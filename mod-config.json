@@ -1,0 +1,318 @@
+{
+  "mods": {
+    "fast-bootup": true,
+    "series-expansion": true,
+    "folder-expansion": true,
+    "skip-intros": true,
+    "song-limit-expansion": true,
+    "song-playback-speed": true,
+    "timer-freeze": true,
+    "autoplay": true,
+    "announcer-mute": true,
+    "note-types-expansion": true,
+    "premium-free": true,
+    "quick-restart-or-fail": true,
+    "real-speed-fix": true,
+    "power-user-statistics": true,
+    "webui-options": true,
+    "movie-size-customization": true,
+    "center-arrows-single": true,
+    "timing-offsets": false,
+    "overlay-element-styling": true,
+    "playfield-styling": true,
+    "fps-unlock": true,
+    "assist-tick": true,
+    "shader-fixes": true,
+    "player-perspective": true,
+    "non-native-operating-system-support": false,
+    "quick-logout": true,
+    "training-mode": true,
+    "decorative-option-headers": true
+  },
+  "diagnostics": {
+    "profiling": false
+  },
+  "layeredfs": {
+    "verbose": false,
+    "developer_mode": false,
+    "mod_folder": "./data_mods",
+    "allowlist": [],
+    "blocklist": []
+  },
+  "series_expansion": {
+    "custom_series": [
+      {
+        "series_value": 30,
+        "label": "WORLD RUBY",
+        "texture_name": "world_ruby"
+      },
+      {
+        "series_value": 31,
+        "label": "WORLD SAPPHIRE",
+        "texture_name": "world_sapphire"
+      }
+    ]
+  },
+  "folder_expansion": {
+    "custom_folders": [
+      {
+        "bit_index": 11,
+        "key": "dogs",
+        "voice_key": ""
+      }
+    ],
+    "hide_difficulty_pane": true
+  },
+  "custom_options": {
+    "persist_network": true,
+    "persist_json": true,
+    "lane_gamma_correction": 3.0,
+    "preview_window": 3,
+    "animate_backgrounds": true,
+    "option_menu_settings": [
+      {
+        "id": "header_power_user_options",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "premium_free",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "timing_stats",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "announcer_mute",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "adjust_song_offset",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "current_song_offset",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "pacemaker_to_mserror",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "pacemaker_threshold",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "step_data_export",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "skip_results_fast_exit",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "header_playfield_styling_options",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "perspective",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "center_arrows_1p",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "overlay_scale",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "overlay_opacity",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "arrow_scale",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "arrow_opacity",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "header_training_options",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "autoplay",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "song_speed",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "preserve_pitch",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "sync_movie",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "assist_tick",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "assist_tick_volume",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "training_loop_song",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "training_progress_pos",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "training_start_time",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "training_end_time",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "header_profile_customization_options",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "customize_movie_size",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "is_disp_weight",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "weight",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "customize_appeal_board",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_background",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_background_gameplay",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_character_p1",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_character_p2",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_lane_single",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_lane_double",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_lanecover_single",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "customize_lanecover_double",
+        "overlay": false,
+        "in_game": true
+      }
+    ],
+    "p1": {},
+    "p2": {}
+  },
+  "timing_offsets": {
+    "sound_offset": 87,
+    "input_offset": 28,
+    "render_offset": 17,
+    "bomb_frame_offset": 0
+  },
+  "fps_unlock": {
+    "presets": [
+      60,
+      120,
+      144,
+      165,
+      240,
+      360
+    ],
+    "selected": 60
+  },
+  "quick_restart": {
+    "restart_delay_ms": 0
+  },
+  "training_mode": {
+    "ff_increment_ms": 5000,
+    "rw_increment_ms": 5000
+  },
+  "music_wheel_song_length": {
+    "offset_x": 280.0,
+    "offset_y": 0.0,
+    "scale": 1.0,
+    "spacing": -10.0
+  },
+  "per_song_judgement_offsets": {
+    "mirror_players": true
+  },
+  "non_native_os_support": {
+    "movie_mode": "fallback"
+  }
+}

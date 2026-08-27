@@ -1,0 +1,106 @@
+# Task: Binding-Era Renames and Identity-Base Assertions
+
+## Description
+
+On the green tree `task-01-retire-cache-model` produced, rename the lifecycle and
+maintenance vocabulary from the redirect era to the binding era, and pin the
+identity-only intermediate state with explicit host assertions. Completes plan
+Step 1.
+
+## Background
+
+The streaming design replaces the old open-redirect/exposure model with a
+bind-inside-`wavebank_create` transaction (design reqs 11, 23). The `GenerationPhase`
+machine keeps its CAS shape but `Preparing` becomes `Binding` and `RedirectReady`
+(a state that only existed because redirect and exposure were two separate seams)
+disappears. This task is deliberately separate from the removal so both diffs stay
+reviewable and each leaves a green tree.
+
+## Reference Documentation
+
+**Required:**
+- Design: `.agents/planning/2026-08-08-song-rate-streaming/design/detailed-design.md`
+  (Lifecycle State Machine diagram; "lifecycle.rs, runtime.rs, xact_runtime.rs —
+  trimmed" component section; req 40)
+
+**Additional References (if relevant to this task):**
+- `.agents/planning/2026-08-08-song-rate-streaming/research/orientation.md` — phase
+  enum inventory and transition drivers
+
+**Note:** Read any document listed above before beginning implementation.
+
+## Technical Requirements
+
+1. In `src/services/song_rate/lifecycle.rs`: rename phase `Preparing` → `Binding`;
+   delete `RedirectReady` and its dead transition APIs (`begin_exposing`,
+   `mark_redirect_ready`); rename `begin_preparing` → `begin_binding`. Update every
+   consumer and test. Transition semantics per the design's state diagram:
+   `Armed → Binding → XactInFlight → Committed/LateFailed`, `Binding → EarlyFailed`,
+   `Committed → XactInFlight` (Quick-Restart re-create).
+2. In `src/services/song_rate/xact_runtime.rs`: retire the lease-era
+   `MaintenanceKind` vocabulary in favor of the binding era — introduce
+   `ReclaimBinding` (consumed from plan Step 4 onward; crate-wide `dead_code` allow
+   covers the interim) and keep the queue mechanics untouched.
+3. Add identity-base assertions to the host suites:
+   - `integration_ready()` is false while the binding preflight refuses;
+   - the `song-playback-speed` mod's `enable()` refuses (no option row registered)
+     under that readiness — reuse the validator's existing custom-options
+     registry/api harness mini-module (precedent: the retired feature's step05
+     task-02 availability tests).
+4. Sweep surviving `song_rate` sources for redirect-era vocabulary in log strings,
+   comments, and doc-comments (`open-redirect`, `exposed`, `RedirectReady`,
+   generated-path phrasing) and update them to binding-era language where the code
+   they describe survives. Do not touch the retired feature's planning records.
+5. No behavior changes: this task is renames + assertions only; every surviving test
+   must pass with mechanical updates.
+
+## Dependencies
+
+- `task-01-retire-cache-model` (this task edits the tree that removal produces).
+
+## Implementation Approach
+
+1. Mechanical rename with compiler-driven fallout (`Preparing`→`Binding` first, then
+   the deletions), keeping each rename's diff self-contained.
+2. Add the two identity-base assertions in the validator harness.
+3. Vocabulary sweep (`rg` for the redirect-era terms across `src/`).
+4. Full standing gates: song-rate validator, se-bank-synth validator, Windows-target
+   `cargo check` (0 warnings), whole-crate `cargo fmt`, `./build.sh`.
+5. Record progress in
+   `.agents/planning/2026-08-08-song-rate-streaming/progress.md` and tick plan
+   Step 1's checklist item in
+   `.agents/planning/2026-08-08-song-rate-streaming/implementation/plan.md` when the
+   step's demo holds (repo convention: progress lives in the planning dir, never
+   `.agents/scratchpad/`).
+
+## Acceptance Criteria
+
+1. **Phase machine is binding-era**
+   - Given the completed rename
+   - When searching `src/` for `RedirectReady`, `begin_exposing`, or
+     `mark_redirect_ready`
+   - Then no reference remains, and the lifecycle tests exercise
+     `Armed → Binding → XactInFlight` with unchanged CAS semantics
+
+2. **Identity base is asserted, not assumed**
+   - Given the host validator
+   - When the identity-base suite runs
+   - Then it proves `integration_ready()` is false and the SONG SPEED row refuses
+     registration, and both assertions are wired so plan Step 4 must flip them
+     deliberately
+
+3. **Green tree, step demo met**
+   - Given the completed task
+   - When running the five standing gates
+   - Then all pass (0 warnings), the validator report carries no cache/on-demand
+     sections, and plan Step 1's demo statement holds: an identity-only build with
+     no reference to caches, leases, deadlines, or admission anywhere in `src/`
+
+## Metadata
+
+- **Complexity**: Low
+- **Labels**: refactor, rename, song-rate, host-validation
+- **Required Skills**: Rust, repository host-validator harness
+- **Generated By**: code-task-generator 2026-08-08
+- **Source Plan**: `.agents/planning/2026-08-08-song-rate-streaming/implementation/plan.md`
+- **Plan Step**: Step 1: Remove the retired cache model and land the identity-only base

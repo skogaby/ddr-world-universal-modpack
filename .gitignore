@@ -1,0 +1,16 @@
+/target
+**/.DS_Store
+capture/
+mod_assets/
+**/__pycache__/
+log.txt
+*.arc
+
+# Claude Code
+.claude/settings.local.json
+
+# Agents sometimes store build logs locally for checking the outputs later on
+/.agents/**/logs
+
+# Shader build intermediates (committed artifacts are the .gsp under data_mods/)
+/shaders/build/

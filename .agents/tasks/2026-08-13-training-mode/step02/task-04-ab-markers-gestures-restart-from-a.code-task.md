@@ -1,0 +1,96 @@
+# Task: A/B markers, gestures, and restart-from-A
+
+## Description
+The mod-side surface of Step 2: `src/mods/training_mode/bounds.rs` holding
+the A/B marker state, the triple-7 / triple-9 / triple-5 pinpad gestures
+during eligible gameplay, and restart-from-A —
+`quick_restart_or_fail::trigger_restart` consults
+`training_mode::active_section_start()` and restarts at `a_ms` with the
+2.5 s silent approach lead instead of 0. Closes Step 2 with the cabinet
+demo.
+
+## Background
+Gestures (R3): triple-**7** sets A at the current position, triple-**9**
+sets B, triple-**5** clears both (pinpad 4/6 reserved for v2 FF/RW). The
+current position is the live raw-ms music count (`GamePlayActor+0x178`,
+block-quantized via task-02's helper). Markers are session/song-scoped
+state (cleared at song change), consumed in Step 2 only by
+restart-from-A; B is stored + logged for Steps 4–6. quick_logout's
+triple-9 lives at SONG SELECT (scene 25) — no conflict with gameplay
+(scene 28) gestures. Marker targets clamp against task-03's
+`chart_end_raw(side)` accessor. A restart while a training marker is set
+routes through `song_reset::request_reset(a_ms, TRAINING_LEAD_MS + the
+operator's restart_delay_ms policy per design, AccumulatorPolicy::Zero,
+…)`; a `Refused` seek falls back to the shipped restart-at-0 (R6/design
+§6 ladder). NOTE (plan-approved ordering): score containment for
+seeks/markers arrives in Step 5 — until then a seek-practiced song's
+score will submit; flagged for the demo.
+
+## Reference Documentation
+**Required:**
+- Design: .agents/planning/2026-08-13-training-mode/design/detailed-design.md (§4.1 session-active predicate, §4.2 bounds, §4.3 driver notes, §6)
+
+**Additional References (if relevant to this task):**
+- src/mods/quick_logout.rs (GestureBuffer precedent, per-side buffers, scene gating)
+- src/mods/quick_restart_or_fail.rs (`trigger_restart`, restart-delay knob, recovery ladder)
+- src/mods/training_mode/mod.rs (the Step-1 skeleton this extends; REMOVE the `DDR_TRAINING_TEST_SHIFT_MS` knob here)
+- docs/training_mode_research.md §3.1 (music-count domains)
+
+**Note:** Read any document listed above before beginning implementation.
+
+## Technical Requirements
+1. `src/mods/training_mode/bounds.rs`: per-song `{a_ms, b_ms}` marker
+   state (block-quantized raw-ms domain; 0/none sentinels per the design
+   data model), cleared at gameplay entry/exit; `active_section_start()
+   -> Option<i32>` public accessor.
+2. Input gestures via the GestureBuffer precedent (per-side buffers,
+   1500 ms window, 3 presses), active only at scene 28 with the mod
+   active; triple-7 = A := current (clamped below `chart_end_raw −
+   MARGIN`), triple-9 = B := current, triple-5 = clear. One INFO per
+   accepted gesture; leaving the scene clears the buffers.
+3. Restart-from-A: `trigger_restart` (quick_restart_or_fail) consults
+   `training_mode::active_section_start()`; when set, the in-place reset
+   call becomes `request_reset(a_ms, lead, Zero, …)` with the approach
+   lead (TRAINING_LEAD_MS composed with the operator restart-delay knob
+   per the design); `Refused` ⇒ shipped restart-at-0 fallback, one WARN.
+4. REMOVE the temporary `DDR_TRAINING_TEST_SHIFT_MS` knob (Step-1 demo
+   aid) and its initial-mapping call from the mod's enable path.
+5. Zero footprint preserved: mod disabled ⇒ no gesture callbacks, no
+   markers, `trigger_restart` behavior bit-for-bit shipped.
+6. Logging per repo convention; no locks held across `request_reset`.
+
+## Dependencies
+- task-03 (the seek transaction + `chart_end_raw` accessor).
+- Step 1's mod skeleton.
+
+## Implementation Approach
+1. bounds.rs state + gesture wiring (input callback like quick_logout's).
+2. The trigger_restart consultation + fallback ladder.
+3. Knob removal; readiness gates; cabinet demo.
+
+## Acceptance Criteria
+
+1. **Markers set and clear**
+   - Given eligible gameplay with the mod active
+   - When triple-7 / triple-9 / triple-5 fire
+   - Then A/B latch from the live music count (clamped) and clear on triple-5 and at song change, each logged once
+2. **Restart-from-A**
+   - Given a set A mid-song
+   - When triple-1 fires
+   - Then the run resets in place and resumes at A after the silent approach lead — combo/score/gauge reset, claps aligned — at 100 %, 75 %, and 125 % rate alike (the Step-2 demo)
+3. **Fallback ladder**
+   - Given a seek refusal (no binding / unresolved trio / clamp)
+   - When triple-1 fires with A set
+   - Then the shipped restart-at-0 runs instead, with one bounded WARN
+4. **Zero footprint / no gesture conflicts**
+   - Given the mod disabled, or scenes other than gameplay
+   - When the pinpad is pressed
+   - Then nothing training-related fires (quick_logout's triple-9 at song select unaffected)
+
+## Metadata
+- **Complexity**: Medium
+- **Labels**: training-mode, gestures, quick-restart, cabinet-demo
+- **Required Skills**: Rust, repo mod framework, input/scene managers
+- **Generated By**: code-task-generator 2026-08-13
+- **Source Plan**: .agents/planning/2026-08-13-training-mode/implementation/plan.md
+- **Plan Step**: Step 2: Seek-to-T in song_reset + A/B gestures + restart-from-A

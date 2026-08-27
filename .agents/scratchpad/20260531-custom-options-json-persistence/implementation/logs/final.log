@@ -1,0 +1,6 @@
+info: syncing channel updates for nightly-aarch64-apple-darwin
+info: latest update on 2026-06-06 for version 1.98.0-nightly (8954863c8 2026-06-05)
+info: component rust-std for target x86_64-pc-windows-msvc is up to date
+warn: skipping unavailable component rust-std for target x86_64-win7-windows-msvc
+    Checking ddr-world-hook v0.1.0 (/Users/holmej/Desktop/Projects/ddr-world-universal-modpack)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.67s

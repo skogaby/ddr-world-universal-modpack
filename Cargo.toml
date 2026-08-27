@@ -1,0 +1,45 @@
+# trim-paths is an unstable Cargo feature (nightly-only). This project is
+# already nightly-pinned (build_win7.sh needs -Z build-std), so opting in is
+# safe. It strips builder home/username paths from the release binary; see the
+# [profile.release] trim-paths setting below.
+cargo-features = ["trim-paths"]
+
+[package]
+name = "ddr-world-hook"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemServices",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Environment",
+    "Win32_System_Registry",
+]}
+retour = { version = "0.4.0-alpha.4", features = ["static-detour"] }
+once_cell = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.25"
+texpresso = "2"
+md5 = "0.7"
+quick-xml = "0.36"
+aho-corasick = "1"
+
+[profile.release]
+opt-level = 2
+lto = true
+# Strip absolute source paths (which embed the builder's home dir / username)
+# from the binary. Rust bakes file!()/panic-location strings as literals; this
+# remaps the workspace, ~/.cargo registry deps, and (for the win7 -Z build-std
+# build) the ~/.rustup std source to placeholder prefixes. See build_win7.sh.
+trim-paths = "all"

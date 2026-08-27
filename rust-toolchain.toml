@@ -1,0 +1,10 @@
+[toolchain]
+channel = "nightly"
+targets = ["x86_64-pc-windows-msvc", "x86_64-win7-windows-msvc"]
+# rust-src is REQUIRED for the Win7 build (build_win7.sh uses `-Z build-std`,
+# which compiles std from source for the tier-3 x86_64-win7-windows-msvc
+# target — rustup ships no prebuilt std for it). rust-analyzer backs the
+# editor LSP. Listing them here makes rustup auto-install both on every
+# nightly, so a fresh `rustup toolchain install nightly` is build-ready
+# without a manual `rustup component add`.
+components = ["rust-src", "rust-analyzer"]

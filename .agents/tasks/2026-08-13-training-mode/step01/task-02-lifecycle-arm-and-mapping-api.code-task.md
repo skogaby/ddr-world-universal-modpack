@@ -1,0 +1,95 @@
+# Task: Training-arm lifecycle acceptance + content-mapping runtime API
+
+## Description
+Make an identity (100 %) percent armable when a training-arm request is
+present, bind it through the Task-01 IdentityPassthrough plan, and expose
+the content-mapping runtime API (bind-time pre-shift and stop/replay-time
+seek shifts). Add one `DDR_SONG_RATE_FAULT` leg (bind-refused at identity
+arm) proving the fail-open degradation.
+
+## Background
+Today `song_rate::lifecycle` arms only non-identity percents at scene 26;
+ordinary 100 % boots stay `Identity` with zero footprint — a hard design
+pin that must NOT weaken for non-training sessions. Training mode needs a
+binding on every eligible song so gestures can seek even at 100 %: a
+training-arm request atomic (set by the mod before scene 26) makes the
+identity percent armable, producing an IdentityPassthrough binding. The
+Q31 clock factor stays identity and movies are NOT suppressed for identity
+arms (design §4.5). The mapping API is how skip-first pre-shifts at bind
+time (silent lead + content from A as the first bytes ever served — R15)
+and how future seeks shift between cue stop and replay.
+
+## Reference Documentation
+**Required:**
+- Design: .agents/planning/2026-08-13-training-mode/design/detailed-design.md (§4.5, §4.2 arm policy, §6 error ladder)
+
+**Additional References (if relevant to this task):**
+- src/services/song_rate/lifecycle.rs (+ lifecycle_tests.rs) — arm/eligibility model this extends
+- src/services/song_rate/transaction.rs — commit ordering + FaultSelector
+- src/services/song_rate/wavebank_hook.rs — where binds qualify (preview vs gameplay creates)
+- docs/training_mode_research.md §5.3 (identity-arm surface area, fail-open)
+
+**Note:** Read any document listed above before beginning implementation.
+
+## Technical Requirements
+1. `runtime`: `set_training_arm(requested: bool)` (atomic; read at scene-26
+   arm alongside the desired-percent atomics) and
+   `set_content_mapping(shift_blocks, lead_blocks) -> bool` (false when no
+   live binding — callers fail open).
+2. `lifecycle`: an armed generation may resolve to identity WHEN the
+   training-arm request is set; eligibility gates unchanged (ordinary
+   solo/doubles only). Identity arms commit with the Q31 factor at
+   identity and WITHOUT movie suppression.
+3. `prepare_binding`/bind path: identity arms plan via Task 01's identity
+   plan and may carry an initial mapping (bind-time pre-shift parameter,
+   plumbed but driven by Step 3 — default `{0,0}` here).
+4. `RateSnapshot` semantics unchanged: identity-committed training arms
+   must read as identity to every existing consumer (tick_domain,
+   real_speed, score containment's rate ledger).
+5. Fail-open: bind refusal at identity arm ⇒ EarlyFailed to stock exactly
+   like rate binds, one coalesced WARN via the existing refusal mailbox;
+   new `DDR_SONG_RATE_FAULT` leg `identity-bind-refused` exercises it.
+6. Without a training-arm request, behavior is bit-for-bit today's
+   (identity never arms) — assert via existing tests staying green.
+
+## Dependencies
+- Task 01 (identity plan + serve mode + mapping storage).
+
+## Implementation Approach
+1. Extend `lifecycle`'s arm evaluation + `EligibilityInputs` with the
+   training request; thread an `identity_passthrough` flag into the arm
+   request and binding construction.
+2. Add the runtime API + mapping plumbing to the live-binding registry
+   path.
+3. Extend the FaultSelector and host lifecycle tests for the new arm shape
+   and the refusal leg.
+
+## Acceptance Criteria
+1. **Identity arm gated on the request**
+   - Given desired percent 100 on the entered side and no training-arm request
+   - When scene 26 evaluates arming
+   - Then the generation resolves Identity (no binding), exactly as shipped
+2. **Training identity arm binds passthrough**
+   - Given a training-arm request and an eligible 100 % entry
+   - When the dance bank creates
+   - Then an IdentityPassthrough binding is live, the Q31 factor is identity, movie suppression is NOT engaged, and `RateSnapshot.is_non_identity_commit()` is false
+3. **Mapping API contract**
+   - Given a live binding
+   - When `set_content_mapping(s, l)` is called
+   - Then serving reflects the new mapping (per Task 01 semantics) and the call returns true; with no live binding it returns false and changes nothing
+4. **Fail-open on refusal**
+   - Given the `identity-bind-refused` fault leg
+   - When a training identity arm attempts to bind
+   - Then the generation fails to stock (EarlyFailed), one coalesced refusal WARN is drained, and the song plays normally
+5. **Ineligible sessions never arm**
+   - Given versus or course/Dan session shape
+   - When training-arm is requested
+   - Then no arm occurs (existing eligibility fail-closed path)
+
+## Metadata
+- **Complexity**: Medium
+- **Labels**: song-rate, lifecycle, fail-open, host-tested
+- **Required Skills**: Rust, song_rate lifecycle/transaction model
+- **Generated By**: code-task-generator 2026-08-13
+- **Source Plan**: .agents/planning/2026-08-13-training-mode/implementation/plan.md
+- **Plan Step**: Step 1: Identity arm + shifted serving in song_rate
