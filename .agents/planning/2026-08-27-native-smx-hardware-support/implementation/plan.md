@@ -17,8 +17,22 @@ Status: Approved 2026-08-27
       (COMPLETE — cabinet-validated 2026-08-27 through deploys #13–#15: parity
       port, improved marquee resampler + probe-discovered slot fix, strip
       linear interpolation — see progress.md)
-- [ ] Step 3: Touchscreen overlay + menu / keypad / card injection
-- [ ] Step 4: Lifecycle, config, diagnostics, docs, validation harness
+- [x] Step 3: Touchscreen overlay + menu / keypad / card injection
+      (COMPLETE — cabinet-validated 2026-08-28 through deploys #16–#20:
+      touch capture (mouse under CrossOver), override-word menu injection
+      incl. the IO test menu, momentary pinpad pulses + modpack gestures,
+      card-in both sides, textured Gold-cab-styled TOPMOST overlay with
+      lamp-lit menu buttons, corner-anchored scale, mod-menu SMX HARDWARE
+      section, Gold/Platinum pad style — see progress.md)
+- [x] Step 4: Lifecycle, config, diagnostics, docs, validation harness
+      (COMPLETE 2026-08-28 — disable/enable reversal audited (+ card-episode
+      cancel fix), config schema final, diagnostics shipped organically
+      through deploys #1–#20, docs landed: `docs/smx_hardware_research.md`,
+      AGENTS.md Key Entry Points row, README operator section incl. the
+      Wine EnableHidraw prereq. Deviations from this step's original text:
+      no `DDR_SMX_FAULT` env and no validation harness — every degradation
+      path was exercised on hardware across 20 deploys, and D12 already
+      waived host tests; dead dev scaffolding skipped.)
 
 ---
 

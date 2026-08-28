@@ -79,6 +79,9 @@ static OUTPUT_LIGHTS: AtomicBool = AtomicBool::new(true);
 /// `output_cabinet_lights` config; effective only while `OUTPUT_LIGHTS`
 /// is also on).
 static OUTPUT_CABINET_LIGHTS: AtomicBool = AtomicBool::new(true);
+/// Static pad accent style: 0 = Gold, 1 = Platinum (deploy #21; the
+/// mod-menu "Pad Style" row live-edits it).
+static PAD_STYLE: AtomicBool = AtomicBool::new(false);
 /// Per-pad 9-bit input masks, written by the transport thread on every
 /// input report, read by the injection provider on the game thread.
 static INPUT_MASKS: [AtomicU16; 2] = [AtomicU16::new(0), AtomicU16::new(0)];
@@ -180,6 +183,12 @@ pub fn set_output_lights(enabled: bool) {
 /// (marquee / vertical strips / spotlights; stage lights unaffected).
 pub fn set_output_cabinet_lights(enabled: bool) {
     OUTPUT_CABINET_LIGHTS.store(enabled, Ordering::Release);
+}
+
+/// Select the static pad accent (false = Gold, true = Platinum). Applies
+/// on the next 30 Hz lights frame.
+pub fn set_pad_platinum(platinum: bool) {
+    PAD_STYLE.store(platinum, Ordering::Release);
 }
 
 /// Enable/disable sourcing lights by polling the ark's internal GOLD output
@@ -421,9 +430,14 @@ fn thread_main() {
         }
         reap_failed(&mut devices, &mut known_paths);
 
-        // Lights drain.
+        // Lights drain. The two output gates are independent (deploy #20:
+        // they're exposed as separate "Pad Lights" / "Cabinet Lights"
+        // toggles): stage staging is gated inside drain_lights on
+        // OUTPUT_LIGHTS, cabinet staging on OUTPUT_CABINET_LIGHTS.
         if now.duration_since(last_lights) >= LIGHTS_INTERVAL {
-            if OUTPUT_LIGHTS.load(Ordering::Acquire) {
+            if OUTPUT_LIGHTS.load(Ordering::Acquire)
+                || OUTPUT_CABINET_LIGHTS.load(Ordering::Acquire)
+            {
                 if let Some(frame) = acquire_light_frame() {
                     drain_lights(&mut devices, &frame);
                     last_lights = now;
@@ -959,7 +973,13 @@ fn poll_ark_light_buffers() -> Option<DdrLightFrame> {
 /// started set — the pads only apply an update once the set's final command
 /// arrives.
 fn drain_lights(devices: &mut [Device], frame: &DdrLightFrame) {
-    let pads = light_map::map_stage(frame);
+    let style = if PAD_STYLE.load(Ordering::Acquire) {
+        light_map::PadStyle::Platinum
+    } else {
+        light_map::PadStyle::Gold
+    };
+    let pads = light_map::map_stage(frame, style);
+    let stage_enabled = OUTPUT_LIGHTS.load(Ordering::Acquire);
     let cabinet_enabled = OUTPUT_CABINET_LIGHTS.load(Ordering::Acquire);
 
     let mut sent_any = false;
@@ -967,6 +987,9 @@ fn drain_lights(devices: &mut [Device], frame: &DdrLightFrame) {
     for dev in devices.iter_mut() {
         match dev.kind {
             DeviceKind::Stage => {
+                if !stage_enabled {
+                    continue;
+                }
                 let Some(info) = dev.info else { continue };
                 let Some(slot) = dev.player_slot else {
                     continue;

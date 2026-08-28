@@ -50,9 +50,25 @@ impl DdrLightFrame {
     }
 }
 
-/// Static gold used for the un-driven pad regions (SpiceManiaX `kPadRed/
-/// kPadGreen/kPadBlue`).
-pub const PAD_GOLD: [u8; 3] = [0xBB, 0xBB, 0x00];
+/// Static accent used for the un-driven pad regions, selectable to match
+/// the cabinet generation (deploy #21): GOLD is SpiceManiaX's `kPadRed/
+/// kPadGreen/kPadBlue`; PLATINUM is a cool silver/chrome for the
+/// identically-shaped Platinum cabinets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PadStyle {
+    Gold,
+    Platinum,
+}
+
+impl PadStyle {
+    /// The static accent RGB for the un-driven pad regions.
+    pub const fn accent(self) -> [u8; 3] {
+        match self {
+            PadStyle::Gold => [0xBB, 0xBB, 0x00],
+            PadStyle::Platinum => [0x8C, 0x96, 0xA8],
+        }
+    }
+}
 
 /// SMX panel indices, reading order (matches `input_map` bit positions).
 const PANEL_UP_LEFT: usize = 0;
@@ -80,8 +96,10 @@ const CORNER_OFFSET_UP_LEFT: usize = 2;
 const CORNER_OFFSET_DOWN_RIGHT: usize = 3;
 
 /// Map the captured DDR light frame onto both SMX pads' stage lights.
-/// `pads[0]` = P1, `pads[1]` = P2.
-pub fn map_stage(frame: &DdrLightFrame) -> [PadLights; 2] {
+/// `pads[0]` = P1, `pads[1]` = P2. `style` picks the static accent for
+/// the un-driven regions (Gold or Platinum cabinet colors).
+pub fn map_stage(frame: &DdrLightFrame, style: PadStyle) -> [PadLights; 2] {
+    let accent = style.accent();
     let mut pads = [[0u8; PAD_LIGHT_BYTES]; 2];
     for (pad_index, pad) in pads.iter_mut().enumerate() {
         let mut out = PadWriter { buf: pad, pos: 0 };
@@ -97,6 +115,7 @@ pub fn map_stage(frame: &DdrLightFrame) -> [PadLights; 2] {
                     pad_index,
                     CORNER_OFFSET_UP_LEFT,
                     &L_UP_LEFT,
+                    accent,
                 ),
                 PANEL_UP_RIGHT => corner_panel(
                     &mut out,
@@ -104,6 +123,7 @@ pub fn map_stage(frame: &DdrLightFrame) -> [PadLights; 2] {
                     pad_index,
                     CORNER_OFFSET_UP_RIGHT,
                     &L_UP_RIGHT,
+                    accent,
                 ),
                 PANEL_DOWN_LEFT => corner_panel(
                     &mut out,
@@ -111,6 +131,7 @@ pub fn map_stage(frame: &DdrLightFrame) -> [PadLights; 2] {
                     pad_index,
                     CORNER_OFFSET_DOWN_LEFT,
                     &L_DOWN_LEFT,
+                    accent,
                 ),
                 PANEL_DOWN_RIGHT => corner_panel(
                     &mut out,
@@ -118,10 +139,11 @@ pub fn map_stage(frame: &DdrLightFrame) -> [PadLights; 2] {
                     pad_index,
                     CORNER_OFFSET_DOWN_RIGHT,
                     &L_DOWN_RIGHT,
+                    accent,
                 ),
                 PANEL_CENTER => {
                     for _ in 0..25 {
-                        out.push(PAD_GOLD);
+                        out.push(accent);
                     }
                 }
                 _ => unreachable!(),
@@ -151,13 +173,15 @@ fn arrow_panel(out: &mut PadWriter, frame: &DdrLightFrame, device: usize) {
     }
 }
 
-/// Outer 4×4 = L-shape lit by the corner value over gold; inner 3×3 = gold.
+/// Outer 4×4 = L-shape lit by the corner value over the static accent;
+/// inner 3×3 = accent.
 fn corner_panel(
     out: &mut PadWriter,
     frame: &DdrLightFrame,
     pad_index: usize,
     corner_offset: usize,
     flags: &[[u8; 4]; 4],
+    accent: [u8; 3],
 ) {
     let value = frame.dimlamps[CORNER_DIMLAMP_BASE[pad_index] + corner_offset];
     for row in flags {
@@ -165,11 +189,11 @@ fn corner_panel(
             if flag != 0 {
                 out.push([value, value, value]);
             } else {
-                out.push(PAD_GOLD);
+                out.push(accent);
             }
         }
     }
     for _ in 0..9 {
-        out.push(PAD_GOLD);
+        out.push(accent);
     }
 }

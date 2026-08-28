@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use retour::GenericDetour;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::module_resolver::resolve_ark_module;
@@ -141,7 +141,12 @@ pub mod inject_slot {
     pub const PANEL_DOWN: usize = 6;
     pub const PANEL_LEFT: usize = 7;
     pub const PANEL_RIGHT: usize = 8;
-    pub const COUNT: usize = 9;
+    /// Pinpad keys: slot = `PINPAD_BASE + k` where `k` is the
+    /// `arkMDXGet10Key` buffer index (0..=9 digits, 10 = "00",
+    /// 11 = decimal point).
+    pub const PINPAD_BASE: usize = 9;
+    pub const PINPAD_KEYS: usize = 12;
+    pub const COUNT: usize = PINPAD_BASE + PINPAD_KEYS;
 }
 
 /// `(player 0/1, slot) -> currently held`. Must be panic-free and O(1):
@@ -162,40 +167,6 @@ pub fn set_injection_provider(provider: InjectionProvider) {
 /// detour behaving exactly as before this feature existed.
 pub fn set_injection_active(active: bool) {
     SMX_INJECTION_ACTIVE.store(active, Ordering::Release);
-}
-
-/// OR the injected held-level into a getter's current-state out-param.
-///
-/// Writes ONLY the low byte: gamemdx's input poll passes `u8` locals for
-/// these out-params (confirmed in its ark poll loop), while the modpack's
-/// own poll passes `u32`s and reads `& 0xFF` — a byte write is correct for
-/// both. The getters' out pair is (current state, previous state); the
-/// game derives press edges downstream from the pair, so level injection
-/// into the current-state byte is complete — no edge synthesis needed
-/// (the untouched prev byte comes from the ark's own state).
-///
-/// Panic-free.
-///
-/// # Safety
-/// `state` must be the getter's first out-param (may be null).
-unsafe fn inject_state_byte(player: i32, slot: usize, state: *mut u8) {
-    if !SMX_INJECTION_ACTIVE.load(Ordering::Acquire)
-        || IN_MODPACK_POLL.load(Ordering::Acquire)
-        || !(0..2).contains(&player)
-        || state.is_null()
-    {
-        return;
-    }
-    let raw = INJECTION_PROVIDER.load(Ordering::Acquire);
-    if raw == 0 {
-        return;
-    }
-    // SAFETY: the usize was stored from a valid `InjectionProvider` fn
-    // pointer and fn pointers are never deallocated.
-    let provider: InjectionProvider = std::mem::transmute(raw);
-    if provider(player as usize, slot) {
-        *state |= 1;
-    }
 }
 
 // ── Stage panel injection detours (arkMDXIO vtable level) ───────────
@@ -381,6 +352,323 @@ panel_impl_detour!(
     inject_slot::PANEL_RIGHT
 );
 
+// ── Touch-overlay injection: IO dispatcher + 10-key vtable detours ───
+//
+// Step 3 (touchscreen overlay) RE, Ghidra-verified on
+// arkmdxbio2_20260721 (addresses file-relative to 0x180000000):
+//
+// - The design table's `arkMDXGetEAPass` card plan was WRONG: gamemdx
+//   resolves that export but never calls it, and its impl (+0x2d8) is a
+//   trigger/hold BYTE getter, not a UID reader. The ark owns the whole
+//   card flow internally (ENTRYFLOW scenes) and every consumer reads the
+//   MdxHWIO object's card fields, all written by `MdxHWIO::stepUpdate`
+//   (`FUN_1800ce320`)'s reader state machine.
+// - Menu buttons (deploy #16 correction — the first shape missed the
+//   operator IO test menu): the ark's raw-digest LEVEL reader
+//   `FUN_18007e910` ORs a dormant per-player OVERRIDE WORD
+//   (`DAT_180c47f50[player]`, one reader / zero writers — the ark's own
+//   dev-build injection surface, spotted in deploy #5) into every read.
+//   stepUpdate copies those override'd reads into the object level bytes
+//   (+0x61A..), the panel counters consume them, and the TEST MENU reads
+//   the digest level directly — so writing the override word covers every
+//   consumer through the ark's own front door. The EDGE bytes (+0x60D..)
+//   however come from `FUN_180084850` = `~prev & cur` of the RAW digest
+//   (no override), so injected presses never edge naturally: the
+//   dispatcher detour synthesizes the rising-edge byte post-original.
+//   (Deploy #16 also proved the first implementation had the byte
+//   semantics swapped: +0x61A.. is the LEVEL byte, +0x60D.. the EDGE —
+//   in-game nav worked by acting as auto-repeat, the test menu didn't.)
+// - Card-in rides the dispatcher detour: replicate exactly the
+//   writes stepUpdate's physical-card path performs (verified against
+//   its decompilation and the acio decoder `FUN_18007f250`).
+// - Pinpad: the 10-key vtable impl (+0x308 = `FUN_1800c9420`,
+//   `(this, player, *buf1[12], *buf2[12])`, one-hot) is the single
+//   funnel — its keycode source `FUN_18007ecd0` has no other caller —
+//   so one impl detour covers the export and internal PIN scenes.
+//
+// MdxHWIO field map (verified):
+//   menu LEVEL bytes (stepUpdate ← override'd digest read): P1
+//     Start 0x61A, Left 0x61B, Right 0x61C, Up 0x61D, Down 0x61E;
+//     P2 = P1 + 5 (0x61F..0x623). Not written directly — fed by the
+//     override word.
+//   menu EDGE bytes (stepUpdate ← raw-digest edge): P1 Start 0x60D,
+//     Left 0x60E, Right 0x60F, Up 0x610, Down 0x611; P2 = P1 + 5
+//     (0x612..0x616). Synthesized for injected presses.
+//   digest mask bits (FUN_18007e910's 2nd arg / the override word):
+//     Start 0x01, Left 0x02, Right 0x04, Up 0x08, Down 0x10.
+//   card block: base +0x5BC (P1) / +0x5D4 (P2), stride 0x18:
+//     {uid[8] @+0, type_bool @+8, presence @+9, type_int @+0xC,
+//      debounce_count @+0x14}. Card type: uid[0]==0xE0 ⇒ 1 (ISO15693)
+//     else 2 (FeliCa) — the acio decoder's own rule.
+//   card trigger +0x60B/+0x60C (set once on a NEW uid), card hold
+//     +0x624/+0x625 (held while the card is on the reader) — both
+//     zeroed at stepUpdate's top every frame.
+//   scan-enabled gate +0x6F8/+0x6F9 (set by MdxHWIO::setEAPassReadStart
+//     — the entry flow arms the reader on its card-wait screens).
+
+/// Menu-button EDGE byte offsets in the MdxHWIO object, indexed
+/// [inject_slot::MENU_*][player] (the level bytes are fed by the
+/// override word through stepUpdate — never written directly).
+const MENU_EDGE_OFFSETS: [[usize; 2]; 5] = [
+    [0x60D, 0x612], // Start
+    [0x610, 0x615], // Up
+    [0x611, 0x616], // Down
+    [0x60E, 0x613], // Left
+    [0x60F, 0x614], // Right
+];
+
+/// Raw-digest mask bit per menu button (the override word's bit space),
+/// indexed by `inject_slot::MENU_*` order.
+const MENU_DIGEST_MASK: [u32; 5] = [0x01, 0x08, 0x10, 0x02, 0x04];
+
+/// Address of the ark's per-player digest override words (2 × u32), or 0
+/// when the AOB didn't resolve. Derived in the lazy installer from the
+/// `TEST [RBP+RDI*4+disp32], ESI` in `FUN_18007e910` (RBP = module base,
+/// so disp32 is module-relative).
+static MENU_OVERRIDE_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// AOB for the override-word TEST inside the digest LEVEL reader:
+/// `CALL rel32; TEST [RBP+RDI*4+disp32], ESI; MOV RBX,[RSP+0x30]`.
+const MENU_OVERRIDE_PATTERN: &str = "E8 ?? ?? ?? ?? 85 B4 BD ?? ?? ?? ?? 48 8B 5C 24 30";
+
+/// Card block bases per player (see field map above).
+const CARD_BLOCK_BASE: [usize; 2] = [0x5BC, 0x5D4];
+const CARD_TRIGGER_OFFSET: [usize; 2] = [0x60B, 0x60C];
+const CARD_HOLD_OFFSET: [usize; 2] = [0x624, 0x625];
+const CARD_SCAN_ENABLED_OFFSET: [usize; 2] = [0x6F8, 0x6F9];
+
+/// IO dispatcher (vtable +0x28) and 10-key impl (vtable +0x308) shapes.
+type IoDispatchFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> u64;
+type TenKeyImplFn =
+    unsafe extern "C" fn(*mut std::ffi::c_void, i32, *mut [u8; 12], *mut [u8; 12]) -> u64;
+
+static mut IO_DISPATCH_DETOUR: Option<GenericDetour<IoDispatchFn>> = None;
+static mut TENKEY_IMPL_DETOUR: Option<GenericDetour<TenKeyImplFn>> = None;
+
+/// Per-(player, menu-button) previous held state for trigger-edge
+/// synthesis (mirrors PANEL_PREV_HELD).
+static MENU_PREV_HELD: [[AtomicBool; 5]; 2] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const B: AtomicBool = AtomicBool::new(false);
+    [[B; 5], [B; 5]]
+};
+
+/// Card scan episodes (one per player): UID bytes packed LE into a u64
+/// (memory order preserved on write), frames remaining, and a one-shot
+/// "assert the trigger byte" latch for the episode's first armed frame.
+static CARD_UID: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static CARD_FRAMES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+static CARD_TRIGGER_PENDING: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// One-shot INFO/WARN latches for card episodes.
+static CARD_INJECT_SEEN: AtomicBool = AtomicBool::new(false);
+static CARD_NOT_ARMED_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// How long an injected "card on the reader" episode lasts, in ark IO
+/// frames (~60/s at stock refresh). Roughly a 2 s card tap.
+const CARD_EPISODE_FRAMES: u32 = 120;
+
+/// Request a one-shot card scan for `player` (0/1) with the given raw
+/// 8-byte UID. Callable from any thread (atomics only). The injection
+/// itself happens in the IO-dispatcher detour and only takes effect
+/// while the ark has that player's reader armed (its card-wait
+/// screens); episodes always drain so a press on the wrong screen
+/// cannot fire minutes later.
+pub fn request_card_scan(player: usize, uid: [u8; 8]) {
+    if player >= 2 {
+        return;
+    }
+    CARD_UID[player].store(u64::from_le_bytes(uid), Ordering::Relaxed);
+    CARD_TRIGGER_PENDING[player].store(true, Ordering::Relaxed);
+    CARD_FRAMES[player].store(CARD_EPISODE_FRAMES, Ordering::Release);
+    log_info!(
+        "InputManager: card scan requested (player={}, uid[0]={:#04x})",
+        player,
+        uid[0]
+    );
+}
+
+/// Snapshot the provider's menu-button state: per-player digest masks
+/// (for the override words) + per-button held levels (for the edge
+/// synthesis). Panic-free.
+fn menu_held_snapshot() -> ([u32; 2], [[bool; 5]; 2]) {
+    let mut masks = [0u32; 2];
+    let mut held = [[false; 5]; 2];
+    let raw = INJECTION_PROVIDER.load(Ordering::Acquire);
+    if raw == 0 {
+        return (masks, held);
+    }
+    // SAFETY: stored from a valid `InjectionProvider` fn pointer.
+    let provider: InjectionProvider = unsafe { std::mem::transmute(raw) };
+    for player in 0..2usize {
+        for btn in 0..5usize {
+            if provider(player, inject_slot::MENU_START + btn) {
+                held[player][btn] = true;
+                masks[player] |= MENU_DIGEST_MASK[btn];
+            }
+        }
+    }
+    (masks, held)
+}
+
+/// Publish the per-player override words (the ark's own dev injection
+/// surface — nothing else ever writes them). Called every dispatcher
+/// frame PRE-original so stepUpdate's level-byte copies and the test
+/// menu's direct digest reads both see this frame's state; storing 0
+/// when idle keeps the surface clean across disable.
+unsafe fn write_menu_override(masks: [u32; 2]) {
+    let base = MENU_OVERRIDE_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
+    let words = base as *mut u32;
+    words.write_volatile(masks[0]);
+    words.add(1).write_volatile(masks[1]);
+}
+
+/// Cancel any in-flight card scan episodes (the SMX mod's disable — a
+/// frozen episode would otherwise resume on re-enable and fire whenever
+/// the reader next arms).
+pub fn clear_card_scans() {
+    for player in 0..2 {
+        CARD_FRAMES[player].store(0, Ordering::Release);
+        CARD_TRIGGER_PENDING[player].store(false, Ordering::Relaxed);
+    }
+}
+
+/// Post-dispatcher injection body: synthesize menu EDGE bytes for rising
+/// edges and drive any pending card episode. `this` is the live MdxHWIO
+/// object (bounds-checked by the installer's vtable validation; the
+/// dispatcher is only ever invoked on the singleton).
+///
+/// # Safety
+/// Called from the dispatcher detour with the original already run.
+unsafe fn overlay_inject_post_dispatch(this: *mut u8, held: &[[bool; 5]; 2]) {
+    if this.is_null() {
+        return;
+    }
+
+    // Menu EDGE bytes: the raw-digest edge derivation never sees the
+    // override word, so injected presses edge here — one pulse per
+    // press via the prev-held latch (stepUpdate rewrote the byte from
+    // the raw digest just now; our OR lasts exactly this frame).
+    for player in 0..2usize {
+        for btn in 0..5usize {
+            let now = held[player][btn];
+            let prev = MENU_PREV_HELD[player][btn].swap(now, Ordering::AcqRel);
+            if now && !prev {
+                *this.add(MENU_EDGE_OFFSETS[btn][player]) |= 1;
+            }
+        }
+    }
+
+    // Card episodes.
+    for player in 0..2usize {
+        let frames = CARD_FRAMES[player].load(Ordering::Acquire);
+        if frames == 0 {
+            continue;
+        }
+        CARD_FRAMES[player].store(frames - 1, Ordering::Release);
+        if frames == 1 {
+            // Episode over: clear a never-consumed trigger latch.
+            CARD_TRIGGER_PENDING[player].store(false, Ordering::Relaxed);
+        }
+        // Only inject while the ark has this player's reader armed
+        // (the entry flow's card-wait screens) — mirrors a physical
+        // card only being read while the reader scans.
+        if *this.add(CARD_SCAN_ENABLED_OFFSET[player]) == 0 {
+            if !CARD_NOT_ARMED_WARNED.swap(true, Ordering::Relaxed) {
+                log_warn!(
+                    "InputManager: card scan requested while reader not scanning (player={}) -- press INSERT CARD on the card entry screen",
+                    player
+                );
+            }
+            continue;
+        }
+        let uid = CARD_UID[player].load(Ordering::Relaxed).to_le_bytes();
+        let block = this.add(CARD_BLOCK_BASE[player]);
+        // Replicate stepUpdate's physical-card writes exactly.
+        std::ptr::copy_nonoverlapping(uid.as_ptr(), block, 8);
+        let type_int: u8 = if uid[0] == 0xE0 { 1 } else { 2 };
+        *block.add(8) = type_int - 1; // type_bool (0 = ISO15693, 1 = FeliCa)
+        *block.add(9) = 1; // presence
+        *(block.add(0xC) as *mut u32) = type_int as u32;
+        *(block.add(0x14) as *mut u32) = 2; // debounce count (nonzero)
+        *this.add(CARD_HOLD_OFFSET[player]) = 1;
+        if CARD_TRIGGER_PENDING[player].swap(false, Ordering::AcqRel) {
+            *this.add(CARD_TRIGGER_OFFSET[player]) = 1;
+        }
+        if !CARD_INJECT_SEEN.swap(true, Ordering::AcqRel) {
+            log_info!(
+                "InputManager: injecting card scan (player={}, type={})",
+                player,
+                type_int
+            );
+        }
+    }
+}
+
+unsafe extern "C" fn io_dispatch_detour(this: *mut std::ffi::c_void) -> u64 {
+    std::panic::catch_unwind(|| {
+        // Pre-original: publish the menu override words so this frame's
+        // stepUpdate (level bytes, panel counters) and the test menu's
+        // direct digest reads see the injected state. Idle = all zero.
+        let (masks, held) = if SMX_INJECTION_ACTIVE.load(Ordering::Acquire) {
+            menu_held_snapshot()
+        } else {
+            ([0u32; 2], [[false; 5]; 2])
+        };
+        write_menu_override(masks);
+        let ret = match &*std::ptr::addr_of!(IO_DISPATCH_DETOUR) {
+            Some(hook) => hook.call(this),
+            None => 0,
+        };
+        if SMX_INJECTION_ACTIVE.load(Ordering::Acquire) {
+            overlay_inject_post_dispatch(this as *mut u8, &held);
+        }
+        ret
+    })
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn tenkey_impl_detour(
+    this: *mut std::ffi::c_void,
+    player: i32,
+    buf1: *mut [u8; 12],
+    buf2: *mut [u8; 12],
+) -> u64 {
+    std::panic::catch_unwind(|| {
+        let ret = match &*std::ptr::addr_of!(TENKEY_IMPL_DETOUR) {
+            Some(hook) => hook.call(this, player, buf1, buf2),
+            None => 0,
+        };
+        // OR injected pinpad keys one-hot into both buffers — for the
+        // GAME and for the modpack's own poll alike (deploy #17
+        // feedback: touch pinpad presses should drive the modpack's
+        // pinpad gestures — mod-menu 0-0-0, quick restart/fail, quick
+        // logout — exactly like cabinet pinpad presses; the original
+        // IN_MODPACK_POLL exclusion made touch keys game-only).
+        if SMX_INJECTION_ACTIVE.load(Ordering::Acquire)
+            && (0..2).contains(&player)
+            && !buf1.is_null()
+            && !buf2.is_null()
+        {
+            let raw = INJECTION_PROVIDER.load(Ordering::Acquire);
+            if raw != 0 {
+                // SAFETY: stored from a valid `InjectionProvider` fn pointer.
+                let provider: InjectionProvider = std::mem::transmute(raw);
+                for k in 0..inject_slot::PINPAD_KEYS {
+                    if provider(player as usize, inject_slot::PINPAD_BASE + k) {
+                        (*buf1)[k] |= 1;
+                        (*buf2)[k] |= 1;
+                    }
+                }
+            }
+        }
+        ret
+    })
+    .unwrap_or(0)
+}
+
 /// Lazily install the four panel vtable-impl detours. Called from [`poll`]
 /// once the ark IO singleton is live and a provider is registered. The
 /// implementation pointers are read from the live object's vtable (no AOB,
@@ -420,16 +708,27 @@ unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
         }
         targets[i] = fn_ptr;
     }
-    // The four impls are distinct functions on every known build; if a
+    // The touch-overlay targets: the IO dispatcher (+0x28, menu-byte +
+    // card injection) and the 10-key impl (+0x308, pinpad injection).
+    // Resolved alongside the panels from the same live vtable; a miss
+    // degrades only the overlay slots (panels install regardless).
+    let io_dispatch = std::ptr::read_volatile((vtable + 0x28) as *const usize);
+    let tenkey_impl = std::ptr::read_volatile((vtable + 0x308) as *const usize);
+    // The impls are distinct functions on every known build; if a
     // future build merges them, a double detour on one address would fail —
     // bail loudly instead.
-    for i in 0..4 {
-        for j in (i + 1)..4 {
-            if targets[i] == targets[j] {
-                log_warn!("InputManager: panel vtable impls alias -- panel injection unavailable");
-                return;
-            }
-        }
+    let mut all = [
+        targets[0],
+        targets[1],
+        targets[2],
+        targets[3],
+        io_dispatch,
+        tenkey_impl,
+    ];
+    all.sort_unstable();
+    if all.windows(2).any(|w| w[0] == w[1]) {
+        log_warn!("InputManager: ark vtable impls alias -- injection unavailable");
+        return;
     }
 
     macro_rules! install {
@@ -473,6 +772,81 @@ unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
         targets[2],
         targets[3]
     );
+
+    // Touch-overlay detours (menu bytes + card episodes + pinpad).
+    // Best-effort: a miss leaves the panels working and the overlay
+    // slots inert with one WARN each.
+    if in_ark(io_dispatch) {
+        if let Err(e) = crate::core::hooks::install_enabled(
+            std::ptr::addr_of_mut!(IO_DISPATCH_DETOUR),
+            std::mem::transmute::<usize, IoDispatchFn>(io_dispatch),
+            io_dispatch_detour as IoDispatchFn,
+        ) {
+            log_warn!(
+                "InputManager: failed to install IO-dispatcher detour: {} -- menu/card injection unavailable",
+                e
+            );
+        } else {
+            log_info!(
+                "InputManager: IO-dispatcher injection detour installed ({:#x})",
+                io_dispatch
+            );
+        }
+    } else {
+        log_warn!(
+            "InputManager: IO-dispatcher vtable slot outside ark module -- menu/card injection unavailable"
+        );
+    }
+    if in_ark(tenkey_impl) {
+        if let Err(e) = crate::core::hooks::install_enabled(
+            std::ptr::addr_of_mut!(TENKEY_IMPL_DETOUR),
+            std::mem::transmute::<usize, TenKeyImplFn>(tenkey_impl),
+            tenkey_impl_detour as TenKeyImplFn,
+        ) {
+            log_warn!(
+                "InputManager: failed to install 10-key impl detour: {} -- pinpad injection unavailable",
+                e
+            );
+        } else {
+            log_info!(
+                "InputManager: 10-key impl injection detour installed ({:#x})",
+                tenkey_impl
+            );
+        }
+    } else {
+        log_warn!(
+            "InputManager: 10-key vtable slot outside ark module -- pinpad injection unavailable"
+        );
+    }
+
+    // Resolve the ark's per-player digest OVERRIDE WORDS (menu-button
+    // level injection incl. the operator test menu — see the module
+    // comment). Exactly-one-match AOB on the ark module; the disp32 in
+    // `TEST [RBP+RDI*4+disp32], ESI` is module-base-relative (RBP holds
+    // the image base). A miss degrades menu injection with one WARN.
+    let matches = crate::core::scanner::scan_pattern_all(ark.base, ark.size, MENU_OVERRIDE_PATTERN);
+    if matches.len() == 1 {
+        let disp = std::ptr::read_unaligned((matches[0].address as usize + 8) as *const u32);
+        let addr = ark_lo + disp as usize;
+        if addr >= ark_lo && addr + 8 <= ark_hi {
+            MENU_OVERRIDE_BASE.store(addr, Ordering::Release);
+            log_info!(
+                "InputManager: digest override words resolved ({:#x}, module+{:#x})",
+                addr,
+                disp
+            );
+        } else {
+            log_warn!(
+                "InputManager: override-word disp {:#x} outside ark module -- menu injection unavailable",
+                disp
+            );
+        }
+    } else {
+        log_warn!(
+            "InputManager: digest override AOB matched {} times (want 1) -- menu injection unavailable",
+            matches.len()
+        );
+    }
 }
 
 unsafe extern "C" fn get_10key_detour(player: i32, buf1: *mut [u8; 12], buf2: *mut [u8; 12]) {
@@ -506,14 +880,16 @@ static mut GET_DOWN_DETOUR: Option<GenericDetour<TriggerHoldFn>> = None;
 static mut GET_LEFT_DETOUR: Option<GenericDetour<TriggerHoldFn>> = None;
 static mut GET_RIGHT_DETOUR: Option<GenericDetour<TriggerHoldFn>> = None;
 
-/// Shared body: forward to the original via `detour`, OR in any SMX-injected
-/// state for game-side callers (inert unless the SMX mod activated
-/// injection), then zero the out-params for game-side callers while
-/// suppression is active. Injection runs BEFORE suppression so an open
-/// overlay wins over injected input, exactly as it does over cabinet input.
+/// Shared body: forward to the original via `detour`, then zero the
+/// out-params for game-side callers while suppression is active. SMX
+/// touch-overlay menu injection does NOT happen here: it flows through
+/// the ark's digest override words upstream (see the dispatcher detour),
+/// so the original impl already returns injected state — an additional
+/// OR here would double-apply. Suppression still runs last, so an open
+/// mod menu wins over injected input exactly as it does over cabinet
+/// input.
 unsafe fn menu_button_detour_body(
     detour: &Option<GenericDetour<TriggerHoldFn>>,
-    slot: usize,
     player: i32,
     trigger: *mut u32,
     hold: *mut u32,
@@ -521,9 +897,6 @@ unsafe fn menu_button_detour_body(
     if let Some(ref hook) = *detour {
         hook.call(player, trigger, hold);
     }
-    // Injection writes only the low byte (game-side callers pass u8
-    // out-buffers — see inject_state_byte's doc).
-    inject_state_byte(player, slot, trigger.cast::<u8>());
     if !IN_MODPACK_POLL.load(Ordering::Acquire) && IS_INPUT_SUPPRESSED.load(Ordering::Acquire) {
         if !trigger.is_null() {
             *trigger = 0;
@@ -535,26 +908,20 @@ unsafe fn menu_button_detour_body(
 }
 
 macro_rules! menu_button_detour {
-    ($name:ident, $static:ident, $slot:expr) => {
+    ($name:ident, $static:ident) => {
         unsafe extern "C" fn $name(player: i32, trigger: *mut u32, hold: *mut u32) {
             let _ = std::panic::catch_unwind(|| {
-                menu_button_detour_body(
-                    &*std::ptr::addr_of!($static),
-                    $slot,
-                    player,
-                    trigger,
-                    hold,
-                );
+                menu_button_detour_body(&*std::ptr::addr_of!($static), player, trigger, hold);
             });
         }
     };
 }
 
-menu_button_detour!(get_start_detour, GET_START_DETOUR, inject_slot::MENU_START);
-menu_button_detour!(get_up_detour, GET_UP_DETOUR, inject_slot::MENU_UP);
-menu_button_detour!(get_down_detour, GET_DOWN_DETOUR, inject_slot::MENU_DOWN);
-menu_button_detour!(get_left_detour, GET_LEFT_DETOUR, inject_slot::MENU_LEFT);
-menu_button_detour!(get_right_detour, GET_RIGHT_DETOUR, inject_slot::MENU_RIGHT);
+menu_button_detour!(get_start_detour, GET_START_DETOUR);
+menu_button_detour!(get_up_detour, GET_UP_DETOUR);
+menu_button_detour!(get_down_detour, GET_DOWN_DETOUR);
+menu_button_detour!(get_left_detour, GET_LEFT_DETOUR);
+menu_button_detour!(get_right_detour, GET_RIGHT_DETOUR);
 
 /// Install the five menu-button suppression detours. `getters` is
 /// `[start, up, down, left, right]`. Best-effort: logs and leaves a button

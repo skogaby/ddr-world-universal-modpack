@@ -29,6 +29,10 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    # smx touch overlay: game-window subclass + WM_TOUCH capture
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_Touch",
+    "Win32_Graphics_Gdi",
 ]}
 retour = { version = "0.4.0-alpha.4", features = ["static-detour"] }
 once_cell = "1"

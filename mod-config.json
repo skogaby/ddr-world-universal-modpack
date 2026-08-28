@@ -314,5 +314,16 @@
   },
   "non_native_os_support": {
     "movie_mode": "fallback"
+  },
+  "smx_hardware": {
+    "p1card": "",
+    "p2card": "",
+    "overlay_enabled": true,
+    "overlay_opacity": 0.75,
+    "overlay_scale": 100,
+    "pad_style": "gold",
+    "output_lights": true,
+    "output_cabinet_lights": true,
+    "force_gold_cabinet": true
   }
 }

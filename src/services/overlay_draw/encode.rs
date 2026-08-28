@@ -46,6 +46,13 @@ pub const TAG_SET_SHADER: u16 = 0x13;
 pub const TAG_SET_VS_CONST_F: u16 = 0x14;
 /// Scissor rect enable/disable.
 pub const TAG_SCISSOR: u16 = 0x0C;
+/// Blend state (forwards gd 0x13 + 0x1F).
+pub const TAG_BLEND: u16 = 0x08;
+
+/// The engine's own standard-alpha blend bits — the frame-begin reset
+/// writes `{1, 0x1220625}` as every private list's prefix (see
+/// docs/overlay_draw_research.md, the frame-begin reset).
+pub const BLEND_STANDARD_ALPHA: u32 = 0x0122_0625;
 
 /// One untextured quad: four corner points tracing the perimeter in order
 /// (the walker expands `(p0,p1,p2)(p2,p3,p0)`), plus a D3DCOLOR
@@ -53,6 +60,17 @@ pub const TAG_SCISSOR: u16 = 0x0C;
 #[derive(Clone, Copy, Debug)]
 pub struct Quad {
     pub corners: [[f32; 2]; 4],
+    pub color: u32,
+}
+
+/// One textured quad (tag 0x04 "DrawRotateSprites" entry): four corner
+/// points tracing the perimeter, a UV RECT `{u0, v0, u1, v1}` (the walker
+/// assigns UVs per-corner from the rect's min/max only — see
+/// docs/custom_arrow_renderer_research.md §4.2), and a D3DCOLOR modulate.
+#[derive(Clone, Copy, Debug)]
+pub struct TexQuad {
+    pub corners: [[f32; 2]; 4],
+    pub uv: [f32; 4],
     pub color: u32,
 }
 
@@ -146,6 +164,15 @@ impl RecordWriter {
         self.scissor(false, 0, 0, 0, 0);
     }
 
+    /// Blend-state record (tag 0x08, size 0xC): `{u32 1, u32 blendBits}`.
+    /// The engine's list prefixes use [`BLEND_STANDARD_ALPHA`].
+    pub fn blend(&mut self, blend_bits: u32) {
+        self.push_u16(TAG_BLEND);
+        self.push_u16(0x0C);
+        self.push_u32(1);
+        self.push_u32(blend_bits);
+    }
+
     /// 2D-context record (tag 0x07, size 0x14): `{f32 canvas_w @+4,
     /// f32 canvas_h @+8, f32 offset_x @+0xC, f32 offset_y @+0x10}`.
     /// Handler (`FUN_180268c40`, 20260616): sets the walker's draw context to
@@ -234,6 +261,36 @@ impl RecordWriter {
             for [x, y] in q.corners {
                 self.push_f32(x);
                 self.push_f32(y);
+            }
+            self.push_u32(q.color);
+        }
+    }
+
+    /// Textured quad batch (tag 0x04 "DrawRotateSprites", size 0x10 +
+    /// count*0x34): header `{u32 count @+4, u64 payload_ptr @+8}`, payload =
+    /// count × 0x34 `{x0,y0..x3,y3, u0,v0,u1,v1, u32 color}` inline after
+    /// the header (absolute pointer — the layout `mine_render` fills via the
+    /// game's own sprite helper, emitted here directly). Draws with the
+    /// currently bound texture (tag 0x11) and shader. No-op for an empty
+    /// list.
+    pub fn quads_textured(&mut self, quads: &[TexQuad]) {
+        let count = quads.len() as u32;
+        if count == 0 {
+            return;
+        }
+        let total = 0x10 + count as u16 * 0x34;
+        let payload_addr = self.cursor_addr() + 0x10;
+        self.push_u16(TAG_QUADS_TEXTURED);
+        self.push_u16(total);
+        self.push_u32(count);
+        self.push_u64(payload_addr);
+        for q in quads {
+            for [x, y] in q.corners {
+                self.push_f32(x);
+                self.push_f32(y);
+            }
+            for v in q.uv {
+                self.push_f32(v);
             }
             self.push_u32(q.color);
         }
@@ -411,6 +468,68 @@ mod tests {
             assert_eq!(f32_at(b, quad + i * 4), *v);
         }
         assert_eq!(le32(b, quad + 0x20), 0x80FF00FF);
+    }
+
+    #[test]
+    fn blend_layout_is_byte_exact() {
+        let mut w = RecordWriter::new(0);
+        w.blend(BLEND_STANDARD_ALPHA);
+        #[rustfmt::skip]
+        let expected: [u8; 0x0C] = [
+            0x08, 0x00,             // tag
+            0x0C, 0x00,             // size
+            0x01, 0x00, 0x00, 0x00, // enable/count = 1
+            0x25, 0x06, 0x22, 0x01, // 0x01220625
+        ];
+        assert_eq!(w.bytes(), &expected);
+    }
+
+    #[test]
+    fn textured_quads_layout_and_absolute_payload_ptr() {
+        let mut w = RecordWriter::new(0x3000);
+        w.quads_textured(&[TexQuad {
+            corners: [[10.0, 20.0], [40.0, 20.0], [40.0, 50.0], [10.0, 50.0]],
+            uv: [0.25, 0.5, 0.75, 1.0],
+            color: 0xC0FFFFFF,
+        }]);
+        let b = w.bytes();
+        assert_eq!(b.len(), 0x44); // 0x10 header + 1*0x34
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]), TAG_QUADS_TEXTURED);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 0x44);
+        assert_eq!(le32(b, 4), 1); // count
+        assert_eq!(le64(b, 8), 0x3000 + 0x10); // absolute payload ptr
+        let e = 0x10;
+        for (i, v) in [10.0f32, 20.0, 40.0, 20.0, 40.0, 50.0, 10.0, 50.0]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(f32_at(b, e + i * 4), *v, "corner float {i}");
+        }
+        for (i, v) in [0.25f32, 0.5, 0.75, 1.0].iter().enumerate() {
+            assert_eq!(f32_at(b, e + 0x20 + i * 4), *v, "uv float {i}");
+        }
+        assert_eq!(le32(b, e + 0x30), 0xC0FFFFFF);
+    }
+
+    #[test]
+    fn textured_multi_quad_stride_and_empty_noop() {
+        let q = TexQuad {
+            corners: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: 0xFFFFFFFF,
+        };
+        let mut w = RecordWriter::new(0);
+        w.quads_textured(&[q, q, q]);
+        let b = w.bytes();
+        assert_eq!(b.len(), 0x10 + 3 * 0x34);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]) as usize, b.len());
+        // Quad N's color dword sits at header + 0x10 + N*0x34 + 0x30.
+        for n in 0..3 {
+            assert_eq!(le32(b, 0x10 + n * 0x34 + 0x30), 0xFFFFFFFF);
+        }
+        let mut e = RecordWriter::new(0);
+        e.quads_textured(&[]);
+        assert!(e.is_empty());
     }
 
     #[test]

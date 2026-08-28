@@ -235,6 +235,247 @@ pub fn clear_emit_anchor() {
     ANCHOR_DIRTY.store(0, Ordering::Relaxed);
 }
 
+// ── Auxiliary quad anchor (SMX touch overlay) ────────────────────────
+//
+// A second, independent emission anchor for DLL features that draw plain
+// untextured quads every frame (the SMX touchscreen overlay's buttons).
+// Same mechanism as the menu background anchor: the owner creates a
+// hidden text widget FIRST among its widgets, registers its wrapper +
+// dirty byte here with an emitter fn, and the emitter appends records
+// mid-walk at that wrapper's render (above earlier layer content, below
+// the owner's own label widgets). The dirty byte is re-armed
+// post-render so the walk keeps dispatching the anchor every frame.
+
+/// The aux anchor wrapper address (0 = none).
+static AUX_ANCHOR: AtomicUsize = AtomicUsize::new(0);
+/// The aux anchor widget's dirty-flag byte.
+static AUX_DIRTY: AtomicUsize = AtomicUsize::new(0);
+/// Emitter fn pointer (`fn()`), called at the aux anchor's render.
+/// Must be panic-free or panic-contained; typically calls
+/// [`emit_overlay_quads`].
+static AUX_EMITTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the aux anchor (see module docs). Callable from any thread.
+pub fn set_aux_anchor(wrapper: usize, dirty_addr: usize, emitter: fn()) {
+    AUX_DIRTY.store(dirty_addr, Ordering::Relaxed);
+    AUX_EMITTER.store(emitter as usize, Ordering::Relaxed);
+    AUX_ANCHOR.store(wrapper, Ordering::Release);
+    log_info!(
+        "overlay_draw: aux emission anchor set (wrapper=0x{:X}, dirty=0x{:X})",
+        wrapper,
+        dirty_addr
+    );
+}
+
+/// Clear the aux anchor (owner teardown).
+pub fn clear_aux_anchor() {
+    AUX_ANCHOR.store(0, Ordering::Release);
+    AUX_DIRTY.store(0, Ordering::Relaxed);
+    AUX_EMITTER.store(0, Ordering::Relaxed);
+}
+
+// ── Topmost emission (post-dispatcher append) ────────────────────────
+//
+// The SMX touch overlay must draw ABOVE everything — the mod menu, the
+// game's own widget-layer content (loading art), all of it (it stands in
+// for physical cabinet hardware that sits "in front of" the screen).
+// Widget z = registration order, so no widget-based approach can
+// guarantee that. Instead: POST-original in the layer-dispatcher detour
+// — after the dispatcher recorded every layer's content — append records
+// to the WIDGET layer's private CommandList (the 11-entry layer table's
+// override entry whose layer object IS the render-list manager the DLL's
+// widgets register into; see docs/overlay_draw_research.md "The widget
+// layer is an OVERRIDE entry"). Appended records are the last in the
+// list ⇒ drawn last ⇒ topmost. The append happens before the render
+// orchestrator's consumer kick (we're still inside its dispatcher call),
+// so the list is not yet submitted — same-thread, same-frame, safe.
+
+/// The registered topmost emitter (`fn()`), called once per frame after
+/// the dispatcher runs. Inside the call, [`with_topmost_writer`] targets
+/// the widget layer's private list.
+static TOPMOST_EMITTER: AtomicUsize = AtomicUsize::new(0);
+/// The widget layer's private CommandList — valid ONLY during the
+/// emitter call (published before, cleared after).
+static TOPMOST_LIST: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+static WARNED_NO_WIDGET_LAYER: AtomicBool = AtomicBool::new(false);
+
+/// Register the per-frame topmost emitter (SMX overlay). One consumer.
+pub fn set_topmost_emitter(f: fn()) {
+    TOPMOST_EMITTER.store(f as usize, Ordering::Release);
+}
+
+pub fn clear_topmost_emitter() {
+    TOPMOST_EMITTER.store(0, Ordering::Release);
+}
+
+/// Whether topmost emission is available (dispatcher detour installed —
+/// the same availability as the animated backgrounds).
+pub fn topmost_ready() -> bool {
+    DISPATCHER_HOOKED.load(Ordering::Acquire)
+}
+
+/// Resolve the widget layer's private CommandList from the layer table:
+/// the override entry whose layer object == the render-list manager the
+/// DLL's widgets live in, and whose walk flags say it was composed this
+/// frame. Null on any failure (one WARN).
+unsafe fn resolve_widget_layer_list() -> *mut u8 {
+    let global = LAYER_TABLE_GLOBAL.load(Ordering::Acquire);
+    if global.is_null() {
+        return std::ptr::null_mut();
+    }
+    let table = *(global as *const *const u8);
+    if table.is_null() {
+        return std::ptr::null_mut();
+    }
+    let widget_mgr = crate::services::widget_renderer::render_list_manager();
+    if widget_mgr.is_null() {
+        return std::ptr::null_mut();
+    }
+    for i in 0..11usize {
+        let entry = table.add(i * 0x18);
+        let override_ptr = *(entry as *const *mut u8);
+        let layer = *(entry.add(8) as *const *const u8);
+        if override_ptr.is_null() || layer.is_null() {
+            continue;
+        }
+        if layer != widget_mgr as *const u8 {
+            continue;
+        }
+        // Same walk conditions as the dispatcher: only append when the
+        // layer was actually composed this frame.
+        if *layer.add(0x10) == 0 && *layer.add(0x12) != 0 {
+            return override_ptr;
+        }
+        return std::ptr::null_mut(); // found but not composed this frame
+    }
+    std::ptr::null_mut()
+}
+
+/// Build + append records to the widget layer's private list, topmost.
+/// ONLY callable from inside the registered topmost emitter (the list is
+/// published around that call). The closure receives a [`RecordWriter`]
+/// whose base is the final destination (self-contained payload pointers
+/// stay valid). Fail-open with the shared WARN classes; returns whether
+/// the block was appended.
+pub fn with_topmost_writer(build: impl FnOnce(&mut RecordWriter)) -> bool {
+    unsafe {
+        let cl = TOPMOST_LIST.load(Ordering::Acquire);
+        if cl.is_null() {
+            warn_once(
+                &WARNED_NO_WIDGET_LAYER,
+                "widget layer list unavailable -- topmost overlay not drawn",
+            );
+            return false;
+        }
+        let size = *(cl.add(0x0C) as *const u32);
+        let write = *(cl.add(0x10) as *const *mut u8);
+        let base = *(cl.add(0x18) as *const *const u8);
+        if write.is_null() || base.is_null() {
+            warn_once(&WARNED_NO_LIST, "arena pointers null (topmost)");
+            return false;
+        }
+        if (write as usize) != (base as usize) + size as usize {
+            warn_once(
+                &WARNED_BUMP_MISMATCH,
+                "arena bump invariant violated -- refusing to emit (topmost)",
+            );
+            return false;
+        }
+        if size > ARENA_SOFT_CAP {
+            warn_once(
+                &WARNED_ARENA_CAP,
+                "arena size beyond soft cap -- refusing to emit (topmost)",
+            );
+            return false;
+        }
+
+        let mut w = RecordWriter::new(write as u64);
+        build(&mut w);
+        if w.is_empty() {
+            return true;
+        }
+        let bytes = w.bytes();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), write, bytes.len());
+        let new_size = size + bytes.len() as u32;
+        *(cl.add(0x0C) as *mut u32) = new_size;
+        *(cl.add(0x10) as *mut *mut u8) = (base as *mut u8).add(new_size as usize);
+        true
+    }
+}
+
+/// The default-shader pointer + program count for topmost consumers
+/// (binding program 0 around textured draws).
+pub fn default_shader_ptr() -> *const u8 {
+    let (shader, progs) = unsafe { read_default_shader() };
+    if shader.is_null() || progs < 1 || progs > MAX_PLAUSIBLE_PROGRAMS {
+        std::ptr::null()
+    } else {
+        shader
+    }
+}
+
+/// Append a batch of untextured quads to the ACTIVE command list, bound
+/// to the stock default-shader program 0 (mid-walk the current shader
+/// binding is arbitrary — an explicit stock bind keeps the quads
+/// correct and doubles as the state the layer's later records expect).
+/// ONLY legal from inside an aux-emitter call (the active list is the
+/// engine's own installation for the walk in progress). Fail-open:
+/// every gate failure skips the frame with one latched WARN class.
+/// Returns whether the batch was emitted.
+pub fn emit_overlay_quads(quads: &[encode::Quad]) -> bool {
+    if quads.is_empty() {
+        return true;
+    }
+    unsafe {
+        let (shader, progs) = read_default_shader();
+        if shader.is_null() || progs < 1 || progs > MAX_PLAUSIBLE_PROGRAMS {
+            warn_once(
+                &WARNED_NO_SHADER,
+                "default shader unresolved -- overlay quads unavailable",
+            );
+            return false;
+        }
+        let cl = render_notes_hook::active_command_list();
+        if cl.is_null() {
+            warn_once(&WARNED_NO_LIST, "active command list null at aux anchor");
+            return false;
+        }
+        let size = *(cl.add(0x0C) as *const u32);
+        let write = *(cl.add(0x10) as *const *mut u8);
+        let base = *(cl.add(0x18) as *const *const u8);
+        if write.is_null() || base.is_null() {
+            warn_once(&WARNED_NO_LIST, "arena pointers null (aux)");
+            return false;
+        }
+        if (write as usize) != (base as usize) + size as usize {
+            warn_once(
+                &WARNED_BUMP_MISMATCH,
+                "arena bump invariant violated -- refusing to emit (aux)",
+            );
+            return false;
+        }
+        if size > ARENA_SOFT_CAP {
+            warn_once(
+                &WARNED_ARENA_CAP,
+                "arena size beyond soft cap -- refusing to emit (aux)",
+            );
+            return false;
+        }
+
+        let mut w = RecordWriter::new(write as u64);
+        w.set_context_2d(1280.0, 720.0, 0.0, 0.0);
+        w.set_shader(shader as u64, 0);
+        w.quads_untextured(quads);
+        let bytes = w.bytes();
+
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), write, bytes.len());
+        let new_size = size + bytes.len() as u32;
+        *(cl.add(0x0C) as *mut u32) = new_size;
+        *(cl.add(0x10) as *mut *mut u8) = (base as *mut u8).add(new_size as usize);
+        true
+    }
+}
+
 // Latched one-shot WARN classes (fail-open diagnostics, never spam).
 static WARNED_NO_LIST: AtomicBool = AtomicBool::new(false);
 static WARNED_BUMP_MISMATCH: AtomicBool = AtomicBool::new(false);
@@ -293,14 +534,25 @@ pub fn init(signatures: &SignatureStore) {
     }
 }
 
-/// The layer-dispatcher detour: pure passthrough. Installing it proves
-/// the layer machinery resolved on this build (`emitter_ready` — the
-/// menu's ANIMATED BACKGROUND availability gate); emission itself happens
-/// at the menu's anchor wrapper render (see [`EMIT_ANCHOR`]).
+/// The layer-dispatcher detour: forward first, then run the registered
+/// topmost emitter (SMX overlay) against the widget layer's private
+/// list — records appended after the dispatcher's own recording draw
+/// LAST (topmost), and the orchestrator's consumer kick hasn't run yet
+/// (we're inside its dispatcher call), so the append is same-frame-safe.
+/// Installing this detour also proves the layer machinery resolved on
+/// this build (`emitter_ready` / `topmost_ready`).
 extern "C" fn dispatcher_hook() {
     unsafe {
         if let Some(ref hook) = *std::ptr::addr_of!(DISPATCHER_HOOK) {
             hook.call();
+        }
+        let emitter = TOPMOST_EMITTER.load(Ordering::Acquire);
+        if emitter != 0 {
+            TOPMOST_LIST.store(resolve_widget_layer_list(), Ordering::Release);
+            // SAFETY: stored from a valid `fn()` pointer.
+            let f: fn() = std::mem::transmute(emitter);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            TOPMOST_LIST.store(std::ptr::null_mut(), Ordering::Release);
         }
     }
 }
@@ -387,6 +639,16 @@ unsafe fn read_default_shader() -> (*const u8, u32) {
 /// compare for every non-anchor wrapper. Panic-contained here (the caller
 /// is an extern "C" frame).
 pub fn on_anchor_render(wrapper: *mut u8) {
+    // Aux anchor (SMX touch overlay quads).
+    if wrapper as usize == AUX_ANCHOR.load(Ordering::Acquire) {
+        let emitter = AUX_EMITTER.load(Ordering::Relaxed);
+        if emitter != 0 {
+            // SAFETY: stored from a valid `fn()` pointer.
+            let f: fn() = unsafe { std::mem::transmute(emitter) };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        }
+        return;
+    }
     if wrapper as usize != EMIT_ANCHOR.load(Ordering::Acquire) {
         return;
     }
@@ -401,6 +663,15 @@ pub fn on_anchor_render(wrapper: *mut u8) {
 /// keeps dispatching it every frame (the render pass clears the flag; a
 /// clean static wrapper is served from a cached path — round-1 finding).
 pub fn on_anchor_rendered(wrapper: *mut u8) {
+    // Aux anchor: re-arm unconditionally while installed (the emitter's
+    // own gates make an idle frame O(1)).
+    if wrapper as usize == AUX_ANCHOR.load(Ordering::Acquire) {
+        let dirty = AUX_DIRTY.load(Ordering::Relaxed);
+        if dirty != 0 {
+            unsafe { *(dirty as *mut u8) = 1 };
+        }
+        return;
+    }
     if wrapper as usize != EMIT_ANCHOR.load(Ordering::Acquire) {
         return;
     }

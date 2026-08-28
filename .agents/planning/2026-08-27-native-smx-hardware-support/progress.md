@@ -1,17 +1,18 @@
 # Progress — Native SMX Hardware Support
 
-Updated: 2026-08-27
-Status: Step 2 of 4 — **COMPLETE & cabinet-validated** (deploys #13–#15: parity
-port → improved marquee resampler + slot fix → strip linear interpolation, all
-confirmed on hardware; marquee/strips/spotlights at their physical resolution
-ceiling). Step 1 also COMPLETE & cabinet-validated. Uncommitted (maintainer
-commits manually).
-NEXT ACTION: none required for Step 2. When ready, move to Step 3 (touchscreen
-overlay: menu nav / pinpad / card-in — see `implementation/plan.md`). Known
-cosmetic gap carried to Step 4: the test-menu "FOOT PANEL CHECK" per-SENSOR
-screen reads sensors through a different path and shows nothing (gameplay + I/O
-input are unaffected). Resume protocol: read the deploy #13–#15 + probe entries
-below + `implementation/plan.md` Step 3.
+Updated: 2026-08-28
+Status: **FEATURE COMPLETE — all 4 steps done, cabinet-validated through
+deploy #20** (uncommitted — maintainer commits manually).
+Step 3 (touchscreen overlay) validated across deploys #16–#20; Step 4
+(close-out) done 2026-08-28: lifecycle audit (+ card-episode cancel on
+disable), docs (`docs/smx_hardware_research.md`, AGENTS.md row, README
+"StepManiaX Cabinet Support" section incl. the Wine EnableHidraw prereq),
+plan checklist closed. Known cosmetic gap (accepted): the test-menu "FOOT
+PANEL CHECK" per-SENSOR screen reads sensors through a path we don't feed
+(gameplay + I/O input unaffected). Skipped by design: `DDR_SMX_FAULT` env +
+validation harness (every degradation path was hardware-exercised across
+20 deploys; D12 waived host tests).
+NEXT ACTION: none — maintainer commit when ready.
 
 ## Done
 
@@ -59,10 +60,124 @@ below + `implementation/plan.md` Step 3.
 
 ## In flight
 
-- Nothing — Step 2 code complete, awaiting cabinet deploy #13. Readiness gates all
-  green 2026-08-27: `cargo check --target x86_64-pc-windows-msvc` clean →
-  `cargo fmt` (whole crate) → `./build.sh` clean
-  (`target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`).
+- Step 3 code complete, readiness gates all green 2026-08-28
+  (`cargo check --target x86_64-pc-windows-msvc` → `cargo fmt` → `./build.sh`).
+  Awaiting cabinet deploy #16.
+
+### Step 3 implementation summary (what was built)
+
+- **Ghidra RE (all on `arkmdxbio2_20260721`, file-relative to 0x180000000;
+  the injection design DEVIATES from the design doc's table where RE proved
+  it wrong):**
+  - **`arkMDXGetEAPass` card plan was WRONG.** gamemdx resolves the export
+    (slot `DAT_1806f2270`) but NEVER calls it; its impl (vtable +0x2d8 →
+    `FUN_1800c9d10`) is a per-player trigger/hold BYTE getter, not a UID
+    reader. The whole card flow is ark-internal (ENTRYFLOW scenes) and every
+    consumer reads the MdxHWIO object's card fields, written each frame by
+    `MdxHWIO::stepUpdate` (`FUN_1800ce320`)'s reader state machine.
+    `MdxHWIO::getEAPassCardID` (vtable +0xF0 → `FUN_1800cd460`) formats the
+    stored UID for the entry flow's network login.
+  - **Card field map (verified against stepUpdate's physical-card path +
+    the acio decoder `FUN_18007f250`):** per-player card block base
+    `+0x5BC` (P1) / `+0x5D4` (P2), stride 0x18:
+    `{uid[8] @+0, type_bool @+8, presence @+9, type_int @+0xC,
+    debounce_count @+0x14}`; card trigger `+0x60B/+0x60C` (set on a NEW
+    uid), card hold `+0x624/+0x625` (held while the card sits on the
+    reader) — both zeroed at stepUpdate's top each frame; scan-enabled
+    gate `+0x6F8/+0x6F9` (set by `MdxHWIO::setEAPassReadStart` — the entry
+    flow arms the reader on its card-wait screens). Card type rule (the
+    decoder's own): `uid[0]==0xE0 ⇒ type 1` (ISO15693) else 2 (FeliCa).
+  - **Menu getters** (vtable +0x2E0 Start / +0x2E8 Up / +0x2F0 Down /
+    +0x2F8 Left / +0x300 Right) are 4-arg byte getters
+    `(this, player, *trigger_u8, *hold_u8)` — NOT the panels' 6-arg shape —
+    over plain object fields stepUpdate rewrites per frame from the raw
+    digest: trigger P1 `0x61A/0x61B/0x61C/0x61D/0x61E` =
+    Start/Left/Right/Up/Down (P2 = +5 each), hold P1 `0x60D..0x611`
+    (P2 = +5). Internal ark consumers (entry-flow scenes) read the BYTES,
+    so export-level injection is insufficient (deploy #4's lesson again).
+  - **10-key impl** (vtable +0x308 → `FUN_1800c9420`,
+    `(this, player, *buf1[12], *buf2[12])`, one-hot both buffers) is the
+    single keypad funnel: its keycode source `FUN_18007ecd0`
+    (`DAT_180bd59ec + player*0x84`, values 0..0xB, else 0xC=none) has NO
+    other caller — one impl detour covers the export AND the ark's own
+    PIN scenes. Buffer index = key: 0..9 digits, 10 = "00", 11 = decimal.
+  - **IO dispatcher** = vtable +0x28 → `FUN_1800d07d0` (per-frame state
+    machine; state 4 calls stepUpdate). Called ONLY through the vtable —
+    the perfect post-original injection point right after the game's own
+    field writes.
+- **`src/services/input_manager.rs` extensions:** `inject_slot` grew
+  `PINPAD_BASE..PINPAD_BASE+12` (COUNT 21). Two NEW detours, resolved from
+  the live vtable inside the existing lazy `install_panel_impl_hooks`
+  (aliasing check now spans all 6 targets; each overlay target degrades
+  independently with one WARN): **(1) IO-dispatcher detour** (+0x28) —
+  PRE-original it publishes the ark's per-player digest OVERRIDE WORDS
+  (`DAT_180c47f50`, resolved by the ark module's first AOB — see the
+  deploy #17 entry) with the provider-served MENU_* state (mask bits
+  Start 0x01/Left 0x02/Right 0x04/Up 0x08/Down 0x10, zeros when idle), so
+  the test menu's direct digest reads, stepUpdate's level-byte copies
+  (+0x61A..) and the panel counters all see injected presses through the
+  ark's own front door; POST-original it synthesizes one rising-edge
+  pulse into the EDGE bytes (+0x60D..0x611 / +0x612..0x616 — the raw
+  edge derivation never sees the override) and drives **card episodes**:
+  `request_card_scan(player, uid8)` arms a ~120-frame episode; each
+  dispatcher frame with the reader ARMED (`+0x6F8+p`) replicates
+  stepUpdate's physical-card writes (uid block + type + presence +
+  count + hold, trigger once per episode). Episodes always drain; a
+  press on a non-card screen warns once and does nothing.
+  **(2) 10-key impl detour** (+0x308) — ORs PINPAD_* one-hot into both
+  buffers, EXCLUDED from the modpack's own poll (`IN_MODPACK_POLL`) so
+  touch pinpad presses reach the game's PIN entry, not the mod-menu
+  gesture machinery. The export-level `arkMDXGet10Key` suppression runs
+  after the impl's injection, so an open mod menu still wins for
+  game-side export callers. The export menu detours no longer inject
+  anything (suppression only) — injection flows through the override
+  words upstream.
+- **`src/mods/smx_hardware/overlay_model.rs` (pure):** SpiceManiaX button
+  set + layout (same 1280×720 coordinates incl. its int truncations:
+  menu-up cx 100/1072 cy 575, L/R/Start row cy 618, down 662, Start
+  offset +162; pinpad first key (35|1165, 85), 30 px keys / 10 px gaps;
+  toggle (80|1200, 35); card (210|1070, 35)), rotated-rect corner math +
+  inverse-rotation `contains`, `hit_test` (visibility-aware: hidden
+  overlay = only the toggle responds — fixes SpiceManiaX pressing
+  invisible buttons), `parse_card_id` (16 hex chars → 8 UID bytes).
+- **`src/services/overlay_draw/` aux anchor:** a second, independent
+  emission anchor (`set_aux_anchor(wrapper, dirty, emitter)` /
+  `clear_aux_anchor`) with unconditional dirty re-arm, plus
+  `emit_overlay_quads(&[Quad])` — gate ladder (default shader, active
+  list, bump invariant, soft cap) → `set_context_2d` + stock program-0
+  bind + one untextured-quad batch.
+- **`src/mods/smx_hardware/overlay.rs`:** shared state (per-player HELD
+  bitmask + VISIBLE + per-button press timestamps + alpha from
+  `overlay_opacity`) and the native render: aux-anchor text widget FIRST,
+  then label TextWidgets (labels z-above quads); per-frame emitter builds
+  border+fill quad pairs per visible button (pressed = red border +
+  warm-accent fill, ≥150 ms flash so sub-frame taps read; UI improvement
+  over SpiceManiaX's flat polygons), reconciles label visibility on
+  transitions (toggle label flips HIDE/SHOW OVERLAY — new). Lazy widget
+  allocation from the mod's `on_frame` tick once `widget_renderer` is
+  ready (pool-headroom check like mod_menu's chrome).
+- **`src/mods/smx_hardware/touch.rs`:** paced game-window discovery
+  (EnumWindows, same-PID largest visible client area, ≥320×240) →
+  `SetWindowLongPtrW(GWLP_WNDPROC)` subclass + `RegisterTouchWindow`.
+  Handles WM_TOUCH (1/100-screen-px → client), WM_POINTERDOWN/UP (screen
+  px), WM_LBUTTONDOWN/UP (client px) — each with a one-shot
+  `SmxTouch: delivery -- …` INFO so deploy #16 doubles as the CrossOver
+  touch-delivery probe. Presses tracked per CONTACT (release releases the
+  pressed button regardless of lift position — fixes SpiceManiaX's
+  stuck-press on drag-off). WndProc panic-contained; consumes ONLY
+  WM_TOUCH (exists solely because we registered); everything else
+  forwarded via `CallWindowProcW`. Disable restores the original proc +
+  unregisters touch.
+- **`input_inject.rs`:** provider now serves MENU_* + PINPAD_* from the
+  overlay bitmask (PANEL_* unchanged); `on_card_button(player)` fires
+  `request_card_scan` with the parsed config UID.
+- **`mod.rs`:** enable parses `p1card`/`p2card` (bad hex ⇒ WARN + that
+  button absent), activates overlay (when `overlay_enabled`) + touch +
+  injection, registers ONE `input_manager::on_frame` tick
+  (overlay widget alloc + window-subclass pacing); disable reverses
+  (widgets stay hidden — render-list nodes are permanently consumed).
+- **Cargo.toml:** + `Win32_UI_WindowsAndMessaging`, `Win32_UI_Input_Touch`,
+  `Win32_Graphics_Gdi`.
 
 ### Step 2 implementation summary (what was built)
 
@@ -185,6 +300,263 @@ below + `implementation/plan.md` Step 3.
 
 ## Deploy & test log
 
+- **2026-08-28 Step 4 close-out — FEATURE COMPLETE.** Lifecycle audit:
+  `disable()` fully reverses (rows removed, WndProc restored + touch
+  unregistered, topmost emitter cleared, injection off, capture/force/
+  poll-ark gated off, transport threads joined); found + fixed one gap —
+  a mid-flight card episode froze at disable and would fire on re-enable,
+  now cancelled via `input_manager::clear_card_scans()` from
+  `input_inject::deactivate`. Docs: `docs/smx_hardware_research.md` (the
+  consolidated RE record — ark IO maps, the three-consumer-layer input
+  lesson, override words, card machine, lamp id decode, topmost append,
+  atlas pipeline, Wine facts), AGENTS.md Key Entry Points row, README
+  "StepManiaX Cabinet Support" operator section + the `smx_hardware`
+  config-table row + the Wine `EnableHidraw` prereq. plan.md Steps 3+4
+  ticked. Gates green.
+- **2026-08-28 deploy #20 — VALIDATED: everything looks perfect
+  (maintainer).** Layout (card between toggle and pinpad, column-aligned),
+  the mod-menu SMX HARDWARE section (opacity / scale / pad lights /
+  cabinet lights / pad style), corner-anchored live scale, decoupled
+  light toggles, and Gold/Platinum pad style all confirmed on the
+  cabinet. → feature close-out.
+- **2026-08-28 deploy #20 (superseded by validation above) — layout polish + mod-menu SMX HARDWARE
+  section + overlay scale + decoupled light toggles + Pad Style.** Deploy
+  #19c feedback (aesthetic settled; card-in validated on both sides):
+  - **Pad Style (Gold / Platinum)**: new `smx_hardware.pad_style` config
+    key ("gold" default | "platinum"; unknown ⇒ WARN + gold) selecting the
+    static accent for the un-driven pad regions — `light_map::PadStyle`
+    (Gold = SpiceManiaX's 0xBB,0xBB,0x00; Platinum = cool silver/chrome
+    0x8C,0x96,0xA8, tune on hardware) threaded through `map_stage`/
+    `corner_panel`; live via `transport::set_pad_platinum` + a fifth
+    mod-menu row ("Pad Style", GOLD/PLATINUM).
+  - **Top-cluster layout** (`overlay_model.rs`): Insert-Card moved from
+    beside the toggle to BELOW it (between toggle and pinpad); toggle,
+    card, and pinpad all center on the pinpad's middle column
+    (`COLUMN_CX` = 75 | 1205). Stack: toggle cy 35 → card cy 75 → pinpad
+    rows 115/155/195/235 (pinpad position fixed whether or not a card
+    button exists).
+  - **Overlay scale, corner-anchored** (maintainer design): every button
+    carries a cluster `anchor` — pinpad/utility stacks anchor at the TOP
+    screen corners, menu-nav clusters at the BOTTOM corners — and both
+    `corners()` (render) and `contains()` (hit-test, inverse-mapped)
+    apply `p' = anchor + (p − anchor)·s`, so clusters grow toward screen
+    center / shrink into their corners and touch targets always track
+    the visuals. Range 50–150 %, default 100, live.
+  - **Mod-menu section**: four contributed rows under
+    `parent_row_key = "smx-hardware"` (the GLOBAL SETTINGS tab groups
+    them under the mod's own header while it's enabled, hides them when
+    disabled): Touch Overlay Opacity (10–100 %, fine 5 / coarse 25),
+    Touch Overlay Scale (50–150 %), Pad Lights (ON/OFF), Cabinet Lights
+    (ON/OFF). All live-applied; every change persists the WHOLE
+    `smx_hardware` config section (`config::persist`, quick_restart
+    pattern; cards/gold/overlay_enabled carried from the enable-time
+    snapshot; opacity percent is the source of truth — the ALPHA-byte
+    round-trip drifted 25→24).
+  - **Light toggles decoupled** (`transport.rs`): `output_lights` was the
+    master gate on the whole 30 Hz drain (cabinet lights required it);
+    now `OUTPUT_LIGHTS` gates only the stage-pad staging and
+    `OUTPUT_CABINET_LIGHTS` only the cabinet devices — two honest,
+    independent toggles. Config docs updated; `overlay_scale` added to
+    `SmxHardwareConfig` + the repo example config.
+  Watch-items: (1) column alignment reads right at 100 %; (2) scale
+  50 %/150 % — clusters stay glued to their corners, diamonds/glow scale
+  proportionally, touch matches visuals at every scale; (3) the SMX
+  HARDWARE section appears/disappears with the mod toggle; (4) Pad
+  Lights OFF leaves cabinet lights running and vice versa; (5) row edits
+  land in mod-config.json and load next boot; (6) card buttons still
+  work at the new position.
+- **2026-08-28 deploy #19b → #19c — textures VALIDATED; lit-face color
+  iterations.** #19b confirmed: occlusion fix works, textures load and
+  look right. Lit-face feedback loop: v1 warm gold = too yellow → v2 pure
+  white = too subtle at overlay opacity during gameplay → v3 (#19c):
+  slight warm hue (255,252,238 → 238,226,188) **plus a bloom halo** — a
+  new `menu_glow` atlas cell (2× the button footprint, warm-white radial
+  alpha falloff) drawn as an extra quad inflated by half the button size
+  per side, underneath the face, alpha-crossfaded by the lamp value like
+  the lit face. Reads clearly lit through the overlay opacity. Rebuild
+  required (UV table gained MENU_GLOW); atlas re-copied to the bottle.
+- **2026-08-28 deploy #19 → #19b — occlusion fix VALIDATED; textures didn't
+  load (stem/basename mismatch — fixed).** Deploy #19 confirmed the topmost
+  emission works (overlay renders above the mod menu) but the atlas never
+  resolved (`textured=false`, no `atlas texture resolved` line, load issued
+  and polled forever). Root cause: the engine's PngFileCallback registers a
+  loose PNG under its **BARE FILENAME STEM**, and `asset_loader::resolve`
+  hashes the caller's stem — the file was `overlay_atlas.png` but the code
+  polled `smx_overlay_atlas`. Fix (#19b): the PNG is now
+  `smx_overlay_atlas.png`; the generator derives BOTH constants from the
+  filename so they can never diverge, and the overlay tick gained a
+  self-diagnosing timeout WARN (600 unresolved polls ⇒ name the path +
+  stem rule). Rebuilt + atlas re-copied to the bottle (the stale
+  `overlay_atlas.png` removed).
+- **2026-08-28 deploy #19 (what shipped) — textured topmost overlay + lamp-lit
+  menu buttons (the mod-menu occlusion fix + presentation pass).**
+  Deploy #18 feedback: the mod menu (widget-based, registered later ⇒
+  higher z) occluded the touch overlay; maintainer requested pre-rendered
+  Gold-cab-styled textures instead of flat quads + labels, plus the menu
+  buttons lighting with the game's cabinet lamp output.
+  - **Topmost emission** (`overlay_draw`): the layer-dispatcher detour
+    (installed since the overlay-menu rewrite as a passthrough) now runs a
+    registered TOPMOST EMITTER post-original — appends into the WIDGET
+    layer's private CommandList (the layer-table override entry whose
+    layer object == `widget_renderer::render_list_manager()`, walk-flag
+    gated; table global deref confirmed against the dispatcher decompile)
+    AFTER the dispatcher recorded everything ⇒ our records draw LAST ⇒
+    above the mod menu, loading art, all game UI. Appends happen before
+    the orchestrator's consumer kick (same call stack) — same-frame-safe.
+    `with_topmost_writer(closure)` wraps the gate ladder + arena append;
+    `topmost_ready()` = the dispatcher-hook availability.
+  - **Textured buttons**: `scripts/gen_smx_overlay_atlas.py` (PIL + the
+    repo font) generates `data_mods/smx_hardware/overlay_atlas.png` + the
+    UV table `src/mods/smx_hardware/overlay_atlas.rs` — silver convex
+    menu diffusers with near-black rounded bevels (drawn square; the 45°
+    quad rotation makes the diamond, matching the real cab's rotated
+    buttons), a warm LIT variant, Kokushin-style charcoal keycaps with
+    baked legends (blank bottom-right), INSERT CARD / HIDE / SHOW
+    utility buttons, and per-shape translucent-grey pressed overlays.
+    Loaded via `asset_loader` (chrome_loader's loose-PNG pattern) from
+    the overlay `tick()`; `encode.rs` gained `TexQuad` + `quads_textured`
+    (tag 0x04, count × 0x34 `{corners, uv rect, color}`) and `blend`
+    (tag 0x08; the emitter binds the engine's own standard-alpha bits +
+    stock program 0 for deterministic state mid-append). 21 host tests.
+  - **Lamp-lit menu buttons — zero new hooks**: menu-button lamps are
+    dimlamps `player*8 + button` (P1 Start/Up/Down/Left/Right = 0..4,
+    P2 = 8..12) — decoded from the ark's 29-triple staging table
+    (0x1800f7a60: staging (0,i)/(1,i) for i 0..7) + the 21-pair slot map
+    (0x180115c90: slots 0..15) + the BI2A LED table
+    (`DAT_180117150` = [8..23, 28..32]) + spice2x's GOLD LED names
+    (LEDs 8..12/16..20 = P1/P2 menu), cross-validated against the
+    woofer ids 19/20 Step 2 proved on hardware. The emitter reads them
+    off the live MdxHWIO object (`+0x14C8 + id*4`, resolved once per
+    frame) and crossfades the LIT cell by lamp value — proportional
+    brightness, like the spotlights.
+  - **TextWidgets deleted** from the overlay (labels are baked into the
+    art): no more widget-pool consumption, no aux anchor, no label
+    centering guess. The `overlay_draw` aux-anchor API remains (unused —
+    kept as service surface). Flat-quad fallback (no legends) when the
+    atlas fails to resolve; one WARN when topmost is unavailable.
+  - **DEPLOY NOTE:** needs the DLL **and**
+    `data_mods/smx_hardware/overlay_atlas.png` (already copied into the
+    local bottle's contents/data_mods — regenerate with
+    `python3 scripts/gen_smx_overlay_atlas.py` after art edits).
+  Watch-items: (1) overlay visible + usable ABOVE the open mod menu;
+  (2) textured look (diamonds/keycaps/legends; rotated diamond art reads
+  correctly); (3) menu lamps track the game (P1/P2 sides not swapped —
+  if swapped, the dimlamp base ids flip); (4) pressed grey highlight on
+  all shapes; (5) alpha blending clean (no opaque black boxes — would
+  mean the blend/shader state records misbehave); (6) HIDE/SHOW cell
+  swaps on toggle; (7) if `atlas texture resolved` never appears the
+  overlay falls back to flat quads (check the PNG path); (8) no
+  performance dip (≈90 textured quads + 10 lamp reads per frame);
+  (9) if some game content STILL draws above the overlay, layer-table
+  entries 8..10 compose above entry 7 — fallback plan: append to the
+  LAST walked override entry instead (one-line change in
+  `resolve_widget_layer_list`).
+- **2026-08-28 deploy #18 — VALIDATED: touch pinpad gestures (mod menu
+  0-0-0, quick restart/fail/logout), blank decimal key, and X-CLOSE FIXED
+  (the game shuts down from the window close button).** New feedback →
+  deploy #19: draw the touch overlay as the very top layer (the mod menu
+  occluded it), and move to pre-rendered Gold-cab-style button textures +
+  lamp-lit menu buttons.
+
+- **2026-08-28 deploy #18 (what shipped) — touch-pinpad modpack gestures +
+  blank decimal key + X-close ownership.** Deploy #17 validated the
+  override-word menu nav (test menu ✓, in-game ✓) and the pinpad pulse
+  (momentary in the test menu ✓). Remaining items:
+  - **Touch pinpad didn't drive the modpack's gestures** (mod-menu 0-0-0,
+    quick restart 1 / fail 3, logout 9-9-9): the 10-key impl detour
+    deliberately excluded the modpack's own poll via `IN_MODPACK_POLL` —
+    maintainer wants cabinet parity instead. Exclusion removed: injected
+    pinpad pulses now reach the modpack poll AND the game alike.
+  - **Decimal key label blanked** (Konami cabinet pinpads have a blank
+    key there).
+  - **X-close STILL hangs — and the deploy #17 log exonerated the HID
+    reader threads**: the failing run had NO SMX devices attached, and
+    the X-click produced NO log reaction at all (no WM_CLOSE at our
+    subclassed proc — which sits FIRST in the chain — and no spice2x
+    shutdown initiation; the visible teardown lines were the later
+    ctrl-C). New approach: take OWNERSHIP of the close in the subclass —
+    on `WM_SYSCOMMAND/SC_CLOSE` or `WM_CLOSE` (one-shot): log which
+    message fired, stop the SMX transport, forward, and force-exit via
+    `TerminateProcess` after 1.5 s if the game is still alive
+    (deliberately NOT `process::exit` — CRT teardown is the thing that
+    wedges; spice2x's own "force shutdown" ends the same way).
+    `WM_DESTROY` still triggers a transport stop for teardowns that
+    bypass close messages. **Decision tree for the log:** `close
+    requested (msg=0x112)` = Mac close button arrives as SC_CLOSE ✓ fixed;
+    `msg=0x10` = arrives as WM_CLOSE ✓ fixed; NO line at all = the close
+    request never enters the window proc chain under CrossOver — our DLL
+    cannot see it, move the investigation to spice2x (its window hook /
+    `-windowed` handling) or accept ctrl-C as the close path.
+  Watch-items: (1) touch 0-0-0 opens the mod menu; touch menu-nav then
+  navigates it (exclusive consumer) while the game underneath stays
+  suppressed; (2) quick restart / fail / logout gestures fire from touch;
+  (3) decimal key blank; (4) X-close per the decision tree above; (5) no
+  regression in PIN entry (the pulse now also feeds the modpack poll —
+  harmless, it only consumes digits during its own UI flows).
+- **2026-08-28 deploy #17 — test-menu menu nav + pinpad pulse VALIDATED;
+  X-close still hangs (reader threads exonerated — see deploy #18).**
+  Override words + edge-byte synthesis work on hardware: menu nav
+  registers in the cabinet IO test menu and in-game; held pinpad keys
+  read as one momentary press. New findings → #18: touch pinpad didn't
+  drive modpack gestures (IN_MODPACK_POLL exclusion — intentional, but
+  maintainer wants cabinet parity), decimal key should be blank, X-close
+  produced zero log reaction (not even spice2x shutdown initiation).
+
+- **2026-08-28 deploy #17 (what shipped) — test-menu menu nav (override
+  words) + pinpad pulse + first X-close attempt.** Deploy #16 findings and
+  their fixes:
+  - **Menu nav worked in-game but NOT in the cabinet IO test menu** (the
+    deploy-#4 lesson, one layer deeper): the test menu reads the raw
+    digest LEVEL through `FUN_18007e910`, UPSTREAM of the object bytes the
+    first implementation wrote. RE follow-up settled the whole level/edge
+    architecture: `FUN_18007e910` (raw digest LEVEL) ORs a dormant
+    per-player OVERRIDE WORD `DAT_180c47f50[player]` into every read
+    (single reader, ZERO writers — the ark's own dev injection surface,
+    first spotted in deploy #5); `FUN_180084850` derives the EDGE bytes
+    (`~prev & cur`) from the RAW digest with NO override. stepUpdate
+    copies the override'd level reads into `+0x61A..` and the raw edges
+    into `+0x60D..` — so the first implementation ALSO had level/edge
+    swapped (it navigated in-game by acting as auto-repeat on the edge
+    byte). **Fix:** the dispatcher detour now (pre-original) publishes the
+    override words (digest mask bits Start 0x01 / Left 0x02 / Right 0x04 /
+    Up 0x08 / Down 0x10; zeros when idle) — covering the test menu, the
+    level bytes, and the panel counters through the ark's own front door —
+    and (post-original) synthesizes ONE rising-edge pulse into the edge
+    bytes `+0x60D..0x611`/`+0x612..0x616` per press. The override base is
+    the ark module's first AOB
+    (`E8 ?? ?? ?? ?? 85 B4 BD ?? ?? ?? ?? 48 8B 5C 24 30`, disp32 at +8 is
+    MODULE-BASE-relative — RBP holds the image base; exactly-one-match +
+    bounds-validated, miss ⇒ WARN + menu injection off). The export menu
+    detours' `inject_state_byte` path was REMOVED (it double-applied
+    level-as-trigger on top of the dispatcher injection).
+  - **A held touch pinpad key stayed "pressed" in the test menu.** Not
+    event flooding — the injection was level-based, so the one-hot 10-key
+    getter faithfully reported the key down while the finger was down;
+    real pinpads are momentary. **Fix:** each touch converts to one fixed
+    ~120 ms pulse (`overlay::pinpad_pulse_active` — press-edge timestamp,
+    re-press requires lifting); the visual pressed state still tracks the
+    finger.
+  - **Clicking X on the game window didn't shut the game down** (predates
+    Step 3 — present since the SMX mod landed). Prime suspect: the
+    per-device reader threads blocked in overlapped hidraw reads wedge
+    Wine's process teardown. **Fix:** the (now-owned) WndProc subclass
+    catches WM_CLOSE/WM_DESTROY one-shot and runs `transport::shutdown()`
+    (CancelIoEx + joins all threads, idempotent) before forwarding.
+  Watch-items: (1) test-menu button check shows touch Up/Down/Left/Right/
+  Start; (2) in-game nav unchanged (single steps per tap — no auto-repeat
+  regression from the edge rework; holding should repeat only if the game
+  itself repeats on level); (3) held pinpad key = one press in test menu;
+  (4) X-close exits cleanly; (5)
+  `InputManager: digest override words resolved` appears; (6) pads/lights/
+  card-in/visibility unaffected.
+- **2026-08-28 deploy #16 — OVERLAY VALIDATED (mouse delivery under
+  CrossOver): quads + labels render in-game, all buttons work — menu nav
+  navigates, pinpad enters digits (test menu shows keys), card-in and
+  visibility toggle behave.** Touch delivery on this rig = MOUSE events
+  (as predicted for Wine). Two findings → deploy #17 (above): menu nav
+  invisible to the IO test menu; held touch pinpad keys read as held
+  (should be momentary). Also raised: the long-standing X-close hang
+  (since Step 1) — fix folded into #17.
 - **2026-08-27 deploy #1 — BOOT CRASH (no SMX hardware attached, mod OFF).**
   EXCEPTION_ACCESS_VIOLATION ~2 s after `io_Start` (first game input poll),
   stack rooted spice64 → arkmdxbio2 thread-entry (+0x1F81/+0x2EEC of base
@@ -578,6 +950,38 @@ below + `implementation/plan.md` Step 3.
 
 ## Deviations & open questions
 
+- **Step 3 deviates from the design doc's injection table (RE-driven,
+  2026-08-28):** (1) `arkMDXGetEAPass` injection is DEAD — gamemdx never
+  calls it; card-in instead writes the MdxHWIO object's card block from a
+  post-original detour on the vtable +0x28 IO dispatcher, replicating the
+  physical reader's writes (see the Step 3 summary for the field map).
+  (2) Menu-button injection lives in the ark's per-player digest OVERRIDE
+  WORDS (`DAT_180c47f50` — the ark's own dormant dev injection surface;
+  written pre-original in the dispatcher detour) plus a synthesized
+  rising-edge pulse into the object EDGE bytes post-original — the export
+  detours' `inject_state_byte` path was removed outright (deploys #16→#17;
+  internal ark consumers and the TEST MENU read the digest/bytes, not the
+  exports). (3) `arkMDXGet10Key` injection sits at the vtable impl
+  (+0x308), not the export, covering the ark's own PIN scenes; presses
+  are momentary ~120 ms pulses, not levels (deploy #16 finding).
+- **Touch menu presses reach the mod menu while it is open** (the
+  object-byte injection is upstream of the modpack's poll): touch
+  Up/Down/Left/Right/Start navigates the mod menu exactly like cabinet
+  buttons, and the menu's suppression still shields the game underneath.
+  Deliberate cabinet-button parity.
+- **Touch pinpad presses feed the modpack's poll too** (deploy #18 —
+  reversing the original IN_MODPACK_POLL exclusion at maintainer request):
+  touch 0-0-0 opens the mod menu, and quick restart / fail / logout
+  gestures fire from touch, exactly like the cabinet pinpad.
+- **WM_TOUCH is consumed** (not forwarded) — it only exists because we
+  RegisterTouchWindow'd; mouse/pointer messages are always forwarded to the
+  original proc (spice2x's own hooks may want them; the game ignores mouse).
+- **Pinpad "00"/decimal buffer indices (10/11) are unverified** — digits
+  0..9 are cabinet-proven (mod-menu gesture); the last two are the natural
+  reading of the one-hot impl. Trivial swap if deploy shows them reversed.
+- **Label vertical centering is a first-deploy guess** (`cy − 20·scale`,
+  BmpString anchors at glyph top; no text metrics queryable) — tune by eye
+  like the mod menu's layout.
 - **Marquee AND strips deviate from D6 (verbatim SpiceManiaX) — all
   maintainer-approved 2026-08-27, each landed only after a cabinet deploy
   validated what it replaced.** (1) `map_marquee` is the prefer-lit,
@@ -620,6 +1024,43 @@ below + `implementation/plan.md` Step 3.
 
 ## Key facts for a cold resume
 
+- **Step 3 ark IO injection map (arkmdxbio2_20260721, MdxHWIO vftable @
+  0x1800F7C88, singleton ptr @ DAT_180c43658, all offsets object-relative):**
+  IO dispatcher vtable +0x28 (`FUN_1800d07d0`, state 4 → stepUpdate
+  `FUN_1800ce320`); menu getters +0x2E0/E8/F0/F8/300 =
+  Start/Up/Down/Left/Right, 4-arg `(this, player, *level_u8, *edge_u8)`;
+  10-key impl +0x308 (`FUN_1800c9420`, one-hot, sole reader of keycode
+  source `FUN_18007ecd0`); menu LEVEL bytes P1
+  0x61A(S)/0x61B(L)/0x61C(R)/0x61D(U)/0x61E(D) (P2 = +5) fed by
+  stepUpdate from `FUN_18007e910` = raw digest OR the per-player
+  OVERRIDE WORD `DAT_180c47f50[player]` (single reader, zero writers —
+  our injection surface; digest mask bits S 0x01/L 0x02/R 0x04/U 0x08/
+  D 0x10; AOB `E8 ?? ?? ?? ?? 85 B4 BD ?? ?? ?? ?? 48 8B 5C 24 30`,
+  disp32 at +8 is MODULE-BASE-relative); menu EDGE bytes 0x60D..0x611
+  (P2 = +5) fed from the RAW digest only (`FUN_180084850`, ~prev & cur —
+  the override never reaches them; we synthesize pulses); card block
+  +0x5BC/+0x5D4 `{uid[8], type_bool@8, presence@9, type_int@C,
+  count@14}`, card trigger 0x60B/0x60C, hold 0x624/0x625, scan-armed
+  gate 0x6F8/0x6F9 (armed by the entry flow's card-wait screens); card
+  type: uid[0]==0xE0 ⇒ 1 else 2. `arkMDXGetEAPass` is resolved by
+  gamemdx but never called — do not inject there.
+- **Overlay layout (1280×720, SpiceManiaX-exact):** menu diamonds
+  anchored at (100|1072, 575); pinpad 4×3 rows from (35|1165, 85);
+  toggle (80|1200, 35); card (210|1070, 35). Shared state bits:
+  0..4 menu, 5..16 pinpad (5+bufidx), 17 card, 18 toggle.
+- **Menu-button LAMPS:** dimlamp id = `player*8 + button` (MenuButton
+  order Start/Up/Down/Left/Right ⇒ P1 = 0..4, P2 = 8..12; woofers 19/20,
+  stage corners 21..28 — all in the same `MdxHWIO+0x14C8 + id*4` u32
+  array the LAMP CHECK poll reads). Chain: staging triples 0x1800f7a60 →
+  slot map 0x180115c90 → BI2A LEDs `DAT_180117150` = [8..23, 28..32] →
+  spice2x GOLD names (8..12/16..20 = P1/P2 menu).
+- **Topmost overlay rendering:** post-dispatcher append to the widget
+  layer's private CommandList (layer-table override entry matched by
+  `render_list_manager()` identity) — records drawn last = above ALL
+  widget content incl. the mod menu. Atlas: regenerate with
+  `python3 scripts/gen_smx_overlay_atlas.py` (writes the PNG + the UV
+  table `overlay_atlas.rs`); the PNG must ship to
+  `contents/data_mods/smx_hardware/`.
 - SMX HID: VID 0x2341 PID 0x8037; product string "StepManiaX" (stage) / "SMXArcade"
   (cabinet). 64-byte reports: id 3 = input (`mask = buf[2]<<8 | buf[1]`, 9 bits,
   bit1=Up bit3=Left bit4=Center bit5=Right bit7=Down), id 5 = host→device

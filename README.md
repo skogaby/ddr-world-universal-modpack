@@ -110,6 +110,7 @@ All the cosmetic customizations normally locked behind Konami's web portal — a
 | **Song Limit Expansion** | Raises the loadable song cap by ~8× for large custom libraries. |
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |
 | **Non-Native OS Support** | Keeps the game stable under CrossOver/Wine (background-movie handling). |
+| **SMX Hardware** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
 
 ## Your Scores Are Safe
 
@@ -140,12 +141,44 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
 | `shader_fixes` | Arrow anti-aliasing toggle (also editable in the mod menu) |
 | `overlay_menu` | Mod-menu theme/opacity (managed by the APPEARANCE tab) |
+| `smx_hardware` | SMX cabinet support: card ids, overlay opacity/scale, light toggles, pad style (most also editable in the mod menu) |
 
 All keys are optional; missing keys use sensible defaults.
 
 </details>
 
 Custom songs, textures, and assets are served from the `data_mods/` folder — drop-in PNGs are converted automatically, no repacking tools needed.
+
+## StepManiaX Cabinet Support
+
+If your DDR World rig is built on a **StepManiaX Dedicated Cabinet**, the
+`smx-hardware` mod (default **off** — enable it in the mod menu) drives the
+whole cabinet natively over USB, with no SpiceAPI or external apps:
+
+- **Pads as input** — stage panels play the game, with the same latency-first
+  design as the SMX SDK (dedicated reader threads).
+- **Lights** — DDR's per-arrow stage lighting, corner lamps, marquee, monitor
+  strips, and spotlights all mirror onto the SMX hardware. The pads' static
+  accent color is selectable (**Gold** or **Platinum**) to match your cabinet.
+- **Touchscreen overlay** — cabinet-style menu buttons (they light up like the
+  real thing), a pinpad, and an Insert Card button rendered on top of the game,
+  working in fullscreen. Pinpad gestures (0-0-0 mod menu, quick restart, etc.)
+  work from the touchscreen too.
+
+Setup notes:
+
+- The game must be running in Gold-Cab/BIO2 mode; the mod's default
+  `force_gold_cabinet` handles the usual case automatically.
+- **Card-in:** set `smx_hardware.p1card` / `p2card` in `mod-config.json` to
+  your e-amusement card UID (the same 16-hex-digit value a spice2x card file
+  uses). The Insert Card button only appears when a card is configured.
+- Overlay opacity/scale, the light toggles, and the pad style live in the mod
+  menu's **SMX HARDWARE** section (GLOBAL SETTINGS tab).
+- **CrossOver/Wine only:** the SMX devices must be passed through as raw HID.
+  In the bottle's registry add
+  `HKLM\System\CurrentControlSet\Services\winebus\EnableHidraw` as a
+  `REG_MULTI_SZ` containing `2341:8037`, then restart the bottle. (Real
+  Windows needs nothing.)
 
 ## Playing on macOS / Linux (CrossOver/Wine)
 

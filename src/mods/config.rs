@@ -341,10 +341,10 @@ pub struct NonNativeOsSupportConfig {
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-
-/// edited only — the DLL never writes this section back. Read once at mod
-/// enable (next-launch semantics). The overlay/card fields are consumed
-/// from Step 3 of the feature plan; they parse now so operator configs
-/// written early stay valid.
+/// edited for the card/gold fields; the overlay opacity/scale and light
+/// toggles are ALSO live-editable from the mod menu's SMX HARDWARE
+/// section, which persists the whole section back (`save_json_key`).
+/// Read once at mod enable (next-launch semantics for the fixed fields).
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct SmxHardwareConfig {
     /// P1's e-Amusement card id (hex string). Enables the P1 Insert-Card
@@ -357,17 +357,24 @@ pub struct SmxHardwareConfig {
     /// Touchscreen overlay opacity 0.0..=1.0 (Step 3; default 0.6).
     #[serde(default)]
     pub overlay_opacity: Option<f32>,
+    /// Touchscreen overlay scale percent, 50..=150 (default 100). Each
+    /// button cluster scales about its screen-corner anchor.
+    #[serde(default)]
+    pub overlay_scale: Option<i32>,
+    /// Static pad accent: "gold" (default) or "platinum" (the Platinum
+    /// cabinets' silver/chrome). Colors the un-driven pad regions.
+    #[serde(default)]
+    pub pad_style: Option<String>,
     /// Master touchscreen-overlay toggle (Step 3; default true).
     #[serde(default)]
     pub overlay_enabled: Option<bool>,
-    /// Drive the SMX cabinet lights from DDR's light output (default true).
-    /// A debug off-switch: input injection stays active when false.
+    /// Drive the SMX stage pads' lights from DDR's light output
+    /// (default true). Input injection stays active when false.
     #[serde(default)]
     pub output_lights: Option<bool>,
     /// Drive the SMX cabinet's NON-stage lights — marquee, monitor-side
-    /// vertical strips, spotlights — from DDR's cabinet lighting (default
-    /// true). Effective only while `output_lights` is also true; stage-pad
-    /// lights are unaffected by this knob.
+    /// vertical strips, spotlights — from DDR's cabinet lighting
+    /// (default true). Independent of `output_lights` since deploy #20.
     #[serde(default)]
     pub output_cabinet_lights: Option<bool>,
     /// Force the game into Gold-Cab light mode (default true). On this
