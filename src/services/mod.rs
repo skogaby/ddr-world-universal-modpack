@@ -126,6 +126,7 @@ pub mod scene_manager;
 pub mod score_guard;
 pub mod se_bank_synth;
 pub mod series_filter_scroll;
+pub mod smx;
 pub mod song_rate;
 pub mod song_reset;
 pub mod stage_records;

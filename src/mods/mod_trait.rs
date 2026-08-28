@@ -40,6 +40,11 @@ use std::collections::HashMap;
 /// first so faster hooks land sooner; these enable last.
 const LATE_BINDING_MODS: &[&str] = &["folder-expansion", "webui-options"];
 
+/// Mods that default OFF when absent from the config `mods` map (every
+/// other mod defaults ON). Reserved for hardware-specific mods that are
+/// meaningless — or actively wrong — on cabinets without that hardware.
+const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware"];
+
 /// Context passed to mods during initialization. Provides read-only access
 /// to the game module (base address, size) and resolved function signatures.
 pub struct ModContext<'a> {
@@ -236,7 +241,8 @@ impl ModRegistry {
             if id == "mod-menu" {
                 continue;
             }
-            let should_enable = config.get(&id).copied().unwrap_or(true);
+            let default_on = !DEFAULT_OFF_MODS.contains(&id.as_str());
+            let should_enable = config.get(&id).copied().unwrap_or(default_on);
             if should_enable {
                 self.enable(&id);
             }

@@ -340,6 +340,47 @@ pub struct NonNativeOsSupportConfig {
     pub movie_mode: Option<String>,
 }
 
+/// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-
+/// edited only — the DLL never writes this section back. Read once at mod
+/// enable (next-launch semantics). The overlay/card fields are consumed
+/// from Step 3 of the feature plan; they parse now so operator configs
+/// written early stay valid.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct SmxHardwareConfig {
+    /// P1's e-Amusement card id (hex string). Enables the P1 Insert-Card
+    /// overlay button (Step 3).
+    #[serde(default)]
+    pub p1card: Option<String>,
+    /// P2's e-Amusement card id (hex string).
+    #[serde(default)]
+    pub p2card: Option<String>,
+    /// Touchscreen overlay opacity 0.0..=1.0 (Step 3; default 0.6).
+    #[serde(default)]
+    pub overlay_opacity: Option<f32>,
+    /// Master touchscreen-overlay toggle (Step 3; default true).
+    #[serde(default)]
+    pub overlay_enabled: Option<bool>,
+    /// Drive the SMX cabinet lights from DDR's light output (default true).
+    /// A debug off-switch: input injection stays active when false.
+    #[serde(default)]
+    pub output_lights: Option<bool>,
+    /// Drive the SMX cabinet's NON-stage lights — marquee, monitor-side
+    /// vertical strips, spotlights — from DDR's cabinet lighting (default
+    /// true). Effective only while `output_lights` is also true; stage-pad
+    /// lights are unaffected by this knob.
+    #[serde(default)]
+    pub output_cabinet_lights: Option<bool>,
+    /// Force the game into Gold-Cab light mode (default true). On this
+    /// cabinet the game auto-detects a non-GOLD machine type and drives the
+    /// SD `arkMDXChangeSatellite` path (cabinet-light colors on the pads,
+    /// no per-arrow tape or corners). Forcing GOLD (via in-memory detours on
+    /// `arkMDXGetMachineType`/`arkMDXGetPCType`) makes it drive the per-LED
+    /// `arkMDXChangeTapeled` + `arkMDXChangeDimlamp` path the SMX map expects.
+    /// Operator off-switch for genuine SD/HD cabinets; never written by the DLL.
+    #[serde(default)]
+    pub force_gold_cabinet: Option<bool>,
+}
+
 /// Config for the overlay mod menu's appearance (`overlay_menu` section).
 /// DLL-WRITTEN: the THEME tab persists the whole section on any change
 /// (`save_json_key`), serializing all three keys each time.
@@ -404,6 +445,8 @@ pub struct ConfigFile {
     pub non_native_os_support: Option<NonNativeOsSupportConfig>,
     #[serde(default)]
     pub overlay_menu: Option<OverlayMenuConfig>,
+    #[serde(default)]
+    pub smx_hardware: Option<SmxHardwareConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -439,6 +482,7 @@ pub fn init() {
                     per_song_judgement_offsets: None,
                     non_native_os_support: None,
                     overlay_menu: None,
+                    smx_hardware: None,
                 }
             }
         },
@@ -463,6 +507,7 @@ pub fn init() {
                 per_song_judgement_offsets: None,
                 non_native_os_support: None,
                 overlay_menu: None,
+                smx_hardware: None,
             }
         }
     };

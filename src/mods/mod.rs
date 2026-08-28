@@ -53,6 +53,7 @@ pub mod real_speed_fix;
 pub mod series_expansion;
 pub mod shader_fixes;
 pub mod skip_intros;
+pub mod smx_hardware;
 pub mod song_limit_expansion;
 pub mod song_playback_speed;
 pub mod timer_freeze;
