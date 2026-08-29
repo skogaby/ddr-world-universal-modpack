@@ -84,6 +84,20 @@ static FAILED_HWNDS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 /// contact, never by position). Mouse uses contact id `u32::MAX`.
 static CONTACTS: Mutex<Vec<(u32, usize)>> = Mutex::new(Vec::new());
 
+/// IR-frame release debounce (ms). The SMX cabinet's touchscreen is an
+/// IR frame, not a glass digitizer: the beam plane sits above the glass,
+/// so one physical press arrives as a down/up/down flutter as the finger
+/// crosses the plane (cabinet deploy #1: the visibility toggle
+/// double-fired, edge buttons multi-pressed). Releases are therefore
+/// DEFERRED by this window and cancelled by a re-press: the HELD bit
+/// never clears across the flutter, so edge-driven actions fire once,
+/// and genuinely held buttons survive beam flicker. 0 = immediate
+/// release (the pre-debounce behavior).
+static DEBOUNCE_MS: AtomicU32 = AtomicU32::new(150);
+
+/// Deferred releases: (button index, due at overlay::clock_ms()).
+static PENDING_RELEASES: Mutex<Vec<(usize, u64)>> = Mutex::new(Vec::new());
+
 // One-shot delivery diagnostics (the deploy-#16 probe).
 static SEEN_TOUCH: AtomicBool = AtomicBool::new(false);
 static SEEN_POINTER: AtomicBool = AtomicBool::new(false);
@@ -93,9 +107,14 @@ static FIRST_HIT_LOGGED: AtomicBool = AtomicBool::new(false);
 static CLOSE_HANDLED: AtomicBool = AtomicBool::new(false);
 
 /// Per-frame tick (render thread, via the mod's on_frame callback):
-/// paced attempts to find + subclass the game window until installed.
+/// drains due deferred releases, then paced attempts to find + subclass
+/// the game window until installed.
 pub fn tick() {
-    if !ACTIVE.load(Ordering::Acquire) || INSTALLED.load(Ordering::Acquire) {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    drain_pending_releases();
+    if INSTALLED.load(Ordering::Acquire) {
         return;
     }
     // One attempt every ~2 s at 60 fps (EnumWindows isn't free).
@@ -107,13 +126,29 @@ pub fn tick() {
 
 /// Arm the capture (mod enable). The subclass installs lazily from
 /// [`tick`] once the game window exists.
-pub fn activate() {
+pub fn activate(debounce_ms: u32) {
+    DEBOUNCE_MS.store(debounce_ms, Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
+}
+
+/// Live debounce-window update (the mod menu's "Touch Debounce" row).
+/// Applies to the next release; already-queued releases keep their
+/// deadline.
+pub fn set_debounce_ms(ms: u32) {
+    DEBOUNCE_MS.store(ms, Ordering::Relaxed);
 }
 
 /// Restore the original WndProc + unregister touch (mod disable).
 pub fn deactivate() {
     ACTIVE.store(false, Ordering::Release);
+    // Flush deferred releases so no button stays logically held.
+    if let Ok(mut p) = PENDING_RELEASES.lock() {
+        let pending = std::mem::take(&mut *p);
+        drop(p);
+        for (index, _) in pending {
+            overlay::set_button_state(index, false);
+        }
+    }
     if !INSTALLED.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -405,7 +440,13 @@ fn handle_down(contact: u32, x: f32, y: f32) {
             c.push((contact, index));
         }
     }
-    if let Some(button) = overlay::set_button_state(index, true) {
+    // A re-press cancels the button's deferred release (IR flutter: the
+    // HELD bit stays set across the down/up/down burst, so this press is
+    // no edge and kind actions below don't re-fire).
+    if let Ok(mut p) = PENDING_RELEASES.lock() {
+        p.retain(|(i, _)| *i != index);
+    }
+    if let Some((button, edge)) = overlay::set_button_state(index, true) {
         if !FIRST_HIT_LOGGED.swap(true, Ordering::Relaxed) {
             log_info!(
                 "SmxTouch: first button hit (P{} {:?} at {:.0},{:.0})",
@@ -415,20 +456,65 @@ fn handle_down(contact: u32, x: f32, y: f32) {
                 y
             );
         }
-        if button.kind == overlay_model::ButtonKind::CardIn {
+        if edge && button.kind == overlay_model::ButtonKind::CardIn {
             input_inject::on_card_button(button.player);
         }
     }
 }
 
 /// A contact lifted — release whatever it pressed (position ignored).
+/// With the IR-frame debounce active the release is deferred; a
+/// re-press inside the window cancels it (see [`DEBOUNCE_MS`]).
 fn handle_up(contact: u32) {
     let index = CONTACTS.lock().ok().and_then(|mut c| {
         c.iter()
             .position(|(id, _)| *id == contact)
             .map(|i| c.swap_remove(i).1)
     });
-    if let Some(index) = index {
+    let Some(index) = index else {
+        return;
+    };
+    let debounce = DEBOUNCE_MS.load(Ordering::Relaxed) as u64;
+    if debounce == 0 {
+        overlay::set_button_state(index, false);
+        return;
+    }
+    let due = overlay::clock_ms() + debounce;
+    if let Ok(mut p) = PENDING_RELEASES.lock() {
+        if let Some(entry) = p.iter_mut().find(|(i, _)| *i == index) {
+            entry.1 = due;
+        } else if p.len() < 64 {
+            p.push((index, due));
+        } else {
+            // Table full (shouldn't happen with 38 buttons) — fail to
+            // the immediate release rather than a stuck button.
+            drop(p);
+            overlay::set_button_state(index, false);
+        }
+    } else {
+        overlay::set_button_state(index, false);
+    }
+}
+
+/// Release every deferred button whose debounce window has elapsed
+/// (per-frame, render thread).
+fn drain_pending_releases() {
+    let now = overlay::clock_ms();
+    // Collect first: never call set_button_state under the lock.
+    let mut due = [0usize; 8];
+    let mut n = 0;
+    if let Ok(mut p) = PENDING_RELEASES.lock() {
+        p.retain(|&(index, deadline)| {
+            if deadline <= now && n < due.len() {
+                due[n] = index;
+                n += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for &index in &due[..n] {
         overlay::set_button_state(index, false);
     }
 }

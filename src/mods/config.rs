@@ -386,6 +386,14 @@ pub struct SmxHardwareConfig {
     /// Operator off-switch for genuine SD/HD cabinets; never written by the DLL.
     #[serde(default)]
     pub force_gold_cabinet: Option<bool>,
+    /// Touch-overlay release debounce in ms (default 150, clamped
+    /// 0..=1000; 0 = off). The SMX cabinet touchscreen is an IR frame —
+    /// the beam plane triggers above the glass, so one physical press
+    /// flutters down/up/down. Button releases are deferred by this
+    /// window and cancelled by a re-press, collapsing the flutter into
+    /// one logical press.
+    #[serde(default)]
+    pub touch_debounce_ms: Option<u32>,
 }
 
 /// Config for the overlay mod menu's appearance (`overlay_menu` section).

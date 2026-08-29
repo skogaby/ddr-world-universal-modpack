@@ -163,7 +163,11 @@ whole cabinet natively over USB, with no SpiceAPI or external apps:
 - **Touchscreen overlay** — cabinet-style menu buttons (they light up like the
   real thing), a pinpad, and an Insert Card button rendered on top of the game,
   working in fullscreen. Pinpad gestures (0-0-0 mod menu, quick restart, etc.)
-  work from the touchscreen too.
+  work from the touchscreen too. The cabinet's IR-frame touchscreen triggers
+  slightly above the glass, so button releases are debounced
+  (`smx_hardware.touch_debounce_ms`, default 150; 0 disables — also editable
+  live as **Touch Debounce** in the mod menu's SMX HARDWARE section) to absorb
+  the down/up/down flutter a single physical press produces.
 
 Setup notes:
 

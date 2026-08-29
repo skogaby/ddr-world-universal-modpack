@@ -103,6 +103,12 @@ fn now_ms() -> u64 {
     EPOCH.elapsed().as_millis() as u64
 }
 
+/// Shared monotonic ms clock (touch.rs debounce deadlines use the same
+/// epoch as the press-flash timestamps).
+pub(super) fn clock_ms() -> u64 {
+    now_ms()
+}
+
 /// Minimum visual pressed duration so sub-frame taps still flash.
 const FLASH_MS: u64 = 150;
 
@@ -206,14 +212,20 @@ pub fn buttons() -> &'static [Button] {
 }
 
 /// Touch press/release for a button index (from the touch thread).
-/// Returns the button so the caller can act on kind-specific edges.
-pub fn set_button_state(index: usize, pressed: bool) -> Option<&'static Button> {
+/// Returns the button plus whether this call was a state EDGE (press
+/// while released / release while pressed). IR-frame flutter re-presses
+/// a button whose deferred release is still pending — the HELD bit
+/// never cleared, so those arrive as `edge == false` and kind-specific
+/// press actions (visibility toggle, card-in) must not re-fire.
+pub fn set_button_state(index: usize, pressed: bool) -> Option<(&'static Button, bool)> {
     let button = buttons().get(index)?;
     let mask = 1u32 << button.bit;
+    let edge;
     if pressed {
         let prev = HELD[button.player].fetch_or(mask, Ordering::AcqRel);
         PRESS_MS[button.player][button.bit as usize].store(now_ms(), Ordering::Relaxed);
-        if prev & mask == 0 && button.kind == ButtonKind::Visibility {
+        edge = prev & mask == 0;
+        if edge && button.kind == ButtonKind::Visibility {
             // Toggle on press edge.
             let v = &VISIBLE[button.player];
             let new = !v.load(Ordering::Relaxed);
@@ -225,9 +237,10 @@ pub fn set_button_state(index: usize, pressed: bool) -> Option<&'static Button> 
             );
         }
     } else {
-        HELD[button.player].fetch_and(!mask, Ordering::AcqRel);
+        let prev = HELD[button.player].fetch_and(!mask, Ordering::AcqRel);
+        edge = prev & mask != 0;
     }
-    Some(button)
+    Some((button, edge))
 }
 
 /// Build the button set and arm rendering (the mod's enable). The atlas

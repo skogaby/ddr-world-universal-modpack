@@ -59,12 +59,13 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static FRAME_CB_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Row keys of the mod-menu SMX HARDWARE section (removed on disable).
-const MENU_ROW_KEYS: [&str; 5] = [
+const MENU_ROW_KEYS: [&str; 6] = [
     "smx_overlay_opacity",
     "smx_overlay_scale",
     "smx_pad_lights",
     "smx_cabinet_lights",
     "smx_pad_style",
+    "smx_touch_debounce",
 ];
 
 /// Register the SMX HARDWARE section rows on the mod menu's GLOBAL
@@ -148,6 +149,23 @@ fn register_menu_rows(settings: &config::SmxSettings) {
         on_change: Arc::new(|v| {
             transport::set_pad_platinum(v != 0);
             config::set_pad_platinum(v != 0);
+            config::persist();
+        }),
+    });
+    mod_menu::register_scalar_row(mod_menu::ScalarRowSpec {
+        key: MENU_ROW_KEYS[5].to_string(),
+        label: "Touch Debounce".to_string(),
+        hint: "IR-frame flutter absorber (ms): button releases wait this long and a re-press cancels them. 0 = off.".to_string(),
+        parent_row_key: Some("smx-hardware".to_string()),
+        min: 0,
+        max: 1000,
+        step_fine: 25,
+        step_coarse: 100,
+        initial: settings.touch_debounce_ms as i32,
+        on_change: Arc::new(|v| {
+            let ms = v.clamp(0, 1000) as u32;
+            touch::set_debounce_ms(ms);
+            config::set_touch_debounce(ms);
             config::persist();
         }),
     });
@@ -257,7 +275,7 @@ impl Mod for SmxHardwareMod {
                 settings.overlay_opacity,
                 settings.overlay_scale,
             );
-            touch::activate();
+            touch::activate(settings.touch_debounce_ms);
             if FRAME_CB_ID.load(Ordering::Acquire) == usize::MAX {
                 let id = input_manager::on_frame(Arc::new(|| {
                     overlay::tick();

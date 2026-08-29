@@ -2,7 +2,7 @@
 //! over the operator's `smx_hardware` config section) + the section
 //! persist helper for the mod-menu-editable knobs.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use crate::mods::config as mod_config;
@@ -23,6 +23,9 @@ pub struct SmxSettings {
     pub output_lights: bool,
     pub output_cabinet_lights: bool,
     pub force_gold_cabinet: bool,
+    /// Touch-overlay release debounce ms (IR-frame flutter absorber;
+    /// 0 = off).
+    pub touch_debounce_ms: u32,
 }
 
 impl Default for SmxSettings {
@@ -37,6 +40,7 @@ impl Default for SmxSettings {
             output_lights: true,
             output_cabinet_lights: true,
             force_gold_cabinet: true,
+            touch_debounce_ms: 150,
         }
     }
 }
@@ -74,6 +78,10 @@ pub fn load() -> SmxSettings {
         force_gold_cabinet: section
             .force_gold_cabinet
             .unwrap_or(defaults.force_gold_cabinet),
+        touch_debounce_ms: section
+            .touch_debounce_ms
+            .unwrap_or(defaults.touch_debounce_ms)
+            .clamp(0, 1000),
     }
 }
 
@@ -93,6 +101,8 @@ static LIGHTS_STAGE: AtomicBool = AtomicBool::new(true);
 static LIGHTS_CABINET: AtomicBool = AtomicBool::new(true);
 /// Live mirror of the pad accent style (true = Platinum).
 static PAD_PLATINUM: AtomicBool = AtomicBool::new(false);
+/// Live mirror of the touch release-debounce window (ms).
+static TOUCH_DEBOUNCE: AtomicU32 = AtomicU32::new(150);
 
 /// Latch the enable-time settings (call from the mod's enable, after
 /// `load()`).
@@ -100,6 +110,7 @@ pub fn latch(settings: &SmxSettings) {
     LIGHTS_STAGE.store(settings.output_lights, Ordering::Relaxed);
     LIGHTS_CABINET.store(settings.output_cabinet_lights, Ordering::Relaxed);
     PAD_PLATINUM.store(settings.pad_platinum, Ordering::Relaxed);
+    TOUCH_DEBOUNCE.store(settings.touch_debounce_ms, Ordering::Relaxed);
     if let Ok(mut s) = SNAPSHOT.lock() {
         *s = Some(settings.clone());
     }
@@ -118,6 +129,11 @@ pub fn set_lights_cabinet(on: bool) {
 /// Live pad-accent mirror (the mod-menu "Pad Style" row).
 pub fn set_pad_platinum(platinum: bool) {
     PAD_PLATINUM.store(platinum, Ordering::Relaxed);
+}
+
+/// Live touch-debounce mirror (the mod-menu "Touch Debounce" row).
+pub fn set_touch_debounce(ms: u32) {
+    TOUCH_DEBOUNCE.store(ms, Ordering::Relaxed);
 }
 
 /// Persist the whole `smx_hardware` section from the live state (mod-menu
@@ -141,6 +157,7 @@ pub fn persist() {
             "output_lights": LIGHTS_STAGE.load(Ordering::Relaxed),
             "output_cabinet_lights": LIGHTS_CABINET.load(Ordering::Relaxed),
             "force_gold_cabinet": base.force_gold_cabinet,
+            "touch_debounce_ms": TOUCH_DEBOUNCE.load(Ordering::Relaxed),
         }),
     );
 }
