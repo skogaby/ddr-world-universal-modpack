@@ -23,16 +23,20 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Foundation::{GetLastError, BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::System::Console::GetConsoleWindow;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, UnregisterTouchWindow,
     HTOUCHINPUT, TOUCHEVENTF_DOWN, TOUCHEVENTF_UP, TOUCHINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, EnumWindows, GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
-    SetWindowLongPtrW, GWLP_WNDPROC,
+    CallWindowProcW, EnumWindows, GetClassNameW, GetClientRect, GetWindow, GetWindowRect,
+    GetWindowThreadProcessId, IsWindowVisible, SetWindowLongPtrW, GWLP_WNDPROC, GW_OWNER,
 };
 
 use crate::{log_info, log_warn};
@@ -63,6 +67,18 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Install attempt pacing (attempt every N frames until success).
 static FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
 static SEARCH_WARNED: AtomicBool = AtomicBool::new(false);
+static TOUCH_REG_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Windows the subclass attempt FAILED on — never retried. The
+/// "biggest visible window" heuristic can land on a window we cannot
+/// subclass at all: the classic case is the spice2x console window,
+/// which Windows reports as belonging to this PID for compatibility
+/// even though conhost.exe actually owns it, so `SetWindowLongPtrW`
+/// fails with access denied forever (deploy: Windows windowed mode,
+/// where no D3DProxyWindow exists and a large console out-areas the
+/// 1280x720 game window). Blocklisting lets the next attempt fall
+/// through to the next-biggest candidate instead of spinning.
+static FAILED_HWNDS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 
 /// contact id → pressed button index (the stuck-press fix: release by
 /// contact, never by position). Mouse uses contact id `u32::MAX`.
@@ -120,12 +136,26 @@ pub fn deactivate() {
 
 struct FindState {
     pid: u32,
+    console: HWND,
     best: HWND,
     best_area: i64,
 }
 
 unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let state = &mut *(lparam.0 as *mut FindState);
+    // Never the console window: GetWindowThreadProcessId reports it as
+    // ours (a Windows compat lie) but conhost.exe owns it — it can't be
+    // subclassed and must not shadow the real game window.
+    if hwnd == state.console {
+        return true.into();
+    }
+    if FAILED_HWNDS
+        .lock()
+        .map(|f| f.contains(&(hwnd.0 as isize)))
+        .unwrap_or(false)
+    {
+        return true.into();
+    }
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == state.pid && IsWindowVisible(hwnd).as_bool() {
@@ -142,10 +172,22 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+/// Best-effort window class name (diagnostics only).
+fn class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if n > 0 {
+        String::from_utf16_lossy(&buf[..n as usize])
+    } else {
+        String::from("<unknown>")
+    }
+}
+
 fn try_install() {
     unsafe {
         let mut state = FindState {
             pid: GetCurrentProcessId(),
+            console: GetConsoleWindow(),
             best: HWND::default(),
             best_area: 0,
         };
@@ -158,27 +200,86 @@ fn try_install() {
             }
             return;
         }
-        let hwnd = state.best;
-
-        // Opt into WM_TOUCH (real-Windows path). Failure is fine — the
-        // mouse path still works (the expected case under Wine).
-        if RegisterTouchWindow(hwnd, Default::default()).is_err() {
-            log_info!("SmxTouch: RegisterTouchWindow failed (mouse path only)");
+        // Owned popups lose the tiebreak to their owner: in fullscreen
+        // spice2x creates a D3DProxyWindow as a WS_POPUP owned by the
+        // real game window, with the IDENTICAL 1280x720 client area —
+        // whichever enumerates first wins the strict `>` contest, but
+        // mouse input is delivered to the OWNER (the D3D focus window;
+        // fullscreen deploy #2: subclassing the proxy captured nothing).
+        // Walk to the top owner, bounded, staying inside our process.
+        let mut hwnd = state.best;
+        for _ in 0..4 {
+            let owner = GetWindow(hwnd, GW_OWNER).unwrap_or_default();
+            if owner.0.is_null() || owner == state.console {
+                break;
+            }
+            let mut owner_pid = 0u32;
+            GetWindowThreadProcessId(owner, Some(&mut owner_pid));
+            if owner_pid != state.pid {
+                break;
+            }
+            log_info!(
+                "SmxTouch: candidate hwnd={:p} class=\"{}\" is owned -- walking to owner hwnd={:p} class=\"{}\"",
+                hwnd.0,
+                class_name(hwnd),
+                owner.0,
+                class_name(owner)
+            );
+            hwnd = owner;
+        }
+        // The owner walk can land on an already-blocklisted window;
+        // blocklist the candidate that led there too (else every pass
+        // re-picks it) and bail — the WARN already fired when the
+        // owner was listed.
+        if FAILED_HWNDS
+            .lock()
+            .map(|f| f.contains(&(hwnd.0 as isize)))
+            .unwrap_or(false)
+        {
+            if let Ok(mut f) = FAILED_HWNDS.lock() {
+                if f.len() < 32 && !f.contains(&(state.best.0 as isize)) {
+                    f.push(state.best.0 as isize);
+                }
+            }
+            return;
         }
 
         let original =
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc as *const () as usize as isize);
         if original == 0 {
-            log_warn!("SmxTouch: SetWindowLongPtrW failed -- touch capture unavailable");
-            let _ = UnregisterTouchWindow(hwnd);
+            // Not subclassable (e.g. another process really owns it).
+            // Log the identity ONCE, blocklist it, and let the next
+            // attempt pick the next-best candidate.
+            log_warn!(
+                "SmxTouch: SetWindowLongPtrW failed on hwnd={:p} class=\"{}\" area={} (err={:?}) -- blocklisting, will try other windows",
+                hwnd.0,
+                class_name(hwnd),
+                state.best_area,
+                GetLastError()
+            );
+            if let Ok(mut f) = FAILED_HWNDS.lock() {
+                if f.len() < 32 {
+                    f.push(hwnd.0 as isize);
+                }
+            }
             return;
         }
         ORIGINAL_PROC.store(original, Ordering::Release);
         GAME_HWND.store(hwnd.0 as isize, Ordering::Release);
         INSTALLED.store(true, Ordering::Release);
+
+        // Opt into WM_TOUCH (real-Windows path). Failure is fine — the
+        // mouse path still works (the expected case under Wine).
+        if RegisterTouchWindow(hwnd, Default::default()).is_err()
+            && !TOUCH_REG_WARNED.swap(true, Ordering::Relaxed)
+        {
+            log_info!("SmxTouch: RegisterTouchWindow failed (mouse path only)");
+        }
+
         log_info!(
-            "SmxTouch: game window subclassed (hwnd={:p}, client area {} px)",
+            "SmxTouch: game window subclassed (hwnd={:p}, class=\"{}\", client area {} px)",
             hwnd.0,
+            class_name(hwnd),
             state.best_area
         );
     }
@@ -186,7 +287,33 @@ fn try_install() {
 
 // ── Coordinate mapping ───────────────────────────────────────────────
 
+/// One-shot: the fullscreen (monitor-relative) mapping engaged.
+static FULLSCREEN_MAP_LOGGED: AtomicBool = AtomicBool::new(false);
+/// One-shot: full geometry dump at the first mapped click (every
+/// fallback branch must be observable — repo learnings).
+static GEOMETRY_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// Client-pixel point → the 1280×720 model space.
+///
+/// Two regimes:
+/// - Windowed: the game renders inside the client area — scale client
+///   coords by the client size.
+/// - Fullscreen: the presented image covers the MONITOR, but the game
+///   window keeps its decorations, so the client rect is offset from
+///   the screen origin (border + caption) and slightly smaller than
+///   the monitor. Client-relative mapping then lands short — the
+///   error converges to ~0 at the bottom edge and grows toward the
+///   top (fullscreen deploy #4: bottom menu buttons fine, top pinpad
+///   rows needed clicks BELOW the art). Map via screen coords
+///   relative to the monitor rect instead.
+///
+/// Fullscreen detection is by the OUTER window rect covering the
+/// monitor (fullscreen deploy #4 root cause: the previous
+/// `client size == monitor size` gate never engaged — with Windows
+/// fullscreen optimizations the desktop stays at native resolution
+/// and D3D9 sizes the decorated window to the monitor, leaving the
+/// client a caption-height smaller). A maximized borderless window
+/// also passes, where both mappings agree — harmless.
 fn client_to_model(hwnd: HWND, x: i32, y: i32) -> Option<(f32, f32)> {
     let mut rect = RECT::default();
     unsafe { GetClientRect(hwnd, &mut rect).ok()? };
@@ -194,6 +321,59 @@ fn client_to_model(hwnd: HWND, x: i32, y: i32) -> Option<(f32, f32)> {
     let h = (rect.bottom - rect.top) as f32;
     if w <= 0.0 || h <= 0.0 {
         return None;
+    }
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mut wr = RECT::default();
+        let have_geom =
+            GetMonitorInfoW(monitor, &mut mi).as_bool() && GetWindowRect(hwnd, &mut wr).is_ok();
+        if have_geom && !GEOMETRY_LOGGED.swap(true, Ordering::Relaxed) {
+            log_info!(
+                "SmxTouch: click geometry -- client {}x{}, window ({},{})-({},{}), monitor ({},{})-({},{})",
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                wr.left,
+                wr.top,
+                wr.right,
+                wr.bottom,
+                mi.rcMonitor.left,
+                mi.rcMonitor.top,
+                mi.rcMonitor.right,
+                mi.rcMonitor.bottom
+            );
+        }
+        if have_geom {
+            let mw = mi.rcMonitor.right - mi.rcMonitor.left;
+            let mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            let covers = wr.left <= mi.rcMonitor.left
+                && wr.top <= mi.rcMonitor.top
+                && wr.right >= mi.rcMonitor.right
+                && wr.bottom >= mi.rcMonitor.bottom;
+            if covers && mw > 0 && mh > 0 {
+                let mut pt = POINT { x, y };
+                if ClientToScreen(hwnd, &mut pt).as_bool() {
+                    if !FULLSCREEN_MAP_LOGGED.swap(true, Ordering::Relaxed) {
+                        log_info!(
+                            "SmxTouch: fullscreen mapping engaged (monitor {}x{} at ({},{}), client origin offset ({},{}))",
+                            mw,
+                            mh,
+                            mi.rcMonitor.left,
+                            mi.rcMonitor.top,
+                            pt.x - x - mi.rcMonitor.left,
+                            pt.y - y - mi.rcMonitor.top
+                        );
+                    }
+                    return Some((
+                        (pt.x - mi.rcMonitor.left) as f32 * 1280.0 / mw as f32,
+                        (pt.y - mi.rcMonitor.top) as f32 * 720.0 / mh as f32,
+                    ));
+                }
+            }
+        }
     }
     Some((x as f32 * 1280.0 / w, y as f32 * 720.0 / h))
 }
