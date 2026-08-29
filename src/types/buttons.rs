@@ -29,6 +29,13 @@ pub mod button {
     pub const NUM_9: u32 = 1 << 14;
     pub const NUM_STAR: u32 = 1 << 15;
     pub const NUM_HASH: u32 = 1 << 16;
+    // Dance-pad stage panels (distinct from the MENU_* cabinet buttons).
+    // Only reported while a consumer has opted in via
+    // `input_manager::set_panel_polling(true)`.
+    pub const PANEL_UP: u32 = 1 << 17;
+    pub const PANEL_DOWN: u32 = 1 << 18;
+    pub const PANEL_LEFT: u32 = 1 << 19;
+    pub const PANEL_RIGHT: u32 = 1 << 20;
 }
 
 pub static BUTTON_NAMES: Lazy<HashMap<u32, &'static str>> = Lazy::new(|| {
@@ -50,6 +57,10 @@ pub static BUTTON_NAMES: Lazy<HashMap<u32, &'static str>> = Lazy::new(|| {
     m.insert(button::NUM_9, "9");
     m.insert(button::NUM_STAR, "*");
     m.insert(button::NUM_HASH, "#");
+    m.insert(button::PANEL_UP, "Panel-Up");
+    m.insert(button::PANEL_DOWN, "Panel-Down");
+    m.insert(button::PANEL_LEFT, "Panel-Left");
+    m.insert(button::PANEL_RIGHT, "Panel-Right");
     m
 });
 

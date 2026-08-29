@@ -30,6 +30,7 @@ pub mod anytime_speedmod;
 pub mod assist_tick;
 pub mod autoplay;
 pub mod center_arrows_single;
+pub mod classic_difficulty;
 pub mod config;
 pub mod decorative_option_headers;
 pub mod fast_bootup;

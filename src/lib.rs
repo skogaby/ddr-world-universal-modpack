@@ -114,6 +114,7 @@ fn init() {
         Box::new(mods::premium_free::PremiumFreeMod::new()),
         Box::new(mods::quick_restart_or_fail::QuickRestartOrFailMod::new()),
         Box::new(mods::quick_logout::QuickLogoutMod::new()),
+        Box::new(mods::classic_difficulty::ClassicDifficultyMod::new()),
         Box::new(mods::autoplay::AutoplayMod::new()),
         Box::new(mods::announcer_mute::AnnouncerMuteMod::new()),
         Box::new(mods::anytime_speedmod::AnytimeSpeedmodMod::new()),

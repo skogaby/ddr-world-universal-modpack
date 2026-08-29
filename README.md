@@ -91,6 +91,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 | **Per-Song Judgement Offsets** | Per-song, per-player judgement offsets that follow the song wheel; community pre-seed included. |
 | **Quick Restart / Fail** | Pinpad 1 = instant in-place restart (optional countdown); 3 = instant fail to song select. |
 | **Quick Logout** | Triple-9 at song select ends the session through the game's normal logout flow. |
+| **Classic Difficulty Adjustment** | Double-tap pad UP/DOWN at song select to raise/lower difficulty, like every DDR before World. |
 | **Premium Free** | Unlimited stages per credit (per-player toggle). |
 | **Autoplay** | Perfect auto-play with an on-screen watermark; scores never submitted. |
 | **Assist Tick** | Sample-exact clap at each arrow's judgement moment, with volume control. |

@@ -17,6 +17,9 @@ use windows::Win32::System::LibraryLoader::GetProcAddress;
 
 type TriggerHoldFn = unsafe extern "C" fn(i32, *mut u32, *mut u32);
 type TenKeyFn = unsafe extern "C" fn(i32, *mut [u8; 12], *mut [u8; 12]);
+/// `arkMDXGetPanel{Up,Down,Left,Right}(player, *trigger, *hold, *release, *counter)`
+/// — the stage-panel export wrappers (see `docs/input_system_research.md`).
+type PanelGetFn = unsafe extern "C" fn(i32, *mut u8, *mut u8, *mut u8, *mut u32);
 
 struct ArkExports {
     get_start: TriggerHoldFn,
@@ -25,6 +28,9 @@ struct ArkExports {
     get_left: TriggerHoldFn,
     get_right: TriggerHoldFn,
     get_10key: TenKeyFn,
+    /// Stage-panel getters `[Up, Down, Left, Right]`. Best-effort: `None`
+    /// when any export failed to resolve (panel events unavailable).
+    panel_getters: Option<[PanelGetFn; 4]>,
 }
 
 unsafe impl Send for ArkExports {}
@@ -168,6 +174,97 @@ pub fn set_injection_provider(provider: InjectionProvider) {
 pub fn set_injection_active(active: bool) {
     SMX_INJECTION_ACTIVE.store(active, Ordering::Release);
 }
+
+// ── Pinpad pulse injection (generic mod-facing one-shot API) ────────
+//
+// A minimal sibling of the SMX injection provider: any mod can request a
+// one-shot pinpad key pulse (classic_difficulty synthesizes the game's
+// difficulty-change pinpad presses from dance-pad double-taps). Pulses
+// ride the same 10-key vtable-impl detour the SMX overlay uses, but are
+// independent of the SMX provider/active gates. Like SMX pinpad presses
+// (deploy #17), pulses are visible to BOTH the game and the modpack's
+// own poll. The pulse length mirrors the SMX overlay's cabinet-proven
+// value: level injection reads as a stuck key, ~120 ms reads as a tap.
+
+/// How long a requested pinpad pulse reads as "key down".
+const PINPAD_PULSE_MS: u64 = 120;
+
+/// Millisecond epoch for pulse deadlines (Instant isn't atomic-friendly).
+static PULSE_EPOCH: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
+
+fn pulse_now_ms() -> u64 {
+    PULSE_EPOCH.elapsed().as_millis() as u64
+}
+
+/// Per-(player, 10-key buffer index) pulse deadline in [`PULSE_EPOCH`]
+/// millis (0 = idle). Indices 0..=9 digits, 10 = "00", 11 = decimal point.
+static PINPAD_PULSE_DEADLINE: [[AtomicU64; 12]; 2] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [[Z; 12], [Z; 12]]
+};
+
+/// Set once any consumer wants injection detours without registering the
+/// (single-slot, SMX-owned) injection provider — a second trigger for the
+/// lazy vtable-detour install in [`poll`].
+static AUX_INJECTION_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Declare that a mod will call [`request_pinpad_pulse`], so the lazy
+/// 10-key vtable-impl detour installs even when the SMX mod is disabled.
+/// Call from the mod's `enable` (before the first pulse). One-way for the
+/// process lifetime — the installed detour is pass-through while idle.
+pub fn request_pinpad_injection() {
+    AUX_INJECTION_WANTED.store(true, Ordering::Release);
+}
+
+/// Request a one-shot ~120 ms pinpad key pulse for `player` (0/1),
+/// `key` = 10-key buffer index (0..=9 digits, 10 = "00", 11 = point).
+/// Callable from any thread (atomics only). Requires
+/// [`request_pinpad_injection`] to have been called at some enable point
+/// so the vtable detour is installed.
+pub fn request_pinpad_pulse(player: usize, key: usize) {
+    if player >= 2 || key >= 12 {
+        return;
+    }
+    PINPAD_PULSE_DEADLINE[player][key].store(pulse_now_ms() + PINPAD_PULSE_MS, Ordering::Release);
+}
+
+/// Cancel all in-flight pinpad pulses (mod disable hygiene; pulses also
+/// self-expire in ~120 ms).
+pub fn clear_pinpad_pulses() {
+    for player in &PINPAD_PULSE_DEADLINE {
+        for key in player {
+            key.store(0, Ordering::Release);
+        }
+    }
+}
+
+// ── Stage-panel event polling (opt-in) ──────────────────────────────
+//
+// When enabled, [`poll_player`] also reads the four `arkMDXGetPanel*`
+// exports and reports the dance-pad panels as `button::PANEL_*`
+// InputEvents. Off by default so boots without a panel consumer keep the
+// exact stock poll footprint. The exports funnel through the same vtable
+// impls the SMX injection detours cover, so injected SMX pad presses show
+// up here too — consistent with cabinet presses.
+
+static PANEL_POLLING: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable dance-pad panel polling (PANEL_* InputEvents).
+/// Currently a plain flag, not a refcount: if two mods ever consume panel
+/// events, the second `set_panel_polling(false)` would starve the first —
+/// promote to a refcount at that point.
+pub fn set_panel_polling(enabled: bool) {
+    PANEL_POLLING.store(enabled, Ordering::Release);
+}
+
+/// Panel poll order ↔ button bits (matches `ArkExports::panel_getters`).
+const PANEL_BUTTONS: [u32; 4] = [
+    button::PANEL_UP,
+    button::PANEL_DOWN,
+    button::PANEL_LEFT,
+    button::PANEL_RIGHT,
+];
 
 // ── Stage panel injection detours (arkMDXIO vtable level) ───────────
 //
@@ -664,6 +761,29 @@ unsafe extern "C" fn tenkey_impl_detour(
                 }
             }
         }
+        // Generic one-shot pinpad pulses (request_pinpad_pulse) — same
+        // visibility rules as the SMX block above (game + modpack poll),
+        // but independent of the SMX provider/active gates.
+        if (0..2).contains(&player) && !buf1.is_null() && !buf2.is_null() {
+            let deadlines = &PINPAD_PULSE_DEADLINE[player as usize];
+            let mut now = 0u64;
+            let mut now_read = false;
+            for (k, deadline) in deadlines.iter().enumerate() {
+                if deadline.load(Ordering::Acquire) == 0 {
+                    continue;
+                }
+                if !now_read {
+                    now = pulse_now_ms();
+                    now_read = true;
+                }
+                if deadline.load(Ordering::Acquire) > now {
+                    (*buf1)[k] |= 1;
+                    (*buf2)[k] |= 1;
+                } else {
+                    deadline.store(0, Ordering::Release);
+                }
+            }
+        }
         ret
     })
     .unwrap_or(0)
@@ -1126,10 +1246,12 @@ pub fn poll() {
             // Lazy panel-injection install: the arkMDXIO vtable only exists
             // once the game populated the singleton, and the detours are
             // only wanted once an injection provider registered (the SMX
-            // mod's enable). One attempt per process; runs on the render
-            // thread, which is fine for retour installs (every other hook
-            // installs while game threads run too).
-            if INJECTION_PROVIDER.load(Ordering::Acquire) != 0
+            // mod's enable) or a pinpad-pulse consumer declared itself
+            // (request_pinpad_injection). One attempt per process; runs on
+            // the render thread, which is fine for retour installs (every
+            // other hook installs while game threads run too).
+            if (INJECTION_PROVIDER.load(Ordering::Acquire) != 0
+                || AUX_INJECTION_WANTED.load(Ordering::Acquire))
                 && !PANEL_IMPL_INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel)
             {
                 unsafe { install_panel_impl_hooks(singleton_obj) };
@@ -1172,10 +1294,11 @@ fn poll_player(player: u8) {
         };
 
         // Copy function pointers out before mutable borrow
-        let (fns, get_10key) = match &mgr.exports {
+        let (fns, get_10key, panel_fns) = match &mgr.exports {
             Some(e) => (
                 [e.get_start, e.get_up, e.get_down, e.get_left, e.get_right],
                 e.get_10key,
+                e.panel_getters,
             ),
             None => return,
         };
@@ -1207,6 +1330,33 @@ fn poll_player(player: u8) {
         for (i, &bit) in NUMPAD_BITS.iter().enumerate() {
             let active = buf1[i] != 0;
             state = update_button(state, bit, active, ages, player, RELEASE_DELAY, &mut events);
+        }
+
+        // Dance-pad stage panels (opt-in — see set_panel_polling). The
+        // exports aren't suppression-detoured, but funnel through the same
+        // vtable impls the SMX injection covers, so injected pad presses
+        // are visible here like cabinet ones.
+        if PANEL_POLLING.load(Ordering::Acquire) {
+            if let Some(panel_fns) = panel_fns {
+                for (i, &bit) in PANEL_BUTTONS.iter().enumerate() {
+                    let mut trigger: u8 = 0;
+                    let mut hold: u8 = 0;
+                    let mut release: u8 = 0;
+                    let mut counter: u32 = 0;
+                    unsafe {
+                        panel_fns[i](
+                            player as i32,
+                            &mut trigger,
+                            &mut hold,
+                            &mut release,
+                            &mut counter,
+                        )
+                    };
+                    let active = trigger != 0 || hold != 0;
+                    state =
+                        update_button(state, bit, active, ages, player, RELEASE_DELAY, &mut events);
+                }
+            }
         }
 
         mgr.player_state[player as usize] = state;
@@ -1311,6 +1461,29 @@ fn resolve_exports(ark_module: &crate::core::module_resolver::GameModule) -> Opt
             unsafe extern "C" fn(i32, *mut [u8; 12], *mut [u8; 12]),
         >(resolve("arkMDXGet10Key")?);
 
+        // Stage-panel getters: best-effort (all-or-nothing). Panel button
+        // events are simply unavailable if a future build drops an export.
+        let panel_getters = (|| -> Option<[PanelGetFn; 4]> {
+            let mut fns = [None; 4];
+            for (i, name) in [
+                "arkMDXGetPanelUp",
+                "arkMDXGetPanelDown",
+                "arkMDXGetPanelLeft",
+                "arkMDXGetPanelRight",
+            ]
+            .iter()
+            .enumerate()
+            {
+                fns[i] = Some(std::mem::transmute::<*const (), PanelGetFn>(resolve(name)?));
+            }
+            Some([fns[0]?, fns[1]?, fns[2]?, fns[3]?])
+        })();
+        if panel_getters.is_none() {
+            log_warn!(
+                "InputManager: arkMDXGetPanel* exports unresolved -- panel events unavailable"
+            );
+        }
+
         Some(ArkExports {
             get_start,
             get_up,
@@ -1318,6 +1491,7 @@ fn resolve_exports(ark_module: &crate::core::module_resolver::GameModule) -> Opt
             get_left,
             get_right,
             get_10key,
+            panel_getters,
         })
     }
 }
