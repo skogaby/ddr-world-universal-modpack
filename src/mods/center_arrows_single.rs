@@ -22,6 +22,23 @@
 //! centers the 8-panel `double_lane_usr` lane itself, so the shift must only
 //! apply to the side-offset single-style layout.
 //!
+//! Dark song-info card (third detour, best-effort): the centered lane's lower
+//! portion is occluded by the opaque 1P song-info/jacket card at the bottom of
+//! the screen. DOUBLES play natively swaps that card for a dark transparent
+//! variant (`dance_song_info_double`) precisely so it doesn't cover the
+//! centered lane. The song-info card builder picks the variant from its own
+//! style field (`card+0xC4`, 0=single/1=double): `CMP [RBP+0xC4],EDI; SETZ
+//! R13B`, where R13B selects the card name AND gates the dark-tint color write
+//! at the tail. A community hex patch (20250805, file offset 476947:
+//! `41 0F 94 C5` -> `41 B5 00 90`, i.e. SETZ R13B -> MOV R13B,0) forces the
+//! doubles card unconditionally. We reproduce it runtime-gated: detour the
+//! card builder (entry derived from the `song_info_card_style` AOB via a
+//! backward prologue scan) and, when the same centering gate holds, flip
+//! `card+0xC4` to 1 across the original call and restore it after — identical
+//! in-function behavior to the byte patch, zero code patching, and only when
+//! the lane is actually centered. Validated in Ghidra on all four supported
+//! builds (20250805/20260324/20260616/20260721; cluster unique on each).
+//!
 //! See `.agents/planning/20260612-center-arrows-single/`.
 
 use retour::GenericDetour;
@@ -82,6 +99,26 @@ const PER_SIDE_STYLE_BASE: usize = 0x84;
 /// `PER_SIDE_STYLE_BASE` value meaning "this side laid out with the side-offset
 /// SINGLE style" — the only layout our centering shift is valid for.
 const STYLE_SINGLE: i32 = 0;
+
+/// Song-info card object: card style field (i32) at `card + 0xC4`.
+/// `0` = single (opaque side card), nonzero = double (dark transparent card).
+/// The card builder's variant branch (`song_info_card_style` AOB) reads it
+/// exactly once; flipping it to 1 across the original call forces the dark
+/// doubles card without touching code bytes.
+const CARD_STYLE_OFFSET: usize = 0xC4;
+
+/// Song-info card builder prologue, used to derive the function entry by
+/// scanning backwards from the `song_info_card_style` cluster match:
+/// `MOV RAX,RSP; PUSH RDI; PUSH R12; PUSH R13; SUB RSP,0x70`. Byte-identical
+/// on all four supported builds (entry = match - 0x9D on each, but the scan
+/// tolerates drift).
+const CARD_BUILDER_PROLOGUE: &[u8] = &[
+    0x48, 0x8B, 0xC4, 0x57, 0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x70,
+];
+
+/// Maximum backward-scan distance from the style-cluster match to the builder
+/// entry (0x9D on all four builds; generous headroom for code drift).
+const CARD_BUILDER_SCAN_BACK: usize = 0x200;
 
 /// Lane-relative element keys to recenter (Q1). `score`/`gauge`/`bpm`/`option`
 /// and the lane-name keys are intentionally excluded.
@@ -308,9 +345,79 @@ fn maybe_center(parent: *mut u8, name: *const i8, coord: *mut i32) {
     }
 }
 
+// ── Song-info card detour (dark card for centered 1P play) ──────────
+
+/// Song-info card builder — `void(card /*RCX*/)`. Entry derived from the
+/// `song_info_card_style` cluster match via backward prologue scan.
+type SongInfoBuilderFn = unsafe extern "C" fn(*mut u8);
+static mut SONG_INFO_HOOK: Option<GenericDetour<SongInfoBuilderFn>> = None;
+
+unsafe extern "C" fn song_info_builder_hook(card: *mut u8) {
+    let force = std::panic::catch_unwind(|| should_force_dark_card(card)).unwrap_or(false);
+    let Some(ref hook) = *std::ptr::addr_of!(SONG_INFO_HOOK) else {
+        return;
+    };
+    if force {
+        // Transiently present the card builder with the DOUBLE style so it
+        // picks the dark transparent `dance_song_info_double` card and applies
+        // the doubles tint — same in-function effect as the community byte
+        // patch (SETZ R13B -> MOV R13B,0), but gated and restored. The builder
+        // reads the field exactly once (the CMP feeding SETZ) and runs
+        // synchronously on the game thread, so the flip is invisible outside
+        // this call.
+        let style = unsafe { card.add(CARD_STYLE_OFFSET) as *mut i32 };
+        unsafe { style.write_unaligned(1) };
+        hook.call(card);
+        unsafe { style.write_unaligned(STYLE_SINGLE) };
+    } else {
+        hook.call(card);
+    }
+}
+
+/// Force the dark doubles card iff the same gate that centers the lane holds:
+/// card is genuinely SINGLE-style, session is single-player, and the active
+/// side's centering option is on. Doubles play (style already nonzero) needs
+/// no help — the game picks the dark card natively.
+fn should_force_dark_card(card: *mut u8) -> bool {
+    if card.is_null() {
+        return false;
+    }
+    let style = unsafe { (card.add(CARD_STYLE_OFFSET) as *const i32).read_unaligned() };
+    if style != STYLE_SINGLE {
+        return false;
+    }
+    let (p0_present, p1_present) = read_presence();
+    let side = match (p0_present, p1_present) {
+        (true, false) => 0usize,
+        (false, true) => 1usize,
+        _ => return false, // 2P (or unknown): never force
+    };
+    OPTION_ENABLED[side].load(Ordering::Acquire)
+}
+
+/// Derive the song-info card builder entry: backward-scan from the
+/// `song_info_card_style` cluster match for the builder prologue. Returns
+/// None (feature unavailable, WARN'd by the caller) if not found.
+fn derive_card_builder_entry(cluster: *const u8) -> Option<*const u8> {
+    unsafe {
+        for back in CARD_BUILDER_PROLOGUE.len()..=CARD_BUILDER_SCAN_BACK {
+            let candidate = cluster.sub(back);
+            let window = std::slice::from_raw_parts(candidate, CARD_BUILDER_PROLOGUE.len());
+            if window == CARD_BUILDER_PROLOGUE {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 // ── Hook lifecycle ──────────────────────────────────────────────────
 
-fn install_hooks(builder_addr: *const u8, setter_addr: *const u8) -> bool {
+fn install_hooks(
+    builder_addr: *const u8,
+    setter_addr: *const u8,
+    card_builder_addr: Option<*const u8>,
+) -> bool {
     // Builder entry hook.
     unsafe {
         let target: HudBuilderFn = std::mem::transmute(builder_addr);
@@ -341,6 +448,28 @@ fn install_hooks(builder_addr: *const u8, setter_addr: *const u8) -> bool {
         }
     }
 
+    // Song-info dark-card hook (best-effort: centering works without it, the
+    // card just stays opaque; one WARN at derivation/install failure).
+    if let Some(card_addr) = card_builder_addr {
+        unsafe {
+            let target: SongInfoBuilderFn = std::mem::transmute(card_addr);
+            match crate::core::hooks::install_enabled(
+                std::ptr::addr_of_mut!(SONG_INFO_HOOK),
+                target,
+                song_info_builder_hook,
+            ) {
+                Ok(()) => log_info!(
+                    "CenterArrowsSingle: song-info dark-card hook installed @ {:p}",
+                    card_addr
+                ),
+                Err(e) => log_warn!(
+                    "CenterArrowsSingle: song-info card hook install failed ({:?}) — card stays opaque",
+                    e
+                ),
+            }
+        }
+    }
+
     log_info!(
         "CenterArrowsSingle: hooks installed (builder @ {:p}, setter @ {:p})",
         builder_addr,
@@ -351,6 +480,9 @@ fn install_hooks(builder_addr: *const u8, setter_addr: *const u8) -> bool {
 
 fn remove_hooks() {
     unsafe {
+        if let Some(d) = (*std::ptr::addr_of_mut!(SONG_INFO_HOOK)).take() {
+            let _ = d.disable();
+        }
         if let Some(d) = (*std::ptr::addr_of_mut!(HUD_SETTER_HOOK)).take() {
             let _ = d.disable();
         }
@@ -372,6 +504,9 @@ fn on_change(side: u8, value: i32) {
 pub struct CenterArrowsSingleMod {
     builder_addr: Option<*const u8>,
     setter_addr: Option<*const u8>,
+    /// Song-info card builder entry (derived from `song_info_card_style`);
+    /// None = dark-card feature unavailable (centering still works).
+    card_builder_addr: Option<*const u8>,
 }
 
 unsafe impl Send for CenterArrowsSingleMod {}
@@ -381,6 +516,7 @@ impl CenterArrowsSingleMod {
         Self {
             builder_addr: None,
             setter_addr: None,
+            card_builder_addr: None,
         }
     }
 }
@@ -408,6 +544,37 @@ impl Mod for CenterArrowsSingleMod {
     fn init(&mut self, ctx: &ModContext) -> bool {
         self.builder_addr = ctx.signatures.get_address("hud_layout_builder");
         self.setter_addr = ctx.signatures.get_address("hud_layout_setter");
+
+        // Song-info dark-card derivation (best-effort). Require exactly one
+        // cluster match (the pattern is unique on all four supported builds;
+        // multiple matches would mean the anchor drifted — fail the feature,
+        // not the mod), then backward-scan for the builder prologue.
+        let cluster_matches = ctx.signatures.get_all_matches("song_info_card_style");
+        self.card_builder_addr = match cluster_matches.as_slice() {
+            [cluster] => match derive_card_builder_entry(*cluster) {
+                Some(entry) => {
+                    log_info!(
+                        "CenterArrowsSingle: song-info card builder (derived) @ {:p}",
+                        entry
+                    );
+                    Some(entry)
+                }
+                None => {
+                    log_warn!(
+                        "CenterArrowsSingle: card builder prologue not found behind style cluster @ {:p} — dark card unavailable",
+                        *cluster
+                    );
+                    None
+                }
+            },
+            other => {
+                log_warn!(
+                    "CenterArrowsSingle: song_info_card_style resolved {} matches (want 1) — dark card unavailable",
+                    other.len()
+                );
+                None
+            }
+        };
 
         // Resolve the player-object array via the accessor anchor: the first
         // instruction is `MOV RAX,[RIP+disp32]` (48 8B 05), so the global is
@@ -444,7 +611,7 @@ impl Mod for CenterArrowsSingleMod {
         // single- from two-player, so don't install/offer it (no inert row).
         let detection_ok = PLAYER_ARRAY.load(Ordering::Acquire) != 0;
         let ok = match (self.builder_addr, self.setter_addr, detection_ok) {
-            (Some(b), Some(s), true) => install_hooks(b, s),
+            (Some(b), Some(s), true) => install_hooks(b, s, self.card_builder_addr),
             _ => false,
         };
         HOOKS_OK.store(ok, Ordering::Release);

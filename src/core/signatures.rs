@@ -179,6 +179,28 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "4C 8B DC 56 57 41 54 41 55 41 56 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B 05",
         description: "Named-layout setter: void(parent /*RCX*/, name /*RDX, C-string*/, coord /*R8, 6xi32; [0]=X,[1]=Y*/). Center-arrows mod detours this to shift coord[0] for the active 1P side's lane-relative keys. Pattern ends at the stack-cookie LEA opcode (the differing displacement is excluded); verified to match one site on both supported builds.",
     },
+    // Song-info card builder — the branch cluster that picks the card style:
+    //   CMP dword [RBP+0xC4],EDI   ; card style field: 0 = single, 1 = double
+    //   SETZ R13B                  ; R13B = 1 when single
+    //   LEA RAX,["dance_song_info_single"]
+    //   LEA R8, ["dance_song_info_double"]
+    //   TEST R13B,R13B
+    //   CMOVNZ R8,RAX
+    // R13B also gates the doubles dark-tint color write at the function tail
+    // (TEST R13B / JNZ skip). The community hex patch for 20250805 (file offset
+    // 476947: 41 0F 94 C5 -> 41 B5 00 90) forces R13B=0 here so 1P play gets
+    // the dark transparent doubles card that doesn't occlude a centered lane.
+    // The center-arrows mod reproduces that effect at runtime by detouring the
+    // containing function (entry derived via backward prologue scan from this
+    // match) and transiently flipping the +0xC4 style field for gated calls.
+    // Unique single match on builds 20250805 (0x18007530D), 20260324
+    // (0x18007951D), 20260616 (0x18007882D), 20260721 (0x180078C2D);
+    // byte-identical apart from the wildcarded string LEA disp32s.
+    SignatureDefinition {
+        name: "song_info_card_style",
+        pattern: "39 BD C4 00 00 00 41 0F 94 C5 48 8D 05 ?? ?? ?? ?? 4C 8D 05 ?? ?? ?? ?? 45 84 ED 4C 0F 45 C0",
+        description: "Song-info card builder style branch: CMP [RBP+0xC4],EDI; SETZ R13B; LEA single/double card names; CMOVNZ. Center-arrows mod derives the builder entry from this match (backward prologue scan) and detours it to force the dark doubles card during centered 1P play.",
+    },
     SignatureDefinition {
         name: "player_array_anchor",
         pattern: "48 8B 05 ?? ?? ?? ?? 66 C7 05 ?? ?? ?? ?? 00 FF 66 C7 05 ?? ?? ?? ?? 00 FF 66 C7 05 ?? ?? ?? ?? 00 FF",
