@@ -71,8 +71,14 @@ Live per-player stats while you play: millisecond error (current/max/mean), EX l
 ### WebUI Options, In-Game
 All the cosmetic customizations normally locked behind Konami's web portal — appeal board, backgrounds, characters, lane skins, lane covers — selectable in-game with **live art previews** (the backgrounds even animate). Plus workout-profile settings (weight / calorie display).
 ![WebUI](screenshots/webui.png)
+
 ### Fast Bootup
 **DDR A3-style instant bootup mod for DDR World**. This is accomplished by caching all of the data that DDR World normally analyzes from all charts during every bootup cycle. If a chart changes, the cache is updated, so the chart metadata never goes stale from an update.
+
+### StepManiaX Cabinet Support
+Native support for running on StepManiaX cabinets, with no configuration needed. Stage inputs and lights, as well as emulation of DDR Gold cabinet lights, are fully supported. There's even a touchscreen overlay to give you access to menu buttons, pinpads, and a card-in button.
+
+![SMX Touch Overlay](screenshots/smx_overlay.png)
 
 ## Full Feature List
 
@@ -152,22 +158,15 @@ Custom songs, textures, and assets are served from the `data_mods/` folder — d
 ## StepManiaX Cabinet Support
 
 If your DDR World rig is built on a **StepManiaX Dedicated Cabinet**, the
-`smx-hardware` mod (default **off** — enable it in the mod menu) drives the
-whole cabinet natively over USB, with no SpiceAPI or external apps:
+`smx-hardware` mod drives the whole cabinet natively over USB.
 
 - **Pads as input** — stage panels play the game, with the same latency-first
   design as the SMX SDK (dedicated reader threads).
 - **Lights** — DDR's per-arrow stage lighting, corner lamps, marquee, monitor
-  strips, and spotlights all mirror onto the SMX hardware. The pads' static
-  accent color is selectable (**Gold** or **Platinum**) to match your cabinet.
-- **Touchscreen overlay** — cabinet-style menu buttons (they light up like the
-  real thing), a pinpad, and an Insert Card button rendered on top of the game,
-  working in fullscreen. Pinpad gestures (0-0-0 mod menu, quick restart, etc.)
-  work from the touchscreen too. The cabinet's IR-frame touchscreen triggers
-  slightly above the glass, so button releases are debounced
-  (`smx_hardware.touch_debounce_ms`, default 150; 0 disables — also editable
-  live as **Touch Debounce** in the mod menu's SMX HARDWARE section) to absorb
-  the down/up/down flutter a single physical press produces.
+  strips, and spotlights all mirror onto the SMX hardware.
+- **Touchscreen overlay** — cabinet-style menu buttons, a pinpad, and an
+  Insert Card button rendered on top of the game. Pinpad gestures (0-0-0
+  mod menu, quick restart, etc.) work from the touchscreen too.
 
 Setup notes:
 
@@ -178,11 +177,6 @@ Setup notes:
   uses). The Insert Card button only appears when a card is configured.
 - Overlay opacity/scale, the light toggles, and the pad style live in the mod
   menu's **SMX HARDWARE** section (GLOBAL SETTINGS tab).
-- **CrossOver/Wine only:** the SMX devices must be passed through as raw HID.
-  In the bottle's registry add
-  `HKLM\System\CurrentControlSet\Services\winebus\EnableHidraw` as a
-  `REG_MULTI_SZ` containing `2341:8037`, then restart the bottle. (Real
-  Windows needs nothing.)
 
 ## Playing on macOS / Linux (CrossOver/Wine)
 

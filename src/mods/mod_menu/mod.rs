@@ -52,7 +52,8 @@ const GESTURE_COUNT: usize = 3;
 /// Shared state that the ModMenu and the global registry interact with.
 pub struct ModMenuState {
     is_open: bool,
-    /// Per-tab cursor/scroll memory + the active tab (reset on every open).
+    /// Per-tab cursor/scroll memory + the active tab (reset on every open,
+    /// then restored to the persisted last-closed position).
     tab_nav: model::TabNav,
     /// Built display lists, parallel to `model::TabId::ALL`. Rebuilt on open,
     /// tab switch, and after any edit (a toggle may register/remove rows).
@@ -367,9 +368,26 @@ fn open() {
     }
 
     // Fresh navigation (MODS tab, top) + fresh row lists from current
-    // registry/contributed state.
+    // registry/contributed state, then restore the last-closed position
+    // (persisted in overlay_menu.last_tab / last_row). Row lists rebuild
+    // from live snapshots, so the row is re-found by its stable key; a
+    // stale tab id or key degrades to the tab's top via clamp_active.
     state.tab_nav.reset();
     tabs::rebuild_tabs(&mut state);
+    if let Some((tab_id, row_key)) = chrome_loader::last_position() {
+        if let Some(tab) = model::TabId::from_id(&tab_id) {
+            state.tab_nav.set_active(tab);
+            if let Some(idx) = row_key.and_then(|key| {
+                state
+                    .tab_rows
+                    .get(tab.index())
+                    .and_then(|rows| rows.iter().position(|r| r.key == key))
+            }) {
+                state.tab_nav.state_mut().cursor = idx;
+            }
+            tabs::clamp_active(&mut state);
+        }
+    }
 
     state.is_open = true;
     MENU_OPEN.store(true, Ordering::Release);
@@ -412,6 +430,20 @@ fn close() {
     }
     state.is_open = false;
     MENU_OPEN.store(false, Ordering::Release);
+
+    // Remember the position for the next open (+ persist through the
+    // overlay_menu section — file write only, safe off the game thread).
+    {
+        let tab = state.tab_nav.active();
+        let row_key = state
+            .tab_rows
+            .get(tab.index())
+            .and_then(|rows| rows.get(state.tab_nav.state().cursor))
+            .map(|r| r.key.clone());
+        chrome_loader::set_last_position(tab.id(), row_key);
+        chrome_loader::persist_overlay_menu();
+    }
+
     // Stop the animated background immediately (the deferred widget hide
     // would otherwise leave a frame or two of emission).
     update_background_feed();

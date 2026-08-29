@@ -197,7 +197,11 @@ Shaped by being an in-process hook DLL where the engine-facing code has no test 
   `opacity` (25..=100, clamp+snap 5, default 80). Unlike most sections the DLL
   WRITES this one: every APPEARANCE-tab change persists the whole section via
   `save_json_key`. Theme/opacity drive the synthesized panel chrome
-  (`mod_menu/chrome_loader.rs`) and the animated shader background.
+  (`mod_menu/chrome_loader.rs`) and the animated shader background. Also holds
+  the last-position memory `last_tab` (tab id `mods` / `global_settings` /
+  `player_settings` / `appearance`) + `last_row` (the selected row's stable
+  key), written at every menu close and restored at open (stale ids/keys
+  degrade to the tab top via `clamp_after_rebuild`).
 - `timing_offsets`: the four cabinet-wide timing offsets (sound/input/render/bomb),
   written on overlay change; missing keys use the game's stock defaults. The
   auto-calibration apply writes `sound_offset` through the same path; the

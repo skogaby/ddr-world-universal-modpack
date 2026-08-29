@@ -74,6 +74,10 @@ static ANIMATE: AtomicBool = AtomicBool::new(true);
 static SYNTH_GENERATION: AtomicU32 = AtomicU32::new(0);
 /// `kick()` once-latch.
 static KICKED: AtomicBool = AtomicBool::new(false);
+/// Last menu position: `(tab id, selected row key)` — seeded from
+/// `overlay_menu.last_tab` / `last_row` at kick, updated at menu close,
+/// serialized by [`persist_overlay_menu`]. `None` ⇒ nothing remembered.
+static LAST_POSITION: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
 
 /// Active theme index (render.rs palette lookups, tabs.rs row builder).
 pub(super) fn active_theme_index() -> usize {
@@ -105,20 +109,38 @@ pub(super) fn set_effective_opacity(percent: i32) {
     EFFECTIVE_OPACITY.store(percent, Ordering::Release);
 }
 
+/// Last remembered menu position `(tab id, selected row key)` for the
+/// open-time restore.
+pub(super) fn last_position() -> Option<(String, Option<String>)> {
+    LAST_POSITION.lock().ok().and_then(|g| g.clone())
+}
+
+/// Record the position the menu closed on (caller then calls
+/// [`persist_overlay_menu`] to write it through).
+pub(super) fn set_last_position(tab_id: &str, row_key: Option<String>) {
+    if let Ok(mut g) = LAST_POSITION.lock() {
+        *g = Some((tab_id.to_string(), row_key));
+    }
+}
+
 /// Persist the whole `overlay_menu` section from the live appearance
 /// state (`save_json_key` replaces the top-level key, so every field is
 /// serialized on every change — the quick_restart persist pattern). Runs
 /// on the input/repeat thread; file write only, no game calls.
 pub(super) fn persist_overlay_menu() {
     let theme_id = theme::theme(active_theme_index()).id;
-    crate::mods::config::save_json_key(
-        "overlay_menu",
-        serde_json::json!({
-            "theme": theme_id,
-            "animate_background": animate_background(),
-            "opacity": effective_opacity(),
-        }),
-    );
+    let mut section = serde_json::json!({
+        "theme": theme_id,
+        "animate_background": animate_background(),
+        "opacity": effective_opacity(),
+    });
+    if let Some((tab_id, row_key)) = last_position() {
+        section["last_tab"] = serde_json::Value::String(tab_id);
+        if let Some(key) = row_key {
+            section["last_row"] = serde_json::Value::String(key);
+        }
+    }
+    crate::mods::config::save_json_key("overlay_menu", section);
 }
 
 /// Snapshot of the chrome texture state for the renderer.
@@ -246,6 +268,13 @@ pub(super) fn kick() {
         );
     }
     EFFECTIVE_OPACITY.store(opacity, Ordering::Release);
+
+    // Last-position memory (restored by open()). Kept as raw strings here —
+    // validity against live tab/row lists is decided at restore time.
+    if let Some(tab_id) = section.and_then(|o| o.last_tab.clone()) {
+        let row_key = section.and_then(|o| o.last_row.clone());
+        set_last_position(&tab_id, row_key);
+    }
 
     let generation = SYNTH_GENERATION.load(Ordering::Acquire);
     spawn_synthesis(generation, theme_index, opacity, true);

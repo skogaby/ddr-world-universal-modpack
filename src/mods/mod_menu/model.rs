@@ -44,6 +44,24 @@ impl TabId {
         Self::ALL.iter().position(|&t| t == self).unwrap_or(0)
     }
 
+    /// Stable string id used by the `overlay_menu.last_tab` persistence
+    /// (mod-config.json). NEVER renamed — persisted values must keep
+    /// resolving across releases.
+    pub fn id(self) -> &'static str {
+        match self {
+            TabId::Mods => "mods",
+            TabId::GlobalSettings => "global_settings",
+            TabId::PlayerSettings => "player_settings",
+            TabId::Theme => "appearance",
+        }
+    }
+
+    /// Inverse of [`TabId::id`]; unknown/stale persisted ids yield `None`
+    /// (caller falls back to the default first tab).
+    pub fn from_id(id: &str) -> Option<TabId> {
+        Self::ALL.iter().copied().find(|t| t.id() == id)
+    }
+
     pub fn next(self) -> TabId {
         Self::ALL[(self.index() + 1) % Self::ALL.len()]
     }
@@ -450,6 +468,12 @@ impl TabNav {
 
     pub fn switch_prev(&mut self) {
         self.active = self.active.prev();
+    }
+
+    /// Jump directly to `tab` (last-position restore at menu open). Per-tab
+    /// cursor memory is untouched.
+    pub fn set_active(&mut self, tab: TabId) {
+        self.active = tab;
     }
 
     pub fn state(&self) -> NavState {
@@ -953,6 +977,26 @@ mod tests {
         tn.reset();
         assert_eq!(tn.active(), TabId::Mods);
         assert_eq!(tn.state(), NavState::default());
+    }
+
+    #[test]
+    fn tab_id_roundtrip_and_set_active() {
+        // Every tab's persisted id resolves back to itself.
+        for &tab in TabId::ALL {
+            assert_eq!(TabId::from_id(tab.id()), Some(tab));
+        }
+        // Unknown/stale persisted ids resolve to None.
+        assert_eq!(TabId::from_id("nonsense"), None);
+        assert_eq!(TabId::from_id(""), None);
+
+        // set_active jumps directly without touching per-tab memory.
+        let mut tn = TabNav::new();
+        tn.state_mut().cursor = 5;
+        tn.set_active(TabId::Theme);
+        assert_eq!(tn.active(), TabId::Theme);
+        assert_eq!(tn.state(), NavState::default());
+        tn.set_active(TabId::Mods);
+        assert_eq!(tn.state().cursor, 5, "memory survives set_active");
     }
 
     #[test]

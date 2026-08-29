@@ -396,9 +396,10 @@ pub struct SmxHardwareConfig {
     pub touch_debounce_ms: Option<u32>,
 }
 
-/// Config for the overlay mod menu's appearance (`overlay_menu` section).
-/// DLL-WRITTEN: the THEME tab persists the whole section on any change
-/// (`save_json_key`), serializing all three keys each time.
+/// Config for the overlay mod menu (`overlay_menu` section): appearance
+/// plus last-position memory. DLL-WRITTEN: the THEME tab and menu close
+/// persist the whole section on any change (`save_json_key`), serializing
+/// every key each time.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct OverlayMenuConfig {
     /// Built-in theme id (`bubbles` / `terminal` / `waveform` /
@@ -416,6 +417,15 @@ pub struct OverlayMenuConfig {
     /// Out-of-range values clamp+snap silently at mod-menu enable.
     #[serde(default)]
     pub opacity: Option<i32>,
+    /// Last-position memory (DLL-written at menu close): the tab id
+    /// (`mods` / `global_settings` / `player_settings` / `appearance`)
+    /// the menu was on when closed. Unknown/missing ⇒ first tab.
+    #[serde(default)]
+    pub last_tab: Option<String>,
+    /// Last-position memory: the stable row key selected on `last_tab`
+    /// when closed. Stale/missing keys fall back to the top of the tab.
+    #[serde(default)]
+    pub last_row: Option<String>,
 }
 
 const CONFIG_FILENAME: &str = "mod-config.json";
