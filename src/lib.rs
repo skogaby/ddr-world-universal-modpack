@@ -138,6 +138,7 @@ fn init() {
         Box::new(mods::decorative_option_headers::DecorativeOptionHeadersMod::new()),
         Box::new(mods::music_wheel_song_length::MusicWheelSongLengthMod::new()),
         Box::new(mods::per_song_judgement_offsets::PerSongJudgementOffsetsMod::new()),
+        Box::new(mods::s_marvelous::SMarvelousMod::new()),
         Box::new(mods::smx_hardware::SmxHardwareMod::new()),
     ];
     let mod_config = mods::config::get()

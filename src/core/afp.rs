@@ -44,6 +44,12 @@ pub fn apply_bsi(data: &mut [u8], bsi: &[u8]) {
 
 /// Decode the AFP string table in-place. Each byte at position i is decoded as
 /// `(byte - (128 + i)) & 0xFF`. Returns a map of (offset_within_st -> string).
+///
+/// NOTE: `core/ap2/mod.rs` carries a DELIBERATE local duplicate of this
+/// rolling cipher (`decode_string_table`/`encode_string_table`) — that module
+/// must stay std-only with zero `crate::` imports so the
+/// validate_s_marvelous.sh harness can mount it standalone. Keep the two in
+/// sync.
 pub fn decode_stringtable(
     data: &mut [u8],
     st_offset: usize,
@@ -73,6 +79,8 @@ pub fn decode_stringtable(
 }
 
 /// Encode a plaintext string table back to AFP cipher form.
+/// (Mirror-duplicated in `core/ap2/mod.rs::encode_string_table` — see the
+/// note on [`decode_stringtable`].)
 pub fn encode_stringtable(plain: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; plain.len()];
     for (i, byte) in plain.iter().enumerate() {

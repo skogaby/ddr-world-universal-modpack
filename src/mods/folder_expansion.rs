@@ -734,112 +734,23 @@ fn patch_empty_root_frame(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Patch GE2D label strings: replace "firststep" with the custom key in texture names.
+///
+/// Thin wrapper over the promoted [`crate::core::geo::rewrite_labels`]
+/// (this used to be the rewriter's home). Same contract as before: `None`
+/// when the file is structurally unrecognized or no label contained the
+/// source key (callers copy the donor bytes verbatim). Equal/shorter keys
+/// produce byte-identical output to the original in-place implementation;
+/// keys LONGER than "firststep" — which the old code silently truncated —
+/// now rebuild correctly via the promoted helper's append path.
 fn patch_ge2d_labels(data: &[u8], custom_key: &str) -> Option<Vec<u8>> {
-    if data.len() < 52 {
-        return None;
-    }
-
-    // Check GE2D magic (little-endian "D2EG" or big-endian "GE2D")
-    let (is_le, magic_ok) = match &data[0..4] {
-        b"D2EG" => (true, true),
-        b"GE2D" => (false, true),
-        _ => (false, false),
-    };
-    if !magic_ok {
-        return None;
-    }
-
-    let read_u32 = |off: usize| -> u32 {
-        let b = &data[off..off + 4];
-        if is_le {
-            u32::from_le_bytes(b.try_into().unwrap())
-        } else {
-            u32::from_be_bytes(b.try_into().unwrap())
-        }
-    };
-    let read_u16 = |off: usize| -> u16 {
-        let b = &data[off..off + 2];
-        if is_le {
-            u16::from_le_bytes(b.try_into().unwrap())
-        } else {
-            u16::from_be_bytes(b.try_into().unwrap())
-        }
-    };
-
-    let label_count = read_u16(26) as usize;
-    let label_offset = read_u32(44) as usize;
-
-    if label_count == 0 || label_offset == 0 {
-        return None;
-    }
-
-    let mut patched = data.to_vec();
-    let mut did_patch = false;
-
-    for i in 0..label_count {
-        let ptr_off = label_offset + i * 4;
-        if ptr_off + 4 > patched.len() {
-            break;
-        }
-        let str_off = read_u32(ptr_off) as usize;
-        if str_off >= patched.len() {
-            continue;
-        }
-
-        // Read the null-terminated string (may be obfuscated with XOR 0x80)
-        let mut end = str_off;
-        while end < patched.len() && patched[end] != 0 {
-            end += 1;
-        }
-        let raw = &patched[str_off..end];
-        if raw.is_empty() {
-            continue;
-        }
-
-        // Detect obfuscation: if first byte has high bit set and (byte - 0x20) > 0x7F
-        let obfuscated = (raw[0].wrapping_sub(0x20)) > 0x7F;
-        let decoded: Vec<u8> = if obfuscated {
-            raw.iter().map(|b| b.wrapping_add(0x80)).collect()
-        } else {
-            raw.to_vec()
-        };
-
-        let label = match std::str::from_utf8(&decoded) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
+    crate::core::geo::rewrite_labels(data, |label| {
         if !label.contains(SOURCE_KEY) {
-            continue;
+            return None;
         }
-
         let new_label = label.replace(SOURCE_KEY, custom_key);
         log_info!("FolderExpansion: GE2D label '{}' → '{}'", label, new_label);
-
-        // Encode back (with obfuscation if original was obfuscated)
-        let new_bytes: Vec<u8> = if obfuscated {
-            new_label.bytes().map(|b| b.wrapping_add(0x80)).collect()
-        } else {
-            new_label.into_bytes()
-        };
-
-        // Write in-place: new string + null padding for the length difference
-        for j in 0..raw.len() {
-            let off = str_off + j;
-            if j < new_bytes.len() {
-                patched[off] = new_bytes[j];
-            } else {
-                patched[off] = 0;
-            }
-        }
-        did_patch = true;
-    }
-
-    if did_patch {
-        Some(patched)
-    } else {
-        None
-    }
+        Some(new_label)
+    })
 }
 
 // ── Mod implementation ──────────────────────────────────────────────

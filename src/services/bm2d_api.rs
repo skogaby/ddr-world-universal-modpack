@@ -315,6 +315,24 @@ pub fn mc_op(mc_id: u32, op: i32, value: i32) -> bool {
     ret == 0
 }
 
+/// `afp_mc_op` with a STRING third argument (the export widens it to u64,
+/// so a pointer fits). Op `0xF09` = goto-frame-label-by-string + play — the
+/// stock FullcomboActor's label-jump call (docs/s_marvelous_judgement RE);
+/// used by the s_marvelous flash re-drive. Game-thread-only like every
+/// libafp call.
+pub fn mc_op_str(mc_id: u32, op: i32, value: &std::ffi::CStr) -> bool {
+    let api = match API.lock() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let api = match api.as_ref() {
+        Some(a) => a,
+        None => return false,
+    };
+    let ret = unsafe { (api.mc_op)(mc_id, op, value.as_ptr() as u64, 0) };
+    ret == 0
+}
+
 /// Set a MovieClip parameter (type-4 MC ID).
 /// Param 0x1007 = visibility (0=hidden, 1=visible).
 pub fn mc_set_param(mc_id: u32, param: i32, value: i32) -> bool {
@@ -408,6 +426,31 @@ pub fn mc_get_param(mc_id: u32, param: i32) -> Option<i32> {
     );
     if ret == 0 {
         Some(out[0] as i32)
+    } else {
+        None
+    }
+}
+
+/// Resolve a frame LABEL to its frame number on a MovieClip — the exact
+/// call shape the game's NoteResultActor grade handler uses before its
+/// SetFrame (`afp_mc_get_param(mc, 0x1012, label_cstr, &out_frame)`; the
+/// out param is a u32 frame, not a float). Returns `None` when the export
+/// is unresolved or the lookup fails (label absent / clip invalid) — the
+/// failure IS observable here, unlike `mc_op(0xF09)` whose internal lookup
+/// failure still returns success (libafp RE, s-marvelous deploy #6).
+pub fn mc_frame_by_label(mc_id: u32, label: &std::ffi::CStr) -> Option<u32> {
+    let api = API.lock().ok()?;
+    let api = api.as_ref()?;
+    let get = api.mc_get_param?;
+    let mut out: [u32; 4] = [0; 4];
+    // Same export as mc_get_param; param 0x1012 takes the label string as
+    // the 3rd arg and writes the frame to the 4th. Cast through the
+    // variadic-style op signature.
+    let get: unsafe extern "C" fn(u32, i32, *const i8, *mut u32) -> i32 =
+        unsafe { std::mem::transmute(get) };
+    let ret = unsafe { get(mc_id, 0x1012, label.as_ptr(), out.as_mut_ptr()) };
+    if ret == 0 {
+        Some(out[0])
     } else {
         None
     }

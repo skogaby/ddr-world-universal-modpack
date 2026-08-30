@@ -1,0 +1,344 @@
+//! Enable-time asset staging for the S-Marvelous gameplay flash: the
+//! donor-anchored atlas clone of the word texture, the rewritten geo, the
+//! AFP geo-mapping registration, and the deterministic pre-computation of
+//! the character ids the `dance_judge` AP2 patch will allocate.
+//!
+//! Everything here is best-effort IO run once per enable (cache-guarded
+//! where the shipped pipeline provides it): any failure logs one WARN with
+//! the reason and returns `None`, leaving the patch unstaged — the game
+//! then streams stock bytes (AC-3 fail-open).
+//!
+//! The §10 word-chain derivation (research display-side-re.md) drives every
+//! name: nothing about shape/sprite ids or region names is hardcoded — the
+//! chain is re-resolved from the stock template + geo each enable, and the
+//! ids come from a dry run of the REAL patch recipe
+//! ([`Ap2Doc::clone_word_segment_with_new_shape`]) on the stock bytes, so
+//! the staged names always match what the patch fn will allocate at stream
+//! time (allocation is `max_character_id()+1` at call time — deterministic
+//! for fixed input bytes).
+
+use crate::core::ap2::Ap2Doc;
+use crate::core::{afp, arc, geo, ifs};
+use crate::services::avs_layeredfs::atlas_cloner::{
+    generate_cloned_atlases_cached, load_stock_texturelist, AtlasSet, BatchResult, OwnedTextureSpec,
+};
+use crate::services::avs_layeredfs::{ifs_textures, mod_paths};
+use crate::{log_info, log_warn};
+
+// ── Names (§10 derivation — see the module docs and plan.md D4) ─────
+
+/// The arc carrying the LIVE gameplay judgement package. Cabinet-observed
+/// (deploy #2, 2026-08-30): the game loads the UNSUFFIXED `dance_judge_v3`
+/// arc — the `dance_judge0000_v0`-style arcs are skin/revision variants it
+/// never opened. The v3 template is a parallel structure (word chain
+/// PlaceObject(46) → sprite 46 → shape 41 → region `daju_marvelous`) that
+/// the dynamic resolution absorbs unchanged.
+pub const DANCE_JUDGE_ARC: &str = "data/arc/bm2d/dance_judge_v3.arc";
+/// The IFS inside the arc (suffix-matched against the arc's entry paths).
+pub const DANCE_JUDGE_IFS: &str = "dance_judge_v3.ifs";
+/// Normalized IFS path key the game's opens resolve to (arc-contained IFS
+/// paths normalize to the BARE `<name>.ifs/...` form — the
+/// folder_expansion precedent), used for the geo MD5 mapping registration.
+pub const DANCE_JUDGE_IFS_PATH: &str = "dance_judge_v3.ifs";
+/// Mod-folder-relative IFS directory (`.ifs → _ifs`, the ifs_textures rule).
+pub const IFS_MOD_PATH: &str = "dance_judge_v3_ifs";
+/// The mod's data root (a LayeredFS mod folder).
+pub const MOD_ROOT: &str = "./data_mods/s_marvelous";
+/// Shared LayeredFS cache root.
+pub const CACHE_ROOT: &str = "./data_mods/_cache";
+/// The template's exported name — the afp_patcher patch key.
+pub const TEMPLATE_NAME: &str = "dance_judge";
+/// Stock labeled segment / the new segment (§10 label map).
+pub const SRC_LABEL: &str = "in_marvelous";
+pub const NEW_LABEL: &str = "in_smarvelous";
+/// The donor region is detected by this suffix on the word geo's label
+/// (`daju_marvelous` on the live v3 package); the new region substitutes
+/// `smarvelous` for the suffix word (`daju_smarvelous`).
+const REGION_SUFFIX_OLD: &str = "marvelous";
+const REGION_SUFFIX_NEW: &str = "smarvelous";
+/// The maintainer-supplied word art (260×90 — the v3 donor uvrect exactly).
+pub const WORD_PNG: &str = "./data_mods/s_marvelous/dance_judge/smarvelous.png";
+/// Cloned-atlas name prefix (short + unique per atlas_cloner docs).
+const ATLAS_PREFIX: &str = "smarv_dj";
+
+/// Everything the patch fn needs, staged at enable.
+pub struct StagedPatch {
+    /// The stock template, descrambled — the byte-exact input the patch fn
+    /// expects at the afp_patcher seam (the v1 skin gate compares against
+    /// this).
+    pub stock_bytes: Vec<u8>,
+    /// The word shape resolved from the §10 chain (geo label ends
+    /// `_marvelous`).
+    pub word_shape_id: u16,
+    /// Ids the patch WILL allocate (dry-run of the real recipe).
+    pub new_shape_id: u16,
+    pub new_sprite_id: u16,
+    /// The injected texture region (`dance_judge0000_smarvelous` on 0000).
+    pub new_region: String,
+}
+
+/// BSI byteswap + string-table cipher removal — produces the same "fully
+/// descrambled" shape the game's afp_patcher seam sees (docs/afp_system.md
+/// §1; identical to the validate harness's descramble).
+fn descramble(mut afp: Vec<u8>, bsi: &[u8]) -> Option<Vec<u8>> {
+    afp::apply_bsi(&mut afp, bsi);
+    let st_off = u32::from_le_bytes(afp.get(48..52)?.try_into().ok()?) as usize;
+    let st_size = u32::from_le_bytes(afp.get(52..56)?.try_into().ok()?) as usize;
+    let table = afp.get(st_off..st_off.checked_add(st_size)?)?.to_vec();
+    let plain = crate::core::ap2::decode_string_table(&table);
+    afp[st_off..st_off + st_size].copy_from_slice(&plain);
+    Some(afp)
+}
+
+/// The impure half of the §10 word-chain resolution: walk the `in_marvelous`
+/// segment's placements for a sprite whose nested section places a shape
+/// whose GEO (extracted from the IFS) carries a `*_marvelous` region label.
+struct WordChain {
+    word_shape_id: u16,
+    donor_geo: Vec<u8>,
+    donor_region: String,
+}
+
+fn resolve_word_chain(doc: &Ap2Doc, ifs_data: &[u8]) -> Option<WordChain> {
+    // Geo-first resolution via the SHARED core/ap2 resolver (deploy #3 fix
+    // — the previous sprite-walk resolver diverged from the harness and
+    // broke on the live v3 template's 3-deep nesting). The closure feeds
+    // geos out of the IFS and remembers the bytes of whichever geo wins so
+    // the clone step can rewrite them.
+    let donor_geo = std::cell::RefCell::new(None::<(String, Vec<u8>)>);
+    let (word_shape_id, donor_region) =
+        doc.find_word_shape_by_geo(SRC_LABEL, REGION_SUFFIX_OLD, |geo_name| {
+            let extracted =
+                ifs::extract_files(ifs_data, "geo", std::slice::from_ref(&geo_name.to_string()));
+            let (_, geo_bytes) = extracted.into_iter().next()?;
+            let labels = geo::labels(&geo_bytes)?;
+            donor_geo.replace(Some((geo_name.to_string(), geo_bytes)));
+            Some(labels)
+        })?;
+    // The winning geo is the LAST successful lookup only when unambiguous —
+    // re-extract by the resolved id to be exact.
+    let geo_name = format!("{}_shape{}", doc.exported_name(), word_shape_id);
+    let donor_geo = match donor_geo.into_inner() {
+        Some((name, bytes)) if name == geo_name => bytes,
+        _ => {
+            let extracted = ifs::extract_files(ifs_data, "geo", std::slice::from_ref(&geo_name));
+            extracted.into_iter().next()?.1
+        }
+    };
+    Some(WordChain {
+        word_shape_id,
+        donor_geo,
+        donor_region,
+    })
+}
+
+/// Stage the full dance_judge asset chain. Any failure WARNs with the
+/// reason and returns `None` (stock behavior — AC-3).
+pub fn stage() -> Option<StagedPatch> {
+    if !std::path::Path::new(WORD_PNG).exists() {
+        log_warn!(
+            "SMarvelous: word art missing at {} — dance_judge patch not staged",
+            WORD_PNG
+        );
+        return None;
+    }
+
+    // ── Extract + descramble the stock template ─────────────────────
+    let arc_data = match std::fs::read(DANCE_JUDGE_ARC) {
+        Ok(d) => d,
+        Err(e) => {
+            log_warn!("SMarvelous: can't read {}: {}", DANCE_JUDGE_ARC, e);
+            return None;
+        }
+    };
+    let Some(entries) = arc::parse(&arc_data) else {
+        log_warn!("SMarvelous: failed to parse {}", DANCE_JUDGE_ARC);
+        return None;
+    };
+    let ifs_entry = match entries.iter().find(|e| e.path.ends_with(DANCE_JUDGE_IFS)) {
+        Some(e) => e,
+        None => {
+            log_warn!(
+                "SMarvelous: {} not found in {}",
+                DANCE_JUDGE_IFS,
+                DANCE_JUDGE_ARC
+            );
+            return None;
+        }
+    };
+    let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
+        log_warn!("SMarvelous: failed to extract {}", DANCE_JUDGE_IFS);
+        return None;
+    };
+
+    let tpl_name = TEMPLATE_NAME.to_string();
+    let afp_files = ifs::extract_files(&ifs_data, "afp", std::slice::from_ref(&tpl_name));
+    let bsi_files = ifs::extract_files(&ifs_data, "afp/bsi", std::slice::from_ref(&tpl_name));
+    let (Some((_, afp_raw)), Some((_, bsi_raw))) =
+        (afp_files.into_iter().next(), bsi_files.into_iter().next())
+    else {
+        log_warn!("SMarvelous: dance_judge AFP/BSI not found in the IFS");
+        return None;
+    };
+    let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
+        log_warn!("SMarvelous: dance_judge descramble failed");
+        return None;
+    };
+    let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
+        log_warn!("SMarvelous: stock dance_judge did not parse — patch not staged");
+        return None;
+    };
+    if doc.exported_name() != TEMPLATE_NAME {
+        log_warn!(
+            "SMarvelous: unexpected exported name '{}' — patch not staged",
+            doc.exported_name()
+        );
+        return None;
+    }
+
+    // ── Resolve the word chain (§10) ────────────────────────────────
+    let Some(chain) = resolve_word_chain(&doc, &ifs_data) else {
+        log_warn!(
+            "SMarvelous: dance_judge word chain unresolved (unknown structure) — patch not staged"
+        );
+        return None;
+    };
+    let Some(stem) = chain.donor_region.strip_suffix(REGION_SUFFIX_OLD) else {
+        log_warn!(
+            "SMarvelous: donor region '{}' has no '{}' suffix — patch not staged",
+            chain.donor_region,
+            REGION_SUFFIX_OLD
+        );
+        return None;
+    };
+    let new_region = format!("{}{}", stem, REGION_SUFFIX_NEW);
+
+    // ── Dry-run the REAL recipe to learn the ids the patch allocates ─
+    let mut scratch = doc.clone();
+    let Some(ids) =
+        scratch.clone_word_segment_with_new_shape(SRC_LABEL, NEW_LABEL, chain.word_shape_id)
+    else {
+        log_warn!("SMarvelous: dance_judge patch dry-run failed — patch not staged");
+        return None;
+    };
+    if scratch.serialize().is_none() {
+        log_warn!("SMarvelous: patched dance_judge does not serialize — patch not staged");
+        return None;
+    }
+
+    // ── Rewritten geo: donor bytes, region label re-aimed ───────────
+    let Some(new_geo) = geo::rewrite_labels(&chain.donor_geo, |l| {
+        if l == chain.donor_region {
+            Some(new_region.clone())
+        } else {
+            None
+        }
+    }) else {
+        log_warn!("SMarvelous: geo label rewrite failed — patch not staged");
+        return None;
+    };
+    let geo_name = format!("{}_shape{}", doc.exported_name(), ids.new_shape_id);
+    let geo_dir = format!("{}/{}/geo", MOD_ROOT, IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&geo_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — patch not staged", geo_dir, e);
+        return None;
+    }
+    let geo_path = format!("{}/{}", geo_dir, geo_name);
+    if let Err(e) = std::fs::write(&geo_path, &new_geo) {
+        log_warn!(
+            "SMarvelous: can't write {}: {} — patch not staged",
+            geo_path,
+            e
+        );
+        return None;
+    }
+
+    // ── Donor-anchored atlas clone (cache-guarded) ──────────────────
+    let Some(texlist) = load_stock_texturelist(DANCE_JUDGE_ARC, DANCE_JUDGE_IFS) else {
+        log_warn!("SMarvelous: stock dance_judge texturelist unavailable — patch not staged");
+        return None;
+    };
+    let batch = [AtlasSet {
+        atlas_prefix: ATLAS_PREFIX.to_string(),
+        specs: vec![OwnedTextureSpec {
+            new_name: new_region.clone(),
+            donor_name: chain.donor_region.clone(),
+            png_path: WORD_PNG.to_string(),
+        }],
+        fresh: false, // donor-anchored: cloned geo UVs must stay valid
+    }];
+    match generate_cloned_atlases_cached(&texlist, IFS_MOD_PATH, CACHE_ROOT, MOD_ROOT, &batch) {
+        BatchResult::Nothing => {
+            log_warn!("SMarvelous: word atlas injection produced nothing — patch not staged");
+            return None;
+        }
+        BatchResult::Cached | BatchResult::Rebuilt => {}
+    }
+
+    // ── Serve the new geo by MD5 name ───────────────────────────────
+    ifs_textures::register_afp_geo_mapping(DANCE_JUDGE_IFS_PATH, &geo_name);
+
+    // The AFP runtime loads geos strictly from the afplist `<geo>` id list
+    // at IFS mount (deploy #4: `afp-mip: can not find geo id` — no
+    // on-demand fallback). Extend the existing dance_judge entry so the
+    // stream registers our new shape.
+    ifs_textures::register_afplist_geo_extension(
+        DANCE_JUDGE_IFS_PATH,
+        TEMPLATE_NAME,
+        &[ids.new_shape_id],
+    );
+
+    // Per-image texture data: this IFS family stores texture data one file
+    // per IMAGE (deploy #4: the game opened tex/md5("daju_smarvelous") and
+    // never the cloned atlas blob). handle_texture serves it from a PNG at
+    // `{ifs_mod_path}/tex/{image_name}.png` (folder_expansion's shipped
+    // pattern), converting + padding to the imgrect dims from the merged
+    // texturelist. Stage a copy of the word art under the image name.
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — patch not staged", tex_dir, e);
+        return None;
+    }
+    let image_png = format!("{}/{}.png", tex_dir, new_region);
+    if let Err(e) = std::fs::copy(WORD_PNG, &image_png) {
+        log_warn!(
+            "SMarvelous: can't stage {}: {} — patch not staged",
+            image_png,
+            e
+        );
+        return None;
+    }
+
+    // The mod-paths file cache was scanned at layeredfs init — BEFORE this
+    // enable ran. If the merged texturelist / geo weren't on disk at scan
+    // time (first boot after deploy), rescan once so this boot sees them
+    // (music_wheel_song_length precedent).
+    let merged_rel = format!("{}/tex/texturelist.merged.xml", IFS_MOD_PATH);
+    let geo_rel = format!("{}/geo/{}", IFS_MOD_PATH, geo_name);
+    let tex_rel = format!("{}/tex/{}.png", IFS_MOD_PATH, new_region);
+    if mod_paths::find_first_modfile(&merged_rel).is_none()
+        || mod_paths::find_first_modfile(&geo_rel).is_none()
+        || mod_paths::find_first_modfile(&tex_rel).is_none()
+    {
+        log_info!("SMarvelous: staged assets not in mod-path cache — rescanning");
+        mod_paths::init_mod_paths();
+    }
+
+    log_info!(
+        "SMarvelous: dance_judge patch staged (word sprite {}, shape {} -> new shape {} / sprite {}, geo '{}', region '{}')",
+        ids.word_sprite_id,
+        chain.word_shape_id,
+        ids.new_shape_id,
+        ids.new_sprite_id,
+        geo_name,
+        new_region
+    );
+
+    Some(StagedPatch {
+        stock_bytes,
+        word_shape_id: chain.word_shape_id,
+        new_shape_id: ids.new_shape_id,
+        new_sprite_id: ids.new_sprite_id,
+        new_region,
+    })
+}

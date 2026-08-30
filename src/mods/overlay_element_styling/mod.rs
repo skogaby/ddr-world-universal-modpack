@@ -117,6 +117,66 @@ pub fn set_calibration_hide(on: bool) -> bool {
     is_enabled()
 }
 
+// ── Shared capture (cross-mod consumers) ────────────────────────────
+
+/// Install the CMovieClip capture detours for a SHARING consumer
+/// (s_marvelous' flash re-drive needs the side-bound `dance_judge` clip even
+/// when this mod is config-disabled). Idempotent — whichever of this fn /
+/// this mod's own `enable` runs first installs; the detours are never torn
+/// down while a shared consumer is registered. Returns whether the Create
+/// capture (the load-bearing half) is live; SetPosition (versus side
+/// binding) and the player-array derivation are best-effort.
+///
+/// Precedent: `power_user_statistics::data_feed::install` (multiple mods'
+/// inits request one shared detour).
+pub fn ensure_capture_installed(signatures: &crate::core::signatures::SignatureStore) -> bool {
+    capture::set_shared_capture(true);
+    derive_player_array(signatures);
+
+    let Some(create_addr) = signatures.get_address("cmovieclip_create") else {
+        log_warn!("OverlayElementStyling: shared capture — cmovieclip_create unresolved");
+        return false;
+    };
+    if !capture::install_create(create_addr) {
+        return false;
+    }
+    if let Some(addr) = signatures.get_address("cmovieclip_set_position") {
+        let _ = capture::install_set_position(addr);
+    }
+    true
+}
+
+/// The side-bound `dance_judge` clip's pool wrapper for `side` (0/1), or
+/// `None` when not captured/bound this song. GAME-THREAD-ONLY.
+pub fn judge_clip(side: usize) -> Option<*mut u8> {
+    if side > 1 {
+        return None;
+    }
+    capture::judge_wrapper_for_side(side as u8)
+}
+
+/// Derive + register the player-object array for capture side binding.
+/// Idempotent (re-stores the same pointer). Shared by `init` and
+/// `ensure_capture_installed`.
+fn derive_player_array(signatures: &crate::core::signatures::SignatureStore) {
+    if let Some(anchor) = signatures.get_address("player_array_anchor") {
+        unsafe {
+            if *anchor == 0x48 && *anchor.add(1) == 0x8B && *anchor.add(2) == 0x05 {
+                let arr = crate::core::scanner::decode_rip_relative(anchor.add(3));
+                capture::set_player_array(arr);
+            } else {
+                log_warn!(
+                    "OverlayElementStyling: player_array_anchor opcode mismatch — side binding unavailable"
+                );
+            }
+        }
+    } else {
+        log_warn!(
+            "OverlayElementStyling: player_array_anchor unresolved — side binding unavailable"
+        );
+    }
+}
+
 // ── Value accessors for the detour modules ──────────────────────────
 
 /// Authoritative per-side scale % at bind time (design §5.1): prefer the
@@ -283,23 +343,8 @@ impl Mod for OverlayElementStylingMod {
         // Non-fatal: without it, side attribution fails (both versus and the
         // single-side Create fallback need presence) — the mod still enables
         // and captures but applies nothing. Model: center_arrows_single.
-        if let Some(anchor) = ctx.signatures.get_address("player_array_anchor") {
-            unsafe {
-                if *anchor == 0x48 && *anchor.add(1) == 0x8B && *anchor.add(2) == 0x05 {
-                    let arr = crate::core::scanner::decode_rip_relative(anchor.add(3));
-                    capture::set_player_array(arr);
-                    log_info!("OverlayElementStyling: player_array (derived) @ {:p}", arr);
-                } else {
-                    log_warn!(
-                        "OverlayElementStyling: player_array_anchor opcode mismatch — side binding unavailable"
-                    );
-                }
-            }
-        } else {
-            log_warn!(
-                "OverlayElementStyling: player_array_anchor unresolved — side binding unavailable"
-            );
-        }
+        // (Shared helper — also invoked by `ensure_capture_installed`.)
+        derive_player_array(ctx.signatures);
 
         let matrix_ok = bm2d_api::afp_layers_available();
         let color_ok = bm2d_api::layer_color_available();

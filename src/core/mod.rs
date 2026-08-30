@@ -8,8 +8,10 @@
 //! that could be reused for hooking any Windows DLL.
 
 pub mod afp;
+pub mod ap2;
 pub mod arc;
 pub mod crash_handler;
+pub mod geo;
 pub mod hook_transaction;
 #[cfg(test)]
 mod hook_transaction_tests;

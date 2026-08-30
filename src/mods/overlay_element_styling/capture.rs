@@ -21,7 +21,7 @@ use retour::GenericDetour;
 use crate::log_info;
 use crate::services::bm2d_api;
 
-use super::{is_enabled, MOD_ID};
+use super::MOD_ID;
 
 // ── Registry types (design §4.3, §5.3) ──────────────────────────────
 
@@ -145,6 +145,23 @@ static PLAYER_ARRAY: AtomicU64 = AtomicU64::new(0);
 /// True once the SetPosition side-binding detour is live. When false, the
 /// Create detour applies the single-active-side fallback (design §4.4).
 static SETPOS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Shared-capture flag: another mod (s_marvelous' flash re-drive) relies on
+/// this registry's `dance_judge` tracking even when the styling mod itself
+/// is config-disabled. While set: the hook bodies TRACK (classify + bind)
+/// regardless of `MOD_ENABLED`, the styling APPLY stays gated on the mod,
+/// and `remove()` refuses to tear the detours down (styling's enable
+/// rollback must not break the sharing consumer).
+static SHARED_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_shared_capture(on: bool) {
+    SHARED_CAPTURE.store(on, Ordering::Release);
+}
+
+/// Whether the hook bodies should track clips at all.
+fn tracking_enabled() -> bool {
+    super::is_enabled() || SHARED_CAPTURE.load(Ordering::Acquire)
+}
 
 /// Store the derived player-object array global (called from `mod.rs::init`).
 pub(crate) fn set_player_array(addr: *const u8) {
@@ -312,6 +329,19 @@ unsafe fn bind_and_apply(idx: usize, side: Side, x: i32, y: i32) {
         (clip.kind, clip.layer_id)
     };
 
+    // Styling application below is the MOD's behavior — gated on it being
+    // enabled. Shared-capture-only mode (styling config-disabled) stops
+    // here: the clip is tracked + side-bound for consumers like the
+    // s_marvelous flash, with zero visual writes.
+    if !super::is_enabled() {
+        if matches!(kind, ElementKind::Judge) {
+            ANCHOR_X[side_i].store(x, Ordering::Release);
+            ANCHOR_Y[side_i].store(y, Ordering::Release);
+            ANCHOR_KNOWN[side_i].store(true, Ordering::Release);
+        }
+        return;
+    }
+
     // Opacity one-shot (once, design §4.5). Independent of the position matrix.
     //   - Combo: COMPOSE-ONLY. The game hides a <4 combo via SetColor(a=0); a
     //     one-shot here would un-hide a 0-combo counter. All combo alpha flows
@@ -440,6 +470,35 @@ pub(crate) fn tracked_bound_side(wrapper: *mut u8) -> Option<u8> {
     }
 }
 
+/// The side-bound `dance_judge` clip's pool wrapper, if captured this song.
+/// GAME-THREAD-ONLY (lock-free registry). The layer id is revalidated
+/// against the live wrapper so a recycled pool slot is never handed out.
+/// Consumed cross-mod via `overlay_element_styling::judge_clip`.
+pub(crate) fn judge_wrapper_for_side(side: u8) -> Option<*mut u8> {
+    let want = match side {
+        0 => Side::P1,
+        1 => Side::P2,
+        _ => return None,
+    };
+    unsafe {
+        let reg = &*addr_of!(REGISTRY);
+        for clip in reg.iter() {
+            if !clip.wrapper.is_null()
+                && clip.bound
+                && clip.kind == ElementKind::Judge
+                && clip.side == want
+            {
+                let live_layer = (clip.wrapper.add(0x08) as *const u32).read_unaligned();
+                if live_layer != 0 && live_layer == clip.layer_id {
+                    return Some(clip.wrapper);
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// Clear the whole registry (belt-and-braces alongside Create-time eviction).
 /// `log_counts` emits the per-song capture summary before zeroing.
 pub(crate) fn clear(log_counts: bool) {
@@ -493,7 +552,7 @@ unsafe extern "C" fn create_hook(
 
     // Our capture logic never propagates a panic across the FFI boundary.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if !is_enabled() || this.is_null() {
+        if !tracking_enabled() || this.is_null() {
             return;
         }
         // Slot-reuse eviction: any Create over a tracked wrapper ptr (matching
@@ -532,6 +591,11 @@ unsafe extern "C" fn create_hook(
 /// mod refuses to enable in that case.
 pub(crate) fn install_create(addr: *const u8) -> bool {
     unsafe {
+        // Idempotent: the shared-capture consumer and the styling mod's
+        // enable may both request the install (whichever runs first wins).
+        if (*addr_of!(CREATE_HOOK)).is_some() {
+            return true;
+        }
         let target: CreateFn = std::mem::transmute(addr);
         match crate::core::hooks::install_enabled(addr_of_mut!(CREATE_HOOK), target, create_hook) {
             Ok(()) => {
@@ -546,8 +610,14 @@ pub(crate) fn install_create(addr: *const u8) -> bool {
     }
 }
 
-/// Tear down the Create detour and clear the registry.
+/// Tear down the Create detour and clear the registry. No-op while a
+/// shared-capture consumer holds the registry (styling's enable rollback
+/// must not break the sharing mod; the detours are passive when unused).
 pub(crate) fn remove() {
+    if SHARED_CAPTURE.load(Ordering::Acquire) {
+        log_info!("{MOD_ID}: capture remove skipped — shared consumer active");
+        return;
+    }
     unsafe {
         if let Some(d) = (*addr_of_mut!(SETPOS_HOOK)).take() {
             let _ = d.disable();
@@ -575,7 +645,7 @@ unsafe extern "C" fn set_position_hook(this: *mut u8, x: i32, y: i32) {
     }
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if !is_enabled() {
+        if !tracking_enabled() {
             return;
         }
         let idx = match find(this) {
@@ -637,6 +707,10 @@ unsafe fn reposition(idx: usize, x: i32, y: i32) {
 /// false if the address is missing or the install fails.
 pub(crate) fn install_set_position(addr: *const u8) -> bool {
     unsafe {
+        // Idempotent (see install_create).
+        if (*addr_of!(SETPOS_HOOK)).is_some() {
+            return true;
+        }
         let target: SetPositionFn = std::mem::transmute(addr);
         match crate::core::hooks::install_enabled(
             addr_of_mut!(SETPOS_HOOK),

@@ -1,6 +1,10 @@
 //! Per-step ms-error data feed — installs a retour detour on `judge_submit`
 //! to capture per-step timing data into a shared buffer for Timing Stats,
-//! Pacemaker→MsError, and CSV Export sub-features.
+//! Pacemaker→MsError, and CSV Export sub-features. Also hosts the minimal
+//! hot-path taps for features whose policy lives elsewhere: the
+//! auto-calibration accumulator (`timing_offsets::calibration`) and the
+//! S-Marvelous classification feed (`s_marvelous::state`) — the detour body
+//! is the only place the per-step ms error exists (one detour per target).
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -24,6 +28,9 @@ const OPCODE_OK: u32 = 0x102E;
 
 /// Player side offset on GamePlayActor.
 const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
+/// Live combo counter on GamePlayActor (read by the S-Marvelous tap, only
+/// while a side is armed).
+const ACTOR_COMBO_OFFSET: usize = 0x1DC;
 
 // NOTE: this module used to also carry a "session/match struct" offset table
 // (`ACTOR_SESSION_OFFSET = 0x88` plus songcode/chart-info offsets hanging off
@@ -243,10 +250,44 @@ unsafe extern "C" fn judge_submit_hook(
     let grade_index = judge_code.wrapping_sub(OPCODE_GRADE_BASE);
     let is_grade_opcode = grade_index <= 6; // 0..=6 covers M through OK
 
+    // S-Marvelous flash re-drive, deferred to AFTER the original call at
+    // the bottom: the original's 0x1028 handler plays `in_marvelous` on
+    // the judgement clip — a re-drive issued before it gets clobbered the
+    // same event (deploy #5: green log, stock word on screen). Set by the
+    // classification tap below.
+    let mut smarv_side: Option<usize> = None;
+
     if is_grade_opcode {
         let player_side = *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) as usize;
 
         if player_side <= 1 {
+            // ── S-Marvelous classification tap ──────────────────────
+            // Feeds `s_marvelous::state` (policy lives in that mod). Must
+            // see EVERY grade opcode 0..=6 — the combo-bit machine needs
+            // grades 1..6 too, and O.K. passes `ms: None` — so it sits
+            // before the has_ms_error split. Disarmed cost: one relaxed
+            // load. Armed: two extra aligned reads + a few relaxed
+            // atomics; independent of the try_lock buffer path below so a
+            // contended lock can never drop an S-Marv event.
+            if crate::mods::s_marvelous::state::is_armed(player_side) {
+                let combo = *(actor.add(ACTOR_COMBO_OFFSET) as *const i32);
+                let ms = if judge_code != OPCODE_OK && !scratch.is_null() {
+                    Some(*(scratch.add(4) as *const i32))
+                } else {
+                    None
+                };
+                if crate::mods::s_marvelous::state::on_judge_event(
+                    player_side,
+                    grade_index,
+                    ms,
+                    combo,
+                ) {
+                    // S-Marvelous: re-drive the judgement flash AFTER the
+                    // original below (which plays the stock in_marvelous).
+                    smarv_side = Some(player_side);
+                }
+            }
+
             let ex_earned = ex_value_for_opcode(judge_code);
             let ex_loss_this_step = 3 - ex_earned;
 
@@ -310,5 +351,13 @@ unsafe extern "C" fn judge_submit_hook(
     // Always call the original so score/combo/gauge updates proceed.
     if let Some(detour) = DETOUR.get() {
         detour.call(actor, result, judge_code, scratch);
+    }
+
+    // S-Marvelous flash re-drive — must run after the original's stock
+    // `in_marvelous` play so the label jump is the LAST write this event.
+    // Passes the dispatch actor: the NoteResultActor (whose stored wrapper
+    // the stock handler drives) lives in its subtree.
+    if let Some(side) = smarv_side {
+        crate::mods::s_marvelous::flash::on_smarvelous(side, actor);
     }
 }

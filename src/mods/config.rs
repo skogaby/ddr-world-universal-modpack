@@ -340,6 +340,17 @@ pub struct NonNativeOsSupportConfig {
     pub movie_mode: Option<String>,
 }
 
+/// Config for the `s-marvelous` mod (`s_marvelous` section). Operator-edited
+/// only — the DLL never writes this section back. Read once at mod enable.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct SMarvelousConfig {
+    /// S-Marvelous judgement window in ms (|delta| <= window, inclusive).
+    /// Default 12; clamped 1..=17 (stock Marvelous is +/-17, and S-Marvelous
+    /// must remain a strict subset). Tuning escape hatch — no UI.
+    #[serde(default)]
+    pub window_ms: Option<i32>,
+}
+
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-
 /// edited for the card/gold fields; the overlay opacity/scale and light
 /// toggles are ALSO live-editable from the mod menu's SMX HARDWARE
@@ -471,6 +482,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub overlay_menu: Option<OverlayMenuConfig>,
     #[serde(default)]
+    pub s_marvelous: Option<SMarvelousConfig>,
+    #[serde(default)]
     pub smx_hardware: Option<SmxHardwareConfig>,
 }
 
@@ -507,6 +520,7 @@ pub fn init() {
                     per_song_judgement_offsets: None,
                     non_native_os_support: None,
                     overlay_menu: None,
+                    s_marvelous: None,
                     smx_hardware: None,
                 }
             }
@@ -532,6 +546,7 @@ pub fn init() {
                 per_song_judgement_offsets: None,
                 non_native_os_support: None,
                 overlay_menu: None,
+                s_marvelous: None,
                 smx_hardware: None,
             }
         }

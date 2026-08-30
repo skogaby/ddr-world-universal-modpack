@@ -51,6 +51,7 @@ pub mod premium_free;
 pub mod quick_logout;
 pub mod quick_restart_or_fail;
 pub mod real_speed_fix;
+pub mod s_marvelous;
 pub mod series_expansion;
 pub mod shader_fixes;
 pub mod skip_intros;

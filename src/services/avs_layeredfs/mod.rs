@@ -7,6 +7,7 @@
 //! This is an always-on service (not toggleable via mod menu). Once initialized,
 //! hooks are transparent — unmodified files pass through with negligible overhead.
 
+pub(crate) mod afplist_ext;
 pub(super) mod arc_handler;
 pub(crate) mod atlas_cloner;
 pub(super) mod avs_resolver;

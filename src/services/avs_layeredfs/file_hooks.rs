@@ -364,6 +364,17 @@ fn find_mod_replacement(norm_path: &str, original_path: &str) -> Option<String> 
             if lower.ends_with("texturelist.xml") {
                 ifs_textures::parse_texturelist(norm_path, &cached);
             } else if lower.ends_with("afplist.xml") {
+                // Apply registered geo-list extensions on top of the merge.
+                if ifs_textures::has_afplist_extensions(norm_path) {
+                    if let Some(merged_xml) = xml_merger::load_xml_from_avs_path(&cached) {
+                        if let Some((rewritten_path, _)) =
+                            ifs_textures::rewrite_afplist_if_extended(norm_path, &merged_xml)
+                        {
+                            ifs_textures::parse_afplist(norm_path, &rewritten_path);
+                            return Some(rewritten_path);
+                        }
+                    }
+                }
                 ifs_textures::parse_afplist(norm_path, &cached);
             }
             return Some(cached);
@@ -386,6 +397,19 @@ fn find_mod_replacement(norm_path: &str, original_path: &str) -> Option<String> 
             }
         }
     } else if lower.ends_with("afplist.xml") {
+        // Apply registered geo-list extensions to the stock afplist (kbin
+        // decoded to text; the game's property loader accepts text XML back,
+        // proven by the served merged texturelists).
+        if ifs_textures::has_afplist_extensions(norm_path) {
+            if let Some(xml) = xml_merger::load_xml_from_avs_path(original_path) {
+                if let Some((rewritten_path, _)) =
+                    ifs_textures::rewrite_afplist_if_extended(norm_path, &xml)
+                {
+                    ifs_textures::parse_afplist(norm_path, &rewritten_path);
+                    return Some(rewritten_path);
+                }
+            }
+        }
         ifs_textures::parse_afplist(norm_path, original_path);
     } else {
         // Try texture replacement via MD5 lookup

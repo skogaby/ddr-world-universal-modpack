@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use crate::{log_info, log_warn};
 
+use super::afplist_ext::extend_afplist_geo;
 use super::cache_hasher::CACHE_FOLDER;
 use super::mod_paths;
 use super::xml_merger;
@@ -54,6 +55,17 @@ pub struct AfpInfo {
 static TEXTURE_MAP: Lazy<Mutex<BTreeMap<String, ImageInfo>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 static AFP_MAP: Lazy<Mutex<BTreeMap<String, AfpInfo>>> = Lazy::new(|| Mutex::new(BTreeMap::new()));
+
+/// Registered afplist `<geo>` id-list extensions, keyed by normalized IFS
+/// path. Each entry appends shape ids to an EXISTING `<afp name=...>`
+/// entry's geo list — the AFP runtime loads geos strictly from this list
+/// at IFS mount (cabinet-observed: `afp-mip: can not find geo id` for any
+/// unlisted geo, no on-demand fallback), and the append-only XML merger
+/// can't edit an existing entry (a duplicate `<afp>` node risks
+/// double-registering the whole template). Mods register at enable time
+/// (before the IFS mounts); the afplist open then serves a rewritten copy.
+static AFPLIST_EXTENSIONS: Lazy<Mutex<BTreeMap<String, Vec<(String, Vec<u16>)>>>> =
+    Lazy::new(|| Mutex::new(BTreeMap::new()));
 
 /// In-memory index of files present under `CACHE_FOLDER` (`./data_mods/_cache`),
 /// stored as their full relative paths (e.g.
@@ -381,6 +393,90 @@ pub fn handle_texture(norm_path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Register an afplist `<geo>` id-list extension: `extra_ids` are appended
+/// to the EXISTING `<afp name="{afp_name}">` entry's geo list when the
+/// IFS's afplist is opened. Idempotent per (ifs, afp, id). Callers must
+/// register at enable time — before the target IFS mounts.
+pub fn register_afplist_geo_extension(ifs_path: &str, afp_name: &str, extra_ids: &[u16]) {
+    let mut map = AFPLIST_EXTENSIONS.lock().unwrap();
+    let entries = map.entry(ifs_path.to_string()).or_default();
+    match entries.iter_mut().find(|(name, _)| name == afp_name) {
+        Some((_, ids)) => {
+            for id in extra_ids {
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
+            }
+        }
+        None => entries.push((afp_name.to_string(), extra_ids.to_vec())),
+    }
+}
+
+/// Cheap pre-check: whether any geo extension is registered for this
+/// afplist path (avoids loading/decoding afplists that need no rewrite).
+pub fn has_afplist_extensions(norm_path: &str) -> bool {
+    let Some(ifs_path) = norm_path
+        .strip_suffix("/afp/afplist.xml")
+        .or_else(|| norm_path.strip_suffix("\\afp\\afplist.xml"))
+    else {
+        return false;
+    };
+    AFPLIST_EXTENSIONS.lock().unwrap().contains_key(ifs_path)
+}
+
+/// Serve a rewritten afplist for an IFS with registered geo extensions.
+/// `xml` is the (already merged, if applicable) afplist text. Applies every
+/// registered extension, writes the result to the cache folder, and returns
+/// the cache path to serve. Returns `None` when no extension is registered
+/// or every rewrite failed (caller serves the unmodified file — fail-open).
+pub fn rewrite_afplist_if_extended(norm_path: &str, xml: &str) -> Option<(String, String)> {
+    let ifs_path = norm_path
+        .strip_suffix("/afp/afplist.xml")
+        .or_else(|| norm_path.strip_suffix("\\afp\\afplist.xml"))?;
+    let entries = {
+        let map = AFPLIST_EXTENSIONS.lock().unwrap();
+        map.get(ifs_path)?.clone()
+    };
+    let mut out = xml.to_string();
+    let mut applied = 0usize;
+    for (afp_name, ids) in &entries {
+        match extend_afplist_geo(&out, afp_name, ids) {
+            Some(rewritten) => {
+                out = rewritten;
+                applied += 1;
+            }
+            None => {
+                log_warn!(
+                    "LayeredFS: afplist geo extension failed for '{}' in {} — entry not found",
+                    afp_name,
+                    norm_path
+                );
+            }
+        }
+    }
+    if applied == 0 {
+        return None;
+    }
+    let ifs_mod_path = ifs_path.replace(".ifs", "_ifs");
+    let outfolder = format!("{}/{}/afp", CACHE_FOLDER, ifs_mod_path);
+    mod_paths::mkdir_p(&outfolder);
+    let outfile = format!("{}/afplist.xml", outfolder);
+    if let Err(e) = std::fs::write(&outfile, &out) {
+        log_warn!(
+            "LayeredFS: can't write rewritten afplist {}: {}",
+            outfile,
+            e
+        );
+        return None;
+    }
+    log_info!(
+        "LayeredFS: extended {} afplist geo list(s) in {}",
+        applied,
+        norm_path
+    );
+    Some((outfile, out))
 }
 
 /// Register a custom AFP/geo MD5 mapping so handle_afp can serve mod files.
