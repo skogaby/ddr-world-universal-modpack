@@ -13,6 +13,98 @@ Resume protocol: read `implementation/plan.md` (checklist = step status),
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
 
 ## Done
+
+- Step 6 implemented (S-MFC splash — uncommitted, maintainer commits):
+  - Appendix-B dump DONE: the four main templates are SELF-CONTAINED
+    (each carries the 4 marvelous-art shapes; the `which_fullcombo_*` /
+    `effect_*_*` sub-templates are other scenes' surfaces — not in the
+    splash path). `marbelous_in` (sic) in root + inner sprite (158/214)
+    — the dual-timeline rule again. Art shapes SHARE sprite chains
+    (sprite 123 places {117,120}, 148 places {120,127,130}) ⇒ per-shape
+    chain clone impossible.
+  - core/ap2: `clone_segment_with_new_shapes` (NEW) — multi-shape
+    generalization: reachability fixpoint over the section's sprites,
+    children-first topological clone order, one cumulative remap, then
+    the placements-only segment clone into EVERY labeled section
+    (object-id death-frame shift inherited). Host test on a shared-chain
+    fixture (dedup, leaf remap completeness, shared non-art shape kept,
+    unknown-id fail-closed).
+  - `core/signatures.rs`: `fullcombo_actor_on_message` (prologue AOB,
+    `CMP EDX,0x1034` pins uniqueness — module-unique, Ghidra-verified).
+  - `assets.rs::stage_fullcombo`: per template — geo-first art-shape
+    resolution (rename rule: prefix `s` onto the last `_`-token iff it
+    starts with `mar`: `dafu_eff_mar`→`dafu_eff_smar`,
+    `dafu_light_marvelous`→`dafu_light_smarvelous`; shipped art files
+    already named accordingly), dry-run, rewritten geos, MD5 mappings,
+    afplist geo extensions (multi-entry per IFS — the Step-4 mechanism
+    handles 4 templates in one afplist rewrite); once per IFS —
+    donor-anchored atlas clone + per-image PNGs.
+  - `splash.rs` (NEW): post-original detour on the message handler;
+    predicate `msg==0x1034 && type==0 && combo_is_all_smarv(side)`
+    (side = first dword of `*(this+0x88)`); re-drives `*(this+0x98)`'s
+    mc to `s_marbelous_in` via 0xF09 (Step-4's proven op + all sections
+    carry the label). Never re-plays the SE. Registers the 4 afp_patcher
+    patches at first activate (byte-gated vs staged stock, id-verified
+    vs the dry run).
+  - Harness Leg E: the recipe on all four REAL templates (geo-first
+    resolution + label/sort checks in every section) — green:
+    single 117/120/127/130→159..162, double 159/162/169/172→215..218,
+    3 sprite clones each.
+  - Gates: 99/78 host tests, Legs A–E, fmt/build clean.
+  - Cabinet demo (2026-08-30): **S-MFC splash VALIDATED** (maintainer
+    confirmed the S-MARVELOUS splash on an all-S full combo). The
+    non-S-MFC path was NOT explicitly tested (maintainer accepted):
+    stock-by-construction — predicate false ⇒ no re-drive ⇒ the stock
+    label the original just played stands. STEP 6 DEMO DONE.
+
+- Step 5 implemented (combo digits — uncommitted, maintainer commits):
+  - `core/signatures.rs`: `combo_digit_refresh` (prologue-anchored AOB,
+    tint-immediates run 0xA9FEEC/0xDFA6EF pins uniqueness; verified
+    exactly-once on 20260721 in Ghidra; cookie disp wildcarded).
+  - `assets.rs::stage_combo_digits`: FRESH-mode atlas entries
+    (`smarv_dc` prefix, donor `daco_combo_marvelous_0` for encoding) +
+    per-image PNGs at `dance_combo_v3_ifs/tex/daco_combo_smarvelous_%d.png`
+    (per-image serving — the deploy-#4/#5 lesson applied from the start;
+    NO geo/afplist/AP2 patch needed: `afp_mc_load_bitmap` binds by
+    texturelist image name alone). Arc = unsuffixed `dance_combo_v3`
+    (deploy-#2 rule). Stock digits 104×120 imgrect; our art 100×118.
+  - `combo.rs` (NEW): post-original GenericDetour on the refresh;
+    predicate `worst(this+0x6C)==0 && combo_is_all_smarv(side)` (side =
+    `**(this+0x58)`, verified against the stock decompile which reads
+    the same); replicates the stock traversal-6 walk for places
+    {10,100,1000} with the display-clamped combo (min 9999), ones place
+    left stock (quirk); tint pair via wrapper vfunc+0x98 float[4]
+    (stock's own call shape, verified in the decompile — float conv =
+    (c>>16&FF)/255 etc. matches). Violet pair 0xE9C8F8/0xB05CE0 (root2
+    light / root3 deep — mirrors the stock light/deep pairing). Gated on
+    `ASSETS_READY` + panic-contained; self-healing per design (no
+    cleanup path).
+  - `mod.rs`: combo::install at init (data_feed-gated),
+    stage_combo_digits at enable, assets_ready dropped at disable.
+  - state.rs: +5 host tests (the §4.5 override-predicate sequences:
+    all-S keeps, loose drops, O.K. neutral, combo-break resets, grades
+    1–3 degrade).
+  - Gates: 98/77 host tests, Legs A–D, fmt/build clean.
+  - CABINET DEMO PENDING: combo ≥ 4 all-S ⇒ violet digits + tint;
+    first loose Marvelous ⇒ stock repaint; O.K. steps neutral. Tint
+    SEMANTICS (multiply vs add on vfunc+0x98) are the design's flagged
+    live-verify item — if the violet looks wrong, tune TINT_ROOT2/3
+    in combo.rs (compiled constants).
+  - Combo deploy #1 (2026-08-30): CRASH at the first combo refresh
+    (EXCEPTION_ACCESS_VIOLATION, IP = float-data garbage). Phase-logged
+    bisect build pinned it in ONE cycle: died at `tint root2 start`.
+    Bug: `vtable.add(0x98 / 8)` — `vtable` is a BYTE pointer after
+    `read_unaligned()`, so the offset advanced 19 BYTES (mid-slot read →
+    wild call). Fix: `.add(0x98)`. LESSON (learnings sweep): raw vtable
+    slot reads in Rust — keep the pointer as `*const u8` and offset in
+    BYTES, or cast to `*const usize` and offset in SLOTS; mixing the two
+    is exactly one keystroke away. flash.rs unaffected (no raw vfunc
+    calls). Phase logging left in (first-override-only, ~8 lines/session).
+  - Combo deploy #2 (2026-08-30): **VALIDATED ON CABINET.** Maintainer
+    confirmed: violet digits + violet tint tracking the all-S combo,
+    correct per-grade color adjustment on drop (marvelous/perfect/great
+    repaints stock). Tint constants approved as-is (match the word art).
+    STEP 5 DEMO DONE.
 - PDD complete: register accepted (Readiness Confirmed 2026-08-29), design +
   plan Approved 2026-08-29.
 - Research: `research/orientation.md` (infra seams), `research/afp-tooling.md`

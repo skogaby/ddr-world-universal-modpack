@@ -342,3 +342,381 @@ pub fn stage() -> Option<StagedPatch> {
         new_region,
     })
 }
+
+// ── Combo digits (Step 5) ────────────────────────────────────────────
+
+/// The arc/IFS carrying the live combo package (same unsuffixed-v3 rule as
+/// dance_judge — deploy #2 finding; the `dance_combo0000_v0`-style arcs are
+/// skin variants the game never opens by default).
+pub const DANCE_COMBO_ARC: &str = "data/arc/bm2d/dance_combo_v3.arc";
+pub const DANCE_COMBO_IFS: &str = "dance_combo_v3.ifs";
+pub const COMBO_IFS_MOD_PATH: &str = "dance_combo_v3_ifs";
+/// Digit art source (maintainer-supplied, 100×118 — stock digits are
+/// 104×120 imgrect / 102×118 uvrect; FRESH-mode rects are emitted from the
+/// PNG dims so the entries stay self-consistent).
+const COMBO_PNG_DIR: &str = "./data_mods/s_marvelous/dance_combo";
+/// Injected texture-name prefix — the digit-refresh walk loads
+/// `daco_combo_smarvelous_%d` (design §4.5), parallel to the stock
+/// `daco_combo_marvelous_%d` set.
+const COMBO_REGION_PREFIX: &str = "daco_combo_smarvelous";
+/// Stock donor image (encoding/compression reference for the FRESH set).
+const COMBO_DONOR: &str = "daco_combo_marvelous_0";
+const COMBO_ATLAS_PREFIX: &str = "smarv_dc";
+
+/// Stage the S-Marvelous combo digit textures: FRESH-mode merged
+/// texturelist entries + per-image PNGs under the mod IFS folder (this
+/// package family serves texture data ONE FILE PER IMAGE — the game opens
+/// `tex/md5(image_name)`; deploy #4/#5 lessons). No geo, no afplist, no
+/// AP2 patch: `afp_mc_load_bitmap` binds by texturelist image name alone.
+/// Fail-open: any failure ⇒ `false` (combo stays stock, one WARN upstream).
+pub fn stage_combo_digits() -> bool {
+    // Per-image PNGs at the serving path.
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, COMBO_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!(
+            "SMarvelous: mkdir {}: {} — combo digits unstaged",
+            tex_dir,
+            e
+        );
+        return false;
+    }
+    let mut specs = Vec::with_capacity(10);
+    for d in 0..10u32 {
+        let src = format!("{}/smarvelous_{}.png", COMBO_PNG_DIR, d);
+        let new_name = format!("{}_{}", COMBO_REGION_PREFIX, d);
+        let dst = format!("{}/{}.png", tex_dir, new_name);
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            log_warn!(
+                "SMarvelous: can't stage {}: {} — combo digits unstaged",
+                dst,
+                e
+            );
+            return false;
+        }
+        specs.push(OwnedTextureSpec {
+            new_name,
+            donor_name: COMBO_DONOR.to_string(),
+            png_path: src,
+        });
+    }
+
+    // FRESH-mode merged texturelist (cache-guarded like the judge batch).
+    let Some(texlist) = load_stock_texturelist(DANCE_COMBO_ARC, DANCE_COMBO_IFS) else {
+        log_warn!("SMarvelous: stock dance_combo texturelist unavailable — combo digits unstaged");
+        return false;
+    };
+    let batch = [AtlasSet {
+        atlas_prefix: COMBO_ATLAS_PREFIX.to_string(),
+        specs,
+        fresh: true, // net-new digit set — no donor slots to preserve
+    }];
+    match generate_cloned_atlases_cached(&texlist, COMBO_IFS_MOD_PATH, CACHE_ROOT, MOD_ROOT, &batch)
+    {
+        BatchResult::Nothing => {
+            log_warn!("SMarvelous: combo digit atlas injection produced nothing — unstaged");
+            false
+        }
+        BatchResult::Cached | BatchResult::Rebuilt => {
+            // First-boot visibility: rescan the mod-path cache if the new
+            // files postdate the init-time scan (same rule as the judge
+            // staging).
+            let merged_rel = format!("{}/tex/texturelist.merged.xml", COMBO_IFS_MOD_PATH);
+            let probe_rel = format!("{}/tex/{}_0.png", COMBO_IFS_MOD_PATH, COMBO_REGION_PREFIX);
+            if mod_paths::find_first_modfile(&merged_rel).is_none()
+                || mod_paths::find_first_modfile(&probe_rel).is_none()
+            {
+                log_info!("SMarvelous: combo assets not in mod-path cache — rescanning");
+                mod_paths::init_mod_paths();
+            }
+            log_info!("SMarvelous: combo digit textures staged (10 images, fresh atlas)");
+            true
+        }
+    }
+}
+
+// ── Full-combo splash (Step 6) ───────────────────────────────────────
+
+pub const DANCE_FC_ARC: &str = "data/arc/bm2d/dance_fullcombo_v3.arc";
+pub const DANCE_FC_IFS: &str = "dance_fullcombo_v3.ifs";
+pub const FC_IFS_MOD_PATH: &str = "dance_fullcombo_v3_ifs";
+/// The four splash templates (all carry `marbelous_in` in root + inner
+/// timeline — Appendix-B dump, 2026-08-30).
+pub const FC_TEMPLATES: [&str; 4] = [
+    "01_fullcombo_single_normal",
+    "01_fullcombo_single_reverse",
+    "02_fullcombo_double_normal",
+    "02_fullcombo_double_reverse",
+];
+pub const FC_SRC_LABEL: &str = "marbelous_in"; // sic — Konami's typo
+pub const FC_NEW_LABEL: &str = "s_marbelous_in";
+const FC_PNG_DIR: &str = "./data_mods/s_marvelous/dance_fullcombo";
+const FC_ATLAS_PREFIX: &str = "smarv_fc";
+
+/// Marvelous-art region → (new region, mod art file). The rename rule:
+/// prefix `s` onto the last underscore token iff it starts with `mar`
+/// (`dafu_eff_mar`→`dafu_eff_smar`, `dafu_light_marvelous`→
+/// `dafu_light_smarvelous`) — the shipped art filenames follow it exactly.
+fn fc_region_rename(region: &str) -> Option<String> {
+    let (head, tail) = region.rsplit_once('_')?;
+    if !tail.starts_with("mar") {
+        return None;
+    }
+    Some(format!("{}_s{}", head, tail))
+}
+
+/// Mod art path for a NEW region name (`dafu_eff_smar` →
+/// `dance_fullcombo/dafu_eff_smar.png`). Note the shipped files are named
+/// by their historical short names; normalize via a lookup.
+fn fc_art_path(new_region: &str) -> String {
+    format!("{}/{}.png", FC_PNG_DIR, new_region)
+}
+
+/// Everything one splash template's patch needs.
+pub struct StagedFcPatch {
+    pub template: &'static str,
+    pub stock_bytes: Vec<u8>,
+    /// Donor art shape ids in resolution order.
+    pub shape_ids: Vec<u16>,
+    /// Expected new ids from the dry run (patch-time verification).
+    pub expected: crate::core::ap2::MultiShapeSegmentClone,
+}
+
+/// Stage the S-MFC splash chain: per template — geo-first art-shape
+/// resolution, dry-run of the multi-shape recipe, rewritten geos, geo MD5
+/// mappings + afplist extensions; once per IFS — donor-anchored atlas
+/// clone + per-image PNGs. Returns the staged patches (empty = fully
+/// unstaged, one WARN per failure; per-template failures skip that
+/// template only).
+pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
+    let arc_data = match std::fs::read(DANCE_FC_ARC) {
+        Ok(d) => d,
+        Err(e) => {
+            log_warn!(
+                "SMarvelous: can't read {}: {} — splash unstaged",
+                DANCE_FC_ARC,
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let Some(entries) = arc::parse(&arc_data) else {
+        log_warn!(
+            "SMarvelous: failed to parse {} — splash unstaged",
+            DANCE_FC_ARC
+        );
+        return Vec::new();
+    };
+    let Some(ifs_entry) = entries.iter().find(|e| e.path.ends_with(DANCE_FC_IFS)) else {
+        log_warn!(
+            "SMarvelous: {} not in {} — splash unstaged",
+            DANCE_FC_IFS,
+            DANCE_FC_ARC
+        );
+        return Vec::new();
+    };
+    let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
+        log_warn!(
+            "SMarvelous: failed to extract {} — splash unstaged",
+            DANCE_FC_IFS
+        );
+        return Vec::new();
+    };
+
+    let geo_dir = format!("{}/{}/geo", MOD_ROOT, FC_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&geo_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — splash unstaged", geo_dir, e);
+        return Vec::new();
+    }
+
+    // Region set across templates (they share the four art regions) for
+    // the one-time texture staging below.
+    let mut regions: Vec<(String, String)> = Vec::new(); // (donor, new)
+    let mut staged: Vec<StagedFcPatch> = Vec::new();
+
+    for template in FC_TEMPLATES {
+        let tpl = template.to_string();
+        let afp_files = ifs::extract_files(&ifs_data, "afp", std::slice::from_ref(&tpl));
+        let bsi_files = ifs::extract_files(&ifs_data, "afp/bsi", std::slice::from_ref(&tpl));
+        let (Some((_, afp_raw)), Some((_, bsi_raw))) =
+            (afp_files.into_iter().next(), bsi_files.into_iter().next())
+        else {
+            log_warn!("SMarvelous: {} AFP/BSI missing — skipped", template);
+            continue;
+        };
+        let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
+            log_warn!("SMarvelous: {} descramble failed — skipped", template);
+            continue;
+        };
+        let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
+            log_warn!("SMarvelous: {} did not parse — skipped", template);
+            continue;
+        };
+
+        // Geo-first art-shape resolution: every Shape whose geo carries a
+        // region the rename rule accepts. (No suffix assumption — covers
+        // `_mar` AND `_marvelous`.)
+        let mut shape_ids: Vec<u16> = Vec::new();
+        let mut donor_geos: Vec<(u16, Vec<u8>, String, String)> = Vec::new();
+        for tag in &doc.root.tags {
+            let crate::core::ap2::Tag::Shape(shape) = tag else {
+                continue;
+            };
+            let geo_name = format!("{}_shape{}", doc.exported_name(), shape.id);
+            let extracted = ifs::extract_files(&ifs_data, "geo", std::slice::from_ref(&geo_name));
+            let Some((_, geo_bytes)) = extracted.into_iter().next() else {
+                continue;
+            };
+            let Some(labels) = geo::labels(&geo_bytes) else {
+                continue;
+            };
+            for l in &labels {
+                if let Some(new_region) = fc_region_rename(l) {
+                    shape_ids.push(shape.id);
+                    donor_geos.push((shape.id, geo_bytes.clone(), l.clone(), new_region));
+                    break;
+                }
+            }
+        }
+        if shape_ids.len() != 4 {
+            log_warn!(
+                "SMarvelous: {} resolved {} art shapes (want 4) — skipped",
+                template,
+                shape_ids.len()
+            );
+            continue;
+        }
+
+        // Dry-run the recipe for the allocated ids.
+        let mut scratch = doc.clone();
+        let Some(expected) =
+            scratch.clone_segment_with_new_shapes(FC_SRC_LABEL, FC_NEW_LABEL, &shape_ids)
+        else {
+            log_warn!("SMarvelous: {} dry-run failed — skipped", template);
+            continue;
+        };
+        if scratch.serialize().is_none() {
+            log_warn!(
+                "SMarvelous: {} patched doc does not serialize — skipped",
+                template
+            );
+            continue;
+        }
+
+        // Rewritten geos + MD5 mappings, named by the NEW shape ids.
+        let mut ok = true;
+        let mut new_geo_names: Vec<String> = Vec::new();
+        for ((old_id, geo_bytes, donor_region, new_region), (old2, new_id)) in
+            donor_geos.iter().zip(expected.shapes.iter())
+        {
+            debug_assert_eq!(old_id, old2);
+            let Some(new_geo) = geo::rewrite_labels(geo_bytes, |l| {
+                if l == donor_region {
+                    Some(new_region.clone())
+                } else {
+                    None
+                }
+            }) else {
+                log_warn!(
+                    "SMarvelous: {} geo rewrite failed ({})",
+                    template,
+                    donor_region
+                );
+                ok = false;
+                break;
+            };
+            let geo_name = format!("{}_shape{}", template, new_id);
+            if let Err(e) = std::fs::write(format!("{}/{}", geo_dir, geo_name), &new_geo) {
+                log_warn!("SMarvelous: can't write {}: {}", geo_name, e);
+                ok = false;
+                break;
+            }
+            new_geo_names.push(geo_name);
+            if !regions.iter().any(|(d, _)| d == donor_region) {
+                regions.push((donor_region.clone(), new_region.clone()));
+            }
+        }
+        if !ok {
+            continue;
+        }
+        for geo_name in &new_geo_names {
+            ifs_textures::register_afp_geo_mapping(DANCE_FC_IFS, geo_name);
+        }
+        let new_ids: Vec<u16> = expected.shapes.iter().map(|(_, n)| *n).collect();
+        ifs_textures::register_afplist_geo_extension(DANCE_FC_IFS, template, &new_ids);
+
+        staged.push(StagedFcPatch {
+            template,
+            stock_bytes,
+            shape_ids,
+            expected,
+        });
+    }
+
+    if staged.is_empty() {
+        return staged;
+    }
+
+    // ── One-time texture staging (shared across templates) ──────────
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, FC_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — splash unstaged", tex_dir, e);
+        return Vec::new();
+    }
+    let mut specs = Vec::new();
+    for (donor, new_region) in &regions {
+        let src = fc_art_path(new_region);
+        if !std::path::Path::new(&src).exists() {
+            log_warn!(
+                "SMarvelous: splash art missing at {} — splash unstaged",
+                src
+            );
+            return Vec::new();
+        }
+        let dst = format!("{}/{}.png", tex_dir, new_region);
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            log_warn!("SMarvelous: can't stage {}: {} — splash unstaged", dst, e);
+            return Vec::new();
+        }
+        specs.push(OwnedTextureSpec {
+            new_name: new_region.clone(),
+            donor_name: donor.clone(),
+            png_path: src,
+        });
+    }
+    let Some(texlist) = load_stock_texturelist(DANCE_FC_ARC, DANCE_FC_IFS) else {
+        log_warn!("SMarvelous: stock dance_fullcombo texturelist unavailable — splash unstaged");
+        return Vec::new();
+    };
+    let batch = [AtlasSet {
+        atlas_prefix: FC_ATLAS_PREFIX.to_string(),
+        specs,
+        fresh: false, // donor-anchored: cloned geo UVs must stay valid
+    }];
+    match generate_cloned_atlases_cached(&texlist, FC_IFS_MOD_PATH, CACHE_ROOT, MOD_ROOT, &batch) {
+        BatchResult::Nothing => {
+            log_warn!("SMarvelous: splash atlas injection produced nothing — splash unstaged");
+            return Vec::new();
+        }
+        BatchResult::Cached | BatchResult::Rebuilt => {}
+    }
+
+    // First-boot mod-path visibility (same rule as the other stagings).
+    let merged_rel = format!("{}/tex/texturelist.merged.xml", FC_IFS_MOD_PATH);
+    let probe_geo = format!(
+        "{}/geo/{}_shape{}",
+        FC_IFS_MOD_PATH, staged[0].template, staged[0].expected.shapes[0].1
+    );
+    if mod_paths::find_first_modfile(&merged_rel).is_none()
+        || mod_paths::find_first_modfile(&probe_geo).is_none()
+    {
+        log_info!("SMarvelous: splash assets not in mod-path cache — rescanning");
+        mod_paths::init_mod_paths();
+    }
+
+    log_info!(
+        "SMarvelous: splash staged ({} template(s), {} region(s))",
+        staged.len(),
+        regions.len()
+    );
+    staged
+}

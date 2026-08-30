@@ -13,8 +13,8 @@ feature directory throughout (per AGENTS.md).
 - [x] Step 2: core/ap2 parser + serializer with round-trip identity
 - [x] Step 3: core/ap2 editing primitives
 - [x] Step 4: Gameplay flash end-to-end (first synthesized AFP on cabinet)
-- [ ] Step 5: Combo digits
-- [ ] Step 6: Full-combo splash
+- [x] Step 5: Combo digits
+- [x] Step 6: Full-combo splash
 - [ ] Step 7: Results score tab row + exclusive MARVELOUS
 - [ ] Step 8: Results judgement graph
 - [ ] Step 9: Full-combo emblems (per-stage + total results)

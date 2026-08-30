@@ -2819,3 +2819,171 @@ fn edit_find_word_shape_by_geo() {
         None
     );
 }
+
+/// Shared-chain fixture shaped like the dance_fullcombo splash (Step 6):
+/// shapes 10/11/12 = art; sprite 20 places {10,11}, sprite 21 places
+/// {11,12} (shape 11 SHARED), sprite 30 places both sprites; the labeled
+/// segment places sprite 30 + a non-art shape 5 that must stay shared.
+fn shared_chain_fixture() -> Ap2Doc {
+    let mut b = FixtureBuilder::new("dance_fc_fx");
+    b.push_shape(&[], 7, 10);
+    b.push_shape(&[], 7, 11);
+    b.push_shape(&[], 7, 12);
+    b.push_shape(&[], 7, 5); // non-art, stays shared
+    let s20 = b.push_sprite(&[], 20);
+    for (d, id) in [(1u16, 10u16), (2, 11)] {
+        b.push_place(
+            &[s20],
+            PlaceObjectParams {
+                depth: d,
+                object_id: 100 + d,
+                source_tag_id: Some(id),
+                ..Default::default()
+            },
+            None,
+        );
+    }
+    b.push_frame(&[s20], 0, 2);
+    let s21 = b.push_sprite(&[], 21);
+    for (d, id) in [(1u16, 11u16), (2, 12)] {
+        b.push_place(
+            &[s21],
+            PlaceObjectParams {
+                depth: d,
+                object_id: 110 + d,
+                source_tag_id: Some(id),
+                ..Default::default()
+            },
+            None,
+        );
+    }
+    b.push_frame(&[s21], 0, 2);
+    let s30 = b.push_sprite(&[], 30);
+    for (d, id) in [(1u16, 20u16), (2, 21)] {
+        b.push_place(
+            &[s30],
+            PlaceObjectParams {
+                depth: d,
+                object_id: 120 + d,
+                source_tag_id: Some(id),
+                ..Default::default()
+            },
+            None,
+        );
+    }
+    b.push_frame(&[s30], 0, 2);
+    // Root segment: places sprite 30 + the shared non-art shape 5.
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 130,
+            source_tag_id: Some(30),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 2,
+            object_id: 131,
+            source_tag_id: Some(5),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_frame(&[], 4, 2); // 4 shapes + 3 sprites... start index set below
+    b.add_label(&[], "marbelous_in", 0);
+    b.finish()
+}
+
+#[test]
+fn edit_clone_segment_with_new_shapes_shared_chain() {
+    let mut doc = shared_chain_fixture();
+    // Fix the root frame span to cover the placements (builder emits tags
+    // in push order: 4 shapes, 3 sprites, 2 places = indices 7,8).
+    doc.root.frames[0] = FrameSpan {
+        start_tag: 0,
+        tag_count: doc.root.tags.len() as u32,
+    };
+    let res = doc
+        .clone_segment_with_new_shapes("marbelous_in", "s_marbelous_in", &[10, 11, 12])
+        .expect("clone");
+    assert_eq!(res.shapes.len(), 3);
+    // Exactly the 3 reaching sprites cloned, ONCE each (dedup despite the
+    // shared shape 11).
+    assert_eq!(res.sprites.len(), 3);
+    let cloned_old: Vec<u16> = res.sprites.iter().map(|(o, _)| *o).collect();
+    assert!(cloned_old.contains(&20) && cloned_old.contains(&21) && cloned_old.contains(&30));
+
+    let out = doc.serialize().expect("serialize");
+    let re = Ap2Doc::parse(&out).expect("re-parse");
+    let sec = &re.root;
+    assert!(sec.labels.iter().any(|l| l.name == "s_marbelous_in"));
+
+    // The cloned top sprite's tree must reference ONLY new shape ids.
+    let (_, new30) = res.sprites.iter().find(|(o, _)| *o == 30).unwrap();
+    let new_ids: Vec<u16> = res.shapes.iter().map(|(_, n)| *n).collect();
+    fn placed_ids(sec: &TagSection, sprite: u16, out: &mut Vec<u16>) {
+        let sp = sec
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                Tag::DefineSprite(s) if s.id == sprite => Some(s),
+                _ => None,
+            })
+            .expect("sprite");
+        for t in &sp.section.tags {
+            if let Tag::PlaceObject(po) = t {
+                if let Some(id) = po.view().and_then(|v| v.source_tag_id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    let mut top = Vec::new();
+    placed_ids(sec, *new30, &mut top);
+    for id in &top {
+        // top places cloned sprites only
+        assert!(
+            res.sprites.iter().any(|(_, n)| n == id),
+            "top places {}",
+            id
+        );
+    }
+    for (_, new_sprite) in res.sprites.iter().filter(|(o, _)| *o != 30) {
+        let mut leaf = Vec::new();
+        placed_ids(sec, *new_sprite, &mut leaf);
+        for id in &leaf {
+            assert!(new_ids.contains(id), "leaf sprite places old id {}", id);
+        }
+    }
+
+    // The new segment's own placements: sprite 30 remapped, shape 5 kept.
+    let label_frame = sec.label_frame("s_marbelous_in").unwrap() as usize;
+    let span = &sec.frames[label_frame];
+    let mut seg_ids = Vec::new();
+    for t in &sec.tags[span.start_tag as usize..(span.start_tag + span.tag_count) as usize] {
+        if let Tag::PlaceObject(po) = t {
+            if let Some(id) = po.view().and_then(|v| v.source_tag_id) {
+                seg_ids.push(id);
+            }
+        }
+    }
+    assert!(
+        seg_ids.contains(new30),
+        "segment places the cloned top sprite"
+    );
+    assert!(seg_ids.contains(&5), "shared non-art shape stays");
+
+    // Unknown shape id fails closed, doc untouched semantics (fresh doc).
+    let mut doc2 = shared_chain_fixture();
+    doc2.root.frames[0] = FrameSpan {
+        start_tag: 0,
+        tag_count: doc2.root.tags.len() as u32,
+    };
+    assert!(doc2
+        .clone_segment_with_new_shapes("marbelous_in", "x_in", &[99])
+        .is_none());
+}

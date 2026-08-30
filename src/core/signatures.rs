@@ -721,6 +721,24 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "55 57 41 55 41 56 48 8B EC 48 83 EC 78 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 D0 48 8B 02 48 89 74 24 68 48 8B F9 80 38 02 0F B6 89 E8 01 00 00",
         description: "Judgment submitter. Takes (actor, result, judge_code, scratch); dispatches score/gauge/display updates.",
     },
+    // ComboActor digit-refresh (s-marvelous combo tint/digits). Prologue
+    // anchored; the inline tint-immediates run (marvelous pair
+    // 0xA9FEEC/0xDFA6EF written to locals) pins uniqueness. RIP disp of the
+    // security-cookie load wildcarded. Event-driven (init + combo-changed
+    // msg with combo >= 4) — never per-frame.
+    SignatureDefinition {
+        name: "combo_digit_refresh",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 98 48 81 EC 40 01 00 00 48 C7 44 24 50 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 18 48 89 4C 24 38 C7 45 F8 EC FE A9 00 C7 45 FC EF A6 DF 00",
+        description: "sequence::dance::ComboActor digit refresh (this in RCX). Repaints digit art per layer/place + applies the per-grade tint pairs.",
+    },
+    // FullcomboActor::onMessage (s-marvelous FC splash). Prologue-anchored;
+    // the `CMP EDX,0x1034` (its only handled message) pins uniqueness —
+    // `81 FA 34 10 00 00` is module-unique on 20260721.
+    SignatureDefinition {
+        name: "fullcombo_actor_on_message",
+        pattern: "40 55 56 57 48 83 EC 60 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 80 00 00 00 0F 29 74 24 50 0F 29 7C 24 40 49 8B F0 48 8B D9 81 FA 34 10 00 00 0F 85",
+        description: "sequence::dance::FullcomboActor message handler (this, msg, payload). Handles only 0x1034: SE + splash label goto + play/visible.",
+    },
     // CalcCalorieActor per-frame tick (vtable slot 6, shared Single/Double).
     // Reads the current measurement-window index (+0x92) and its closed flag
     // (+0x68 + idx*8); when closed, calls vtable slot 9 (+0x48) for the

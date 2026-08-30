@@ -144,6 +144,13 @@ fn main() {
         }
         std::process::exit(smarv_patch(&args[1], &args[2], &args[3], &args[4]));
     }
+    if mode == "smarv-fc" {
+        if args.len() != 4 {
+            eprintln!("usage: ap2check smarv-fc <afp> <bsi> <geo_dir>");
+            std::process::exit(2);
+        }
+        std::process::exit(smarv_fc(&args[1], &args[2], &args[3]));
+    }
     if mode == "geo-rewrite" {
         if args.len() != 5 {
             eprintln!("usage: ap2check geo-rewrite <geo_in> <old_label> <new_label> <geo_out>");
@@ -310,6 +317,90 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
         return 1;
     }
     println!("smarv-patch OK: wrote {out_afp} ({} bytes)", out.len());
+    0
+}
+
+/// Step-6 (Leg E): geo-first art-shape resolution + the multi-shape
+/// recipe on a REAL dance_fullcombo template (the DLL's staging path).
+fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str) -> i32 {
+    let Some(data) = descramble(afp, bsi) else {
+        println!("FAIL smarv-fc: descramble");
+        return 1;
+    };
+    let Some(mut doc) = ap2::Ap2Doc::parse(&data) else {
+        println!("FAIL smarv-fc: parse");
+        return 1;
+    };
+    // Geo-first: shapes whose geo has a region whose last token starts
+    // with "mar" (the DLL's fc_region_rename rule).
+    let mut shape_ids: Vec<u16> = Vec::new();
+    for tag in &doc.root.tags {
+        let ap2::Tag::Shape(shape) = tag else { continue };
+        let geo_name = format!("{}_shape{}", doc.exported_name(), shape.id);
+        let Ok(bytes) = std::fs::read(format!("{geo_dir}/{geo_name}")) else {
+            continue;
+        };
+        let Some(labels) = geo::labels(&bytes) else { continue };
+        if labels.iter().any(|l| {
+            l.rsplit_once('_').map(|(_, t)| t.starts_with("mar")).unwrap_or(false)
+        }) {
+            shape_ids.push(shape.id);
+        }
+    }
+    if shape_ids.len() != 4 {
+        println!("FAIL smarv-fc: resolved {} art shapes (want 4)", shape_ids.len());
+        return 1;
+    }
+    let Some(ids) =
+        doc.clone_segment_with_new_shapes("marbelous_in", "s_marbelous_in", &shape_ids)
+    else {
+        println!("FAIL smarv-fc: recipe returned None");
+        return 1;
+    };
+    let Some(out) = doc.serialize() else {
+        println!("FAIL smarv-fc: serialize");
+        return 1;
+    };
+    let Some(re) = ap2::Ap2Doc::parse(&out) else {
+        println!("FAIL smarv-fc: re-parse");
+        return 1;
+    };
+    // The new label must exist in EVERY section that carries the source
+    // label (root + inner timeline), and every label table stays sorted.
+    fn check(sec: &ap2::TagSection, path: &str, errs: &mut Vec<String>) {
+        let has_src = sec.labels.iter().any(|l| l.name == "marbelous_in");
+        let has_new = sec.labels.iter().any(|l| l.name == "s_marbelous_in");
+        if has_src && !has_new {
+            errs.push(format!("{path}: source label without clone"));
+        }
+        let mut names: Vec<&str> = sec.labels.iter().map(|l| l.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        if names != sorted {
+            errs.push(format!("{path}: label table unsorted"));
+        }
+        names.clear();
+        for (i, t) in sec.tags.iter().enumerate() {
+            if let ap2::Tag::DefineSprite(sp) = t {
+                check(&sp.section, &format!("{path}/{i}"), errs);
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    check(&re.root, "root", &mut errs);
+    if !errs.is_empty() {
+        for e in &errs {
+            println!("FAIL smarv-fc: {e}");
+        }
+        return 1;
+    }
+    println!(
+        "smarv-fc OK: shapes {:?} -> {:?}, {} sprite clone(s), {} bytes",
+        shape_ids,
+        ids.shapes.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        ids.sprites.len(),
+        out.len()
+    );
     0
 }
 
@@ -804,4 +895,16 @@ frames[0].save(out_gif, save_all=True, append_images=frames[1:], duration=1000 /
 print(f"    [render] preview -> {out_gif}")
 PYEOF
 note "Leg D OK — open the patched preview: ${TMPDIR:-/tmp}/s_marvelous_preview/in_smarvelous_patched.gif"
+
+# ── Leg E: dance_fullcombo multi-shape recipe on all four templates ──
+note "Leg E: dance_fullcombo multi-shape clone (4 templates)"
+FC_AFP_DIR="$TMP/dev/dance_fullcombo_v3/x/afp" # extracted by Leg A
+FC_GEO_DIR="$TMP/dev/dance_fullcombo_v3/x/geo"
+for tpl in 01_fullcombo_single_normal 01_fullcombo_single_reverse \
+           02_fullcombo_double_normal 02_fullcombo_double_reverse; do
+  OUT=$("$AP2CHECK" smarv-fc "$FC_AFP_DIR/$tpl" "$FC_AFP_DIR/bsi/$tpl" "$FC_GEO_DIR")
+  echo "$OUT" | sed "s/^/    [$tpl] /"
+  echo "$OUT" | grep -q "smarv-fc OK" || die "Leg E: $tpl failed"
+done
+note "Leg E OK (4 templates)"
 note "OK"

@@ -1049,3 +1049,164 @@ fn collect_sections_with_label(
         }
     }
 }
+
+/// Result of a multi-shape segment clone: the old→new mapping for every
+/// substituted shape and every cloned sprite.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MultiShapeSegmentClone {
+    /// `(old_shape_id, new_shape_id)` in the caller's request order.
+    pub shapes: Vec<(u16, u16)>,
+    /// `(old_sprite_id, new_sprite_id)` for every sprite in the cloned
+    /// reachability subgraph (deepest first).
+    pub sprites: Vec<(u16, u16)>,
+}
+
+impl Ap2Doc {
+    /// Generalized [`Ap2Doc::clone_word_segment_with_new_shape`] for
+    /// segments whose art spans SEVERAL shapes with SHARED sprite chains
+    /// (the dance_fullcombo splash: 4 art shapes, sprites placing 2–3 of
+    /// them each — a per-shape chain clone would duplicate shared sprites).
+    ///
+    /// Clones the labeled segment as `new_label` with every shape in
+    /// `shape_ids` substituted by a fresh shape (same `unknown` field,
+    /// fresh id): computes the set of sprites that transitively REACH any
+    /// listed shape (from the segment's placed candidates), clones exactly
+    /// that subgraph bottom-up with one cumulative remap, then clones the
+    /// segment placements-only through the same remap — into EVERY section
+    /// carrying `src_label` (the dual root+inner-timeline rule).
+    ///
+    /// Same contracts as the single-shape recipe: non-atomic on `None`
+    /// (callers discard the doc), object-id death-frame shift applied by
+    /// the placements-only clone, definitions stay root-global.
+    pub fn clone_segment_with_new_shapes(
+        &mut self,
+        src_label: &str,
+        new_label: &str,
+        shape_ids: &[u16],
+    ) -> Option<MultiShapeSegmentClone> {
+        if shape_ids.is_empty() {
+            return None;
+        }
+        let path = self.find_sprite_by_label(src_label)?;
+
+        // Read-only resolution: dictionary frames + the sprite subgraph.
+        let (donors, clone_order) = {
+            let sec = self.section(&path)?;
+            if sec.labels.iter().any(|l| l.name == new_label) {
+                return None;
+            }
+            // Donor shapes: (id, unknown, dictionary frame).
+            let mut donors: Vec<(u16, u16, usize)> = Vec::with_capacity(shape_ids.len());
+            for &sid in shape_ids {
+                let ti = sec
+                    .tags
+                    .iter()
+                    .position(|t| matches!(t, Tag::Shape(s) if s.id == sid))?;
+                let Tag::Shape(donor) = &sec.tags[ti] else {
+                    return None;
+                };
+                let frame = sec.frames.iter().position(|f| {
+                    let s = f.start_tag as usize;
+                    s <= ti && ti - s < f.tag_count as usize
+                })?;
+                donors.push((sid, donor.unknown, frame));
+            }
+
+            // Sprites reaching any target shape, deepest-first: repeated
+            // passes over the section's DefineSprites until a fixpoint —
+            // a sprite qualifies when it places a target shape or a
+            // qualifying sprite. Order for cloning = reverse topological
+            // (children before parents), obtained by iterating fixpoint
+            // generations.
+            let mut reaching: Vec<u16> = Vec::new();
+            loop {
+                let mut grew = false;
+                for tag in &sec.tags {
+                    let Tag::DefineSprite(sp) = tag else { continue };
+                    if reaching.contains(&sp.id) {
+                        continue;
+                    }
+                    let mut hits = false;
+                    for t in &sp.section.tags {
+                        if let Tag::PlaceObject(po) = t {
+                            if let Some(id) = po.view().and_then(|v| v.source_tag_id) {
+                                if shape_ids.contains(&id) || reaching.contains(&id) {
+                                    hits = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if hits {
+                        reaching.push(sp.id);
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            if reaching.is_empty() {
+                return None; // segment never reaches the shapes — wrong ids
+            }
+            // Clone order: a sprite must be cloned AFTER every sprite it
+            // places (children first). Sort by dependency: repeatedly emit
+            // sprites whose placed reaching-children are all emitted.
+            let mut order: Vec<u16> = Vec::with_capacity(reaching.len());
+            while order.len() < reaching.len() {
+                let before = order.len();
+                for &rid in &reaching {
+                    if order.contains(&rid) {
+                        continue;
+                    }
+                    let sp = sec.tags.iter().find_map(|t| match t {
+                        Tag::DefineSprite(s) if s.id == rid => Some(s),
+                        _ => None,
+                    })?;
+                    let ready = sp.section.tags.iter().all(|t| match t {
+                        Tag::PlaceObject(po) => match po.view().and_then(|v| v.source_tag_id) {
+                            Some(id) if reaching.contains(&id) => order.contains(&id),
+                            _ => true,
+                        },
+                        _ => true,
+                    });
+                    if ready {
+                        order.push(rid);
+                    }
+                }
+                if order.len() == before {
+                    return None; // cycle — fail closed
+                }
+            }
+            (donors, order)
+        };
+
+        // Mutations: new shapes first, then the sprite subgraph bottom-up
+        // with a cumulative remap, then the segment clone(s).
+        let mut result = MultiShapeSegmentClone::default();
+        let mut remap = TagRemap::new();
+        for (old_id, unknown, frame) in donors {
+            let path = self.find_sprite_by_label(src_label)?;
+            let new_id = self.add_shape(&path, frame, unknown)?;
+            remap.insert(old_id, new_id);
+            result.shapes.push((old_id, new_id));
+        }
+        for old_sprite in clone_order {
+            let path = self.find_sprite_by_label(src_label)?;
+            let new_sprite = self.clone_sprite_definition(&path, old_sprite, &remap)?;
+            remap.insert(old_sprite, new_sprite);
+            result.sprites.push((old_sprite, new_sprite));
+        }
+        let path = self.find_sprite_by_label(src_label)?;
+        self.clone_labeled_segment_placements_only(&path, src_label, new_label, &remap)?;
+        let mut extra_paths: Vec<SpritePath> = Vec::new();
+        collect_sections_with_label(&self.root, src_label, &mut Vec::new(), &mut extra_paths);
+        for p in extra_paths {
+            if p == path {
+                continue;
+            }
+            self.clone_labeled_segment_placements_only(&p, src_label, new_label, &remap)?;
+        }
+        Some(result)
+    }
+}

@@ -15,7 +15,9 @@
 
 pub mod afp_patches;
 pub mod assets;
+pub mod combo;
 pub mod flash;
+pub mod splash;
 pub mod state;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +35,8 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct SMarvelousMod {
     data_feed_installed: bool,
+    combo_installed: bool,
+    splash_installed: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -41,6 +45,8 @@ impl SMarvelousMod {
     pub fn new() -> Self {
         Self {
             data_feed_installed: false,
+            combo_installed: false,
+            splash_installed: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -100,6 +106,13 @@ impl Mod for SMarvelousMod {
         // captured pool wrapper. Best-effort — without it the flash falls
         // back to the captured clip.
         flash::set_note_result_vtable(ctx.signatures.get_address("note_result_actor_vtable"));
+        // Combo digit override (Step 5): detour installs once; the override
+        // itself is gated on ACTIVE state + staged assets, so a disabled
+        // mod costs one branch per combo refresh. Best-effort.
+        if self.data_feed_installed {
+            self.combo_installed = combo::install(ctx.signatures);
+            self.splash_installed = splash::install(ctx.signatures);
+        }
         true
     }
 
@@ -139,6 +152,7 @@ impl Mod for SMarvelousMod {
                     state::arm(0, window);
                     state::arm(1, window);
                     flash::reset_latches();
+                    splash::reset_latches();
                 }
             }));
             self.scene_cb_id = Some(id);
@@ -163,12 +177,27 @@ impl Mod for SMarvelousMod {
         // logging above keep working regardless.
         afp_patches::activate();
 
+        // Combo digit textures (Step 5): FRESH atlas entries + per-image
+        // PNGs. Best-effort — failure leaves the combo override dormant
+        // (stock digits/tint).
+        if self.combo_installed {
+            combo::set_assets_ready(assets::stage_combo_digits());
+        }
+
+        // S-MFC splash (Step 6): stage the four dance_fullcombo template
+        // patches + art. Best-effort — failure leaves the stock splash.
+        if self.splash_installed {
+            splash::activate();
+        }
+
         log_info!("SMarvelous: enabled (window {} ms)", window);
     }
 
     fn disable(&mut self) {
         ACTIVE.store(false, Ordering::Release);
         afp_patches::deactivate();
+        combo::set_assets_ready(false);
+        splash::deactivate();
         state::disarm_all();
         state::reset_song_state();
         if let Some(id) = self.scene_cb_id.take() {

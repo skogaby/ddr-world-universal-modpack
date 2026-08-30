@@ -318,3 +318,57 @@ mod tests {
         reset_song_state();
     }
 }
+
+#[cfg(test)]
+mod combo_override_predicate_tests {
+    //! Step-5 plan test: the combo override predicate's state half
+    //! (`combo_is_all_smarv`) across the §4.5 sequences. The other half
+    //! (`stock worst == 0`) is the game's own field — cabinet-verified.
+    use super::*;
+
+    fn seq(events: &[(u32, Option<i32>, i32)]) -> SideState {
+        let mut s = SideState::default();
+        for &(grade, ms, combo) in events {
+            apply_event(&mut s, grade, ms, combo, 12);
+        }
+        s
+    }
+
+    #[test]
+    fn all_smarv_combo_keeps_the_bit() {
+        let s = seq(&[(0, Some(3), 1), (0, Some(-8), 2), (0, Some(12), 3)]);
+        assert!(!s.combo_has_loose_marv);
+    }
+
+    #[test]
+    fn loose_marvelous_drops_it_mid_combo() {
+        let s = seq(&[(0, Some(3), 1), (0, Some(14), 2)]);
+        assert!(s.combo_has_loose_marv);
+    }
+
+    #[test]
+    fn ok_step_is_neutral() {
+        // Freeze O.K. (grade 6, no ms) maps to Marvelous tier in stock and
+        // carries no timing delta — must NOT degrade the all-S status.
+        let s = seq(&[(0, Some(3), 1), (6, None, 2), (0, Some(-2), 3)]);
+        assert!(!s.combo_has_loose_marv);
+    }
+
+    #[test]
+    fn combo_break_resets_on_next_combo_start() {
+        let s = seq(&[
+            (0, Some(15), 1), // loose marv — bit set
+            (5, None, 0),     // miss: combo broken
+            (0, Some(2), 1),  // new combo start (combo <= 1) resets
+        ]);
+        assert!(!s.combo_has_loose_marv);
+    }
+
+    #[test]
+    fn lower_grades_degrade() {
+        for g in 1..=3u32 {
+            let s = seq(&[(0, Some(1), 1), (g, Some(1), 2)]);
+            assert!(s.combo_has_loose_marv, "grade {} must degrade", g);
+        }
+    }
+}
