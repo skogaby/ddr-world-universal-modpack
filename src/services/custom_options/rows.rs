@@ -358,10 +358,11 @@ pub(crate) fn clear_side(side: u8) {
         );
     }
     drop(rows);
-    // The rows are gone, so the side's scroll window is meaningless —
-    // reset it to the top to match the fresh form's initial focus (a
-    // stale mid-list window would clip the top of the list, including a
-    // leading header row, on the next open).
+    // The rows are gone, so the side's scroll state is meaningless — reset
+    // the window to the top (a stale mid-list window would clip the top of
+    // the list, including a leading header row, on the next open) and drop
+    // the side's active-tab latch (a stale Mods-tab latch would otherwise
+    // keep the scroll trampoline armed across the close/reopen boundary).
     crate::services::options_scroll::reset_window(side);
 }
 

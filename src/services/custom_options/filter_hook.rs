@@ -140,14 +140,17 @@ static mut FILTER_HOOK: Option<GenericDetour<TabFilterFn>> = None;
 static mut FN_COMPONENT_SET_VISIBLE: Option<ComponentSetVisibleFn> = None;
 static mut FN_SCENE_LAYOUT_FLUSH: Option<SceneLayoutFlushFn> = None;
 
-/// Cached pointer to the alt_style flag byte.
-static mut ALT_STYLE_PTR: *mut u8 = std::ptr::null_mut();
-
-/// Cached scene mc_id for the last filter pass. Used by
-/// `set_tab_highlight` to rebind the Mods tab background texture.
-static mut CACHED_SCENE_MC_ID: u32 = 0;
-/// Cached scene prefix string (e.g. "option_v3").
-static mut CACHED_SCENE_PREFIX: Option<String> = None;
+/// Per-side cached scene mc_id from that side's last filter pass. Used by
+/// `set_tab_highlight` to rebind the Mods tab background texture. Per-side
+/// is deliberate: in 2-player mode both sides' OptionForms are live at
+/// once, and a shared last-writer-wins cache made one player's scroll
+/// steps rebind against whichever side's filter happened to run last.
+/// `0` = no pass cached yet. Render-thread only (filter detour + the
+/// scroll trampoline both run there).
+static mut CACHED_SCENE_MC_ID: [u32; 2] = [0, 0];
+/// Per-side cached scene prefix string (e.g. "option_v3"). Same lifecycle
+/// and threading as [`CACHED_SCENE_MC_ID`].
+static mut CACHED_SCENE_PREFIX: [Option<String>; 2] = [None, None];
 
 /// Resolve dependencies and install the detour. Returns `true` on
 /// success; any signature miss or hook-install failure logs a warning
@@ -253,10 +256,6 @@ fn filter_detour_body(scene_parent: *mut u8, tab_selection: *mut u8) {
             return;
         }
 
-        // Notify the scroll driver which tab is active so it only
-        // activates on the Mods tab (Page6).
-        crate::services::options_scroll::set_active_tab(active_tab);
-
         let scene_root_ptr = read_ptr(scene_parent_inner.add(SCENE_PARENT_SCENE_ROOT_PTR));
         if scene_root_ptr.is_null() {
             return;
@@ -271,9 +270,29 @@ fn filter_detour_body(scene_parent: *mut u8, tab_selection: *mut u8) {
             }
         };
 
-        // Cache scene context for set_tab_highlight.
-        *std::ptr::addr_of_mut!(CACHED_SCENE_MC_ID) = scene_mc_id;
-        *std::ptr::addr_of_mut!(CACHED_SCENE_PREFIX) = Some(prefix.clone());
+        // Resolve which player side owns this form's layout container.
+        // `None` means no mod rows are injected into it (yet) — every
+        // side-keyed consumer below (scroll latch, highlight cache) is
+        // skipped, matching the scroll trampoline's own `None` ⇒
+        // pass-through behavior for the same container.
+        let layout_root = read_ptr(scene_parent_inner.add(SCENE_PARENT_LAYOUT_ROOT_PTR));
+        let side = if layout_root.is_null() {
+            None
+        } else {
+            super::side_for_container(layout_root)
+        };
+
+        if let Some(side) = side {
+            // Notify the scroll driver of THIS side's active tab so it only
+            // activates on the Mods tab (Page6). Keyed per side: each
+            // side's form has its own tab selection, and both forms are
+            // live at once in 2-player mode.
+            crate::services::options_scroll::set_active_tab(side, active_tab);
+
+            // Cache scene context for set_tab_highlight, also per side.
+            (*std::ptr::addr_of_mut!(CACHED_SCENE_MC_ID))[side as usize] = scene_mc_id;
+            (*std::ptr::addr_of_mut!(CACHED_SCENE_PREFIX))[side as usize] = Some(prefix.clone());
+        }
 
         // ── Phase 1a: title-box visibility ──────────────────────────────
         let title_path = format!("{prefix}/tab_title_usr");
@@ -305,9 +324,6 @@ fn filter_detour_body(scene_parent: *mut u8, tab_selection: *mut u8) {
         let mut alt_style = if flags_obj.is_null() {
             false
         } else {
-            // Cache the alt_style address for the scroll driver.
-            *std::ptr::addr_of_mut!(ALT_STYLE_PTR) =
-                flags_obj.add(SCENE_FLAGS_OBJ_ALT_STYLE_OFFSET);
             *flags_obj.add(SCENE_FLAGS_OBJ_ALT_STYLE_OFFSET) != 0
         };
 
@@ -315,13 +331,10 @@ fn filter_detour_body(scene_parent: *mut u8, tab_selection: *mut u8) {
         // never fires (the Back-template slot doesn't participate in that
         // mechanism). Override: if focus is currently on one of our mod
         // rows, force alt_style=false so the tab renders dimmed.
-        if active_tab == 6 {
-            let layout_root = read_ptr(scene_parent_inner.add(SCENE_PARENT_LAYOUT_ROOT_PTR));
-            if !layout_root.is_null() {
-                let focus_on_mod_row = is_focus_on_mod_row(layout_root);
-                if focus_on_mod_row {
-                    alt_style = false;
-                }
+        if active_tab == 6 && !layout_root.is_null() {
+            let focus_on_mod_row = is_focus_on_mod_row(layout_root);
+            if focus_on_mod_row {
+                alt_style = false;
             }
         }
 
@@ -354,7 +367,6 @@ fn filter_detour_body(scene_parent: *mut u8, tab_selection: *mut u8) {
         }
 
         // ── Phase 3: row filter ─────────────────────────────────────────
-        let layout_root = read_ptr(scene_parent_inner.add(SCENE_PARENT_LAYOUT_ROOT_PTR));
         if !layout_root.is_null() {
             let begin = read_ptr(layout_root.add(LAYOUT_ROOT_BEGIN_OFFSET));
             let end = read_ptr(layout_root.add(LAYOUT_ROOT_END_OFFSET));
@@ -559,12 +571,18 @@ fn tab_name(idx: i32) -> Option<&'static str> {
     }
 }
 
-/// Toggle the Mods tab's visual highlight. Directly rebinds the tab
+/// Toggle `side`'s Mods-tab visual highlight. Directly rebinds the tab
 /// background texture via bm2d so the change takes effect immediately.
-pub(crate) fn set_tab_highlight(highlighted: bool) {
+/// Uses the scene context cached by that side's own filter pass; no-op
+/// for a side whose filter hasn't run yet (or an out-of-range side).
+pub(crate) fn set_tab_highlight(side: u8, highlighted: bool) {
+    let idx = side as usize;
+    if idx >= 2 {
+        return;
+    }
     unsafe {
-        let scene_mc_id = *std::ptr::addr_of!(CACHED_SCENE_MC_ID);
-        let prefix = match &*std::ptr::addr_of!(CACHED_SCENE_PREFIX) {
+        let scene_mc_id = (*std::ptr::addr_of!(CACHED_SCENE_MC_ID))[idx];
+        let prefix = match &(*std::ptr::addr_of!(CACHED_SCENE_PREFIX))[idx] {
             Some(p) => p.clone(),
             None => return,
         };

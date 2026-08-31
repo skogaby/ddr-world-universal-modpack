@@ -23,23 +23,41 @@
 //! mode flag at `*(lambda+0x08)+0xC0` is 0 — which is the case for the
 //! options row list. Its signature is `fn(container, direction) -> i32`.
 //!
-//! Scroll state is kept per player side. State is session-scoped.
+//! ALL state — the scroll window AND the active-tab latch — is kept per
+//! player side. In 2-player mode both sides' OptionForms are live
+//! simultaneously, each with its own tab selection; any shared/global
+//! state here is a cross-player corruption bug (see `set_active_tab`).
+//! State is session-scoped.
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::core::signatures::SignatureStore;
 use crate::services::custom_options::{self, PageTag};
 use crate::{log_info, log_warn};
 
-/// Currently active tab index, updated by the filter_hook detour on every
-/// tab switch. The scroll trampoline only activates when this is 6 (Mods).
-/// Atomic because the filter runs on the render thread and we read it from
-/// the same thread in the step trampoline.
-static ACTIVE_TAB: AtomicI32 = AtomicI32::new(0);
+/// Currently active tab index **per player side**, updated by the
+/// filter_hook detour on every filter pass (tab switch / form open). The
+/// scroll trampoline only activates when the stepping side's entry is 6
+/// (Mods).
+///
+/// Per-side is load-bearing: each side's OptionForm has its own tab
+/// selection, and in 2-player mode both forms are live at once. A single
+/// shared latch (the pre-fix design) held whichever side's filter ran
+/// last, so with P1 on the Mods tab a P2 cursor step on any OTHER tab
+/// entered the scroll path, force-unmasked a 7-row Page6 window onto
+/// P2's current tab (rows the native filter had just hidden) and
+/// teleported P2's focus onto a mod row — the "list grows past the
+/// viewport" 2P glitch. The converse staleness wedged a Mods-tab cursor
+/// at the window edge after the other side switched tabs.
+///
+/// `0` means "unknown/dormant" — the trampoline passes through to native
+/// (fail-open). Atomics because the filter runs on the render thread and
+/// we read from the same thread in the step trampoline.
+static ACTIVE_TAB: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 
 /// Native viewport capacity in rows.
 const VIEWPORT_ROWS: usize = 7;
@@ -61,6 +79,15 @@ struct ScrollState {
 }
 
 static STATE: Lazy<Mutex<HashMap<u8, ScrollState>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Lock [`STATE`], recovering from poison instead of panicking — every
+/// caller is (transitively) inside a hook callback, where an unwrap panic
+/// would unwind into game code.
+fn lock_state() -> MutexGuard<'static, HashMap<u8, ScrollState>> {
+    STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -117,10 +144,22 @@ pub fn is_available() -> bool {
     INITIALIZED.load(Ordering::SeqCst)
 }
 
-/// Called by the filter_hook detour to notify us of the current active tab.
+/// Called by the filter_hook detour to record `side`'s current active tab.
 /// Only tab 6 (Mods) has scroll behavior; all other tabs pass through.
-pub fn set_active_tab(tab: i32) {
-    ACTIVE_TAB.store(tab, Ordering::Relaxed);
+/// Out-of-range sides are ignored (defensive — the filter validates its
+/// side resolution before calling).
+pub fn set_active_tab(side: u8, tab: i32) {
+    if let Some(slot) = ACTIVE_TAB.get(side as usize) {
+        slot.store(tab, Ordering::Relaxed);
+    }
+}
+
+/// The last tab the filter reported for `side`, or 0 when unknown.
+fn active_tab_for_side(side: u8) -> i32 {
+    ACTIVE_TAB
+        .get(side as usize)
+        .map(|slot| slot.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 // ── Detour trampoline ───────────────────────────────────────────────────
@@ -139,12 +178,18 @@ unsafe extern "C" fn positional_step_trampoline(container: *mut u8, direction: i
 }
 
 /// Trampoline body:
-/// 1. Check if this container has our mod rows (via `side_for_container`).
-///    If not, pass through to the original unchanged.
-/// 2. Read the current focus index and find it in our mod-row list.
-/// 3. Pre-advance the scroll window so the target row has `+0xB8=1`.
-/// 4. Call the original (which now finds the freshly-unmasked row).
-/// 5. Re-apply the full mask based on where focus actually landed.
+/// 1. Resolve which player side owns this container (via
+///    `side_for_container`). If no mod rows are injected here, pass
+///    through to the original unchanged.
+/// 2. Check THAT side's active tab — scroll logic only runs on the Mods
+///    tab (Page6). The side must be resolved first: mod rows live in a
+///    side's container regardless of which tab it is showing, so gating
+///    on any other side's tab (the old global latch) let one player's
+///    Mods-tab visit corrupt the other player's non-Mods tab.
+/// 3. Read the current focus index and find it in our mod-row list.
+/// 4. Pre-advance the scroll window so the target row has `+0xB8=1`.
+/// 5. Call the original (which now finds the freshly-unmasked row).
+/// 6. Re-apply the full mask based on where focus actually landed.
 fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
     let detour = unsafe {
         match (*std::ptr::addr_of!(POSITIONAL_STEP_HOOK)).as_ref() {
@@ -153,16 +198,16 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
         }
     };
 
-    // Only activate scroll logic on the Mods tab (Page6).
-    if ACTIVE_TAB.load(Ordering::Relaxed) != 6 {
-        return unsafe { detour.call(container, direction) };
-    }
-
     let side = custom_options::side_for_container(container);
     if side.is_none() {
         return unsafe { detour.call(container, direction) };
     }
     let side = side.unwrap();
+
+    // Only activate scroll logic when THIS side is on the Mods tab (Page6).
+    if active_tab_for_side(side) != 6 {
+        return unsafe { detour.call(container, direction) };
+    }
 
     let rows = custom_options::row_handles_for_tab(side, PageTag::Page6);
     let total = rows.len();
@@ -198,12 +243,12 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
                 std::ptr::null_mut()
             };
             let still_on_mod = rows.iter().any(|r| r.row_ptr == result_ptr);
-            custom_options::filter_hook::set_tab_highlight(!still_on_mod);
+            custom_options::filter_hook::set_tab_highlight(side, !still_on_mod);
             return result;
         }
 
         // Shift scroll window to include the target row.
-        let mut state_map = STATE.lock().unwrap();
+        let mut state_map = lock_state();
         let state = state_map.entry(side).or_default();
         adjust_window_for_target(state, &rows, target_pos);
         let window_top = state.window_top;
@@ -214,13 +259,13 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
         let target_row_ptr = rows[target_pos].row_ptr;
         let target_vec_idx = find_vector_index(container, target_row_ptr, vec_len);
         if let Some(idx) = target_vec_idx {
-            custom_options::filter_hook::set_tab_highlight(false);
+            custom_options::filter_hook::set_tab_highlight(side, false);
             return idx as i32;
         }
 
         // Fallback: couldn't find target in vector (shouldn't happen).
         let result = unsafe { detour.call(container, direction) };
-        custom_options::filter_hook::set_tab_highlight(false);
+        custom_options::filter_hook::set_tab_highlight(side, false);
         return result;
     }
 
@@ -235,7 +280,7 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
     };
 
     // Set window around the target.
-    let mut state_map = STATE.lock().unwrap();
+    let mut state_map = lock_state();
     let state = state_map.entry(side).or_default();
     adjust_window_for_target(state, &rows, target_pos);
     let window_top = state.window_top;
@@ -246,7 +291,7 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
     let target_row_ptr = rows[target_pos].row_ptr;
     let target_vec_idx = find_vector_index(container, target_row_ptr, vec_len);
     if let Some(idx) = target_vec_idx {
-        custom_options::filter_hook::set_tab_highlight(false);
+        custom_options::filter_hook::set_tab_highlight(side, false);
         return idx as i32;
     }
 
@@ -255,7 +300,7 @@ fn positional_step_body(container: *mut u8, direction: i32) -> i32 {
         unsafe { set_row_active(row.row_ptr, 1) };
     }
     let result = unsafe { detour.call(container, direction) };
-    custom_options::filter_hook::set_tab_highlight(false);
+    custom_options::filter_hook::set_tab_highlight(side, false);
     result
 }
 
@@ -346,7 +391,7 @@ pub fn apply_mask(container: *mut u8) {
     }
 
     let window_top = {
-        let mut state_map = STATE.lock().unwrap();
+        let mut state_map = lock_state();
         let state = state_map.entry(side).or_default();
         if total <= VIEWPORT_ROWS {
             state.window_top = 0;
@@ -367,17 +412,22 @@ pub fn apply_mask(container: *mut u8) {
     custom_options::rows::hide_show_when_excluded(side);
 }
 
-/// Reset a side's scroll window to the top. Called when that side's row
-/// registry is torn down (form build and form close both route through
-/// `rows::clear_side`): the native form always reopens focused on the
-/// topmost row, so a stale mid-list window from the previous open would
-/// otherwise clip the top of the list — including a leading header row —
-/// until the first cursor step self-corrected.
+/// Reset a side's scroll state. Called when that side's row registry is
+/// torn down (form build and form close both route through
+/// `rows::clear_side`).
+///
+/// Window: the native form always reopens focused on the topmost row, so a
+/// stale mid-list window from the previous open would otherwise clip the
+/// top of the list — including a leading header row — until the first
+/// cursor step self-corrected.
+///
+/// Tab latch: cleared to 0 (dormant) so a stale `6` from a previous open
+/// can't activate the scroll path on the wrong tab. The side's next
+/// filter pass (form open / tab switch both run it) re-latches the real
+/// tab; until then the trampoline fail-opens to the native step.
 pub fn reset_window(side: u8) {
-    let Ok(mut state_map) = STATE.lock() else {
-        return;
-    };
-    state_map.insert(side, ScrollState::default());
+    set_active_tab(side, 0);
+    lock_state().insert(side, ScrollState::default());
 }
 
 /// Re-apply the scroll mask for a given player side using the current
@@ -394,7 +444,7 @@ pub fn reapply_mask_for_side(side: u8) {
     }
 
     let window_top = {
-        let mut state_map = STATE.lock().unwrap();
+        let mut state_map = lock_state();
         let state = state_map.entry(side).or_default();
         if total <= VIEWPORT_ROWS {
             state.window_top = 0;
