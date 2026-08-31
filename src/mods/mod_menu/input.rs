@@ -1,6 +1,7 @@
 //! Exclusive input handling while the mod-menu overlay is open, plus the
-//! hold-to-repeat thread for scalar/enum rows. Navigation and selection run
-//! through the pure `model::Navigator` over the active tab's row list.
+//! hold-to-repeat thread for scalar/enum value adjustment (LEFT/RIGHT) and
+//! row navigation (UP/DOWN). Navigation and selection run through the pure
+//! `model::Navigator` over the active tab's row list.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -17,6 +18,9 @@ use super::{chrome, chrome_loader, rows, tabs, MOD_MENU_STATE};
 /// press before auto-repeat kicks in, then fire every `REPEAT_INTERVAL_MS`.
 const REPEAT_INITIAL_DELAY_MS: u64 = 350;
 const REPEAT_INTERVAL_MS: u64 = 60;
+/// Hold-to-repeat interval for UP/DOWN row navigation (slightly slower than
+/// value adjust so individual rows stay readable while scrolling).
+const NAV_REPEAT_INTERVAL_MS: u64 = 90;
 /// Repeat-thread poll tick.
 const REPEAT_POLL_MS: u64 = 16;
 
@@ -380,6 +384,24 @@ fn adjust_dir_held() -> Option<bool> {
     }
 }
 
+/// True if MENU_UP/MENU_DOWN is currently held on either side, for the
+/// navigation hold-to-scroll. `Some(true)` = down held, `Some(false)` = up
+/// held, `None` = neither (or both, which we treat as no repeat).
+fn nav_dir_held() -> Option<bool> {
+    if !input_manager::is_available() {
+        return None;
+    }
+    let held =
+        input_manager::get_button_state(Player::P1) | input_manager::get_button_state(Player::P2);
+    let down = (held & button::MENU_DOWN) != 0;
+    let up = (held & button::MENU_UP) != 0;
+    match (down, up) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None, // neither or both
+    }
+}
+
 /// Whether the currently-selected row auto-repeats while a direction is held.
 /// Scalar and Enum rows do (continuous adjust / entry cycling); boolean toggles
 /// do not (the initial press already toggled once).
@@ -389,13 +411,61 @@ fn selected_repeats() -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn the hold-to-repeat thread for scalar/enum rows. Runs while its generation is
+/// Per-axis hold-to-repeat state (one for LEFT/RIGHT adjust, one for UP/DOWN
+/// navigation). Tracks the held direction and fires after an initial delay,
+/// then at a steady interval, for as long as that direction stays held.
+struct RepeatAxis {
+    current_dir: Option<bool>,
+    armed_at: Instant,
+    last_fire: Instant,
+    interval_ms: u64,
+}
+
+impl RepeatAxis {
+    fn new(interval_ms: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            current_dir: None,
+            armed_at: now,
+            last_fire: now,
+            interval_ms,
+        }
+    }
+
+    /// Advance one poll tick with the currently-held direction; calls `fire`
+    /// when an auto-repeat is due. The initial press was already handled by
+    /// the edge-triggered input event, so the first auto-repeat waits the
+    /// full initial delay.
+    fn tick(&mut self, dir: Option<bool>, fire: impl FnOnce(bool)) {
+        match dir {
+            Some(d) => {
+                let now = Instant::now();
+                if self.current_dir != Some(d) {
+                    // New hold (or direction change): arm.
+                    self.current_dir = Some(d);
+                    self.armed_at = now;
+                    self.last_fire = now;
+                } else if now.duration_since(self.armed_at)
+                    >= Duration::from_millis(REPEAT_INITIAL_DELAY_MS)
+                    && now.duration_since(self.last_fire) >= Duration::from_millis(self.interval_ms)
+                {
+                    self.last_fire = now;
+                    fire(d);
+                }
+            }
+            None => self.current_dir = None,
+        }
+    }
+}
+
+/// Spawn the hold-to-repeat thread for value adjustment (scalar/enum rows,
+/// LEFT/RIGHT) and row navigation (UP/DOWN). Runs while its generation is
 /// current (see `REPEAT_THREAD_GEN`); a later open/close bumps the generation and
 /// retires it. The input layer is edge-triggered (no repeat events while held),
 /// so this watches the live held state via `get_button_state` and re-fires
-/// `activate_selected` on a scalar row after an initial delay, then at a steady
-/// interval, for as long as the direction stays held. Idle (no scalar held)
-/// costs one cheap poll per tick.
+/// `activate_selected` / `navigate` after an initial delay, then at a steady
+/// interval, for as long as the direction stays held. Idle (nothing held)
+/// costs two cheap polls per tick.
 pub(super) fn start_repeat_thread() {
     // Claim a new generation; the spawned thread runs only while the global
     // generation still equals this one (a later open/close bumps it, retiring
@@ -403,11 +473,9 @@ pub(super) fn start_repeat_thread() {
     let my_gen = REPEAT_THREAD_GEN.fetch_add(1, Ordering::AcqRel) + 1;
     std::thread::spawn(move || {
         // Per-press repeat state, reset whenever the held direction changes or
-        // releases. `armed_at` = when the current hold began; `last_fire` = when
-        // we last auto-fired.
-        let mut current_dir: Option<bool> = None;
-        let mut armed_at = Instant::now();
-        let mut last_fire = Instant::now();
+        // releases.
+        let mut adjust_axis = RepeatAxis::new(REPEAT_INTERVAL_MS);
+        let mut nav_axis = RepeatAxis::new(NAV_REPEAT_INTERVAL_MS);
 
         loop {
             std::thread::sleep(Duration::from_millis(REPEAT_POLL_MS));
@@ -424,35 +492,19 @@ pub(super) fn start_repeat_thread() {
             // leave the generation looking live to no thread. catch_unwind keeps
             // the loop alive; the generation check still retires it on close.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Only repeat for scalar/enum rows; a held direction on a boolean
-                // row is a no-op here (the initial press already toggled it once).
-                let dir = if selected_repeats() {
+                // Value adjust: only repeat for scalar/enum rows; a held
+                // direction on a boolean row is a no-op here (the initial
+                // press already toggled it once).
+                let adjust_dir = if selected_repeats() {
                     adjust_dir_held()
                 } else {
                     None
                 };
+                adjust_axis.tick(adjust_dir, activate_selected);
 
-                match dir {
-                    Some(d) => {
-                        let now = Instant::now();
-                        if current_dir != Some(d) {
-                            // New hold (or direction change): arm; the initial
-                            // press was already handled by the input event, so
-                            // the first auto-repeat waits the full initial delay.
-                            current_dir = Some(d);
-                            armed_at = now;
-                            last_fire = now;
-                        } else if now.duration_since(armed_at)
-                            >= Duration::from_millis(REPEAT_INITIAL_DELAY_MS)
-                            && now.duration_since(last_fire)
-                                >= Duration::from_millis(REPEAT_INTERVAL_MS)
-                        {
-                            last_fire = now;
-                            activate_selected(d);
-                        }
-                    }
-                    None => current_dir = None,
-                }
+                // Navigation: UP/DOWN hold scrolls through the row list
+                // regardless of the selected row's kind.
+                nav_axis.tick(nav_dir_held(), navigate);
             }));
         }
     });
