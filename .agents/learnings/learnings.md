@@ -660,3 +660,28 @@ arguments' machinery) beats reimplementing the widget pipeline.
 8. Dev harness legs must exercise the DLL's ACTUAL code path (shared fn,
    extracted tables) — a parallel reimplementation validated a resolver
    the DLL didn't have (deploy #3).
+
+## Per-side UI mutators can hide a "caller is the editing side" assumption (2026-08-31)
+
+`options_scroll::reapply_mask_for_side(side)` force-writes the Mods-tab
+(Page6) scroll window's `+0xB8` visibility bytes for `side`. Its only
+historical caller was the native-menu press path — always the EDITING
+side, which by construction is VIEWING the Mods tab — so the function
+never needed a tab check. The SONG SPEED versus mirror added the first
+CROSS-SIDE caller (remask the OTHER side after mirroring a parent
+value), and the hidden assumption broke instantly on the cabinet: with
+P2 on any non-Mods tab, the call unmasked a 7-row block of mod rows over
+P2's current tab's native layout (the same corruption class as the old
+shared tab latch — see the `ACTIVE_TAB` doc in options_scroll.rs).
+
+Fix: gate the function itself (`active_tab_for_side(side) != 6` ⇒
+no-op), not the callers. No catch-up pass is needed — every tab
+switch/form open runs the filter pass, which rebuilds visibility from
+live registry state (`hide_show_when_excluded` evaluates ShowWhen at
+filter time), so a value mirrored while the side was elsewhere displays
+correctly when that side arrives at the tab.
+
+General rule: before calling a per-side UI mutator from a NEW context
+(especially for the non-editing side), check what its existing callers
+implicitly guarantee — "runs only while that side views tab X" is easy
+to encode nowhere and violate silently.

@@ -12,10 +12,17 @@
 //!
 //! Eligibility is NOT duplicated here: the mod keeps a STANDING request
 //! (`song_rate::runtime::set_training_arm`) and the scene-26 classifier
-//! applies the identical ordinary-solo/doubles gate set it applies to rate
-//! arms — versus, course/Dan, and unknown sessions fail closed to identity
-//! inside `classify_scene26` (training design §4.1; the request weakens
-//! nothing).
+//! applies the identical gate set it applies to rate arms — course/Dan
+//! and unknown sessions fail closed to identity inside `classify_scene26`
+//! (training design §4.1; the request weakens nothing). Versus arms since
+//! the 2026-08-31 lift: P1 governs (the classifier's versus policy) and
+//! the three bound rows are MIRRORED across sides via `versus_mirror`
+//! (P1 seeds; last writer wins), so both players share one training
+//! session — every alteration (bounds, gestures, loops) moves the ONE
+//! shared timeline and taints BOTH entered sides' scores. TIMELINE
+//! PLACEMENT mirrors too (one strip — divergent placements were a
+//! fiction); AUTOPLAY is the autoplay mod's genuinely per-side row and
+//! stays independent.
 //!
 //! Step 2 adds the A/B pinpad markers ([`bounds`] — the middle row 4-5-6,
 //! single-press since 2026-08-18: 4 sets A, 6 sets B, 5 clears, gameplay
@@ -87,7 +94,7 @@ use std::sync::Arc;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, EnumValue, PersistMode, RegisterSpec, ScalarFormat};
 use crate::services::{
-    input_manager, scene_manager, score_guard, song_rate, song_reset, stage_records,
+    input_manager, scene_manager, score_guard, song_rate, song_reset, stage_records, versus_mirror,
 };
 use crate::types::buttons::InputEvent;
 use crate::types::scenes::scene;
@@ -136,6 +143,18 @@ const OPT_PROGRESS_POS: &str = "training_progress_pos";
 const PLACEMENT_OFF: i32 = 0;
 const PLACEMENT_LEFT: i32 = 1;
 const PLACEMENT_RIGHT: i32 = 2;
+/// The rows mirrored across sides in versus (`versus_mirror`): everything
+/// that shapes the ONE shared training timeline, plus TIMELINE PLACEMENT —
+/// the HUD is ONE strip, so divergent per-side placements were a fiction
+/// (maintainer call 2026-08-31; it is `PersistMode::Full`, so in versus
+/// both profiles save the shared placement at logout, consistent with the
+/// mirror-wide persistence ruling).
+const MIRRORED_OPTIONS: [&str; 4] = [
+    OPT_START_TIME,
+    OPT_END_TIME,
+    OPT_LOOP_SONG,
+    OPT_PROGRESS_POS,
+];
 /// Whether the mod enabled successfully this boot (readiness gate passed).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -156,6 +175,11 @@ fn on_start_time_change(side: u8, value: i32) {
         bounds::set_row_end_time(side, nudged);
     }
     refresh_pre_shift();
+    // Versus mirror: propagate the EDITED row; the silent END nudge above
+    // re-derives on the other side (its on_change runs the same pure
+    // nudge over the same mirrored inputs — copying it would race the
+    // re-derivation).
+    versus_mirror::mirror_edit(OPT_START_TIME, side, value);
 }
 
 /// SONG END TIME row change callback: store the side's atomic and bump
@@ -178,6 +202,8 @@ fn on_end_time_change(side: u8, value: i32) {
         bounds::set_row_start_time(side, nudged);
         refresh_pre_shift();
     }
+    // Versus mirror (see on_start_time_change for the nudge rationale).
+    versus_mirror::mirror_edit(OPT_END_TIME, side, value);
 }
 
 /// LOOP SONG row change callback: mirror the side's atomic. No nudge, no
@@ -185,6 +211,7 @@ fn on_end_time_change(side: u8, value: i32) {
 /// other rows produce, and latches per song at resolution.
 fn on_loop_song_change(side: u8, value: i32) {
     bounds::set_row_loop_song(side, value != 0);
+    versus_mirror::mirror_edit(OPT_LOOP_SONG, side, value);
 }
 
 /// TIMELINE PLACEMENT row change callback: mirror the side's atomic in
@@ -193,6 +220,7 @@ fn on_loop_song_change(side: u8, value: i32) {
 /// through (0 OFF / 1 LEFT / 2 RIGHT — strip_hud::Placement's encoding).
 fn on_progress_pos_change(side: u8, value: i32) {
     strip_hud::set_placement(side, value);
+    versus_mirror::mirror_edit(OPT_PROGRESS_POS, side, value);
 }
 
 /// The highlight seeder's write half (R2 second amendment 2026-08-14 —
@@ -233,13 +261,13 @@ pub(crate) fn seed_rows_for_highlight(digest: u64, audio_len_ms: u32) {
 }
 
 /// The side whose SONG START TIME row drives the upcoming song's
-/// pre-shift: the ENTERED side (design §4.2's side-choice class —
-/// doubles/solo carry exactly one entered side; armed sessions are never
-/// versus). Both sides entered ⇒ `None` (versus — ineligible; the
-/// classifier fails the arm closed, so no mapping must be requested).
-/// Entered state unavailable ⇒ P1-preferring side with a nonzero start
-/// (assist_tick's "P1 or the only enabled side" class — correct for
-/// every eligible session shape).
+/// pre-shift: the GOVERNING side (design §4.2's side-choice class —
+/// doubles/solo carry exactly one entered side; versus carries two and
+/// P1 governs, matching the scene-26 classifier — the bound rows are
+/// mirrored across sides by `versus_mirror`, so the choice is
+/// value-neutral). Entered state unavailable ⇒ P1-preferring side with a
+/// nonzero start (assist_tick's "P1 or the only enabled side" class —
+/// correct for every eligible session shape).
 fn pre_shift_side() -> Option<usize> {
     let entered = [
         stage_records::side_entered(0),
@@ -248,14 +276,14 @@ fn pre_shift_side() -> Option<usize> {
     match (entered[0], entered[1]) {
         (Some(true), Some(false)) => Some(0),
         (Some(false), Some(true)) => Some(1),
-        (Some(true), Some(true)) => None,
+        (Some(true), Some(true)) => Some(0),
         _ => (0..2).find(|&side| bounds::row_start_time(side) > 0),
     }
 }
 
 /// Keep the sticky bind-time pre-shift current (design §4.3/R15): the
 /// effective (audio-length-clamped) SONG START TIME seconds of the
-/// entered side, converted content→wall at the side's DESIRED rate (the
+/// governing side, converted content→wall at the side's DESIRED rate (the
 /// committed exact ratio does not exist yet; the driver's adjust
 /// re-derives from the live mapping, so the epsilon never reaches the
 /// clock), with the standard approach lead. Start 0 / no side ⇒ `(0, 0)`
@@ -432,16 +460,20 @@ fn register_bound_rows() -> bool {
 }
 
 /// Taint the entered side(s)' per-stage save (Step 5, design §4.7/R5) —
-/// the `on_song_reset(t > 0)` subscriber's body. Runs on the frame thread
-/// inside the reset completion: guarded reads + atomic stores only (no
-/// locks, no allocation, panic-free).
+/// the `on_song_reset(t > 0)` subscriber's body, and (since the
+/// 2026-08-31 versus-training lift) the shared taint target for EVERY
+/// training alteration: gestures, loop latches, and row-derived bounds
+/// all move the ONE shared timeline, so in versus BOTH entered sides'
+/// scores are altered regardless of which player pressed/resolved. Runs
+/// on the frame thread: guarded reads + atomic stores only (no locks, no
+/// allocation, panic-free).
 ///
 /// Prefers exactly the sides `stage_records::side_entered` reports true
-/// (solo/doubles carry one entered side; armed sessions are never versus);
-/// when no side positively reads entered — decode unavailable or torn —
-/// both sides taint conservatively (idempotent; a clean side's flag clears
-/// at the next song's `reset_song_taint`).
-fn taint_entered_sides() {
+/// (solo/doubles carry one entered side; versus carries two); when no
+/// side positively reads entered — decode unavailable or torn — both
+/// sides taint conservatively (idempotent; a clean side's flag clears at
+/// the next song's `reset_song_taint`).
+pub(super) fn taint_entered_sides() {
     let entered = [
         stage_records::side_entered(0),
         stage_records::side_entered(1),
@@ -565,6 +597,11 @@ impl Mod for TrainingModeMod {
         // Seed the pre-shift from the just-seeded row atomics (a re-enable
         // mid-session may already hold a nonzero skip).
         refresh_pre_shift();
+        // Versus mirror (2026-08-31 lift): the bound rows hold one shared
+        // value while both sides are entered — P1 seeds, edits propagate
+        // via the on_change tails. Registered last so an already-engaged
+        // mirror's immediate P1→P2 seed lands on registered rows.
+        versus_mirror::register(&MIRRORED_OPTIONS);
         log_info!(
             "TrainingMode: enabled -- eligible songs arm a binding; press 4/5/6 to set A/clear/B and 7/9 to scrub RW/FF during gameplay, press 1 restarts from A; bound rows {}",
             if rows { "available" } else { "absent" }
@@ -575,6 +612,7 @@ impl Mod for TrainingModeMod {
         // Zero footprint when off: no standing arm request, no pre-shift,
         // no gestures, no markers, no toast, no bound rows — ordinary 100%
         // plays are literally stock again.
+        versus_mirror::unregister(&MIRRORED_OPTIONS);
         bounds::GESTURES_ACTIVE.store(false, Ordering::Release);
         bounds::clear_session_state("mod disabled");
         crate::services::toast::dismiss();

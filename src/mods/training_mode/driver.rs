@@ -464,23 +464,51 @@ fn loop_step() -> LoopState {
 /// mid-grind B set behind the cursor simply loops on the next frame
 /// (the "end here" class).
 fn compute_fire_bound(b_live: Option<i32>, initial: bool) -> bool {
-    let Some((t94_display, t98_raw)) = (0..2).find_map(song_reset::chart_end_thresholds) else {
+    // Fold BOTH sides' live thresholds (versus-training lift: each side
+    // plays its own chart, so the bound must respect the shorter one —
+    // the shipped seek gate's own MIN-across-sides pattern). Solo/doubles
+    // degrade to the single live side exactly as before.
+    let mut t98_min: Option<i32> = None;
+    let mut t94_min: Option<i32> = None;
+    let mut conversion_missed = false;
+    let raised = bounds::loop_thresholds_raised();
+    for side in 0..2 {
+        let Some((t94_display, t98_raw)) = song_reset::chart_end_thresholds(side) else {
+            continue;
+        };
+        t98_min = Some(t98_min.map_or(t98_raw, |current: i32| current.min(t98_raw)));
+        if !raised {
+            // The cascade is live — convert THIS side's display threshold
+            // through its own note vector.
+            match song_reset::decoded_notes(side)
+                .filter(|notes| !notes.is_empty())
+                .and_then(|notes| seek::raw_for_display(&notes, t94_display))
+            {
+                Some(raw) => t94_min = Some(t94_min.map_or(raw, |current: i32| current.min(raw))),
+                None => conversion_missed = true,
+            }
+        }
+    }
+    let Some(t98_raw) = t98_min else {
         disarm_loop("end thresholds unreadable");
         return false;
     };
-    let t94_raw = if bounds::loop_thresholds_raised() {
+    let t94_raw = if raised {
         // The cascade is parked — no display-threshold term.
         None
-    } else {
-        let converted = (0..2)
-            .find_map(|side| song_reset::decoded_notes(side).filter(|notes| !notes.is_empty()))
-            .and_then(|notes| seek::raw_for_display(&notes, t94_display));
-        if converted.is_none() && !LOOP_T94_WARNED.swap(true, Ordering::AcqRel) {
+    } else if conversion_missed {
+        // ANY side failing conversion degrades the whole term (a partial
+        // min could exceed the failed side's true threshold and let its
+        // 0x104A fire mid-grind — same accepted degradation as the
+        // shipped single-side conversion failure).
+        if !LOOP_T94_WARNED.swap(true, Ordering::AcqRel) {
             log_warn!(
                 "TrainingMode: display threshold conversion failed -- loop bound clamps on the raw threshold only (a one-shot loop is possible)"
             );
         }
-        converted
+        None
+    } else {
+        t94_min
     };
     let Some(bound) = section_math::loop_fire_bound(b_live, t94_raw, t98_raw, LOOP_FIRE_MARGIN_MS)
     else {

@@ -213,6 +213,43 @@ fn p2_started_doubles_arms_side1_mask_with_side1_rate() {
     );
 }
 
+/// Local versus arms the SHARED rate: P1 governs (the SONG SPEED mod
+/// mirrors both sides' rows with P1 as the authoritative seed via
+/// `versus_mirror`, and the classifier independently takes P1's values so
+/// a torn mirror can never split the rate), and BOTH mask bits
+/// participate — score containment (per-stage suppression + logout
+/// sanitization) covers both sides.
+#[test]
+fn versus_arms_the_shared_rate_with_p1_governing_and_both_mask_bits() {
+    let mut inputs = eligible_inputs();
+    inputs.entered = Some([true, true]);
+    // Distinct per-side values everywhere so P1 governance is observable.
+    inputs.desired = Some([75, 125]);
+    inputs.desired_preserve = [false, true];
+    inputs.desired_sync = [true, false];
+    assert_eq!(
+        classify_scene26(&inputs),
+        EligibilityDecision::Arm(ArmRequest {
+            requested_percent: 75,
+            preserve_pitch: false,
+            sync_movie: true,
+            participant_mask: 0b11,
+            stage_index: 0,
+        })
+    );
+
+    // P1 at identity resolves IdentityRate even while P2 desires a rate —
+    // P1 governs (the mirror keeps the sides equal in practice; the
+    // classifier must not trust that).
+    let mut inputs = eligible_inputs();
+    inputs.entered = Some([true, true]);
+    inputs.desired = Some([100, 125]);
+    assert_eq!(
+        classify_scene26(&inputs),
+        EligibilityDecision::Identity(IdentityReason::IdentityRate)
+    );
+}
+
 /// The preserve-pitch flag latches from the ENTERED side, both values,
 /// and never affects the eligibility decision itself.
 #[test]
@@ -366,7 +403,9 @@ fn training_arm_makes_identity_percent_armable() {
 #[test]
 fn training_arm_never_weakens_the_eligibility_gates() {
     // Ineligible sessions fail closed identically with the request set
-    // (ordinary solo/doubles only — versus, course, unknown all refuse).
+    // (course and unknown refuse as ever). Versus is NOT ineligible since
+    // the 2026-08-31 lift: a versus training arm arms the shared timeline
+    // exactly like a plain versus rate arm (P1 governs, both mask bits).
     let with_training = |mutate: fn(&mut EligibilityInputs)| {
         let mut inputs = eligible_inputs();
         inputs.desired = Some([100, 100]);
@@ -376,7 +415,14 @@ fn training_arm_never_weakens_the_eligibility_gates() {
     };
     assert_eq!(
         with_training(|inputs| inputs.entered = Some([true, true])),
-        EligibilityDecision::Identity(IdentityReason::LocalVersus)
+        EligibilityDecision::Arm(ArmRequest {
+            requested_percent: 100,
+            preserve_pitch: false,
+            sync_movie: false,
+            participant_mask: 0b11,
+            stage_index: 0,
+        }),
+        "versus training arm arms the shared timeline with P1's values"
     );
     assert_eq!(
         with_training(|inputs| inputs.course_field = Some(1)),
@@ -518,13 +564,8 @@ fn every_excluded_or_ambiguous_mode_resolves_to_identity() {
             },
             IdentityReason::NoSideEntered,
         ),
-        (
-            EligibilityInputs {
-                entered: Some([true, true]),
-                ..eligible_inputs()
-            },
-            IdentityReason::LocalVersus,
-        ),
+        // NOTE: entered [true, true] (local versus) ARMS since 2026-08-31 —
+        // covered by versus_arms_the_shared_rate_with_p1_governing_and_both_mask_bits.
         (
             EligibilityInputs {
                 entered: None,

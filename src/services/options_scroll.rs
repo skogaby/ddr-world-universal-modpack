@@ -433,8 +433,19 @@ pub fn reset_window(side: u8) {
 /// Re-apply the scroll mask for a given player side using the current
 /// window position. Called when ShowWhen visibility changes to immediately
 /// update the viewport without waiting for cursor movement.
+///
+/// No-op unless THAT side is currently viewing the Mods tab (Page6): the
+/// mask IS the Page6 scroll window, and force-writing it while the side is
+/// on any other tab unmasks a 7-row block of mod rows over that tab's
+/// native layout — the same cross-player corruption class as the pre-fix
+/// shared tab latch (see [`ACTIVE_TAB`]). The historical caller (the
+/// native-menu press path) was only ever the EDITING side, which is on the
+/// Mods tab by construction; cross-side callers (the SONG SPEED versus
+/// mirror remasking the OTHER side) hit the gate whenever that side is
+/// elsewhere — and need no catch-up pass, because the side's next filter
+/// pass (tab switch / form open) rebuilds visibility from registry state.
 pub fn reapply_mask_for_side(side: u8) {
-    if !is_available() {
+    if !is_available() || active_tab_for_side(side) != 6 {
         return;
     }
     let rows = custom_options::row_handles_for_tab(side, PageTag::Page6);

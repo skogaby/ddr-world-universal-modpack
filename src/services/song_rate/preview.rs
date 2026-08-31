@@ -37,7 +37,7 @@ use crate::types::scenes::scene;
 /// create being intercepted (preview design §Data Models).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewBindRequest {
-    /// The controlling (single entered) side.
+    /// The controlling side (the single entered side; P1 in versus).
     pub side: u8,
     /// The desired rate percent (≠ 100, in the supported scalar domain).
     pub percent: i32,
@@ -66,10 +66,11 @@ pub struct QualifyInputs<'a> {
 }
 
 /// The preview branch's pure decision (host-tested; design §Components 4):
-/// exactly one entered side, at song select, on a dance bank, desiring a
-/// supported non-100% rate. Everything else — including local versus (D3,
-/// mirroring `IdentityReason::LocalVersus`) and ANY unreadable entered
-/// flag — declines to a stock preview.
+/// a governed session at song select, on a dance bank, desiring a supported
+/// non-100% rate. Solo/doubles: the single entered side governs. Versus:
+/// P1 governs (mirroring the gameplay classifier — the SONG SPEED mod
+/// mirrors both sides' rows, P1 being the authoritative seed). Empty
+/// sessions and ANY unreadable entered flag decline to a stock preview.
 #[must_use]
 pub fn qualify(inputs: &QualifyInputs<'_>) -> Option<PreviewBindRequest> {
     if !inputs.feature_active || inputs.scene != scene::SONG_SELECT {
@@ -79,8 +80,11 @@ pub fn qualify(inputs: &QualifyInputs<'_>) -> Option<PreviewBindRequest> {
     let side = match (inputs.entered[0]?, inputs.entered[1]?) {
         (true, false) => 0u8,
         (false, true) => 1u8,
-        // Versus (both) and empty (neither) previews stay stock.
-        _ => return None,
+        // Versus: the shared rate, P1 governing (gameplay-classifier
+        // parity — see `classify_scene26`).
+        (true, true) => 0u8,
+        // Empty sessions preview stock.
+        (false, false) => return None,
     };
     let percent = inputs.desired[usize::from(side)];
     if percent == IDENTITY_PERCENT || !is_supported_rate_percent(percent) {

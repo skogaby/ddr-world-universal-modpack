@@ -35,6 +35,16 @@
 //! the song-rate integration conjunction hold — a rate the shared service
 //! cannot guarantee audio/clock/score/movie integration for must not be
 //! selectable (no inert UI).
+//!
+//! Versus mirroring (2026-08-31): local versus no longer disables the rate —
+//! the mechanism is cabinet-global (one clock factor, one dance bank), so
+//! versus plays at ONE shared rate. While both sides are entered at song
+//! select, the three rows are MIRRORED through the shared
+//! [`versus_mirror`] service (P1 is the authoritative initial seed; last
+//! writer wins; persistence is pull-based at save time, so both profiles
+//! save the shared value at logout). The gameplay classifier
+//! (`classify_scene26`) and the preview qualifier independently take P1's
+//! values in versus, so a torn mirror can never split the rate.
 
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec, ScalarFormat, ShowWhen};
@@ -44,6 +54,7 @@ use crate::services::song_rate::lifecycle::{
 use crate::services::song_rate::preview as song_preview;
 use crate::services::song_rate::real_speed;
 use crate::services::song_rate::runtime as song_rate_runtime;
+use crate::services::versus_mirror;
 use crate::{log_info, log_warn};
 
 const MOD_ID: &str = "song-playback-speed";
@@ -75,13 +86,23 @@ impl SongPlaybackSpeedMod {
     }
 }
 
+/// The three mirrored rows — everything that latches into the single
+/// cabinet-global `ArmRequest` (rate, DSP mode, movie sync). Divergent
+/// children with a shared rate would silently ignore one side's choice.
+const MIRRORED_OPTIONS: [&str; 3] = [OPT_SONG_SPEED, OPT_PRESERVE_PITCH, OPT_SYNC_MOVIE];
+
 /// Change callback: normalize and store one side's desired rate. One atomic
-/// store — no I/O, no game API, no locking (the option-callback contract).
-/// The preview refresh stamp is two more atomic stores (preview design
-/// §Components 7 — the debounced restart executor consumes it).
+/// store — no I/O, no game API, no locking (the option-callback contract) —
+/// plus, while the versus mirror is engaged, the cross-side sync (which
+/// re-enters the registry lock exactly like the judgement-offsets
+/// precedent's callbacks do). The preview refresh stamp is two more atomic
+/// stores (preview design §Components 7 — the debounced restart executor
+/// consumes it).
 fn on_song_speed_change(side: u8, value: i32) {
-    song_rate_runtime::set_desired_percent(usize::from(side), snap_rate_percent(value));
+    let snapped = snap_rate_percent(value);
+    song_rate_runtime::set_desired_percent(usize::from(side), snapped);
     song_preview::request_refresh();
+    versus_mirror::mirror_edit(OPT_SONG_SPEED, side, snapped);
 }
 
 /// Persistence load transform: a persisted value (network or JSON cache)
@@ -96,6 +117,7 @@ fn load_normalize(_id: &str, value: i32) -> i32 {
 fn on_preserve_pitch_change(side: u8, value: i32) {
     song_rate_runtime::set_desired_preserve_pitch(usize::from(side), value != 0);
     song_preview::request_refresh();
+    versus_mirror::mirror_edit(OPT_PRESERVE_PITCH, side, value);
 }
 
 /// Change callback for the sync-background-video child row: one atomic
@@ -104,6 +126,7 @@ fn on_preserve_pitch_change(side: u8, value: i32) {
 /// next scene-26 arm like every other rate option).
 fn on_sync_movie_change(side: u8, value: i32) {
     song_rate_runtime::set_desired_sync_movie(usize::from(side), value != 0);
+    versus_mirror::mirror_edit(OPT_SYNC_MOVIE, side, value);
 }
 
 /// Load transform for the preserve-pitch bool: clamp any persisted value
@@ -120,7 +143,7 @@ impl Mod for SongPlaybackSpeedMod {
         "Song Playback Speed"
     }
     fn description(&self) -> &str {
-        "Per-player SONG SPEED (25%-175%): pitch-preserved audio with a matching gameplay clock"
+        "Per-player SONG SPEED (25%-175%): pitch-preserved audio with a matching gameplay clock; mirrored/shared in versus"
     }
     fn required_signatures(&self) -> &[&str] {
         // Empty on purpose: every load-bearing piece (clock patch, wave
@@ -288,6 +311,11 @@ impl Mod for SongPlaybackSpeedMod {
             );
         }
 
+        // Versus shared-rate mirroring (shared service): registered after
+        // the seeding loop above so an already-engaged mirror's immediate
+        // P1→P2 seed lands on primed rows.
+        versus_mirror::register(&MIRRORED_OPTIONS);
+
         self.active = true;
         log_info!(
             "{MOD_ID}: enabled — SONG SPEED row available ({}..={} step {}/{}, default {})",
@@ -303,6 +331,9 @@ impl Mod for SongPlaybackSpeedMod {
         if !self.active {
             return;
         }
+        // Versus mirror off first: subsequent value churn must not cross
+        // sides once the mod is disabling.
+        versus_mirror::unregister(&MIRRORED_OPTIONS);
         // Future policy off: hide the row (next form rebuild) and desire
         // identity on both sides. The current attempt, if one is armed or
         // committed, deliberately runs to its definitive lifecycle boundary —

@@ -50,7 +50,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use super::section_math;
 use crate::mods::config;
-use crate::services::score_guard;
 use crate::services::song_rate;
 use crate::services::song_reset::{self, seek, AccumulatorPolicy, ResetOutcome};
 use crate::types::buttons::{button, InputEvent, InputEventType, Player};
@@ -123,10 +122,12 @@ static SEEDED_END_S: AtomicI32 = AtomicI32::new(section_math::BOUND_ROW_MAX_S);
 /// song switches within the session (no highlight seeder, no digest
 /// stamp); the card-in session reset restores OFF for the next player.
 static ROW_LOOP_SONG: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-/// The per-song loop latch (design §4.2/§4.3): the ENTERED side's LOOP
+/// The per-song loop latch (design §4.2/§4.3): the governing side's LOOP
 /// SONG value, latched once per song at resolution (the options modal is
-/// select-only — no mid-song toggle path exists). The end policy's input
-/// and the Step-4 loop driver's arm gate. Cleared with the session state.
+/// select-only — no mid-song toggle path exists). The governing side is
+/// the resolving side (side 0 in versus, where the rows are mirrored by
+/// `versus_mirror` anyway). The end policy's input and the Step-4 loop
+/// driver's arm gate. Cleared with the session state.
 static LOOP_LATCHED: AtomicBool = AtomicBool::new(false);
 
 // ── LOOP OFF threshold apply state (Step 4, design §4.2/§5) ──────────
@@ -139,11 +140,17 @@ static THRESHOLDS_WRITTEN: AtomicBool = AtomicBool::new(false);
 /// bound needs no display-threshold term). Cleared by the session reset
 /// and by [`on_loop_disarmed`]'s restore.
 static LOOP_THRESHOLDS_RAISED: AtomicBool = AtomicBool::new(false);
-/// The stock threshold pair, stashed on the song's FIRST write so a
+/// PER-SIDE stock threshold pairs, stashed on the song's FIRST write so a
 /// section end cleared back to none can restore the natural end.
-static STASH_VALID: AtomicBool = AtomicBool::new(false);
-static STASH_DISPLAY_MS: AtomicI32 = AtomicI32::new(0);
-static STASH_RAW_MS: AtomicI32 = AtomicI32::new(0);
+/// Per-side is load-bearing since the 2026-08-31 versus-training lift: in
+/// versus each side plays its OWN chart (different difficulties ⇒
+/// different `+0x94/+0x98`), so one side's pair written onto the other
+/// side's CMA would corrupt its natural end. `STASH_DONE` is the
+/// once-per-song capture latch (later writes would stash our own values).
+static STASH_DONE: AtomicBool = AtomicBool::new(false);
+static STASH_VALID: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static STASH_DISPLAY_MS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+static STASH_RAW_MS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 /// One-per-song latch for the apply ladder's WARN (design §6: converter
 /// failure / notes unavailable / write refused ⇒ natural end, ONE WARN).
 static END_APPLY_WARNED: AtomicBool = AtomicBool::new(false);
@@ -152,45 +159,76 @@ static END_APPLY_WARNED: AtomicBool = AtomicBool::new(false);
 /// Whether we armed the actors' instant-death gauge gate (`+0x2B7`) for
 /// this song's loop — the restore-idempotence latch.
 static DEATH_GATE_ARMED: AtomicBool = AtomicBool::new(false);
-/// The stock gate value stashed at arm (immortal-class gauges carry a
-/// nonzero stock gate; blind-restoring 0 would un-gate them).
-static DEATH_GATE_STASH: AtomicBool = AtomicBool::new(false);
+/// PER-SIDE stock gate values stashed at arm (immortal-class gauges carry
+/// a nonzero stock gate, and versus sides can run different gauge
+/// classes — blind-restoring one side's stock to both would un-gate or
+/// over-gate the other).
+static DEATH_GATE_STASH_VALID: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static DEATH_GATE_STASH: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 /// Arm the loop's death bypass (called at the loop latch, where the live
-/// actor tree is proven): stash the stock `+0x2B7` gate and set it. With
-/// the gate up, a gauge death latches `m_isDead` but can neither advance
-/// the actor to STEP_GAME_OVER nor finish the DPS (both engine paths are
-/// conditioned on the gate — 20260721 decompile), so the loop driver can
-/// detect the death at its leisure and fire the loop back to A; the
-/// reset's own completion block clears the death flags and restores the
-/// gauge. Fail-open: an unreadable/unwritable gate leaves stock death
-/// behavior (the grind just still fails out on a miss cascade).
+/// actor tree is proven): stash each live side's stock `+0x2B7` gate and
+/// set the gate on every actor. With the gate up, a gauge death latches
+/// `m_isDead` but can neither advance the actor to STEP_GAME_OVER nor
+/// finish the DPS (both engine paths are conditioned on the gate —
+/// 20260721 decompile), so the loop driver can detect the death at its
+/// leisure and fire the loop back to A; the reset's own completion block
+/// clears the death flags and restores the gauge. In versus EITHER side's
+/// death revives BOTH into the next pass (one shared grind). Fail-open:
+/// an unreadable/unwritable gate leaves stock death behavior (the grind
+/// just still fails out on a miss cascade).
 pub(super) fn arm_death_bypass() {
-    let Some(stock) = song_reset::death_gate() else {
+    let mut any = false;
+    for side in 0..2usize {
+        if let Some(stock) = song_reset::death_gate_for_side(side as i32) {
+            DEATH_GATE_STASH[side].store(stock, Ordering::Release);
+            DEATH_GATE_STASH_VALID[side].store(true, Ordering::Release);
+            any = true;
+        }
+    }
+    if !any {
         log_warn!("TrainingMode: death gate unreadable -- loop keeps stock death behavior");
         return;
-    };
+    }
     if !song_reset::set_death_gate(true) {
+        for side in 0..2usize {
+            DEATH_GATE_STASH_VALID[side].store(false, Ordering::Release);
+        }
         log_warn!("TrainingMode: death gate write refused -- loop keeps stock death behavior");
         return;
     }
-    DEATH_GATE_STASH.store(stock, Ordering::Release);
     DEATH_GATE_ARMED.store(true, Ordering::Release);
     log_info!(
-        "TrainingMode: loop death bypass armed (stock gate {})",
-        stock
+        "TrainingMode: loop death bypass armed (stock gates p1={:?} p2={:?})",
+        DEATH_GATE_STASH_VALID[0]
+            .load(Ordering::Acquire)
+            .then(|| DEATH_GATE_STASH[0].load(Ordering::Acquire)),
+        DEATH_GATE_STASH_VALID[1]
+            .load(Ordering::Acquire)
+            .then(|| DEATH_GATE_STASH[1].load(Ordering::Acquire)),
     );
 }
 
-/// Restore the stashed death gate (loop disarm / session end). Refusals
-/// at song boundaries are harmless — the gate is per-actor state and
-/// dies with the actor tree; fresh actors are stock.
+/// Restore each stashed side's death gate (loop disarm / session end).
+/// Refusals at song boundaries are harmless — the gate is per-actor state
+/// and dies with the actor tree; fresh actors are stock.
 pub(super) fn disarm_death_bypass() {
     if !DEATH_GATE_ARMED.swap(false, Ordering::AcqRel) {
         return;
     }
-    if song_reset::set_death_gate(DEATH_GATE_STASH.load(Ordering::Acquire)) {
-        log_info!("TrainingMode: loop death bypass disarmed (stock gate restored)");
+    let mut restored = false;
+    for side in 0..2usize {
+        if DEATH_GATE_STASH_VALID[side].load(Ordering::Acquire)
+            && song_reset::set_death_gate_for_side(
+                side as i32,
+                DEATH_GATE_STASH[side].load(Ordering::Acquire),
+            )
+        {
+            restored = true;
+        }
+    }
+    if restored {
+        log_info!("TrainingMode: loop death bypass disarmed (stock gates restored)");
     }
 }
 
@@ -235,13 +273,7 @@ pub(super) fn on_loop_disarmed() {
     // The death bypass is loop-scoped: with no loop to catch a death, the
     // gate MUST come down or the player could never fail out naturally.
     disarm_death_bypass();
-    if THRESHOLDS_WRITTEN.load(Ordering::Acquire)
-        && STASH_VALID.load(Ordering::Acquire)
-        && song_reset::set_chart_end_thresholds(
-            STASH_DISPLAY_MS.load(Ordering::Acquire),
-            STASH_RAW_MS.load(Ordering::Acquire),
-        )
-    {
+    if THRESHOLDS_WRITTEN.load(Ordering::Acquire) && restore_stock_thresholds() {
         THRESHOLDS_WRITTEN.store(false, Ordering::Release);
         log_info!("TrainingMode: stock end thresholds restored (loop disarmed)");
     }
@@ -380,9 +412,10 @@ fn scrub(side: usize, delta_ms: i32) {
     };
     // A live binding is required on EVERY scrub path: the seek transaction
     // preflights one for t > 0, and gating the t = 0 restart on it too
-    // keeps the scrub confined to training-armed sessions — the scene-26
-    // classifier never arms versus/course, so a scrub can never disturb
-    // the other player's run.
+    // keeps the scrub confined to training-armed sessions (course never
+    // arms). In versus (armable since the 2026-08-31 lift) EITHER player's
+    // scrub seeks the ONE shared clock — both runs move together by
+    // construction, and both sides taint below.
     if song_rate::runtime::active_content_grid().is_none() {
         warn_scrub_once("no live song-rate binding -- scrub unavailable this song");
         return;
@@ -426,7 +459,7 @@ fn scrub(side: usize, delta_ms: i32) {
             // (idempotent); setting SESSION_ACTIVE here is what carries
             // the t = 0 rewind-to-start restart into its predicate.
             SESSION_ACTIVE.store(true, Ordering::Release);
-            score_guard::set_training_taint(side);
+            super::taint_entered_sides();
             super::scrub_indicator::show(delta_ms >= 0);
             log_info!(
                 "TrainingMode: scrub {} -- {} ms -> {} ms (delta {} ms, side {})",
@@ -483,7 +516,7 @@ pub(super) fn clear_markers(reason: &str) -> bool {
 /// plus the Step-4 loop latch and threshold-apply state. The full
 /// song-boundary / mod-disable reset. Written thresholds are restored
 /// first when the run is still live (the mid-song mod-disable case);
-/// the restore is fail-closed on [`song_reset::set_chart_end_thresholds`]'
+/// the restore is fail-closed on [`song_reset::set_chart_end_thresholds_per_side`]'
 /// own gates (live-actor walk, lock-free), so the song-boundary calls
 /// simply refuse against the dying/absent actor tree. Deliberately NO
 /// `scene_manager::current_scene()` read here: this runs inside the
@@ -492,15 +525,14 @@ pub(super) fn clear_markers(reason: &str) -> bool {
 /// (fixed in scene_manager too — callbacks now fire outside the lock —
 /// but this function stays lock-free regardless).
 pub(super) fn clear_session_state(reason: &str) {
-    if THRESHOLDS_WRITTEN.load(Ordering::Acquire)
-        && STASH_VALID.load(Ordering::Acquire)
-        && song_reset::set_chart_end_thresholds(
-            STASH_DISPLAY_MS.load(Ordering::Acquire),
-            STASH_RAW_MS.load(Ordering::Acquire),
-        )
-    {
+    if THRESHOLDS_WRITTEN.load(Ordering::Acquire) && restore_stock_thresholds() {
         log_info!("TrainingMode: stock end thresholds restored ({})", reason);
     }
+    // Death-bypass gate down BEFORE the stash clears below (the disarm
+    // restores from the per-side stashes). Mid-song disable case; at song
+    // boundaries the restore refuses harmlessly against the dying/absent
+    // actor tree — the gate dies with the actors.
+    disarm_death_bypass();
     clear_markers(reason);
     ROW_A_MS.store(0, Ordering::Release);
     ROW_B_MS.store(0, Ordering::Release);
@@ -510,16 +542,17 @@ pub(super) fn clear_session_state(reason: &str) {
     LOOP_LATCHED.store(false, Ordering::Release);
     THRESHOLDS_WRITTEN.store(false, Ordering::Release);
     LOOP_THRESHOLDS_RAISED.store(false, Ordering::Release);
-    STASH_VALID.store(false, Ordering::Release);
-    STASH_DISPLAY_MS.store(0, Ordering::Release);
-    STASH_RAW_MS.store(0, Ordering::Release);
+    STASH_DONE.store(false, Ordering::Release);
+    for side in 0..2usize {
+        STASH_VALID[side].store(false, Ordering::Release);
+        STASH_DISPLAY_MS[side].store(0, Ordering::Release);
+        STASH_RAW_MS[side].store(0, Ordering::Release);
+        DEATH_GATE_STASH_VALID[side].store(false, Ordering::Release);
+        DEATH_GATE_STASH[side].store(false, Ordering::Release);
+    }
     END_APPLY_WARNED.store(false, Ordering::Release);
     SCRUB_COOLING.store(false, Ordering::Release);
     SCRUB_WARNED.store(false, Ordering::Release);
-    // Death-bypass gate down with the rest of the loop state (mid-song
-    // disable case; at song boundaries the restore refuses harmlessly
-    // against the dying actor tree — the gate dies with the actors).
-    disarm_death_bypass();
 }
 
 /// Whether a training session is active for the current song (design
@@ -544,10 +577,11 @@ pub fn row_derived_bounds() -> (i32, i32) {
 /// resolution completed (now or earlier) or none is pending; `false` means
 /// "actors not up yet, retry next frame" (the Step-3 driver's loop).
 ///
-/// The entered side is the side whose ControlMessageActor resolves —
-/// armed sessions are never versus (the scene-26 classifier fails them
-/// closed), so exactly one side carries a live chart end in every session
-/// bounds can engage in.
+/// The governing side is the FIRST side whose ControlMessageActor
+/// resolves — side 0 in versus (both actors live; P1 governs, matching
+/// the scene-26 classifier, and the bound rows are mirrored across sides
+/// by `versus_mirror` so the side choice is value-neutral), the single
+/// entered side otherwise.
 pub fn try_resolve_row_bounds() -> bool {
     if !RESOLUTION_PENDING.load(Ordering::Acquire) {
         return true;
@@ -558,8 +592,8 @@ pub fn try_resolve_row_bounds() -> bool {
         return false;
     };
 
-    // Loop latch (Step 4, design §4.2): the entered side's LOOP SONG
-    // value, once per song. Taken BEFORE the song-coherence gate — the
+    // Loop latch (Step 4, design §4.2): the governing side's LOOP SONG
+    // value, once per song (rows mirrored in versus). Taken BEFORE the song-coherence gate — the
     // loop row is a plain Session row (not song-scoped), so its value is
     // valid whichever song the bound rows were stamped for. Loop-ON is a
     // training session by itself (breakdown decision #2: it loops the
@@ -569,10 +603,11 @@ pub fn try_resolve_row_bounds() -> bool {
         LOOP_LATCHED.store(true, Ordering::Release);
         SESSION_ACTIVE.store(true, Ordering::Release);
         // Step 5 (design §4.7/R5): a latched loop WILL grind this song —
-        // taint the entered side. Deliberately on both digest paths (the
-        // latch precedes the coherence gate): even when stale bound rows
-        // resolve as defaults, the loop still fires.
-        score_guard::set_training_taint(side as usize);
+        // taint every entered side (versus: the loop moves the ONE shared
+        // timeline, so both players' runs are altered). Deliberately on
+        // both digest paths (the latch precedes the coherence gate): even
+        // when stale bound rows resolve as defaults, the loop still fires.
+        super::taint_entered_sides();
         // Step-7 amendment (2026-08-15): a loop session bypasses death —
         // gate the actors' instant-death byte so a gauge empty can never
         // end the run; the driver detects the latched m_isDead and loops
@@ -630,8 +665,9 @@ pub fn try_resolve_row_bounds() -> bool {
     if a_ms > 0 || b_ms > 0 {
         SESSION_ACTIVE.store(true, Ordering::Release);
         // Step 5 (design §4.7/R5): engaged section bounds alter the played
-        // song — taint the entered side's per-stage save.
-        score_guard::set_training_taint(side as usize);
+        // song for EVERY participant (one shared timeline) — taint every
+        // entered side's per-stage save.
+        super::taint_entered_sides();
         log_info!(
             "TrainingMode: row-derived bounds resolved -- a={} ms, b={} ms (chart end {} ms, side {}, start {} s / end {} s)",
             a_ms,
@@ -663,12 +699,7 @@ fn apply_end_policy() {
         section_math::ApplyAction::Write { b_ms } => write_end_thresholds(b_ms),
         section_math::ApplyAction::RaiseThresholds => raise_end_thresholds(),
         section_math::ApplyAction::Restore => {
-            if STASH_VALID.load(Ordering::Acquire)
-                && song_reset::set_chart_end_thresholds(
-                    STASH_DISPLAY_MS.load(Ordering::Acquire),
-                    STASH_RAW_MS.load(Ordering::Acquire),
-                )
-            {
+            if restore_stock_thresholds() {
                 THRESHOLDS_WRITTEN.store(false, Ordering::Release);
                 log_info!("TrainingMode: stock end thresholds restored (section end cleared)");
             } else {
@@ -681,30 +712,62 @@ fn apply_end_policy() {
     }
 }
 
-/// Capture the stock threshold pair once per song (shared by the
-/// truncating write and the loop raise — later writes would stash our
-/// own values). `false` = unreadable (the caller's WARN ladder).
+/// Capture each live side's stock threshold pair once per song (shared by
+/// the truncating write and the loop raise — later writes would stash our
+/// own values). Per-side since the versus-training lift: the sides play
+/// different charts, so each CMA's pair must round-trip through its own
+/// stash. `false` = no side readable (the caller's WARN ladder).
 fn ensure_stock_stash() -> bool {
-    if STASH_VALID.load(Ordering::Acquire) {
-        return true;
+    if STASH_DONE.load(Ordering::Acquire) {
+        return (0..2).any(|side| STASH_VALID[side].load(Ordering::Acquire));
     }
-    let Some((display, raw)) = (0..2).find_map(song_reset::chart_end_thresholds) else {
-        return false;
-    };
-    STASH_DISPLAY_MS.store(display, Ordering::Release);
-    STASH_RAW_MS.store(raw, Ordering::Release);
-    STASH_VALID.store(true, Ordering::Release);
-    true
+    let mut any = false;
+    for side in 0..2usize {
+        if let Some((display, raw)) = song_reset::chart_end_thresholds(side as i32) {
+            STASH_DISPLAY_MS[side].store(display, Ordering::Release);
+            STASH_RAW_MS[side].store(raw, Ordering::Release);
+            STASH_VALID[side].store(true, Ordering::Release);
+            any = true;
+        }
+    }
+    if any {
+        STASH_DONE.store(true, Ordering::Release);
+    }
+    any
+}
+
+/// The per-side restore list from the stash: `(side, display, raw)` for
+/// every stashed side — [`song_reset::set_chart_end_thresholds_per_side`]'s
+/// input shape.
+fn stash_restore_writes() -> Vec<(i32, i32, i32)> {
+    (0..2usize)
+        .filter(|&side| STASH_VALID[side].load(Ordering::Acquire))
+        .map(|side| {
+            (
+                side as i32,
+                STASH_DISPLAY_MS[side].load(Ordering::Acquire),
+                STASH_RAW_MS[side].load(Ordering::Acquire),
+            )
+        })
+        .collect()
+}
+
+/// Restore the stashed stock thresholds on every stashed side
+/// (all-or-nothing through the per-side writer). `false` = nothing
+/// restored (empty stash or the writer refused).
+fn restore_stock_thresholds() -> bool {
+    let writes = stash_restore_writes();
+    !writes.is_empty() && song_reset::set_chart_end_thresholds_per_side(&writes)
 }
 
 /// The `RaiseThresholds` arm of [`apply_end_policy`] (LOOP ON): park the
 /// end cascade by raising the `+0x94` display threshold to the sane-max
 /// sentinel (unreachable — each loop iteration re-anchors the clock).
-/// `+0x98` is written back at its STOCK value: it is never reached with
-/// the cascade parked below step 4, and live readers (marker clamps,
-/// seek clamps, the loop fire bound) stay honest. `0x104A` therefore
-/// never fires mid-grind — it is one-way song-scoped state that strikes
-/// the lane furniture and breaks freeze scoring on later passes
+/// `+0x98` is written back at EACH SIDE'S OWN stock value: it is never
+/// reached with the cascade parked below step 4, and live readers (marker
+/// clamps, seek clamps, the loop fire bound) stay honest. `0x104A`
+/// therefore never fires mid-grind — it is one-way song-scoped state that
+/// strikes the lane furniture and breaks freeze scoring on later passes
 /// (cabinet finding 2026-08-14). Idempotent; failure ⇒ WARN once and
 /// the loop driver falls back to the conservative below-`+0x94` bound.
 fn raise_end_thresholds() {
@@ -717,53 +780,70 @@ fn raise_end_thresholds() {
         );
         return;
     }
-    let stock_raw = STASH_RAW_MS.load(Ordering::Acquire);
-    if !song_reset::set_chart_end_thresholds(song_reset::CHART_END_SANE_MAX_MS, stock_raw) {
+    let writes: Vec<(i32, i32, i32)> = (0..2usize)
+        .filter(|&side| STASH_VALID[side].load(Ordering::Acquire))
+        .map(|side| {
+            (
+                side as i32,
+                song_reset::CHART_END_SANE_MAX_MS,
+                STASH_RAW_MS[side].load(Ordering::Acquire),
+            )
+        })
+        .collect();
+    if writes.is_empty() || !song_reset::set_chart_end_thresholds_per_side(&writes) {
         warn_end_apply_once("threshold raise refused -- loop keeps the conservative fire bound");
         return;
     }
     THRESHOLDS_WRITTEN.store(true, Ordering::Release);
     LOOP_THRESHOLDS_RAISED.store(true, Ordering::Release);
     log_info!(
-        "TrainingMode: end cascade parked for the loop -- +0x94 raised to {} (stock display={}, raw={} ms kept)",
+        "TrainingMode: end cascade parked for the loop -- +0x94 raised to {} on {} side(s) (per-side stock raws kept)",
         song_reset::CHART_END_SANE_MAX_MS,
-        STASH_DISPLAY_MS.load(Ordering::Acquire),
-        stock_raw
+        writes.len()
     );
 }
 
 /// The `Write` arm of [`apply_end_policy`]: stash the stock thresholds
 /// once per song, convert the raw-ms section end into the display domain
-/// through the side's note vector, and write both thresholds on every
-/// live actor's CMA. Any failure fires the WARN-once ladder with the
-/// thresholds untouched — the section end is applied whole or not at all.
+/// through EACH SIDE'S OWN note vector (versus sides play different
+/// charts), and write each side's thresholds on its own CMA. Any failure
+/// on any side fires the WARN-once ladder with the thresholds untouched —
+/// the section end is applied whole (all sides) or not at all.
 fn write_end_thresholds(b_ms: i32) {
     if !ensure_stock_stash() {
         warn_end_apply_once("stock end thresholds unreadable -- natural end");
         return;
     }
-    let Some(notes) =
-        (0..2).find_map(|side| song_reset::decoded_notes(side).filter(|n| !n.is_empty()))
-    else {
-        warn_end_apply_once("note vector unavailable -- natural end");
-        return;
-    };
-    let Some(display_b) = seek::display_for_raw(&notes, b_ms) else {
-        warn_end_apply_once(
-            "display-domain conversion failed (degenerate note vector) -- natural end",
-        );
-        return;
-    };
-    if !song_reset::set_chart_end_thresholds(display_b, b_ms) {
+    let mut writes: Vec<(i32, i32, i32)> = Vec::new();
+    for side in 0..2usize {
+        if !STASH_VALID[side].load(Ordering::Acquire) {
+            continue;
+        }
+        let Some(notes) = song_reset::decoded_notes(side as i32).filter(|n| !n.is_empty()) else {
+            warn_end_apply_once("note vector unavailable -- natural end");
+            return;
+        };
+        let Some(display_b) = seek::display_for_raw(&notes, b_ms) else {
+            warn_end_apply_once(
+                "display-domain conversion failed (degenerate note vector) -- natural end",
+            );
+            return;
+        };
+        writes.push((side as i32, display_b, b_ms));
+    }
+    if writes.is_empty() || !song_reset::set_chart_end_thresholds_per_side(&writes) {
         warn_end_apply_once("threshold write refused -- natural end");
         return;
     }
     THRESHOLDS_WRITTEN.store(true, Ordering::Release);
     log_info!(
-        "TrainingMode: early natural end armed -- thresholds raw={} ms, display={} (stock raw={} ms)",
+        "TrainingMode: early natural end armed -- raw={} ms on {} side(s) (displays {:?})",
         b_ms,
-        display_b,
-        STASH_RAW_MS.load(Ordering::Acquire)
+        writes.len(),
+        writes
+            .iter()
+            .map(|(side, display, _)| (*side, *display))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -823,7 +903,8 @@ fn marker_clamp_bound() -> Option<i32> {
 
 /// Latch A (or B) from the live music count. Refuses silently when no
 /// live count exists (not in a run). `side` is the pressing player's —
-/// the taint target (design §4.7/R5).
+/// log attribution only; the taint covers every entered side (one shared
+/// timeline, design §4.7/R5 as amended by the versus-training lift).
 fn set_marker(which: char, side: usize) {
     let Some(current) = song_reset::current_raw_music_count() else {
         return;
@@ -843,19 +924,24 @@ fn set_marker(which: char, side: usize) {
             // A mid-song gesture makes this a training session (design
             // §4.1's predicate — Step 5's taint consumes the latch).
             SESSION_ACTIVE.store(true, Ordering::Release);
-            score_guard::set_training_taint(side);
+            super::taint_entered_sides();
             crate::services::toast::flash("Set beginning marker");
             log_info!(
-                "TrainingMode: section start A set at {} ms (press 4)",
-                target
+                "TrainingMode: section start A set at {} ms (press 4, side {})",
+                target,
+                side
             );
         }
         _ => {
             B_MS.store(target, Ordering::Release);
             SESSION_ACTIVE.store(true, Ordering::Release);
-            score_guard::set_training_taint(side);
+            super::taint_entered_sides();
             crate::services::toast::flash("Set end marker");
-            log_info!("TrainingMode: section end B set at {} ms (press 6)", target);
+            log_info!(
+                "TrainingMode: section end B set at {} ms (press 6, side {})",
+                target,
+                side
+            );
             // The section end changed: re-evaluate the LOOP OFF early
             // natural end (design §4.2's gesture write point — a B behind
             // the current position ends the song on the next frame's

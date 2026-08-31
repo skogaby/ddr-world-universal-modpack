@@ -802,6 +802,59 @@ pub fn set_chart_end_thresholds(display_ms: i32, raw_ms: i32) -> bool {
     true
 }
 
+/// Write per-side end-cascade threshold pairs: each entry is
+/// `(side, display_ms, raw_ms)` for that side's ControlMessageActor —
+/// the versus-capable sibling of [`set_chart_end_thresholds`] (2026-08-31
+/// versus-training lift: in versus each side plays its OWN chart, so a
+/// single value pair sampled from one side must never be written onto the
+/// other side's CMA). Fail-closed all-or-nothing across the WHOLE list:
+/// `false` with NOTHING written when the list is empty, any value is out
+/// of the sane range, no live run exists, or ANY listed side's actor/CMA
+/// is unresolvable.
+pub fn set_chart_end_thresholds_per_side(writes: &[(i32, i32, i32)]) -> bool {
+    if writes.is_empty() {
+        return false;
+    }
+    for &(_, display_ms, raw_ms) in writes {
+        if !(0..=CHART_END_SANE_MAX_MS).contains(&display_ms)
+            || !(0..=CHART_END_SANE_MAX_MS).contains(&raw_ms)
+        {
+            return false;
+        }
+    }
+    let Some(dps) = live_dps() else {
+        return false;
+    };
+    let actors = gameplay_actors(dps);
+    if actors.is_empty() {
+        return false;
+    }
+    // Resolve every side's CMA BEFORE the first write (refuse-before-write).
+    let mut resolved = Vec::with_capacity(writes.len());
+    for &(side, display_ms, raw_ms) in writes {
+        let mut cma_for_side = None;
+        for actor in &actors {
+            let actor_side = unsafe { memory::read_i32(actor.add(GPA_SIDE_OFFSET)) };
+            if actor_side != side {
+                continue;
+            }
+            cma_for_side = control_message_child(*actor);
+            break;
+        }
+        let Some(cma) = cma_for_side else {
+            return false;
+        };
+        resolved.push((cma, display_ms, raw_ms));
+    }
+    for (cma, display_ms, raw_ms) in resolved {
+        unsafe {
+            memory::write_i32(cma.add(CMA_CHART_END_DISPLAY_OFFSET) as *mut u8, display_ms);
+            memory::write_i32(cma.add(CMA_CHART_END_RAW_OFFSET) as *mut u8, raw_ms);
+        }
+    }
+    true
+}
+
 /// The instant-death gauge gate byte (`GamePlayActor+0x2B7`) of the FIRST
 /// live actor, or `None` when no live run. RE (20260721): the `gauge::DEAD`
 /// chain's `0x103C` handler advances the actor to STEP_GAME_OVER only when
@@ -813,6 +866,43 @@ pub fn death_gate() -> Option<bool> {
     let dps = live_dps()?;
     let actor = *gameplay_actors(dps).first()?;
     Some(unsafe { memory::read_u8(actor.add(GPA_DEATH_GATE_OFFSET)) } != 0)
+}
+
+/// One side's instant-death gauge gate, or `None` when no live run / no
+/// matching actor. The training loop's PER-SIDE death-bypass stash source
+/// (2026-08-31 versus-training lift: sides can run different gauge
+/// classes — one immortal-class with a nonzero stock gate — so a single
+/// first-actor stash restored to both would corrupt the other side).
+pub fn death_gate_for_side(side: i32) -> Option<bool> {
+    let dps = live_dps()?;
+    for actor in gameplay_actors(dps) {
+        let actor_side = unsafe { memory::read_i32(actor.add(GPA_SIDE_OFFSET)) };
+        if actor_side != side {
+            continue;
+        }
+        return Some(unsafe { memory::read_u8(actor.add(GPA_DEATH_GATE_OFFSET)) } != 0);
+    }
+    None
+}
+
+/// Write one side's instant-death gauge gate (the per-side restore half of
+/// the training loop's death bypass). `false` = no live run / no matching
+/// actor, nothing written.
+pub fn set_death_gate_for_side(side: i32, on: bool) -> bool {
+    let Some(dps) = live_dps() else {
+        return false;
+    };
+    for actor in gameplay_actors(dps) {
+        let actor_side = unsafe { memory::read_i32(actor.add(GPA_SIDE_OFFSET)) };
+        if actor_side != side {
+            continue;
+        }
+        unsafe {
+            memory::write_u8(actor.add(GPA_DEATH_GATE_OFFSET) as *mut u8, u8::from(on));
+        }
+        return true;
+    }
+    false
 }
 
 /// Write the instant-death gauge gate on every live actor (the training

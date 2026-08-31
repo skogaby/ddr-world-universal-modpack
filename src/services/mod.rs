@@ -132,6 +132,7 @@ pub mod song_reset;
 pub mod stage_records;
 pub mod texture_resolver;
 pub mod toast;
+pub mod versus_mirror;
 pub mod widget_renderer;
 
 #[cfg(test)]

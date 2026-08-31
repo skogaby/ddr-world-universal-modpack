@@ -106,19 +106,21 @@ pub struct EligibilityInputs {
     /// Full runtime readiness conjunction (identity transaction + clock +
     /// movie policy + full score sanitization), latched by the runtime.
     pub services_ready: bool,
-    /// Per-side desired rate percents (P1, P2) — the entered side's value
-    /// selects the shared rate for both audio and clock. `None` means no
-    /// rate source is registered (the SONG SPEED mod is absent/disabled).
+    /// Per-side desired rate percents (P1, P2) — the governing side's value
+    /// (the single entered side, or P1 in versus — the SONG SPEED mod
+    /// mirrors the rows so both sides agree) selects the shared rate for
+    /// both audio and clock. `None` means no rate source is registered
+    /// (the SONG SPEED mod is absent/disabled).
     pub desired: Option<[i32; 2]>,
-    /// Per-side preserve-pitch flags (P1, P2) — the entered side's value
+    /// Per-side preserve-pitch flags (P1, P2) — the governing side's value
     /// selects the DSP mode (true = WSOLA stretch, false = plain resample).
     /// Plain (not Option): with no option row writing them the runtime
     /// atomics stay at their preserved default, and the flag never affects
     /// the eligibility decision itself.
     pub desired_preserve: [bool; 2],
-    /// Per-side EFFECTIVE sync-background-video flags (P1, P2) — the entered
-    /// side's value decides whether a non-identity arm keeps the movie
-    /// (rate-synced by `movie_sync`'s clock proxy) instead of suppressing
+    /// Per-side EFFECTIVE sync-background-video flags (P1, P2) — the
+    /// governing side's value decides whether a non-identity arm keeps the
+    /// movie (rate-synced by `movie_sync`'s clock proxy) instead of suppressing
     /// it. The runtime pre-ANDs the capability (movie-sync engine
     /// available — platform-uniform since the clock proxy superseded D14,
     /// 2026-08-24). Never affects the eligibility decision itself.
@@ -127,7 +129,8 @@ pub struct EligibilityInputs {
     /// mod before scene 26): an eligible entry at exactly 100% ARMS —
     /// producing an identity-passthrough binding so gestures can seek —
     /// instead of resolving [`IdentityReason::IdentityRate`]. Every other
-    /// gate (course, versus, unknown session, stage) applies unchanged;
+    /// gate (course, unknown session, stage) applies unchanged — versus
+    /// arms since the 2026-08-31 lift (P1 governs, both mask bits);
     /// without the request, identity behavior is bit-for-bit the shipped
     /// pin (100% never arms).
     pub training_arm: bool,
@@ -151,8 +154,6 @@ pub enum IdentityReason {
     UnsupportedRate,
     CourseMode,
     NoSideEntered,
-    /// Two entered sides — local versus is excluded in v1.
-    LocalVersus,
     /// Session pointers unreadable.
     UnknownSession,
     /// Stage counter unavailable.
@@ -163,18 +164,20 @@ pub enum IdentityReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArmRequest {
     pub requested_percent: i32,
-    /// The entered side's preserve-pitch flag (true = pitch-preserved
+    /// The governing side's preserve-pitch flag (true = pitch-preserved
     /// stretch, false = plain resample). Carried to the binding preflight;
     /// never consulted by eligibility.
     pub preserve_pitch: bool,
-    /// The entered side's EFFECTIVE sync-background-video flag (see
+    /// The governing side's EFFECTIVE sync-background-video flag (see
     /// [`EligibilityInputs::desired_sync`]). True on a non-identity arm ⇒
     /// the tentative `MovieSuppressor::SongRate` set is skipped: the movie
     /// graph builds normally and `movie_sync` rate-locks it at graph open.
     /// Never consulted by eligibility.
     pub sync_movie: bool,
-    /// Bit per participating side (bit 0 = P1, bit 1 = P2). Exactly one bit
-    /// in v1 — the single entered side owns the shared rate.
+    /// Bit per participating side (bit 0 = P1, bit 1 = P2). One bit for a
+    /// solo/doubles arm (the single entered side owns the shared rate);
+    /// BOTH bits for a versus arm (the rate — and its score containment —
+    /// applies to both sides; P1's desired values govern).
     pub participant_mask: u8,
     pub stage_index: i32,
 }
@@ -208,11 +211,20 @@ pub fn classify_scene26(inputs: &EligibilityInputs) -> EligibilityDecision {
     let Some(entered) = inputs.entered else {
         return Identity(IdentityReason::UnknownSession);
     };
-    let side = match (entered[0], entered[1]) {
+    let (side, participant_mask) = match (entered[0], entered[1]) {
         (false, false) => return Identity(IdentityReason::NoSideEntered),
-        (true, true) => return Identity(IdentityReason::LocalVersus),
-        (true, false) => 0u8,
-        (false, true) => 1u8,
+        // Local versus arms as a SHARED rate: the mechanism is cabinet-
+        // global (one clock factor, one dance bank), and the SONG SPEED /
+        // training mods mirror both sides' rows while versus is active
+        // (`versus_mirror`), so P1 — the authoritative mirror seed —
+        // governs. Both mask bits: score containment (per-stage
+        // suppression + logout sanitization) applies to both sides.
+        // Training arms included (2026-08-31 versus-training lift):
+        // gestures/loops/bounds move the one shared timeline for both
+        // players by construction.
+        (true, true) => (0u8, 0b11u8),
+        (true, false) => (0u8, 0b01),
+        (false, true) => (1u8, 0b10),
     };
     let requested_percent = desired[usize::from(side)];
     if requested_percent == IDENTITY_PERCENT && !inputs.training_arm {
@@ -231,7 +243,7 @@ pub fn classify_scene26(inputs: &EligibilityInputs) -> EligibilityDecision {
         requested_percent,
         preserve_pitch: inputs.desired_preserve[usize::from(side)],
         sync_movie: inputs.desired_sync[usize::from(side)],
-        participant_mask: 1 << side,
+        participant_mask,
         stage_index,
     })
 }

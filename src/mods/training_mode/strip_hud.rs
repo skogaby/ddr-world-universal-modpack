@@ -203,6 +203,11 @@ const PLACEMENT_LEFT: i32 = 1;
 const PLACEMENT_RIGHT: i32 = 2;
 static PLACEMENT: [AtomicI32; 2] = [AtomicI32::new(PLACEMENT_OFF), AtomicI32::new(PLACEMENT_OFF)];
 static LATCHED_PLACEMENT: AtomicI32 = AtomicI32::new(PLACEMENT_OFF);
+/// Per-song snapshot side filter: the actor play side the once-per-song
+/// snapshot must come from, or `-1` = accept any (solo/doubles — the
+/// shipped behavior). Set alongside the placement latch; `0` in versus
+/// (P1 governs the single strip).
+static SNAPSHOT_SIDE_FILTER: AtomicI32 = AtomicI32::new(-1);
 
 // ── Per-song state machine ───────────────────────────────────────────
 
@@ -338,13 +343,28 @@ pub fn set_placement(side: u8, value: i32) {
     }
 }
 
-/// Latch the ENTERED side's placement for the song (P1 fallback —
-/// solo/doubles only per R8, so exactly one side is entered).
+/// Latch the GOVERNING side's placement for the song: the first entered
+/// side (P1 fallback) — in versus that is P1, matching every other
+/// P1-governs choice of the versus-training lift (TIMELINE PLACEMENT is
+/// mirrored across sides in versus since 2026-08-31, so the side choice
+/// is value-neutral there). Also latches the snapshot
+/// side filter: the HUD is ONE strip, and versus sides play different
+/// charts, so the once-per-song snapshot must come from the governing
+/// side's actor rather than whichever side's judge dispatch lands first
+/// (nondeterministic). Solo/doubles keep the accept-any filter — the
+/// doubles actor's play-side field is not assumed to match the entered
+/// side.
 fn latch_placement() {
-    let side = (0..2usize)
-        .find(|&s| crate::services::stage_records::side_entered(s).unwrap_or(false))
-        .unwrap_or(0);
+    let entered = [
+        crate::services::stage_records::side_entered(0).unwrap_or(false),
+        crate::services::stage_records::side_entered(1).unwrap_or(false),
+    ];
+    let side = if entered[0] || !entered[1] { 0 } else { 1 };
     LATCHED_PLACEMENT.store(PLACEMENT[side].load(Ordering::Acquire), Ordering::Release);
+    SNAPSHOT_SIDE_FILTER.store(
+        if entered[0] && entered[1] { 0 } else { -1 },
+        Ordering::Release,
+    );
 }
 
 /// Whether the latched placement shows the HUD this song (round-4
@@ -522,6 +542,13 @@ fn teardown_song(why: &str) {
 /// model), per the widget/texture threading rule.
 fn on_judge_tick(actor: *mut u8, _music_count: i32) {
     if actor.is_null() || !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    // Versus: only the governing side's actor may take the snapshot (the
+    // Armed phase stays pending until that side's dispatch — same song,
+    // frames apart at most). Solo/doubles: filter −1 accepts any actor.
+    let side_filter = SNAPSHOT_SIDE_FILTER.load(Ordering::Acquire);
+    if side_filter >= 0 && unsafe { memory::read_i32(actor.add(ACTOR_PLAY_SIDE)) } != side_filter {
         return;
     }
     let snapshot_generation = {

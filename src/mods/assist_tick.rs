@@ -83,6 +83,7 @@ use crate::services::se_bank_synth;
 use crate::services::song_rate::clock_patch::{self, RateSnapshot};
 use crate::services::song_rate::tick_domain;
 use crate::services::song_reset;
+use crate::services::versus_mirror;
 use crate::types::game_note::{actor_results_range, for_each_result, kind, state, GameNote};
 use crate::types::scenes::scene;
 use crate::{log_debug, log_info, log_warn};
@@ -151,6 +152,11 @@ const OPT_ID: &str = "assist_tick";
 /// `custom_options.p1/p2.assist_tick_volume`. Shown only while this side's
 /// ASSIST TICK is ON (`ShowWhen::Equals` on [`OPT_ID`]).
 const OPT_VOLUME_ID: &str = "assist_tick_volume";
+/// Versus-mirrored rows (2026-08-31): the tick track is ONE pre-mixed
+/// cabinet-wide cue — both players hear whatever the chosen side baked in —
+/// so divergent per-side values are a fiction. Enable and volume mirror
+/// through the shared `versus_mirror` service (P1 seeds, last writer wins).
+const MIRRORED_OPTIONS: [&str; 2] = [OPT_ID, OPT_VOLUME_ID];
 /// Linear-amplitude percentage bounds and steps — deliberately identical to
 /// the SONG PLAYBACK SPEED row's scroll semantics (design R2). The 25 floor
 /// means the row cannot fully mute; the parent toggle is the mute.
@@ -920,12 +926,16 @@ fn latched_enabled(side: i32) -> bool {
 
 /// Change callback for the `ASSIST TICK` option row. Fires on several threads
 /// (init, render, the ess save/load hook, a background JSON-prime thread), so
-/// the body is an atomic store and nothing else — a panic here would
+/// the body is an atomic store plus the versus-mirror tail — which is a
+/// single atomic load (and a no-op) unless the mirror is engaged, and the
+/// mirror only engages during a live versus session at song select, where
+/// every `on_change` caller is the game/render thread. A panic here would
 /// permanently no-op the callback.
 fn on_option_change(player_side: u8, new_value: i32) {
     if let Some(slot) = ASSIST_TICK_ENABLED.get(player_side as usize) {
         slot.store(new_value != 0, Ordering::Release);
     }
+    versus_mirror::mirror_edit(OPT_ID, player_side, new_value);
 }
 
 /// Clamp to `[VOLUME_MIN, VOLUME_MAX]` and snap to the nearest
@@ -941,12 +951,15 @@ fn normalize_volume(v: i32) -> i32 {
 }
 
 /// Change callback for the `TICK EFFECT VOLUME (%)` child row. Same
-/// multi-thread callers and same atomic-store-only body as
-/// [`on_option_change`].
+/// multi-thread callers, same atomic-store + versus-mirror-tail body as
+/// [`on_option_change`] (the mirror propagates the NORMALIZED value so
+/// both sides land on the same scroll stop).
 fn on_volume_change(player_side: u8, new_value: i32) {
+    let normalized = normalize_volume(new_value);
     if let Some(slot) = TICK_VOLUME.get(player_side as usize) {
-        slot.store(normalize_volume(new_value), Ordering::Release);
+        slot.store(normalized, Ordering::Release);
     }
+    versus_mirror::mirror_edit(OPT_VOLUME_ID, player_side, normalized);
 }
 
 /// This side's TICK EFFECT VOLUME as latched at gameplay entry.
@@ -1413,6 +1426,7 @@ impl Mod for AssistTickMod {
                 Ok(_handle) => {
                     log_info!("AssistTick: registered ASSIST TICK option on the MODS tab");
                     register_volume_row();
+                    versus_mirror::register(&MIRRORED_OPTIONS);
                 }
                 Err(custom_options::RegisterError::Duplicate { .. }) => {
                     for side in 0..2u8 {
@@ -1422,6 +1436,7 @@ impl Mod for AssistTickMod {
                         );
                     }
                     register_volume_row();
+                    versus_mirror::register(&MIRRORED_OPTIONS);
                 }
                 Err(e) => {
                     log_warn!(
@@ -1439,6 +1454,7 @@ impl Mod for AssistTickMod {
     }
 
     fn disable(&mut self) {
+        versus_mirror::unregister(&MIRRORED_OPTIONS);
         if let Some(h) = self.judge_handle.take() {
             judge_hook::unregister(h);
         }

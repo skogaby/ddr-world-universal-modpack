@@ -69,10 +69,31 @@ fn feature_scene_and_path_gates_decline() {
 
 #[test]
 fn entered_side_policy_mirrors_gameplay_eligibility() {
-    // Local versus is excluded (D3 — mirrors IdentityReason::LocalVersus).
+    // Local versus qualifies with P1 governing (gameplay-classifier
+    // parity — the SONG SPEED mod mirrors the rows, P1 as the seed; the
+    // qualifier independently takes P1's values so a torn mirror can
+    // never split the preview from the gameplay rate). P2's values are
+    // distinct to make P1 governance observable.
     let mut inputs = qualifying();
     inputs.entered = [Some(true), Some(true)];
-    assert_eq!(qualify(&inputs), None, "versus");
+    inputs.desired = [75, 150];
+    inputs.preserve = [true, false];
+    assert_eq!(
+        qualify(&inputs),
+        Some(PreviewBindRequest {
+            side: 0,
+            percent: 75,
+            preserve_pitch: true,
+        }),
+        "versus qualifies with P1's values"
+    );
+
+    // Versus with P1 at identity declines even while P2 desires a rate
+    // (P1 governs).
+    let mut inputs = qualifying();
+    inputs.entered = [Some(true), Some(true)];
+    inputs.desired = [100, 150];
+    assert_eq!(qualify(&inputs), None, "versus, P1 at identity");
 
     // No side entered: nothing controls.
     let mut inputs = qualifying();
