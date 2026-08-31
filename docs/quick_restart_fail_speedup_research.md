@@ -510,8 +510,14 @@ same frame thread the loader evaluates them on.
    score not submitted; next song saves normally. The failed stage
    **replays** (no stage consumed).
 3. Gesture during the READY panel (first ~2 s of gameplay, shutter states
-   1–4) or during a natural song end: expect the `shutter not in a
-   fast-path state` log + the natural-death fallback, not a limbo.
+   1–4): ~~expect the `shutter not in a fast-path state` log + the
+   natural-death fallback, not a limbo~~ **WRONG — the fallback IS a limbo
+   pre-song (cabinet-observed 2026-08-31). Superseded by §14: fail takes
+   the fast path (states 4/5 now dismissible), restart is a no-op, the
+   fallback refuses pre-song.** A gesture during a natural song end (DPS
+   8/9, banner pending) still expects the `shutter not in a fast-path
+   state` log + the natural-death fallback (harmless there — the natural
+   tail is already running).
 4. Quick Fail on the final stage: predicate log line + the full natural
    tail (banner + results + session end).
 5. Quick Fail with Premium Free ON: fast path lands at song select, counter
@@ -686,3 +692,130 @@ value governs (the fail is still cabinet-wide); the quick-fail score
 taint applies in both modes (the results *display* reads live state and
 is unaffected by save suppression). Design record:
 `.agents/planning/2026-08-20-skip-results-toggle/design.md`.
+
+## 14. The pre-song READY-window soft lock (2026-08-31)
+
+**Symptom (cabinet-observed):** pressing 3 (quick fail) while the "READY?"
+jacket panel is still on-screen — after the stage loader finishes but
+before the arrows start scrolling — soft-locks the game (only the Test
+Menu button breaks out). Code analysis confirmed quick restart (press 1)
+takes the *identical* path in that window and locks the same way.
+
+**Root cause:** §10's checklist item 3 assumed the natural-death fallback
+was safe "during the READY panel" — it is not. In that window DPS is in
+its **pre-song init states 0..=6** (layout → actors → bank register →
+bank-prepare wait + ready-dwell → timing anchor); the shutter is at
+state 4 (covered) or 5 (`stage_out` reveal in flight), so
+`ensure_shutter_dismissed` (which then accepted only 0/6) refused and
+both gestures fell back to `fail_song` → `force_game_over`. But the
+death flags (`+0x1E8` etc.) are only consulted by DPS's **in-song**
+machinery (state 7 → 8): with the GamePlayActors force-killed mid-init,
+DPS never reaches its state-8 banner request, nothing ever drains the
+shutter, and the scene parks forever — the same limbo class as §4a, now
+from the fallback side. (Restart additionally never reached the in-place
+reset: `song_reset` refuses pre-song by its own "DPS in-song" gate.)
+
+**Fix (shipped 2026-08-31):**
+
+1. **`0x100c` works from states 4/5 too.** The dismiss handler
+   (§4a.3, `FUN_180034c60`) checks only `active kind == 3` — it never
+   reads the current state — and state 7's drain "replays `stage_out` if
+   it never ran" before the out label, so a dismiss from 4 (covered) or
+   5 (revealing) lands in the same verified 7→8→0 idle park as the
+   mid-song 6. `ensure_shutter_dismissed` now accepts
+   `state ∈ {4,5,6} + active 3 + pending −1` (art-load states 1–3 and
+   any pending banner still refuse). Mid-song this is a no-op (the
+   shutter is always 6 there); the new states only occur pre-song.
+2. **Quick fail pre-song = fast path only.** `trigger_fail` detects the
+   window (`dps_pre_song()`: the DPS StackStep read the init sampler
+   already used, `+0x68`/`+0x92`, range-validated; unreadable ⇒ treated
+   as in-song so mid-song behavior is unchanged on layout drift) and
+   takes ONLY the `finish(DPS, 0x19)` fast exit (still behind the
+   session-continues predicate). Any refusal ⇒ the gesture is **ignored**
+   — never the fallback. The quick-fail taint is set only on success
+   (setting it up front would suppress the score of the song about to
+   play on a refused gesture, and `reset_song_taint` can't be used to
+   undo it — it collaterally clears training taints). `skip_results` is
+   moot pre-song (no score exists to show), so the fast exit runs
+   regardless of the pressing side's preference.
+3. **Quick restart pre-song = no-op.** The song hasn't started; a
+   restart is semantically nothing, and no restart shape is safe there
+   (in-place reset refuses, a mid-init fresh-DPS `finish` reload is
+   unvalidated, the fallback locks).
+4. **Structural backstop:** `fail_song` itself refuses when
+   `dps_pre_song()` — no future call path can reintroduce the lock.
+
+**Cabinet verification items:**
+
+- Press 3 during READY (session mid-stream): expect
+  `stage shutter dismissed (4 -> 7 drain)` (or `5 -> 7`) +
+  `quick-fail (pre-song fast) -- finish(25₁ᵢₙdₑₓ)`, landing at song
+  select with no limbo; stage not consumed; next song plays normally.
+  Watch specifically for the old DPS's teardown racing the in-flight
+  song-bank register/prepare (DPS states 4/5) — the select loader's
+  gates B/C should absorb the async settles, but this is the untested
+  half of the pre-song `finish`.
+- Press 3 during READY on the final/extra stage: predicate refusal ⇒
+  `quick-fail ignored during the pre-song READY window` and the song
+  proceeds normally (no taint applied).
+- Press 1 during READY: `restart ignored during the pre-song READY
+  window`, song proceeds normally.
+- Mid-song behavior unchanged (dismiss still logs `6 -> 7`).
+
+### 14.1 The REAL observed limbo: the drain's state-8 wait (2026-08-31, local)
+
+The first fix deploy proved the user's repro was NOT the pre-song window:
+the press landed ~1 s *after* `on audio play` (DPS already in-song, shutter
+at the normal `6/3/-1`), the dismiss verified `6 → 7`, `finish` ran,
+gameplay tore down cleanly — and the post-`finish` watchdog then showed the
+shutter parked at **state 8 for 20 s** with every other loader gate green
+(`gate=1, mgr_loading=0`). A press 20 s into the song on the same install
+drained in 0.03 s. (The "READY banner still visible" was the jacket panel's
+`stage_out` reveal play failing — see below — leaving the panel art
+on-screen after the song had already started.)
+
+Decompile of the update's case 8 (`FUN_180033a50`):
+
+```c
+get_param(mc, 0x1012, "out_end", &a);   // label → frame (0 on miss)
+get_param(mc, 0x1012, "end",     &b);   // DAT_18035dff0 = "end"
+target = max(a, b);
+get_param(mc, 0x1010, &current);
+if (current < target) break;            // wait
+// else: release layer, active = -1, state = 0
+```
+
+and case 7 unconditionally advances to 8 after playing label `"out"`
+(`DAT_18035db90`) — the ONLY thing that moves the clip during the drain.
+
+On this install the `shutter_play` clip has **no labels at all** (afp-access
+warns: `in`, `stage_out`, `ready_out`, `out`, `out_end` all missing; only
+`end` resolves). So: `"out"` play fails → clip never advances; target =
+`frame("end")` > 0. Mid-song the clip already sits at its final frame
+(masked), but early in the song it is still near frame 0 → state 8 waits
+forever → loader gate A never opens → limbo. Timing-dependent, not
+state-machine-dependent — which is why every mid-song test passed and every
+early press hung.
+
+**Fix:** `unblock_shutter_drain` — after the verified `0x100c` dismiss,
+compute state 8's own target (`max(frame("out_end"), frame("end"))` via the
+same label queries) and `SetFrame` (`afp_mc_op` 0xF08) the clip there
+(layer obj at `shutter+0x88+kind*0x10`, mc id at `layer+0x110`). On
+label-less art this satisfies the wait directly; on healthy art state 7's
+`"out"` play re-seeks the playhead anyway, so the write is invisible and
+the stock sub-second out animation still runs. Fail-open (missing layer /
+mc id / both labels ⇒ stock behavior; both-absent means the wait threshold
+is 0 and passes anyway).
+
+Open question: WHY this install's `shutter_play` lacks labels (stock data,
+no shutter art in data_mods) — possibly a libafp/label-table parsing
+difference under this data version. The unblock is correct regardless.
+
+**VALIDATED 2026-08-31 (local CrossOver install):** with
+`unblock_shutter_drain` in place, quick fail AND quick restart succeed at
+every timing — including presses while the READY/jacket panel art is still
+on-screen — with no limbo. The post-`finish` watchdog is kept permanently
+in silent mode: no per-second sampling; on a 20 s timeout it emits ONE gate
+sample (`diag_sample_loader_exit_gate`, still 20260721-RVA-guarded) + a
+LIMBO WARN, so any future limbo self-diagnoses from a single log. The
+gesture-time diag calls were removed (superseded by the watchdog).

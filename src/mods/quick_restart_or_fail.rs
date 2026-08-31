@@ -78,6 +78,41 @@
 //! 2026-05), fail 29→24 (skip results; predicate + repair gated, else the
 //! full natural tail). Cabinet-validated 2026-08-12.
 //!
+//! ## The pre-song READY window (2026-08-31 soft-lock fix)
+//!
+//! Before the song starts (DPS pre-song init states 0..=6 — the "READY?"
+//! banner period), the natural-death fallback is UNSAFE: forcing
+//! `STEP_GAME_OVER` into mid-init GamePlayActors leaves DPS parked in a
+//! pre-song state that never consults the death flags, so its state-8
+//! banner request never fires and nothing drains the shutter — a soft
+//! lock (cabinet-observed for quick-fail; restart took the identical
+//! path). The window is detected by reading the DPS step (`dps_pre_song`)
+//! and handled explicitly:
+//!
+//!   - **Fail (3)**: fast path only. The `0x100c` dismiss works from the
+//!     covering/revealing panel states (4/5) exactly as from the mid-song
+//!     park (the handler only checks `active kind == 3`), so the fast
+//!     `finish(DPS, 0x19)` exit to song select is available for the whole
+//!     READY window. Any gate refusal ⇒ the gesture is IGNORED (never the
+//!     fallback), and the quick-fail taint is only set on success.
+//!   - **Restart (1)**: ignored — the song hasn't started, so a restart is
+//!     semantically a no-op, and no restart shape is safe pre-song.
+//!   - `fail_song` itself refuses pre-song as a structural backstop.
+//!
+//! ## Early-press drain stall (2026-08-31, the limbo actually observed)
+//!
+//! On shutter art whose `shutter_play` clip carries no frame labels, the
+//! drain's state-7 `"out"` play silently fails (the clip never advances)
+//! and state 8's wait (`current >= max(frame("out_end"), frame("end"))`)
+//! never passes while the clip is still near frame 0 — i.e. any dismiss in
+//! the first seconds of the song limbos, while mid-song dismisses are
+//! masked (the clip already sits at its final frame). Fixed by
+//! `unblock_shutter_drain` after every verified dismiss: SetFrame the clip
+//! to the wait's own target. No-op on healthy art (state 7's `"out"` play
+//! re-seeks the playhead anyway); fail-open. A silent post-`finish`
+//! watchdog remains permanently: destination scene within 20 s, or ONE
+//! gate sample + LIMBO WARN.
+//!
 //! See `docs/quick_restart_fail_speedup_research.md` for the full RE record
 //! (§4a the corrected root cause, §4b the fast path) and
 //! `.agents/planning/20260523-bulk-hack-porting/research/quick-restart-pivot.md`
@@ -93,7 +128,7 @@ use crate::mods::mod_menu;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec};
 use crate::services::{
-    input_manager, scene_manager, score_guard, song_reset, stage_records, widget_renderer,
+    bm2d_api, input_manager, scene_manager, score_guard, song_reset, stage_records, widget_renderer,
 };
 use crate::types::buttons::*;
 use crate::types::scenes::scene;
@@ -252,15 +287,23 @@ const SHUTTER_ACTIVE_KIND_OFFSET: usize = 0x310;
 const SHUTTER_PENDING_KIND_OFFSET: usize = 0x314;
 const SHUTTER_KIND_STAGE: i32 = 3;
 /// Shutter states the fast path understands: 0 = idle (layer released),
-/// 6 = the stage panel parked after its `stage_out` reveal (the mid-song
-/// state), 7 = the drain tail entered by the 0x100c dismiss.
+/// 4 = closed/covering (the READY-window park — the jacket panel fully
+/// displayed, waiting for DPS state 5's `stage_out` send), 5 = the
+/// `stage_out` reveal anim in flight, 6 = the stage panel parked after its
+/// reveal (the mid-song state), 7 = the drain tail entered by the 0x100c
+/// dismiss.
 const SHUTTER_STATE_IDLE: i32 = 0;
+const SHUTTER_STATE_COVERED: i32 = 4;
+const SHUTTER_STATE_REVEALING: i32 = 5;
 const SHUTTER_STATE_PARKED_REVEALED: i32 = 6;
 const SHUTTER_STATE_DRAIN_TAIL: i32 = 7;
 const SHUTTER_STATE_MAX: i32 = 8;
 /// The ShutterActor's bannerless stage-panel dismiss: its custom message
-/// handler forces state 7 iff the active kind is 3, leaving the pending
-/// kind untouched — the drain ends parked at idle with NO new banner.
+/// handler forces state 7 iff the active kind is 3 (it does NOT check the
+/// current state — the state-7 drain replays `stage_out` if it never ran,
+/// so a dismiss from 4/5/6 all land in the same 7→8→0 idle-park), leaving
+/// the pending kind untouched — the drain ends parked at idle with NO new
+/// banner.
 const MSG_SHUTTER_DISMISS_STAGE: i32 = 0x100C;
 /// Actor tree-flags offset, the "destruction in progress, dispatch
 /// suppressed" bit (the same guard the game's own message wrappers use),
@@ -271,6 +314,18 @@ const TREE_FLAGS_DISPATCH_SUPPRESSED: u32 = 0x20;
 const TREE_FLAGS_DEAD_MASK: u32 = 0x24;
 /// vtable slot of `agcs::Actor::onMessage(this, msg, param)`.
 const VTBL_ON_MESSAGE_OFFSET: usize = 0x18;
+
+// ── Shutter drain unblock (2026-08-31 early-dismiss limbo fix) ────────
+/// Per-kind layer table on the ShutterActor: the layer OBJECT pointer of a
+/// `shared_ptr<Layer>` pair sits at `+0x88 + kind*0x10` (the control block
+/// at `+0x90 + kind*0x10`) — the `local_200` the update's state waits read.
+const SHUTTER_LAYER_TABLE_OFFSET: usize = 0x88;
+/// AFP MovieClip id on the layer object (`*(u32*)(layer + 0x110)` — the id
+/// every `afp_mc_get_param` in the shutter update targets).
+const SHUTTER_LAYER_MC_ID_OFFSET: usize = 0x110;
+/// `afp_mc_op` SetFrame opcode (BM2D::CMovieClip::SetFrame — same opcode
+/// song_reset uses for the pacemaker clip rewind).
+const MC_OP_SET_FRAME: i32 = 0xF08;
 
 /// `agcs::Sequence::finish(this, nextSceneId_1INDEXED)`.
 type SequenceFinishFn = unsafe extern "C" fn(*mut u8, i32);
@@ -319,6 +374,12 @@ const DPS_READY_TIMER_SEED: f32 = 1000.0;
 /// Generation counter — a new restart invalidates any driver chain still
 /// re-queueing from a previous restart.
 static SAMPLER_GEN: AtomicUsize = AtomicUsize::new(0);
+
+/// First in-song DPS step. Steps 0..=6 are the pre-song init phase (layout,
+/// actors, bank register/prepare, the "READY?" dwell, timing anchor); 7 =
+/// in-song; 8/9 = the natural song-end tail. See the state table in the
+/// `start_restart_init_sampler` doc.
+const DPS_STEP_IN_SONG: i32 = 7;
 
 // --- TEMPORARY limbo-root-cause diagnostics (2026-08-12) -------------------
 // File-relative RVAs on the 20260721 cabinet build ONLY, guarded at runtime
@@ -553,6 +614,43 @@ fn on_input_event(event: &InputEvent) {
     }
 }
 
+/// Read the active `DancePlaySequence`'s current `agcs::StackStep` value
+/// (the same read the restart init sampler uses: `DPS+0x68` indexed by the
+/// u16 at `DPS+0x92`, range-validated). `None` when not in GAMEPLAY, no
+/// active child, or any read is out of range — callers must treat `None`
+/// conservatively for the decision they're gating.
+fn dps_step() -> Option<i32> {
+    if scene_manager::current_scene() != scene::GAMEPLAY {
+        return None;
+    }
+    let ts = scene_manager::current_transition_sequence()?;
+    unsafe {
+        let child = memory::read_ptr(ts.add(ACTIVE_CHILD_OFFSET));
+        if child.is_null() {
+            return None;
+        }
+        let idx = *(child.add(DPS_STEP_INDEX) as *const u16) as usize;
+        if idx >= 5 {
+            return None;
+        }
+        let s = *(child.add(DPS_STEP_BASE + idx * 8) as *const i32);
+        if (0..=15).contains(&s) {
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+/// True when the song provably has NOT started yet (the READY-banner
+/// window: DPS in its pre-song init states 0..=6). An unreadable step
+/// returns `false` — the mid-song paths keep their long-shipped behavior
+/// on any layout surprise; the pre-song special-casing only engages on a
+/// positive identification.
+fn dps_pre_song() -> bool {
+    matches!(dps_step(), Some(s) if s < DPS_STEP_IN_SONG)
+}
+
 /// Walks the active TS → DPS → children chain and returns every child
 /// whose vtable matches `gameplay_actor_vtable`. Empty when not in
 /// gameplay or when the actor tree isn't yet captured.
@@ -608,7 +706,21 @@ unsafe fn force_game_over(actor: *mut u8) {
 /// Shared core of both gestures: optionally arm a one-shot scene redirect,
 /// then force every active GamePlayActor to STEP_GAME_OVER and let the
 /// framework's natural fail flow run.
+///
+/// REFUSES during the pre-song READY window: forcing STEP_GAME_OVER into
+/// mid-init GamePlayActors while DPS is still in its pre-song states
+/// (0..=6) soft-locks — DPS never reaches its state-8 banner request and
+/// nothing else drains the parked shutter (cabinet-observed 2026-08-31).
+/// The gesture triggers gate this themselves; this check is the structural
+/// backstop so no future call path can reintroduce the lock.
 fn fail_song(redirect_target: Option<i32>, label: &str) {
+    if dps_pre_song() {
+        log_warn!(
+            "QuickRestartOrFail: {} refused -- natural-death fallback is unsafe pre-song (READY window)",
+            label
+        );
+        return;
+    }
     let actors = find_gameplay_actors();
     if actors.is_empty() {
         log_warn!(
@@ -800,12 +912,15 @@ fn read_shutter() -> Result<Option<ShutterSnapshot>, &'static str> {
 /// Ensure the shutter cannot block a `finish`-installed successor:
 /// - no shutter actor, or fully idle (state 0, nothing active or pending):
 ///   nothing to do;
-/// - the mid-song stage panel parked at state 6 (active kind 3, no pending
-///   request): send the game's own bannerless dismiss (msg `0x100c` through
-///   the actor's `onMessage`) and verify the synchronous state-7 write took;
-/// - anything else (transitional states, the READY panel at 4, a banner
-///   request already in flight): refuse — the caller falls back to the
-///   natural fail flow.
+/// - the stage panel active with no pending request — covering at state 4
+///   (the READY window), revealing at 5, or parked-revealed at 6 (mid-song):
+///   send the game's own bannerless dismiss (msg `0x100c` through the
+///   actor's `onMessage`) and verify the synchronous state-7 write took
+///   (the handler only checks `active kind == 3`; state 7's drain replays
+///   or finishes the out label as needed, so all three entry states land
+///   in the same 7→8→0 idle park);
+/// - anything else (art-load transitional states 1–3, a banner request
+///   already in flight): refuse — the caller falls back.
 fn ensure_shutter_dismissed(label: &str) -> bool {
     let shutter = match read_shutter() {
         Ok(s) => s,
@@ -822,8 +937,10 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
         return true;
     }
 
-    if s.state == SHUTTER_STATE_PARKED_REVEALED
-        && s.active_kind == SHUTTER_KIND_STAGE
+    if matches!(
+        s.state,
+        SHUTTER_STATE_COVERED | SHUTTER_STATE_REVEALING | SHUTTER_STATE_PARKED_REVEALED
+    ) && s.active_kind == SHUTTER_KIND_STAGE
         && s.pending_kind < 0
     {
         unsafe {
@@ -872,7 +989,12 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
                 return false;
             }
         }
-        log_info!("QuickRestartOrFail: stage shutter dismissed (6 -> 7 drain) for {label}");
+        log_info!(
+            "QuickRestartOrFail: stage shutter dismissed ({} -> 7 drain) for {}",
+            s.state,
+            label
+        );
+        unblock_shutter_drain(s.actor);
         return true;
     }
 
@@ -886,8 +1008,69 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
     false
 }
 
-/// The fast path's shared trigger: gate, dismiss the stage shutter, then
-/// `finish(DPS, target_1idx)`.
+/// Fast-forward the shutter clip past the drain's wait target (the
+/// 2026-08-31 early-dismiss limbo fix).
+///
+/// The drain's state 8 waits on `current_frame >= max(frame("out_end"),
+/// frame("end"))`, and the only thing that advances the clip is state 7's
+/// `"out"` label play. On shutter art whose `shutter_play` clip carries no
+/// labels (observed on a stock-data CrossOver install: `in`, `stage_out`,
+/// `ready_out`, `out`, `out_end` all missing — only `end` resolves), that
+/// play silently fails, so the clip never moves. Mid-song that's masked —
+/// the clip long since sits at its final frame, so the wait passes
+/// instantly — but a dismiss in the first seconds of the song finds the
+/// clip still near frame 0 and state 8 parks forever (the watchdog-caught
+/// `shutter=8` limbo).
+///
+/// Fix: compute state 8's own target (same label queries the game makes)
+/// and SetFrame the clip there. On label-less art this satisfies the wait
+/// directly; on healthy art state 7's `"out"` play re-seeks the playhead
+/// anyway, so the write is a harmless no-op visually and the natural
+/// sub-second out animation still runs. Fail-open: any unresolved id or
+/// failed lookup just leaves the drain to its stock behavior.
+fn unblock_shutter_drain(actor: *mut u8) {
+    unsafe {
+        let kind = *(actor.add(SHUTTER_ACTIVE_KIND_OFFSET) as *const i32);
+        if kind != SHUTTER_KIND_STAGE {
+            return;
+        }
+        let layer =
+            *(actor.add(SHUTTER_LAYER_TABLE_OFFSET + kind as usize * 0x10) as *const *const u8);
+        if layer.is_null() {
+            // State 8 treats a missing layer as "drain complete" — nothing
+            // to unblock.
+            return;
+        }
+        let mc_id = *(layer.add(SHUTTER_LAYER_MC_ID_OFFSET) as *const u32);
+        if mc_id == 0 {
+            return;
+        }
+        let out_end = bm2d_api::mc_frame_by_label(mc_id, c"out_end");
+        let end = bm2d_api::mc_frame_by_label(mc_id, c"end");
+        let target = out_end.unwrap_or(0).max(end.unwrap_or(0));
+        if target == 0 {
+            // Both labels absent (or bm2d API unavailable): the wait's
+            // threshold is 0, which any current frame satisfies — the
+            // drain completes on its own.
+            log_info!(
+                "QuickRestartOrFail: shutter drain unblock skipped (out_end={:?} end={:?} -- wait target 0)",
+                out_end,
+                end
+            );
+            return;
+        }
+        let ok = bm2d_api::mc_op(mc_id, MC_OP_SET_FRAME, target as i32);
+        log_info!(
+            "QuickRestartOrFail: shutter clip fast-forwarded to drain target frame {} (out_end={:?} end={:?} ok={})",
+            target,
+            out_end,
+            end,
+            ok
+        );
+    }
+}
+
+/// The fast path's shared trigger: gate, dismiss the stage shutter, then/// `finish(DPS, target_1idx)`.
 ///
 /// Gates (any failure returns `false` — caller falls back):
 ///   1. `sequence_finish` + `shutter_actor_global` resolved.
@@ -958,17 +1141,70 @@ fn try_fast_finish(target_1idx: i32, label: &str) -> bool {
     );
     let finish: SequenceFinishFn = unsafe { std::mem::transmute(finish_addr) };
     unsafe { finish(child, target_1idx) };
+    // Permanent safety net: silently watch the finish-installed loader
+    // reach its destination; a limbo (it happened twice: the parked-6
+    // shutter in 2026-08, the label-less drain stall in 2026-08-31)
+    // self-diagnoses with one gate sample + WARN instead of a mute hang.
+    start_finish_watchdog(target_1idx);
     true
 }
 
-/// TEMPORARY (2026-08-12): sample the `LoadingSequence` gate inputs at
-/// gesture time and log them — pure reads plus calls into the game's own
-/// read-only readiness predicates, on the frame thread (the same thread the
-/// loader evaluates them on). First cabinet pass confirmed the root cause:
-/// `loader exit gate=1` (bg system ready) with `shutter=6` (the mask-apply
-/// gate blocked by the parked stage panel). Kept for one more deploy to
-/// watch the fast path; fires only on the 20260721 cabinet build (guarded
-/// by the resolved `sequence_finish` RVA); one log line per gesture, no
+/// Post-`finish` watchdog: wait (silently) for the destination scene
+/// (restart: back at GAMEPLAY with a live DPS; fail: SONG_SELECT). If it
+/// has not arrived within 20 s, sample the loader's gate inputs once
+/// (shutter state / mgr_loading / bg readiness terms — the RVA-guarded
+/// `diag_sample_loader_exit_gate`) and WARN: the sample names the blocked
+/// gate so a future limbo is diagnosable from a single log. Pure reads on
+/// the render thread via the self-requeue pattern; a newer gesture's
+/// watchdog supersedes an older one.
+static WATCHDOG_GEN: AtomicUsize = AtomicUsize::new(0);
+
+fn start_finish_watchdog(target_1idx: i32) {
+    if !widget_renderer::is_available() {
+        return;
+    }
+    let gen = WATCHDOG_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    watchdog_tick(gen, Instant::now(), target_1idx);
+}
+
+fn watchdog_tick(gen: usize, started: Instant, target_1idx: i32) {
+    widget_renderer::run_on_render_thread(move || {
+        if WATCHDOG_GEN.load(Ordering::Acquire) != gen {
+            return;
+        }
+        let scene = scene_manager::current_scene();
+        let arrived = match target_1idx {
+            STAGE_LOADER_1IDX => scene == scene::GAMEPLAY && dps_step().is_some(),
+            _ => scene == scene::SONG_SELECT,
+        };
+        if arrived {
+            log_info!(
+                "QuickRestartOrFail[watchdog]: destination scene {} reached at {:.2}s",
+                scene,
+                started.elapsed().as_secs_f32()
+            );
+            return;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            diag_sample_loader_exit_gate("watchdog timeout");
+            log_warn!(
+                "QuickRestartOrFail[watchdog]: loader did NOT complete within 20s (scene {}) -- LIMBO (gate sample above)",
+                scene
+            );
+            return;
+        }
+        watchdog_tick(gen, started, target_1idx);
+    });
+}
+
+/// Sample the `LoadingSequence` gate inputs and log them — pure reads plus
+/// calls into the game's own read-only readiness predicates, on the frame
+/// thread (the same thread the loader evaluates them on). Now fired only
+/// by the post-`finish` watchdog on a limbo timeout: the one line names
+/// the blocked gate (it identified BOTH historical limbo causes — the
+/// parked-6 shutter in 2026-08 and the state-8 drain stall in 2026-08-31).
+/// Fires only on the 20260721 build (guarded by the resolved
+/// `sequence_finish` RVA — the raw-RVA reads below are build-specific); no
 /// game state modified.
 fn diag_sample_loader_exit_gate(label: &str) {
     let finish_addr = SEQUENCE_FINISH.load(Ordering::Acquire) as usize;
@@ -1116,6 +1352,30 @@ fn session_continues_after_results_skip() -> bool {
 /// `skip_results_fast_exit` preference governs (the fail itself is
 /// cabinet-wide either way).
 fn trigger_fail(presser_side: usize) {
+    // READY-banner window (DPS pre-song init, before the arrows scroll):
+    // the natural-death fallback is UNSAFE here — forcing STEP_GAME_OVER
+    // into mid-init GamePlayActors leaves DPS parked in a pre-song state
+    // that never consults the death flags, a soft lock (cabinet-observed
+    // 2026-08-31). Only the fast `finish` is taken: the shutter dismiss
+    // handles the covering/revealing panel (states 4/5) the same way as
+    // the mid-song park. Any refusal ⇒ the gesture is IGNORED (never the
+    // fallback). The taint is set only on success — a refused pre-song
+    // gesture must not suppress the score of the song about to play (and
+    // `reset_song_taint` would collaterally clear training taints).
+    // SKIP RESULTS is moot pre-song (there is no score to show), so the
+    // fast exit is taken regardless of the pressing side's preference.
+    if dps_pre_song() {
+        let session_continues = !is_course() && session_continues_after_results_skip();
+        if session_continues && try_fast_finish(SELECT_LOADER_1IDX, "quick-fail (pre-song fast)") {
+            score_guard::set_quick_fail();
+            return;
+        }
+        log_info!(
+            "QuickRestartOrFail: quick-fail ignored during the pre-song READY window (no safe exit path)"
+        );
+        return;
+    }
+
     // A quick failure fails out both sides at once, so the resulting play is
     // incomplete for everyone. Taint the score guard so neither side's score is
     // submitted for this song (and the session's logout save is sanitised too).
@@ -1136,8 +1396,6 @@ fn trigger_fail(presser_side: usize) {
         fail_song(None, "quick-fail (show results)");
         return;
     }
-
-    diag_sample_loader_exit_gate("quick-fail");
 
     // Both fail shapes skip ResultSequence — the game's only session-over
     // decision — so both require the session-continues predicate. Courses
@@ -1170,6 +1428,17 @@ fn trigger_fail(presser_side: usize) {
 fn trigger_restart() {
     if is_course() {
         log_info!("QuickRestartOrFail: restart blocked (course mode)");
+        return;
+    }
+    // READY-banner window: the song hasn't started, so a "restart" is a
+    // no-op semantically — and every restart shape is unsafe here (the
+    // in-place reset refuses pre-song by its own gates, a mid-init fresh-DPS
+    // `finish` reload is unvalidated, and the natural-death fallback
+    // soft-locks — cabinet-observed for quick-fail 2026-08-31, same path).
+    if dps_pre_song() {
+        log_info!(
+            "QuickRestartOrFail: restart ignored during the pre-song READY window (song not started)"
+        );
         return;
     }
     // A press while a previous restart's in-place reset is still in
@@ -1248,8 +1517,6 @@ fn trigger_restart() {
         }
         song_reset::ResetOutcome::Refused | song_reset::ResetOutcome::Unsupported => {}
     }
-
-    diag_sample_loader_exit_gate("quick-restart");
 
     // Fast path: dismiss the parked stage shutter, then finish(DPS, 0x1C)
     // into the 0-idx 27 stage loader; getNextID(0x1C) = 0x1D builds a fresh
