@@ -3089,3 +3089,221 @@ fn edit_clone_segment_with_new_shapes_shared_chain() {
         .clone_segment_with_new_shapes("marbelous_in", "x_in", &[99])
         .is_none());
 }
+
+// ── SegmentCloneOpts (Step 9: looping/recolored segment clones) ─────
+
+/// Looping-segment fixture shaped like result_fc's `loop_mfc`: shape 60 =
+/// word art (re-pointed), 61 = other art (shared); wrapper sprites 70/71;
+/// frame 0 (labeled) creates both objects, frame 1 carries a pure-HSL
+/// update on EACH object plus the `gotoAndPlay(loop_m)` DoAction.
+fn looping_segment_fixture() -> Ap2Doc {
+    let mut b = FixtureBuilder::new("result_fx");
+    b.push_shape(&[], 7, 60);
+    b.push_shape(&[], 7, 61);
+    let s70 = b.push_sprite(&[], 70);
+    b.push_place(
+        &[s70],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 200,
+            source_tag_id: Some(60),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_frame(&[s70], 0, 1);
+    let s71 = b.push_sprite(&[], 71);
+    b.push_place(
+        &[s71],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 201,
+            source_tag_id: Some(61),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_frame(&[s71], 0, 1);
+    // Frame 0 (segment start): create word (100@d8, src 70) + other
+    // (101@d9, src 71).
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 8,
+            object_id: 100,
+            source_tag_id: Some(70),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 9,
+            object_id: 101,
+            source_tag_id: Some(71),
+            ..Default::default()
+        },
+        None,
+    );
+    let label_off = b.intern("loop_m");
+    // Frame 0 covers the dictionary + the two creates (the recipe's donor
+    // lookup needs the shape definitions inside an executed span).
+    b.push_frame(&[], 0, 6);
+    let mut doc = b.finish();
+    // Frame 1: pure-HSL updates (flags 0x20000001 = update + HSL, tail =
+    // <hbb> hue/sat/light) on both objects + the loop DoAction.
+    let hsl = |depth: u16, obj: u16| -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&0x2000_0001u32.to_le_bytes());
+        d.extend_from_slice(&depth.to_le_bytes());
+        d.extend_from_slice(&obj.to_le_bytes());
+        d.extend_from_slice(&[3, 0, 0, 0]); // hue 3, sat 0, light 0
+        d
+    };
+    // DoAction: FF sentinel, flags 1, one string-table entry = loop_m,
+    // then dummy bytecode bytes.
+    let mut action = vec![0xFF, 0x01];
+    action.extend_from_slice(&1u16.to_le_bytes());
+    action.extend_from_slice(&label_off.to_le_bytes());
+    action.extend_from_slice(&[0x00, 0x00]);
+    doc.root.tags.push(Tag::PlaceObject(PlaceObject {
+        data: hsl(8, 100),
+        pad: Vec::new(),
+    }));
+    doc.root.tags.push(Tag::PlaceObject(PlaceObject {
+        data: hsl(9, 101),
+        pad: Vec::new(),
+    }));
+    doc.root.tags.push(Tag::Opaque(OpaqueTag {
+        tag_id: TAG_DO_ACTION,
+        data: action,
+        pad: Vec::new(),
+    }));
+    doc.root.frames.push(FrameSpan {
+        start_tag: 6,
+        tag_count: 3,
+    });
+    doc.root.labels.push(Label {
+        frame: 0,
+        name_offset: label_off,
+        name: "loop_m".into(),
+    });
+    doc
+}
+
+/// Collect the PlaceObject views + DoAction payloads of a label's segment.
+fn segment_records(sec: &TagSection, label: &str) -> (Vec<PlaceObjectView>, Vec<Vec<u8>>) {
+    let start = sec.label_frame(label).unwrap() as usize;
+    let mut places = Vec::new();
+    let mut actions = Vec::new();
+    for f in &sec.frames[start..] {
+        let s = f.start_tag as usize;
+        for t in &sec.tags[s..s + f.tag_count as usize] {
+            match t {
+                Tag::PlaceObject(po) => places.push(po.view().unwrap()),
+                Tag::Opaque(o) if o.tag_id == TAG_DO_ACTION => actions.push(o.data.clone()),
+                _ => {}
+            }
+        }
+    }
+    (places, actions)
+}
+
+#[test]
+fn edit_clone_opts_drops_hsl_updates_on_remapped_only() {
+    let mut doc = looping_segment_fixture();
+    let res = doc
+        .clone_segment_with_new_shapes_ex(
+            "loop_m",
+            "loop_sm",
+            &[60],
+            SegmentCloneOpts {
+                drop_hsl_updates_on_remapped: true,
+                retarget_actions: false,
+            },
+        )
+        .expect("clone");
+    assert_eq!(res.shapes.len(), 1);
+    let out = doc.serialize().expect("serialize");
+    let re = Ap2Doc::parse(&out).expect("re-parse");
+    let (places, _) = segment_records(&re.root, "loop_sm");
+    // Segment frames moved by +2 ⇒ object ids rebased +2 (id==death-frame
+    // rule). The word's HSL update (100@d8 → 102@d8) is DROPPED; the
+    // non-remapped object's HSL update (101@d9 → 103@d9) is KEPT.
+    let updates: Vec<_> = places.iter().filter(|v| v.flags & 0x1 != 0).collect();
+    assert_eq!(updates.len(), 1, "exactly one HSL update survives");
+    assert_eq!((updates[0].object_id, updates[0].depth), (103, 9));
+    // Both creates survive.
+    assert_eq!(places.iter().filter(|v| v.flags & 0x1 == 0).count(), 2);
+}
+
+#[test]
+fn edit_clone_opts_retargets_do_action_label() {
+    let mut doc = looping_segment_fixture();
+    doc.clone_segment_with_new_shapes_ex(
+        "loop_m",
+        "loop_sm",
+        &[60],
+        SegmentCloneOpts {
+            drop_hsl_updates_on_remapped: false,
+            retarget_actions: true,
+        },
+    )
+    .expect("clone");
+    let out = doc.serialize().expect("serialize");
+    let re = Ap2Doc::parse(&out).expect("re-parse");
+    // The SOURCE segment's DoAction still points at loop_m; the CLONE's
+    // points at loop_sm.
+    let (_, src_actions) = segment_records(&re.root, "loop_m");
+    let (_, new_actions) = segment_records(&re.root, "loop_sm");
+    // segment_records walks label-frame..end, so the source walk sees both
+    // copies — take the FIRST (stock) one.
+    let entry = |d: &[u8]| u16::from_le_bytes([d[4], d[5]]);
+    assert_eq!(re.strings.get(entry(&src_actions[0])), Some("loop_m"));
+    assert_eq!(new_actions.len(), 1);
+    assert_eq!(re.strings.get(entry(&new_actions[0])), Some("loop_sm"));
+}
+
+#[test]
+fn edit_clone_opts_default_matches_plain_clone() {
+    let mut a = looping_segment_fixture();
+    let mut b = looping_segment_fixture();
+    a.clone_segment_with_new_shapes("loop_m", "loop_sm", &[60])
+        .expect("plain");
+    b.clone_segment_with_new_shapes_ex("loop_m", "loop_sm", &[60], SegmentCloneOpts::default())
+        .expect("ex default");
+    assert_eq!(a.serialize().unwrap(), b.serialize().unwrap());
+}
+
+#[test]
+fn write_sorts_label_table_by_name() {
+    // The engine binary-searches label tables by NAME (libafp
+    // FUN_18011dcc0) — the serializer must emit name-sorted regardless of
+    // the model's vec order (Step-10 hardening).
+    let mut b = FixtureBuilder::new("sortfix");
+    b.push_shape(&[], 7, 10);
+    b.push_frame(&[], 0, 1);
+    b.push_frame(&[], 1, 0);
+    let mut doc = b.finish();
+    // Deliberately UNSORTED append order: zz first, aa second.
+    let zz = doc.strings.intern("zz_label").unwrap();
+    let aa = doc.strings.intern("aa_label").unwrap();
+    doc.root.labels.push(Label {
+        frame: 0,
+        name_offset: zz,
+        name: "zz_label".into(),
+    });
+    doc.root.labels.push(Label {
+        frame: 1,
+        name_offset: aa,
+        name: "aa_label".into(),
+    });
+    let out = doc.serialize().expect("serialize");
+    let re = Ap2Doc::parse(&out).expect("re-parse");
+    let names: Vec<&str> = re.root.labels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["aa_label", "zz_label"]);
+    // Frames still pair with their names.
+    assert_eq!(re.root.label_frame("aa_label"), Some(1));
+    assert_eq!(re.root.label_frame("zz_label"), Some(0));
+}

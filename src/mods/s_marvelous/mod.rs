@@ -18,6 +18,7 @@ pub mod assets;
 pub mod combo;
 pub mod flash;
 pub mod records;
+pub mod results_emblem;
 pub mod results_graph;
 pub mod results_score;
 pub mod splash;
@@ -42,6 +43,7 @@ pub struct SMarvelousMod {
     splash_installed: bool,
     results_installed: bool,
     graph_installed: bool,
+    emblem_installed: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -54,6 +56,7 @@ impl SMarvelousMod {
             splash_installed: false,
             results_installed: false,
             graph_installed: false,
+            emblem_installed: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -133,6 +136,10 @@ impl Mod for SMarvelousMod {
             // Judgement graph (Step 8): rebuild/append/legend detours.
             // Best-effort — without them the graph stays stock.
             self.graph_installed = results_graph::install(ctx.signatures);
+            // FC emblems (Step 9): results-build + total-results detours.
+            // Best-effort per surface — without them the emblems stay
+            // stock (violet stage emblem and/or total badge).
+            self.emblem_installed = results_emblem::install(ctx.signatures);
         }
         true
     }
@@ -228,6 +235,13 @@ impl Mod for SMarvelousMod {
             results_graph::activate();
         }
 
+        // FC emblems (Step 9): stage the result_root patch + violet word
+        // region + total-results badge texture. Best-effort — failure
+        // leaves stock emblems.
+        if self.emblem_installed {
+            results_emblem::activate();
+        }
+
         log_info!("SMarvelous: enabled (window {} ms)", window);
     }
 
@@ -238,6 +252,7 @@ impl Mod for SMarvelousMod {
         splash::deactivate();
         results_score::deactivate();
         results_graph::deactivate();
+        results_emblem::deactivate();
         state::disarm_all();
         state::reset_song_state();
         if let Some(id) = self.scene_cb_id.take() {

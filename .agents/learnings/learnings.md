@@ -578,3 +578,85 @@ Diagnostic craft from the same session:
   the broken screen (live vs frozen presentation), re-bind to program 0
   with a plain quad (shader-specific vs draw-path), strip one state
   record at a time. Each test killed a whole theory class in one run.
+
+## Multi-needle AOB scanning: aho-corasick find_iter is NON-OVERLAPPING across patterns (2026-08-30)
+
+`scan_patterns_batch` built ONE aho-corasick automaton over every
+signature's literal run and iterated with `find_iter` — which yields
+non-overlapping matches across the WHOLE automaton, so one signature's
+needle hit was consumed by a DIFFERENT signature's earlier-ending hit over
+shared bytes. Function prologues are near-identical across MSVC builds
+(`40 55 41 54 41 55 41 56 41 57`-class idioms), making silent collisions
+routine: `graph_tab_rebuild` scanned "not found" while its bytes sat in
+the DLL. Fixed with `find_overlapping_iter` in all three scanner paths
+(single, all-matches, batch); a host repro over the real DLL bytes plus
+all ~110 signature patterns pinned it. HABITS: (1) byte-verify every new
+AOB against the CABINET DLL FILE (`$INSTALL/modules/gamemdx.dll`), not
+just Ghidra — Ghidra search doesn't use your scanner; (2) when a
+signature that "must" match doesn't, suspect the scanner before the
+pattern.
+
+## Raw vtable slot reads: keep the pointer type and the offset unit together (2026-08-30)
+
+`vtable.add(0x98 / 8)` on a `*const u8` advanced 19 BYTES (mid-slot read →
+wild call → crash at the first combo repaint). Either keep `*const u8`
+and offset in BYTES (`.add(0x98)`), or cast to `*const usize` and offset
+in SLOTS (`.add(0x98 / 8)`); mixing the conventions is one keystroke
+away. A phase-logged bisect build (bracket each sub-step of the FIRST
+event only) pinned it in one deploy cycle — cheap and reusable.
+
+## MSVC vector<string> elements are 0x28-stride — never re-derive game ABI structs (2026-08-30)
+
+The game's `std::string` as a VECTOR ELEMENT is 16-byte SSO union + u64
+len + u64 cap + **8 bytes trailing pad** (0x28). A hand-re-derived
+0x20-stride array read as ZERO elements when game code walked it at its
+own stride (blank glyph row on cabinet; music_wheel had hit the same
+layout in 2026-08). Cabinet-proven ABI layouts now live in
+`core/msvc.rs` (`MsvcString`/`MsvcVec<T>`/`SharedPtrPair`) — copy from
+there, never re-derive. Related: `GameString::set` clamps >15-byte SSO
+names to empty instead of panicking — hook paths must not panic over art
+naming mistakes.
+
+## Ride the game's own helper MID-CALL instead of replicating its layout (2026-08-30)
+
+The s-marvelous results surfaces (Steps 7–9) added native-looking UI with
+ZERO layout math by detouring the game's own populate/build functions and
+CALLING ITS OWN HELPERS with mod data: the row-write helper pushes a
+widget into the tab's own vector (game owns layout + destruction); the
+chart-append fn deep-copies a stack-local series (the color functor's
+vftable captured LIVE from the incoming argument before the original
+consumes it); the legend fn re-called with the still-live stack ctx
+advances the cursor for us. When a stock call site provides exactly the
+side effect needed, injecting AROUND it (pre/post-original with the same
+arguments' machinery) beats reimplementing the widget pipeline.
+
+## AP2/AFP engine invariants (s-marvelous Steps 2–9, all cabinet-caught)
+
+1. Label tables are BINARY-SEARCHED by name (libafp) — store name-sorted;
+   bemaniutils scans linearly and cannot catch a violation (the
+   serializer now sorts on write).
+2. Object id doubles as the object's DEATH FRAME: the frame executor's
+   catch-up only creates when `object_id > target_frame`. Cloned
+   placements must shift ids by the frame distance the segment moved.
+3. Geos load STRICTLY from the afplist `<geo>` id list at IFS mount — no
+   on-demand MD5 fallback; register afplist extensions for new shapes.
+4. Several IFS families store texture data PER-IMAGE (`tex/md5(name)`),
+   not as atlas blobs — serve per-image PNGs; `mc_load_bitmap` binds by
+   texturelist name alone (no geo needed for bitmap-loaded art).
+5. Templates carry label sets in MULTIPLE sections (root + inner sprite,
+   "dual timeline") — clone into EVERY section carrying the label; and
+   in result_root the label section and the DICTIONARY are split (label
+   in a nested sprite, definitions in root) — sprite closures must be
+   SEGMENT-SCOPED and DOWNWARD or they absorb the scene.
+6. `mc_op(0xF09)`'s internal label-lookup failure is SWALLOWED (returns
+   success) — pre-check with the 0x1012 label→frame lookup when you need
+   an observable; `0xF08` numeric seeks CLAMP on outer wrapper mcs whose
+   total reads as 1.
+7. Looping segments end in a `gotoAndPlay(<label>)` DoAction — a cloned
+   segment must retarget the bytecode's string-table entry or it loops
+   back into the STOCK segment (DoAction data: FF sentinel, flags&1 ⇒
+   u16 count @+2, u16 LE string-table offsets @+4; match entries by
+   TARGET STRING, not offset).
+8. Dev harness legs must exercise the DLL's ACTUAL code path (shared fn,
+   extracted tables) — a parallel reimplementation validated a resolver
+   the DLL didn't have (deploy #3).

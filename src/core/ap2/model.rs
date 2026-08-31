@@ -22,6 +22,11 @@ use super::align4;
 pub const TAG_DEFINE_FONT: u16 = 0x78;
 /// `AP2_DEFINE_SPRITE` — recursive nested tag section.
 pub const TAG_DEFINE_SPRITE: u16 = 0x79;
+
+/// `AP2_DO_ACTION` — frame bytecode (gotoAndPlay loops etc.); carried
+/// opaquely, with a spliceable string-offset table header (edit.rs
+/// `retarget_do_action_strings`).
+pub const TAG_DO_ACTION: u16 = 0x7A;
 /// `AP2_DEFINE_TEXT` — carried opaquely; named for the definition-tag
 /// classification in `edit.rs`.
 pub const TAG_DEFINE_TEXT: u16 = 0x7D;

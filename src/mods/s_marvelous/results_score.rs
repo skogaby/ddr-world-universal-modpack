@@ -55,6 +55,7 @@ use retour::GenericDetour;
 
 use crate::core::ap2::Ap2Doc;
 use crate::core::memory;
+use crate::core::msvc::{MsvcString, MsvcVec, SharedPtrPair};
 use crate::core::signatures::SignatureStore;
 use crate::services::{afp_patcher, stage_records};
 use crate::{log_info, log_warn};
@@ -119,7 +120,7 @@ type RowWriteFn = unsafe extern "C" fn(
     *const MsvcString,
 ) -> *mut SharedPtrPair;
 /// `sequence::SpriteLayer::SetBitmaps(this, names)` — copy-assigns.
-type SetNamesFn = unsafe extern "C" fn(*mut u8, *const MsvcVec) -> *mut u8;
+type SetNamesFn = unsafe extern "C" fn(*mut u8, *const MsvcVec<MsvcString>) -> *mut u8;
 
 /// The ctx pair the row-write helper reads: `[0]` = parent wrapper
 /// (`*(tab+0x110)`), `[1]` = the tab (for the widget-vector push).
@@ -127,69 +128,6 @@ type SetNamesFn = unsafe extern "C" fn(*mut u8, *const MsvcVec) -> *mut u8;
 struct RowCtx {
     wrapper: *mut u8,
     tab: *mut u8,
-}
-
-/// MSVC `std::shared_ptr` — {object, control block}.
-#[repr(C)]
-struct SharedPtrPair {
-    obj: *mut u8,
-    ctrl: *mut u8,
-}
-
-/// MSVC `std::string` as the game's `vector<string>` stores it (0x28
-/// stride: 16-byte SSO buf/heap-ptr union, size, capacity, 8 bytes
-/// TRAILING PAD — the pad is load-bearing: `set_names` walks the source
-/// vector at 0x28 stride, so a 0x20-stride array reads as ZERO elements;
-/// music_wheel's cabinet-proven GameString layout, re-confirmed by Step-7
-/// deploy #1's blank MARVELOUS row). The game only READS strings we pass
-/// by const ref, so the heap form may point at our own static bytes.
-#[repr(C)]
-struct MsvcString {
-    buf: [u8; 16],
-    len: u64,
-    cap: u64,
-    _pad: u64,
-}
-
-impl MsvcString {
-    /// SSO form — `s` must be ≤ 15 bytes (oversized clamps to empty rather
-    /// than panicking on the hook path; the music_wheel 2026-08-16 lesson).
-    fn sso(s: &str) -> MsvcString {
-        let bytes = s.as_bytes();
-        let n = if bytes.len() <= 15 { bytes.len() } else { 0 };
-        let mut buf = [0u8; 16];
-        buf[..n].copy_from_slice(&bytes[..n]);
-        MsvcString {
-            buf,
-            len: n as u64,
-            cap: 0xF,
-            _pad: 0,
-        }
-    }
-
-    /// Heap form referencing caller-owned storage (for names > 15 bytes).
-    /// `bytes` must outlive every use (ours are `'static`).
-    fn heap_ref(bytes: &'static [u8]) -> MsvcString {
-        let mut buf = [0u8; 16];
-        buf[..8].copy_from_slice(&(bytes.as_ptr() as u64).to_le_bytes());
-        MsvcString {
-            buf,
-            len: bytes.len() as u64,
-            // Any value > 15 selects the heap-pointer interpretation; 31
-            // mirrors MSVC's minimum heap capacity.
-            cap: 31,
-            _pad: 0,
-        }
-    }
-}
-
-/// MSVC `std::vector<std::string>` header — passed by const pointer as the
-/// set-names SOURCE (copy-assigned; backing storage stays ours).
-#[repr(C)]
-struct MsvcVec {
-    begin: *const MsvcString,
-    end: *const MsvcString,
-    cap_end: *const MsvcString,
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -213,6 +151,7 @@ static WARN_RECORD: AtomicBool = AtomicBool::new(false);
 static WARN_STOCK_WIDGET: AtomicBool = AtomicBool::new(false);
 static WARN_VARIANT: AtomicBool = AtomicBool::new(false);
 static WARN_TRANSFORM: AtomicBool = AtomicBool::new(false);
+static FIRST_ROW_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn warn_once(latch: &AtomicBool, msg: &str) {
     if !latch.swap(true, Ordering::Relaxed) {
@@ -451,13 +390,17 @@ fn populate_smarv_row(tab: *mut u8) {
             return;
         }
 
-        log_info!(
-            "SMarvelous: results row live (side {}, stage {}, smarv {}, marv_excl {})",
-            side,
-            stage,
-            smarv,
-            exclusive
-        );
+        // First-fire only — the populate re-runs on every tab revisit and
+        // a per-populate line spams the log (Step-10 hardening).
+        if !FIRST_ROW_LOGGED.swap(true, Ordering::Relaxed) {
+            log_info!(
+                "SMarvelous: results row live (side {}, stage {}, smarv {}, marv_excl {})",
+                side,
+                stage,
+                smarv,
+                exclusive
+            );
+        }
     }
 }
 
@@ -568,7 +511,7 @@ unsafe fn set_widget_names_digits(widget: *mut u8, digits: &str) {
         names[count] = MsvcString::sso(&name);
         count += 1;
     }
-    let vec = MsvcVec {
+    let vec = MsvcVec::<MsvcString> {
         begin: names.as_ptr(),
         end: names.as_ptr().add(count),
         cap_end: names.as_ptr().add(MAX_GLYPHS),

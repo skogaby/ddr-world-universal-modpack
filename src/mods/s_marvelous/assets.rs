@@ -898,3 +898,303 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
     );
     staged
 }
+
+// ── FC emblems (Step 9) ──────────────────────────────────────────────
+
+/// The results-scene ROOT template (exported name = the afp_patcher key).
+/// Ghidra-verified (FUN_1800b84c0): the scene builds its ONE layer from
+/// "result_root", whose self-contained fc timeline (sprite 243, labels
+/// loop_fc..loop_assisted) serves BOTH player panes' `fc_usr` instances —
+/// one patch covers 1P and 2P.
+pub const EMBLEM_TEMPLATE: &str = "result_root";
+pub const EMBLEM_SRC_LABEL: &str = "loop_mfc";
+pub const EMBLEM_NEW_LABEL: &str = "loop_smfc";
+/// Injected total-results badge texture (bitmap-load target under
+/// `total_p%d_top_usr/fullcombo_usr` — name-only binding, no geo; the
+/// combo-digit precedent). Name parallels the stock DAT_180486E80 family
+/// ("scre_total_player_" + "fc_mfc").
+pub const EMBLEM_TOTAL_TEXTURE: &str = "scre_total_player_fc_smfc";
+const EMBLEM_TOTAL_DONOR: &str = "scre_total_player_fc_mfc";
+const EMBLEM_PNG_DIR: &str = "./data_mods/s_marvelous/scene_result";
+const EMBLEM_ATLAS_PREFIX: &str = "smarv_fce";
+
+/// Everything the result_root emblem patch needs.
+pub struct StagedEmblemPatch {
+    pub stock_bytes: Vec<u8>,
+    /// The word-art shape id (geo region `scre_fc_marvelous`) — exactly one.
+    pub shape_ids: Vec<u16>,
+    /// Expected new ids from the dry run (patch-time verification).
+    pub expected: crate::core::ap2::MultiShapeSegmentClone,
+}
+
+/// The clone options the emblem patch runs with — shared between staging
+/// dry-run, the patch fn, and the offline harness (deploy-#3 lesson: one
+/// code path). `drop_hsl_updates_on_remapped`: the stock loop_mfc word
+/// object carries per-frame HSL-rotation updates (the rainbow flow) that
+/// would hue-cycle the violet art; `retarget_actions`: the segment loops
+/// via a `gotoAndPlay("loop_mfc")` DoAction at its end — the clone's copy
+/// must jump to `loop_smfc` or the emblem reverts to stock art after one
+/// pass (~1.7 s).
+pub const EMBLEM_CLONE_OPTS: crate::core::ap2::SegmentCloneOpts =
+    crate::core::ap2::SegmentCloneOpts {
+        drop_hsl_updates_on_remapped: true,
+        retarget_actions: true,
+    };
+
+/// Stage the FC-emblem chain: extract + descramble `result_root`, resolve
+/// the word-art shape geo-first (the Step-6 rename rule — last `_`-token
+/// starting `mar`; unique on result_root: shape 202 → `scre_fc_marvelous`),
+/// dry-run the clone recipe, write the rewritten geo + register the geo
+/// MD5 mapping and afplist extension, and stage BOTH textures (the
+/// donor-anchored violet word + the FRESH total-results badge) in one
+/// atlas batch. `None` ⇒ WARN logged, emblems stay stock.
+pub fn stage_emblems() -> Option<StagedEmblemPatch> {
+    // Art first — either PNG missing fails the whole staging.
+    let word_png = format!("{}/{}.png", EMBLEM_PNG_DIR, "scre_fc_smarvelous");
+    let badge_png = format!("{}/{}.png", EMBLEM_PNG_DIR, EMBLEM_TOTAL_TEXTURE);
+    for png in [&word_png, &badge_png] {
+        if !std::path::Path::new(png.as_str()).exists() {
+            log_warn!(
+                "SMarvelous: emblem art missing at {} — emblems stay stock",
+                png
+            );
+            return None;
+        }
+    }
+
+    // ── Extract + descramble result_root ────────────────────────────
+    let arc_data = match std::fs::read(SCENE_RESULT_ARC) {
+        Ok(d) => d,
+        Err(e) => {
+            log_warn!(
+                "SMarvelous: can't read {}: {} — emblems stay stock",
+                SCENE_RESULT_ARC,
+                e
+            );
+            return None;
+        }
+    };
+    let Some(entries) = arc::parse(&arc_data) else {
+        log_warn!(
+            "SMarvelous: failed to parse {} — emblems stay stock",
+            SCENE_RESULT_ARC
+        );
+        return None;
+    };
+    let Some(ifs_entry) = entries.iter().find(|e| e.path.ends_with(SCENE_RESULT_IFS)) else {
+        log_warn!(
+            "SMarvelous: {} not in {} — emblems stay stock",
+            SCENE_RESULT_IFS,
+            SCENE_RESULT_ARC
+        );
+        return None;
+    };
+    let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
+        log_warn!(
+            "SMarvelous: failed to extract {} — emblems stay stock",
+            SCENE_RESULT_IFS
+        );
+        return None;
+    };
+    let tpl = EMBLEM_TEMPLATE.to_string();
+    let afp_files = ifs::extract_files(&ifs_data, "afp", std::slice::from_ref(&tpl));
+    let bsi_files = ifs::extract_files(&ifs_data, "afp/bsi", std::slice::from_ref(&tpl));
+    let (Some((_, afp_raw)), Some((_, bsi_raw))) =
+        (afp_files.into_iter().next(), bsi_files.into_iter().next())
+    else {
+        log_warn!(
+            "SMarvelous: {} AFP/BSI not found — emblems stay stock",
+            EMBLEM_TEMPLATE
+        );
+        return None;
+    };
+    let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
+        log_warn!(
+            "SMarvelous: {} descramble failed — emblems stay stock",
+            EMBLEM_TEMPLATE
+        );
+        return None;
+    };
+    let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
+        log_warn!(
+            "SMarvelous: stock {} did not parse — emblems stay stock",
+            EMBLEM_TEMPLATE
+        );
+        return None;
+    };
+    if doc.exported_name() != EMBLEM_TEMPLATE {
+        log_warn!(
+            "SMarvelous: unexpected exported name '{}' — emblems stay stock",
+            doc.exported_name()
+        );
+        return None;
+    }
+
+    // ── Geo-first word-shape resolution (Step-6 rename rule) ────────
+    let mut word: Option<(u16, Vec<u8>, String, String)> = None;
+    for tag in &doc.root.tags {
+        let crate::core::ap2::Tag::Shape(shape) = tag else {
+            continue;
+        };
+        let geo_name = format!("{}_shape{}", doc.exported_name(), shape.id);
+        let extracted = ifs::extract_files(&ifs_data, "geo", std::slice::from_ref(&geo_name));
+        let Some((_, geo_bytes)) = extracted.into_iter().next() else {
+            continue;
+        };
+        let Some(labels) = geo::labels(&geo_bytes) else {
+            continue;
+        };
+        for l in &labels {
+            if let Some(new_region) = fc_region_rename(l) {
+                if word.is_some() {
+                    log_warn!("SMarvelous: result_root word shape ambiguous — emblems stay stock");
+                    return None;
+                }
+                word = Some((shape.id, geo_bytes.clone(), l.clone(), new_region));
+                break;
+            }
+        }
+    }
+    let Some((word_shape, word_geo, donor_region, new_region)) = word else {
+        log_warn!("SMarvelous: result_root word shape unresolved — emblems stay stock");
+        return None;
+    };
+
+    // ── Dry-run the recipe (allocated ids for patch-time verify) ────
+    let shape_ids = vec![word_shape];
+    let mut scratch = doc.clone();
+    let Some(expected) = scratch.clone_segment_with_new_shapes_ex(
+        EMBLEM_SRC_LABEL,
+        EMBLEM_NEW_LABEL,
+        &shape_ids,
+        EMBLEM_CLONE_OPTS,
+    ) else {
+        log_warn!(
+            "SMarvelous: {} emblem dry-run failed — emblems stay stock",
+            EMBLEM_TEMPLATE
+        );
+        return None;
+    };
+    if scratch.serialize().is_none() {
+        log_warn!(
+            "SMarvelous: patched {} does not serialize — emblems stay stock",
+            EMBLEM_TEMPLATE
+        );
+        return None;
+    }
+
+    // ── Rewritten geo + registrations ────────────────────────────────
+    let geo_dir = format!("{}/{}/geo", MOD_ROOT, RESULT_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&geo_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — emblems stay stock", geo_dir, e);
+        return None;
+    }
+    let Some(new_geo) = geo::rewrite_labels(&word_geo, |l| {
+        if l == donor_region.as_str() {
+            Some(new_region.clone())
+        } else {
+            None
+        }
+    }) else {
+        log_warn!(
+            "SMarvelous: emblem geo rewrite failed ({}) — emblems stay stock",
+            donor_region
+        );
+        return None;
+    };
+    let (_, new_shape) = expected.shapes[0];
+    let geo_name = format!("{}_shape{}", EMBLEM_TEMPLATE, new_shape);
+    if let Err(e) = std::fs::write(format!("{}/{}", geo_dir, geo_name), &new_geo) {
+        log_warn!(
+            "SMarvelous: can't write {}: {} — emblems stay stock",
+            geo_name,
+            e
+        );
+        return None;
+    }
+    ifs_textures::register_afp_geo_mapping(SCENE_RESULT_IFS, &geo_name);
+    ifs_textures::register_afplist_geo_extension(SCENE_RESULT_IFS, EMBLEM_TEMPLATE, &[new_shape]);
+
+    // ── Textures: per-image PNGs + one atlas batch (donor-anchored word
+    // + FRESH total badge) ───────────────────────────────────────────
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, RESULT_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!("SMarvelous: mkdir {}: {} — emblems stay stock", tex_dir, e);
+        return None;
+    }
+    for (src, name) in [
+        (&word_png, new_region.as_str()),
+        (&badge_png, EMBLEM_TOTAL_TEXTURE),
+    ] {
+        let dst = format!("{}/{}.png", tex_dir, name);
+        if let Err(e) = std::fs::copy(src, &dst) {
+            log_warn!(
+                "SMarvelous: can't stage {}: {} — emblems stay stock",
+                dst,
+                e
+            );
+            return None;
+        }
+    }
+    let Some(texlist) = load_stock_texturelist(SCENE_RESULT_ARC, SCENE_RESULT_IFS) else {
+        log_warn!("SMarvelous: stock scene_result texturelist unavailable — emblems stay stock");
+        return None;
+    };
+    let batch = [
+        AtlasSet {
+            atlas_prefix: EMBLEM_ATLAS_PREFIX.to_string(),
+            specs: vec![OwnedTextureSpec {
+                new_name: new_region.clone(),
+                donor_name: donor_region.clone(),
+                png_path: word_png.clone(),
+            }],
+            fresh: false, // donor-anchored: the cloned geo's UVs are the donor's
+        },
+        AtlasSet {
+            atlas_prefix: format!("{}_t", EMBLEM_ATLAS_PREFIX),
+            specs: vec![OwnedTextureSpec {
+                new_name: EMBLEM_TOTAL_TEXTURE.to_string(),
+                donor_name: EMBLEM_TOTAL_DONOR.to_string(),
+                png_path: badge_png.clone(),
+            }],
+            fresh: true, // net-new badge — bitmap-load binds by name alone
+        },
+    ];
+    match generate_cloned_atlases_cached(
+        &texlist,
+        RESULT_IFS_MOD_PATH,
+        CACHE_ROOT,
+        MOD_ROOT,
+        &batch,
+    ) {
+        BatchResult::Nothing => {
+            log_warn!("SMarvelous: emblem atlas injection produced nothing — emblems stay stock");
+            return None;
+        }
+        BatchResult::Cached | BatchResult::Rebuilt => {}
+    }
+
+    // First-boot mod-path visibility (house rule).
+    let merged_rel = format!("{}/tex/texturelist.merged.xml", RESULT_IFS_MOD_PATH);
+    let probe_geo = format!("{}/geo/{}", RESULT_IFS_MOD_PATH, geo_name);
+    if mod_paths::find_first_modfile(&merged_rel).is_none()
+        || mod_paths::find_first_modfile(&probe_geo).is_none()
+    {
+        log_info!("SMarvelous: emblem assets not in mod-path cache — rescanning");
+        mod_paths::init_mod_paths();
+    }
+
+    log_info!(
+        "SMarvelous: emblems staged (word shape {} -> {}, region {} -> {}, badge {})",
+        word_shape,
+        new_shape,
+        donor_region,
+        new_region,
+        EMBLEM_TOTAL_TEXTURE
+    );
+    Some(StagedEmblemPatch {
+        stock_bytes,
+        shape_ids,
+        expected,
+    })
+}

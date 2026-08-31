@@ -68,7 +68,7 @@ for p in "${MODULE_PATHS[@]}"; do
 done
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'if [[ -z "${KEEP_TMP:-}" ]]; then rm -rf "$TMP"; fi' EXIT
 note "harness dir: $TMP"
 
 cat >"$TMP/Cargo.toml" <<EOF
@@ -156,6 +156,13 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(smarv_fc(&args[1], &args[2], &args[3]));
+    }
+    if mode == "smarv-emblem" {
+        if args.len() != 5 {
+            eprintln!("usage: ap2check smarv-emblem <afp> <bsi> <geo_dir> <out_afp>");
+            std::process::exit(2);
+        }
+        std::process::exit(smarv_emblem(&args[1], &args[2], &args[3], &args[4]));
     }
     if mode == "smarv-rows" {
         if args.len() != 6 {
@@ -502,6 +509,225 @@ fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str) -> i32 {
         shape_ids,
         ids.shapes.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
         ids.sprites.len(),
+        out.len()
+    );
+    0
+}
+
+/// Step-9 (Leg G): the REAL FC-emblem recipe — geo-first word-shape
+/// resolution + the multi-shape clone with the emblem options (HSL-update
+/// drop + DoAction loop retarget) on the REAL result_root template, the
+/// same call shape the DLL's patch fn runs.
+fn smarv_emblem(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
+    let Some(data) = descramble(afp, bsi) else {
+        println!("FAIL smarv-emblem: descramble");
+        return 1;
+    };
+    let Some(mut doc) = ap2::Ap2Doc::parse(&data) else {
+        println!("FAIL smarv-emblem: parse");
+        return 1;
+    };
+    // Geo-first word-shape resolution (the DLL's fc_region_rename rule);
+    // result_root must resolve EXACTLY ONE (shape 202 -> scre_fc_marvelous).
+    let mut shape_ids: Vec<u16> = Vec::new();
+    for tag in &doc.root.tags {
+        let ap2::Tag::Shape(shape) = tag else { continue };
+        let geo_name = format!("{}_shape{}", doc.exported_name(), shape.id);
+        let Ok(bytes) = std::fs::read(format!("{geo_dir}/{geo_name}")) else {
+            continue;
+        };
+        let Some(labels) = geo::labels(&bytes) else { continue };
+        if labels.iter().any(|l| {
+            l.rsplit_once('_').map(|(_, t)| t.starts_with("mar")).unwrap_or(false)
+        }) {
+            shape_ids.push(shape.id);
+        }
+    }
+    if shape_ids.len() != 1 {
+        println!("FAIL smarv-emblem: resolved {} word shapes (want 1)", shape_ids.len());
+        return 1;
+    }
+    let opts = ap2::SegmentCloneOpts {
+        drop_hsl_updates_on_remapped: true,
+        retarget_actions: true,
+    };
+    let Some(ids) = doc.clone_segment_with_new_shapes_ex("loop_mfc", "loop_smfc", &shape_ids, opts)
+    else {
+        println!("FAIL smarv-emblem: recipe returned None");
+        return 1;
+    };
+    let Some(out) = doc.serialize() else {
+        println!("FAIL smarv-emblem: serialize");
+        return 1;
+    };
+    let Some(re) = ap2::Ap2Doc::parse(&out) else {
+        println!("FAIL smarv-emblem: re-parse");
+        return 1;
+    };
+    // Structural checks on every section carrying the source label.
+    let new_sprites: Vec<u16> = ids.sprites.iter().map(|(_, n)| *n).collect();
+    fn segment_place_stats(
+        sec: &ap2::TagSection,
+        label: &str,
+        cloned_sprites: &[u16],
+    ) -> Option<(usize, usize, Vec<u16>)> {
+        // (hsl_updates_on_cloned, do_action_count, cloned create object ids)
+        let start = sec.label_frame(label)? as usize;
+        let end = sec
+            .labels
+            .iter()
+            .map(|l| l.frame as usize)
+            .filter(|f| *f > start)
+            .min()
+            .unwrap_or(sec.frames.len());
+        let mut keys: Vec<(u16, u16)> = Vec::new();
+        let mut creates: Vec<u16> = Vec::new();
+        let mut hsl = 0usize;
+        let mut actions = 0usize;
+        for f in &sec.frames[start..end.min(sec.frames.len())] {
+            let s = f.start_tag as usize;
+            for t in sec.tags.get(s..s + f.tag_count as usize)? {
+                match t {
+                    ap2::Tag::PlaceObject(po) => {
+                        let v = po.view()?;
+                        if v.flags & 0x1 == 0 {
+                            if let Some(src) = v.source_tag_id {
+                                if cloned_sprites.contains(&src) {
+                                    keys.push((v.object_id, v.depth));
+                                    creates.push(v.object_id);
+                                }
+                            }
+                        } else if v.flags & 0x2000_0000 != 0
+                            && keys.contains(&(v.object_id, v.depth))
+                        {
+                            hsl += 1;
+                        }
+                    }
+                    ap2::Tag::Opaque(o) if o.tag_id == 0x7A => actions += 1,
+                    _ => {}
+                }
+            }
+        }
+        Some((hsl, actions, creates))
+    }
+    fn walk(
+        sec: &ap2::TagSection,
+        path: &str,
+        re: &ap2::Ap2Doc,
+        new_sprites: &[u16],
+        errs: &mut Vec<String>,
+        stats: &mut Vec<String>,
+    ) {
+        let has_src = sec.labels.iter().any(|l| l.name == "loop_mfc");
+        let has_new = sec.labels.iter().any(|l| l.name == "loop_smfc");
+        if has_src && !has_new {
+            errs.push(format!("{path}: source label without clone"));
+        }
+        if has_new {
+            // 1) The cloned word object carries NO HSL updates (static
+            //    violet), while the stock segment still animates.
+            let clone = segment_place_stats(sec, "loop_smfc", new_sprites);
+            match clone {
+                Some((hsl, actions, creates)) => {
+                    if hsl != 0 {
+                        errs.push(format!("{path}: {hsl} HSL update(s) survived the drop"));
+                    }
+                    if actions == 0 {
+                        errs.push(format!("{path}: cloned segment lost its DoAction"));
+                    }
+                    if creates.is_empty() {
+                        errs.push(format!("{path}: no cloned-word create in the segment"));
+                    }
+                    // 3) id==death-frame: cloned creates outlive the label.
+                    if let Some(lf) = sec.label_frame("loop_smfc") {
+                        for id in &creates {
+                            if *id <= lf {
+                                errs.push(format!("{path}: create id {id} <= label frame {lf}"));
+                            }
+                        }
+                    }
+                    stats.push(format!(
+                        "{path}: hsl_dropped_ok, {actions} action(s), creates {creates:?}"
+                    ));
+                }
+                None => errs.push(format!("{path}: cloned segment unreadable")),
+            }
+            // 2) Every DoAction in the cloned segment referencing a loop
+            //    label must point at loop_smfc (the retarget).
+            if let Some(start) = sec.label_frame("loop_smfc") {
+                let start = start as usize;
+                for f in &sec.frames[start..] {
+                    let s = f.start_tag as usize;
+                    for t in &sec.tags[s..(s + f.tag_count as usize).min(sec.tags.len())] {
+                        if let ap2::Tag::Opaque(o) = t {
+                            if o.tag_id == 0x7A && o.data.len() >= 6 && o.data[0] == 0xFF
+                                && o.data[1] & 1 == 1
+                            {
+                                let n = u16::from_le_bytes([o.data[2], o.data[3]]) as usize;
+                                for i in 0..n {
+                                    let at = 4 + i * 2;
+                                    if at + 2 > o.data.len() {
+                                        break;
+                                    }
+                                    let off = u16::from_le_bytes([o.data[at], o.data[at + 1]]);
+                                    if let Some(s) = re.strings.get(off) {
+                                        if s == "loop_mfc" {
+                                            errs.push(format!(
+                                                "{path}: cloned DoAction still targets loop_mfc"
+                                            ));
+                                        } else if s == "loop_smfc" {
+                                            stats.push(format!("{path}: DoAction -> loop_smfc"));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Label tables stay name-sorted (binary-searched by the engine).
+        let names: Vec<&str> = sec.labels.iter().map(|l| l.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        if names != sorted {
+            errs.push(format!("{path}: label table unsorted"));
+        }
+        for (i, t) in sec.tags.iter().enumerate() {
+            if let ap2::Tag::DefineSprite(sp) = t {
+                walk(&sp.section, &format!("{path}/{i}"), re, new_sprites, errs, stats);
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    let mut stats = Vec::new();
+    walk(&re.root, "root", &re, &new_sprites, &mut errs, &mut stats);
+    if !errs.is_empty() {
+        for e in &errs {
+            println!("FAIL smarv-emblem: {e}");
+        }
+        return 1;
+    }
+    // Re-scramble the string table for bemaniutils consumption (its SWF
+    // parser always runs the cipher).
+    let mut out = out;
+    let st_off = u32::from_le_bytes(out[48..52].try_into().unwrap()) as usize;
+    let st_size = u32::from_le_bytes(out[52..56].try_into().unwrap()) as usize;
+    let scrambled = ap2::encode_string_table(&out[st_off..st_off + st_size]);
+    out[st_off..st_off + st_size].copy_from_slice(&scrambled);
+    if std::fs::write(out_afp, &out).is_err() {
+        println!("FAIL smarv-emblem: write {out_afp}");
+        return 1;
+    }
+    for s in &stats {
+        println!("    {s}");
+    }
+    println!(
+        "smarv-emblem OK: shape {:?} -> {:?}, {} sprite clone(s), {} -> {} bytes",
+        shape_ids,
+        ids.shapes.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        ids.sprites.len(),
+        data.len(),
         out.len()
     );
     0
@@ -1069,4 +1295,37 @@ for name, target in want.items():
 sys.exit(0 if ok else 1)
 PYEOF
 note "Leg F OK"
+
+# ── Leg G: FC-emblem clone on the REAL result_root template ──────────
+# Runs the DLL's actual recipe (clone_segment_with_new_shapes_ex with the
+# emblem options: HSL-update drop + gotoAndPlay retarget) and verifies the
+# cloned segment structurally, then cross-checks bemaniutils accepts the
+# patched file.
+note "Leg G: result_root FC-emblem clone (loop_mfc -> loop_smfc)"
+SR_GEO_DIR="$TMP/dev/scene_result_v3/x/geo"
+EMBLEM_OUT="$TMP/dev/smarv_emblem"
+mkdir -p "$EMBLEM_OUT"
+OUT=$("$AP2CHECK" smarv-emblem "$SR_AFP_DIR/result_root" \
+  "$SR_AFP_DIR/bsi/result_root" "$SR_GEO_DIR" "$EMBLEM_OUT/result_root")
+echo "$OUT" | sed 's/^/    /'
+echo "$OUT" | grep -q "smarv-emblem OK" || die "Leg G: emblem clone failed"
+: >"$EMBLEM_OUT/empty_bsi"
+(cd "$BEMANIUTILS_DIR" && ./afputils parseafp "$EMBLEM_OUT/result_root" "$EMBLEM_OUT/empty_bsi") \
+  >"$EMBLEM_OUT/patched.json" 2>/dev/null || die "Leg G: afputils parseafp rejected the patched file"
+python3 - "$EMBLEM_OUT/patched.json" <<'PYEOF' || die "Leg G: loop_smfc missing in bemaniutils view"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+found = []
+def walk(tags):
+    for t in tags:
+        lf = t.get("labels") or {}
+        if "loop_smfc" in lf:
+            found.append((t.get("id"), lf["loop_smfc"], lf.get("loop_mfc")))
+        walk(t.get("tags", []))
+walk(doc["tags"])
+assert found, "no section carries loop_smfc"
+for sid, smfc, mfc in found:
+    print(f"    [G] sprite {sid}: loop_smfc @ {smfc} (stock loop_mfc @ {mfc})")
+PYEOF
+note "Leg G OK"
 note "OK"

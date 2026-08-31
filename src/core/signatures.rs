@@ -793,6 +793,34 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 57 41 54 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 E7 FE FF FF FF 48 89 58 10 48 89 70 18 41 8B D8 4C 8B E1 48 8B 41 08 44 8B 08 41 FF C1",
         description: "GraphTab legend-line helper (ctx, string, rgba). Appends one colored legend text to the tab and advances the layout cursor.",
     },
+    // Results window build (s-marvelous FC emblems, Step 9 — runs ONCE at
+    // results-scene build). Drives the per-stage clear-kind emblem: suffix
+    // from the DAT_180486410 table ([10]="mfc"), refer
+    // "player_%dp_info_usr/fc_usr", `afp_mc_op(mc, 0xF09, "loop_"+suffix)`.
+    // Prologue-anchored; the frame displacement −0xA18 + SUB RSP,0xAF0 +
+    // the 0x200 EH slot pin uniqueness — verified exactly-once on 20260721
+    // @0x1800B8AA0 AND 20260616 @0x1800B88A0, byte-verified in the on-disk
+    // cabinet DLL (the "scre_rank_%s" string's only xref is inside).
+    // Security-cookie RIP disp (past the pattern) excluded.
+    SignatureDefinition {
+        name: "result_window_build",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 E8 F5 FF FF 48 81 EC F0 0A 00 00 48 C7 85 00 02 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20",
+        description: "sequence::result results-window builder (this). One-shot scene build: rank/emblem/flare bitmaps + fc_usr loop_<kind> label goto per side.",
+    },
+    // Total-results populate (s-marvelous FC emblems, Step 9). Builds the
+    // per-stage "total_result" pane layers (actor+0x1B0+pane*8) and loads
+    // the clear-kind badge bitmap "scre_total_player_%s" (suffix table
+    // DAT_180486E80, [10]="fc_mfc") into the fullcombo_usr leaves under
+    // total_p%d_top_usr. Prologue-anchored; frame displacement −0x5A8 +
+    // SUB RSP,0x680 + the XMM spill run pin uniqueness — verified
+    // exactly-once on 20260721 @0x1800CB090 AND 20260616 @0x1800CB170,
+    // byte-verified in the on-disk cabinet DLL (anchors: the only
+    // "total_result" / "fullcombo_usr" xrefs are inside).
+    SignatureDefinition {
+        name: "total_result_populate",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 58 FA FF FF 48 81 EC 80 06 00 00 48 C7 85 40 02 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8",
+        description: "sequence::result total-results populate (this). Builds per-stage panes and loads the per-side clear-kind badge into fullcombo_usr.",
+    },
     // CalcCalorieActor per-frame tick (vtable slot 6, shared Single/Double).
     // Reads the current measurement-window index (+0x92) and its closed flag
     // (+0x68 + idx*8); when closed, calls vtable slot 9 (+0x48) for the

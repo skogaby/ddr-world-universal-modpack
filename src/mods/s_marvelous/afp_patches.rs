@@ -149,18 +149,6 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
                 NEW_LABEL,
                 staged.new_shape_id
             );
-            // Dev diagnostic (deploy #7 "resolved but blank" fork): dump
-            // the EXACT bytes handed to the game so they can be pulled off
-            // the cabinet and re-rendered offline (Leg-D style) — any
-            // divergence between this dump and the harness's own patched
-            // output localizes the bug to the live seam.
-            if std::env::var_os("DDR_SMARV_DUMP").is_some() {
-                let dump = "./data_mods/_cache/smarv_debug_dance_judge.bin";
-                match std::fs::write(dump, &out) {
-                    Ok(()) => log_info!("SMarvelous: DEV dumped patched template to {}", dump),
-                    Err(e) => log_warn!("SMarvelous: DEV dump failed: {}", e),
-                }
-            }
             Some((out, vec![0u8; 2]))
         }
         None => {

@@ -58,6 +58,7 @@
 use std::sync::Mutex;
 
 use crate::core::memory;
+use crate::core::msvc::{MsvcString, MsvcVec};
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::chart_length;
 use crate::services::song_rate::binding::song_code_digest;
@@ -71,58 +72,12 @@ type SpriteLayerCtorFn = unsafe extern "C" fn(this: *mut u8) -> *mut u8;
 /// `sequence::SpriteLayer::SetBitmaps(this, names)` — COPY-assigns the
 /// names vector (source stays caller-owned), rebuilds the CBitmap row,
 /// ends with a virtual layout call.
-type SpriteLayerSetNamesFn = unsafe extern "C" fn(this: *mut u8, names: *const GameVec) -> *mut u8;
+type SpriteLayerSetNamesFn =
+    unsafe extern "C" fn(this: *mut u8, names: *const MsvcVec<MsvcString>) -> *mut u8;
 /// SpriteLayer vtable slot 0 — per-frame layout.
 type SpriteLayerLayoutFn = unsafe extern "C" fn(this: *mut u8);
 /// Music object vt+0x08 — song code (basename) getter, returns a C string.
 type MusicCodeGetterFn = unsafe extern "C" fn(this: *mut u8) -> *const u8;
-
-/// MSVC `std::string` as used by the game's `vector<string>` (0x28 stride:
-/// 16-byte SSO buf/ptr union, size, capacity, 8 bytes trailing pad). Every
-/// name this mod pushes is ≤15 bytes so the buf is always inline SSO —
-/// the game's copy-assign reads data+size only and never frees our side.
-#[repr(C)]
-struct GameString {
-    buf: [u8; 16],
-    len: u64,
-    cap: u64,
-    _pad: u64,
-}
-
-impl GameString {
-    const fn empty() -> Self {
-        GameString {
-            buf: [0; 16],
-            len: 0,
-            cap: 0xF,
-            _pad: 0,
-        }
-    }
-
-    /// Set an SSO name. Names MUST be ≤15 bytes (asserted in debug); in
-    /// release an oversized name is clamped to empty rather than panicking
-    /// inside the frame callback (a blank glyph, not a dead display —
-    /// cabinet lesson 2026-08-16: a 19-char spacer name panicked here and
-    /// silently killed every set call).
-    fn set(&mut self, s: &str) {
-        let bytes = s.as_bytes();
-        debug_assert!(bytes.len() <= 15, "SSO texture name too long: {}", s);
-        let n = if bytes.len() <= 15 { bytes.len() } else { 0 };
-        self.buf = [0; 16];
-        self.buf[..n].copy_from_slice(&bytes[..n]);
-        self.len = n as u64;
-        self.cap = 0xF;
-    }
-}
-
-/// MSVC `std::vector` header (begin/end/cap-end). Passed by pointer as the
-/// setter's CONST source; backing storage stays mod-owned.
-#[repr(C)]
-struct GameVec {
-    begin: *const GameString,
-    end: *const GameString,
-    cap_end: *const GameString,
-}
 
 /// Max glyphs: label + blank spacer + "MMM:SS" = 8; 10 leaves headroom.
 const MAX_GLYPHS: usize = 10;
@@ -184,7 +139,7 @@ struct Runtime {
     /// Non-empty names currently applied.
     displayed: bool,
     /// Backing storage for the names vector handed to the setter.
-    names: [GameString; MAX_GLYPHS],
+    names: [MsvcString; MAX_GLYPHS],
     /// Diagnostic: last logged stage marker (latched — logs on change only).
     diag_stage: &'static str,
     // Placement (from config).
@@ -267,7 +222,7 @@ impl Mod for MusicWheelSongLengthMod {
             waiting: false,
             pending_code: String::new(),
             displayed: false,
-            names: [const { GameString::empty() }; MAX_GLYPHS],
+            names: [const { MsvcString::empty() }; MAX_GLYPHS],
             diag_stage: "",
             offset_x: cfg.offset_x.unwrap_or(DEFAULT_OFFSET_X),
             offset_y: cfg.offset_y.unwrap_or(DEFAULT_OFFSET_Y),
@@ -697,7 +652,7 @@ unsafe fn apply_names(rt: &mut Runtime, glyphs: &[&str]) {
         slot.set(name);
     }
     let begin = rt.names.as_ptr();
-    let vec = GameVec {
+    let vec = MsvcVec::<MsvcString> {
         begin,
         end: begin.add(count),
         cap_end: begin.add(MAX_GLYPHS),

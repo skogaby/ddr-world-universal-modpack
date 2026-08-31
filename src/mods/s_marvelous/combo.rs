@@ -110,15 +110,6 @@ unsafe extern "C" fn combo_refresh_hook(actor: *mut u8) {
     }
 }
 
-/// First-override phase logging (crash bisect, 2026-08-30 CrossOver crash
-/// at the first combo refresh): logs bracket each sub-step of the FIRST
-/// override only; the last line before a crash names the dying phase.
-fn phase(msg: &str) {
-    if !FIRST_OVERRIDE_LOGGED.load(Ordering::Relaxed) {
-        log_info!("SMarvelous: combo phase {}", msg);
-    }
-}
-
 fn override_if_all_smarv(actor: *mut u8) {
     if actor.is_null() || !ASSETS_READY.load(Ordering::Acquire) {
         return;
@@ -141,7 +132,6 @@ fn override_if_all_smarv(actor: *mut u8) {
             return;
         }
 
-        phase("predicate passed");
         // 1. Digit art on root1, places {10,100,1000} — traversal-6 walk
         // (the stock refresh's own shape: `afp_layer_mc_refer` then every
         // same-name sibling; digit value per place from the display-clamped
@@ -154,24 +144,19 @@ fn override_if_all_smarv(actor: *mut u8) {
                 let digit = (combo / place) % 10;
                 let name = format!("daco_combo_smarvelous_{}", digit);
                 let path = format!("combo_usr/number_usr/{}_usr", place);
-                phase(&format!("walk place {} start", place));
                 let mut mc = bm2d_api::layer_find_child(layer_id, &path);
                 while let Some(id) = mc {
                     let _ = bm2d_api::mc_load_bitmap(id, &name);
                     mc = bm2d_api::mc_traversal(id, 6);
                 }
             }
-            phase("walk done");
         }
 
         // 2. Tint pairs on root2/root3 via the wrapper SetColor vfunc.
         let root2 = (actor.add(ACTOR_ROOT2) as *const *const u8).read_unaligned();
         let root3 = (actor.add(ACTOR_ROOT3) as *const *const u8).read_unaligned();
-        phase("tint root2 start");
         apply_tint(root2, TINT_ROOT2);
-        phase("tint root3 start");
         apply_tint(root3, TINT_ROOT3);
-        phase("tint done");
 
         if !FIRST_OVERRIDE_LOGGED.swap(true, Ordering::Relaxed) {
             log_info!(

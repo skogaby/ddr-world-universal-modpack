@@ -159,15 +159,10 @@ pub fn on_smarvelous(side: usize, judge_actor: *mut u8) {
     }
     if bm2d_api::mc_op_str(mc_id, 0xF09, LABEL) {
         if !FIRST_REDRIVE_LOGGED.swap(true, Ordering::Relaxed) {
-            // Diagnostics: current frame after the jump (param 0x1010 reads
-            // the OUTER mc; a child redirect may leave it untouched — the
-            // pair still discriminates outcomes across deploys).
-            let readback = bm2d_api::mc_get_param(mc_id, 0x1010);
             log_info!(
-                "SMarvelous: flash live — first in_smarvelous re-drive (side {}, 0xF09, via_actor {}, readback {:?})",
+                "SMarvelous: flash live — first in_smarvelous re-drive (side {}, via_actor {})",
                 side,
-                via_actor,
-                readback
+                via_actor
             );
         }
     } else if !WARNED_OP_FAILED.swap(true, Ordering::Relaxed) {

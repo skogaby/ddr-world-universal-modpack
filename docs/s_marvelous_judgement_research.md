@@ -612,3 +612,51 @@ Suggested next step if green-lit: PDD planning dir + a thin
 `mods/s_marvelous/` skeleton with workstream 1 (classification + counters +
 log-only diagnostics) as the first cabinet deploy, before any art is drawn —
 it validates the ±12 subset classification against live play data for free.
+
+## 12. Shipped implementation record (2026-08-30, plan Steps 1–9)
+
+Option C shipped as `src/mods/s_marvelous/` (id `s-marvelous`, config
+`s_marvelous.window_ms`, clamp 1..=17, default 12). Classification rides
+the shared `judge_submit` tap in `power_user_statistics::data_feed`
+(pre-original state ordering; display re-drives POST-original — the
+dispatch is synchronous, §10). Per-surface mechanisms, each fail-open:
+
+- **Runtime AFP synthesis** (`core/ap2/` — parser/serializer with 76-template
+  byte-identity, editing primitives, `afp_patcher` patches on
+  `dance_judge` / four `dance_fullcombo` templates /
+  `body_tab_detail_result` / `result_root`): the display-side engine
+  invariants this uncovered (label tables binary-searched by name ⇒
+  serializer sorts on write; object id == death frame ⇒ cloned placements
+  shift ids by the frame distance; afplist-listed geos only; per-image
+  texture serving; dual-timeline label sets; split label/dictionary
+  topology in result_root; looping segments' `gotoAndPlay` DoActions
+  retargeted via the string-offset table) are recorded in
+  `.agents/learnings/learnings.md` and enforced by
+  `scripts/validate_s_marvelous.sh` Legs A–G.
+- **Gameplay flash** (`flash.rs`): `in_smarvelous` label re-drive on the
+  NoteResultActor's own wrapper (0xF09; actor resolved in the dispatch
+  subtree via the RTTI vtable).
+- **Combo digits** (`combo.rs`): post-original repaint of places
+  {10,100,1000} + violet tint pair via the wrapper SetColor vfunc
+  (`daco_combo_smarvelous_%d` FRESH textures).
+- **S-MFC splash** (`splash.rs`): `s_marbelous_in` re-drive on MFC type 0
+  when the combo was all-S.
+- **Results score tab** (`results_score.rs`): 7-row sheet swap (stock-name
+  replacements, purged at init/disable) + translate-only row moves + the
+  game's OWN row-write helper for the S-MARV row + glyph rewrite for the
+  exclusive MARVELOUS. Counts recomputed fail-closed from the stage
+  record's grade/ms streams, judged-slots-only (partial plays).
+- **Judgement graph** (`results_graph.rs`): three detours riding the
+  game's rebuild/append/legend fns; violet series leads the judge stack;
+  violet ■MARVELOUS legend entry first (maintainer art language: stock
+  wording, violet hue, no "S-" prefix).
+- **FC emblems** (`results_emblem.rs`): `loop_smfc` segment cloned in
+  `result_root` (HSL rainbow-rotation records dropped ⇒ static violet;
+  loop DoAction retargeted) re-driven at the results build; total-results
+  badge `scre_total_player_fc_smfc` re-loaded into the `fullcombo_usr`
+  leaves per S-MFC (side, stage).
+
+S-MFC predicate (record-only): `clear_kind(+0x54)==10 && smarv==marv &&
+marv>0` with the side's last-armed window. Full display-side RE (exact
+addresses both builds, template dumps, suffix tables):
+`.agents/planning/2026-08-29-s-marvelous-judgement/research/display-side-re.md`.

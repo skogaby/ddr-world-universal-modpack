@@ -56,6 +56,11 @@ Adjust the game's global sound/input/render timing live from the mod menu. Bette
 ### Per-Song Judgement Offsets
 Not every song is synced the same. This mod gives every song its own judgement offset that follows the song wheel — and it ships **pre-seeded with community-sourced sync values for ~1,440 songs**. Adjust any song yourself from the options menu; your values follow your profile.
 
+### S-Marvelous Judgement
+A brand-new judgement tier above Marvelous: steps landed within **±12 ms** earn a violet **S-Marvelous**, with the full native treatment — its own judgement flash, combo colors, full-combo splash, a dedicated row on the results screen, its own series on the play graph, and S-MFC emblems for an all-S-Marvelous full combo. It's pure presentation: to the game (and the network) an S-Marvelous is still a Marvelous, so your scores and records are completely untouched.
+![S-Marvelous Gameplay](screenshots/smarv_gameplay.png)
+![S-Marvelous Results 1](screenshots/smarv_results_1.png)
+![S-Marvelous Results 2](screenshots/smarv_results_2.png)
 ### Quick Restart, Quick Fail, Quick Logout
 Press **1** mid-song to instantly restart it (optionally with a countdown), **3** to bail out to song select, and triple-press **9** at song select to end your session on the spot. Combined with **Premium Free** (unlimited stages per credit), your cabinet becomes a practice machine.
 
@@ -94,6 +99,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 | **Classic Difficulty Adjustment** | Double-tap pad UP/DOWN at song select to raise/lower difficulty, like every DDR before World. |
 | **Premium Free** | Unlimited stages per credit (per-player toggle). |
 | **Autoplay** | Perfect auto-play with an on-screen watermark; scores never submitted. |
+| **S-Marvelous Judgement** | A display-only judgement tier above Marvelous for steps within ±12 ms: violet judgement flash, combo digits, S-MFC splash, its own results row/graph series, and S-MFC emblems. Scores are untouched — to the game (and the network) an S-Marvelous IS a Marvelous. |
 | **Assist Tick** | Sample-exact clap at each arrow's judgement moment, with volume control. |
 | **Player Perspective** | OVERHEAD / HALLWAY / DISTANT lane views, per player. |
 | **Playfield Styling** | Arrow/receptor/lane scale and opacity, per player. |
@@ -146,6 +152,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
+| `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–17, default 12) |
 | `shader_fixes` | Arrow anti-aliasing toggle (also editable in the mod menu) |
 | `overlay_menu` | Mod-menu theme/opacity (managed by the APPEARANCE tab) |
 | `smx_hardware` | SMX cabinet support: card ids, overlay opacity/scale, light toggles, pad style (most also editable in the mod menu) |

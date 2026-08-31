@@ -40,7 +40,9 @@ mod tests;
 // S-Marvelous AFP patches land in a later plan step); house re-export
 // pattern per se_bank_synth/custom_options.
 #[allow(unused_imports)]
-pub use edit::{MultiShapeSegmentClone, NamedPlacement, TagRemap, WordSegmentClone};
+pub use edit::{
+    MultiShapeSegmentClone, NamedPlacement, SegmentCloneOpts, TagRemap, WordSegmentClone,
+};
 #[allow(unused_imports)]
 pub use model::{
     Ap2Doc, DefineSprite, FrameSpan, Label, OpaqueTag, PlaceObject, PlaceObjectParams,

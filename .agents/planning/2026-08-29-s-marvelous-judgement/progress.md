@@ -1,19 +1,160 @@
 # Progress — S-Marvelous Judgement
 
 Updated: 2026-08-30
-Status: Step 8 of 10 — DONE (demo passed deploy #2). Next: Step 9 (FC
-emblems), then Step 10 (hardening + docs).
-NEXT ACTION: Step 9 per plan.md — dump the `fc_usr` host template +
-`total_result` package (Appendix-B), patch `loop_smfc`, signatures
-`result_window_build` (anchor `"scre_rank_%s"` xref, 20260721
-0x1800B8AA0) + `total_result_populate` (anchors `"total_result"` /
-`"fullcombo_usr"`, 0x1800CB090), post-original one-shot re-drives.
+Status: **FEATURE COMPLETE (uncommitted — maintainer commits manually).**
+All 10 plan steps done; both Step-9 surfaces cabinet-verified (per-stage
+banner + end-of-credit badge); Step-10 hardening + docs done; feature
+marked complete by the maintainer 2026-08-30. Residual regression-sweep
+items accepted as deferred (list below) — pick them up opportunistically
+in future sessions, none block the feature.
+NEXT ACTION: none. Maintainer supplies `screenshots/s_marvelous.png` for
+the new README hero section, then commits.
 
 Resume protocol: read `implementation/plan.md` (checklist = step status),
 `design/detailed-design.md` (Approved 2026-08-29), task files under
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
 
+## Residual sweep items (accepted-deferred at completion, 2026-08-30)
+
+Not blocking; verify opportunistically if ever in doubt (everything is
+fail-open — worst case is stock visuals + one latched WARN):
+
+- Negative controls with the mod ON: stock MFC / PFC ⇒ stock emblem +
+  badge (trick: JUDGEMENT OFFSET ≈ 14 ms makes honest on-beat steps
+  loose Marvelous ⇒ an FC is a stock MFC).
+- Emblem loop persistence over a long results dwell (~5 s+; no revert to
+  rainbow was reported on deploy #1).
+- Versus (per-side counts/emblems); course/Dan on all results surfaces —
+  incl. the judged-filter watch item: if the COURSE record's note vector
+  is empty while its streams are populated, the course score tab falls
+  back to stock silently.
+- Disabled boot ⇒ stock everything (esp. the Step-7 sheet purge).
+- song_reset paths (quick restart instant + delayed, training
+  scrub/loop), rate play, quick-fail then later-song score tab (the
+  judged-slot gating change).
+- pacemaker_swap / overlay_element_styling / calibration interplay.
+- Step-8 page-switch + display-mode + two-songs checks; Step-7
+  versus/course checks (deferred from their deploy #2s).
+
+## Step 10 — hardening + docs DONE (2026-08-30, uncommitted)
+
+- Serializer label-table SORT-ON-WRITE (`write.rs` — stable by name;
+  stock tables already sorted so Leg A's 76-template byte identity
+  holds) + host test `write_sorts_label_table_by_name`.
+- id==death-frame invariant covered by the `edit_clone_opts_*` host
+  tests (rebased ids asserted) + Leg G's `create id > label frame` check
+  on the real template.
+- Diagnostics trim: `DDR_SMARV_DUMP` dev dump removed (afp_patches.rs);
+  flash readback (0x1010/0x1012 pair) reduced to the one-line first-fire
+  INFO; combo `phase()` bisect logging removed; results_score's
+  per-populate "results row live" INFO latched to first-fire.
+- Partial-play robustness: `records::read_streams` now filters to
+  JUDGED slots via the note-entry flags (pure `filter_judged` core + 2
+  host tests) — quick-failed songs no longer trip the marvelous-counter
+  cross-check (unjudged slots carry grade-0 garbage). Full plays filter
+  to identity. WATCH ITEM for the sweep: if the COURSE record's note
+  vector turns out to be empty/absent while its streams are populated,
+  the course tab falls back to stock (fail-open) — check on cabinet.
+- MSVC ABI structs promoted to `core/msvc.rs`
+  (`MsvcString`/`MsvcVec<T>`/`SharedPtrPair`, sso/sso_bytes/heap_ref/set):
+  music_wheel_song_length, results_score, results_graph migrated (the
+  0x28-stride pad now lives in ONE place).
+- Learnings sweep DONE (`.agents/learnings/learnings.md`): scanner
+  overlapping-AC bug + cabinet-DLL byte-verify habit; vtable byte-offset
+  arithmetic; 0x28-stride MSVC lesson; "ride the game's own helper
+  mid-call" pattern; the 8 AP2/AFP engine invariants.
+- Docs DONE: `docs/s_marvelous_judgement_research.md` §12 (shipped
+  implementation record); AGENTS.md Key Entry Points row; README feature
+  table + operator-config rows + a Highlights hero section
+  ("S-Marvelous Judgement", placed in the judgement/timing cluster —
+  image slot `screenshots/s_marvelous.png`, maintainer supplies the
+  screenshot); data_mods README table (Step-9 art).
+
 ## Done
+
+- Step 9 implemented (FC emblems — uncommitted, maintainer commits):
+  - RE settled (Ghidra both builds + template dumps): the results scene
+    builds its ONE layer from template **`result_root`**
+    (`FUN_1800b84c0`); the fc timeline = self-contained sprite 243
+    (labels loop_fc@50/gfc@175/pfc@300/mfc@417/life4@550/assisted@617,
+    700 frames) placed as `fc_usr` by BOTH player panes ⇒ ONE patch
+    covers 1P+2P. `loop_mfc` = frames 417–549; the word object (src
+    chain sprite 204→203→shape 202→region `scre_fc_marvelous` 232×18)
+    carries per-frame **HSL-shift update records** (the rainbow flow)
+    and the segment loops via a **`gotoAndPlay("loop_mfc")` DoAction at
+    frame 518**; the `_base` shadow (197) and `_ef` sparkle (192) chains
+    are separate and stay stock. Total results: `FUN_1800cb090` builds
+    per-stage `total_result` pane layers (actor+0x1B0+pane*8, one pane
+    per stage whose PRIMARY side (actor+0x9C) record is non-virgin) and
+    loads bitmap `scre_total_player_%s` (table DAT_180486E80,
+    [10]="fc_mfc") into `fullcombo_usr` leaves under `total_p%d_top_usr`.
+    Per-stage suffix table DAT_180486410 [10]="mfc" ⇒ `loop_mfc` via
+    `afp_mc_op(0xF09)` on `player_%dp_info_usr/fc_usr` (layer at
+    actor+0x108, layer id +8; stage actor+0xEC; course branch = the
+    SAME `*(**g+0x70)` gate results_score replicates).
+  - core/ap2: **`SegmentCloneOpts`** + `clone_labeled_segment_placements
+    _only_ex` / `clone_segment_with_new_shapes_ex` (plain fns delegate,
+    byte-identical default — host-tested): `drop_hsl_updates_on_remapped`
+    (drops update records with flag 0x1 + HSL 0x20000000 whose
+    (object_id,depth) matches a create placing a remapped character —
+    violet art must not inherit the stock hue rotation) +
+    `retarget_actions` (DoAction 0x7A string-offset-table entries whose
+    TARGET STRING == src_label re-pointed at the interned new_label;
+    header: FF sentinel, flags&1 ⇒ u16 count@+2, u16 LE string-table
+    offsets @+4 — content-matched, not offset-matched, duplicates safe).
+    PLUS the **split-dictionary recipe variant**
+    (`clone_segment_with_new_shapes_split`, auto-selected): result_root
+    keeps its label in a NESTED sprite while ALL definitions live in
+    ROOT — the resolution is a SEGMENT-SCOPED DOWNWARD closure from the
+    segment's placed ids (a whole-section fixpoint would absorb the
+    label sprite's ancestors and clone the scene); dance_fc's local
+    topology keeps the original code path byte-identical. 3 new host
+    tests (HSL drop scoped to remapped objects, DoAction retarget
+    old-vs-clone, default-opts byte identity).
+  - `core/signatures.rs`: `result_window_build` (@0x1800B8AA0 20260721 /
+    @0x1800B88A0 20260616) + `total_result_populate` (@0x1800CB090 /
+    @0x1800CB170) — both prologue AOBs verified exactly-once in BOTH
+    Ghidra builds AND byte-verified against the on-disk cabinet DLL
+    (file offsets 0xB7EA0 / 0xCA490).
+  - `assets.rs::stage_emblems` (+ `EMBLEM_*` consts, `EMBLEM_CLONE_OPTS`
+    shared staging/patch/harness): result_root extract/descramble,
+    geo-first word-shape resolution (fc_region_rename rule — UNIQUE on
+    result_root: shape 202), dry-run, rewritten geo
+    (`result_root_shape<new>` → region `scre_fc_smarvelous`) + geo MD5
+    mapping + afplist extension, per-image PNGs + ONE atlas batch of TWO
+    sets: donor-anchored `scre_fc_smarvelous` (cloned geo UVs need the
+    donor rect) + FRESH `scre_total_player_fc_smfc` (name-only
+    mc_load_bitmap binding, combo-digit precedent).
+  - `results_emblem.rs` (NEW): two best-effort post-original detours.
+    Per-stage: when a side's record is S-MFC (predicate below), re-drive
+    `0xF09 loop_smfc` on `player_%dp_info_usr/fc_usr` with the
+    `mc_frame_by_label` (0x1012) pre-check as the resolve observable
+    (deploy-#6 lesson) — gated on ASSETS_READY + PATCH_APPLIED. Total:
+    replicate the populate's pane↔stage rule, and for each S-MFC
+    (side, stage) walk `total_p%d_top_usr/fullcombo_usr` leaves
+    (traversal-6) re-loading `scre_total_player_fc_smfc`. S-MFC
+    predicate (record-only, never live counters): mcode != -1 &&
+    clear_kind(+0x54) == 10 && smarv==marv && marv>0, with
+    `state::last_armed_window(side)` (0 ⇒ stock). Course branch shared
+    via `results_score::course_active()`.
+  - Art: `data_mods/s_marvelous/scene_result/scre_fc_smarvelous.png`
+    (232×18) + `scre_total_player_fc_smfc.png` (30×12) — the established
+    colorize (hue 280°, sat floor 150, value ×0.82; verified max-diff-1
+    vs the shipped dance_judge art). Wording kept ("Marvelous
+    Fullcombo!!!" / "MFC"), violet hue — the maintainer's art language.
+    STATIC violet by design (the HSL drop removes the rainbow flow).
+  - Harness **Leg G** (`smarv-emblem` mode): the DLL's ACTUAL recipe on
+    the REAL result_root — checks HSL-drop (0 survivors on the cloned
+    word), DoAction → loop_smfc (and stock's stays loop_mfc),
+    id==death-frame (create 804 > label 700), label tables sorted,
+    serialize + bemaniutils parseafp acceptance (string table
+    re-scrambled) + loop_smfc@700 in sprite 243. Validate script also
+    grew `KEEP_TMP=1` (keeps the temp workdir for debugging).
+  - mod.rs wiring: results_emblem::install (init, best-effort) /
+    activate (enable) / deactivate (disable).
+  - Gates: 116 lib + 83 bin host tests, Legs A–G green, cargo check
+    clean, fmt, ./build.sh clean.
+  - CABINET DEMO PENDING — see "Step 9 deploy #1".
 
 - Step 8 implemented (judgement graph — uncommitted, maintainer commits):
   - `records.rs`: `NoteRef` + pure `smarv_per_second` (mirror-bucketing:
@@ -420,6 +561,57 @@ Resume protocol: read `implementation/plan.md` (checklist = step status),
 - Step 1 cabinet demo (maintainer gate — see Deploy & test log).
 
 ## Deploy & test log
+- Step 9 deploy #2 check (2026-08-30): **PASS.** Maintainer verified the
+  end-of-credit summary badge — the S-MFC stage's pane shows the violet
+  MFC badge (the total_result_populate detour + FRESH texture path).
+  BOTH Step-9 surfaces cabinet-confirmed. FEATURE MARKED COMPLETE by the
+  maintainer; remaining regression-sweep items accepted as deferred (see
+  "Residual sweep items" below).
+- Step 9 deploy #1 (2026-08-30, DLL + data_mods): **PASS (core path).**
+  Maintainer confirmed the violet S-MFC "Marvelous Fullcombo!!!" caption
+  on the per-stage results screen — the result_root patch applied live,
+  the 0xF09 loop_smfc re-drive resolved, and the cloned segment renders.
+  STEP 9 DEMO DONE. Not individually confirmed (maintainer can't
+  reliably produce a stock MFC/PFC by hand — folded into the Step-10
+  sweep): the TOTAL-results violet badge, the ~5 s loop-persistence
+  watch (no revert to rainbow reported), and the negative controls
+  (stock MFC / PFC ⇒ stock art; trick if wanted: a manual play with
+  JUDGEMENT OFFSET ≈ 14 ms turns honest on-beat steps into loose
+  Marvelous — an FC then is a STOCK MFC with the mod on).
+- Step 9 deploy #1 pre-flight expectations (kept for reference):
+  `[+] result_window_build @ +0xB8AA0` / `[+] total_result_populate @
+  +0xCB090` / `SMarvelous: FC emblem detour(s) installed`; at enable
+  `SMarvelous: emblems staged (word shape 202 -> 440, region
+  scre_fc_marvelous -> scre_fc_smarvelous, badge
+  scre_total_player_fc_smfc)`; at the first results-scene template load
+  `SMarvelous: result_root patched (95420 -> 101448 bytes, loop_smfc)`
+  (sizes assuming the stock template matches the dev copy); on an S-MFC
+  result `SMarvelous: S-MFC stage emblem re-drive (side S, mc ..., label
+  frame 700)` and on total results `SMarvelous: S-MFC total badge
+  re-drive (side S, stage N, K leaf(s))`. NOTE: first boot after the new
+  atlas inputs may need ONE reboot (mounted-texturelist staleness rule —
+  atlas-cloner inputs changed). Demo checklist:
+  1. Autoplay (all-S) one song → per-stage results: violet "Marvelous
+     Fullcombo!!!" caption (STATIC violet — no rainbow flow; the sparkle
+     + dark shadow stay stock) instead of the stock rainbow; the emblem
+     must persist (loop) for the whole screen, not revert to rainbow
+     after ~2 s (the DoAction retarget check).
+  2. Total results: the same stage's pane shows the violet MFC badge.
+  3. A stock MFC (loose marvelous > ±12 ms present): BOTH surfaces show
+     the STOCK rainbow emblem/badge (predicate smarv==marv fails).
+  4. A PFC stage: stock PFC emblem everywhere (kind != 10).
+  5. Versus if convenient: per-side emblems (side 0/1 records
+     independent).
+  6. Course/Dan if convenient: per-stage panes on total results, course
+     record on the per-stage screen.
+  7. Watch item (Step 4/6 precedent says harmless): the cloned create
+     records carry stale ON_LOAD `aep_set_set_frame(417)` bytecode — if
+     the emblem misbehaves on SEEK-heavy paths, this is the first
+     suspect.
+- Step 8 deploy #2 (2026-08-30, DLL only): **PASS.** Play Graph tab
+  shows the violet S-Marv series LEADING the judge stack (adjacent to
+  the white marvelous segments), violet ■MARVELOUS legend entry first,
+  white second, whites correspondingly reduced. STEP 8 DEMO DONE.
 - Step 8 deploy #1 (2026-08-30): **FAIL — root-caused same day, CORE
   SCANNER BUG.** Boot log: `[-] graph_tab_rebuild -- pattern not found`
   (other two graph sigs resolved; fail-open kept the graph stock, no

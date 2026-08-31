@@ -30,8 +30,29 @@ use super::align4;
 use super::model::{
     read_u16, read_u32, Ap2Doc, FrameSpan, Label, PlaceObject, PlaceObjectParams, PlaceObjectView,
     Shape, SpritePath, Tag, TagSection, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_FONT,
-    TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_SPRITE, TAG_DEFINE_TEXT, TAG_IMAGE, TAG_SHAPE,
+    TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_SPRITE, TAG_DEFINE_TEXT, TAG_DO_ACTION, TAG_IMAGE,
+    TAG_SHAPE,
 };
+
+/// Options for the extended placements-only segment clone
+/// ([`Ap2Doc::clone_labeled_segment_placements_only_ex`]). `Default` =
+/// both off = byte-identical to the plain clone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SegmentCloneOpts {
+    /// Drop pure-recolor UPDATE records from the clone: a PlaceObject with
+    /// the update flag (0x1) AND an HSL-shift payload (flag 0x20000000)
+    /// whose `(object_id, depth)` matches a CREATE record seen earlier in
+    /// the segment that places a REMAPPED character. Re-colored art must
+    /// not inherit the stock art's hue-rotation animation (the result_fc
+    /// `loop_mfc` rainbow flow — S-Marvelous Step 9); everything else
+    /// (matrix motion, other objects) is copied untouched.
+    pub drop_hsl_updates_on_remapped: bool,
+    /// Re-point DoAction (0x7A) string-offset-table entries whose target
+    /// string equals `src_label` at `new_label` — the `gotoAndPlay(label)`
+    /// loop retarget. Without it a cloned looping segment jumps back into
+    /// the STOCK segment at its loop point.
+    pub retarget_actions: bool,
+}
 
 /// Character-id remap applied to the tags of a cloned segment (old id → new
 /// id). Ids absent from the map stay shared with the source segment —
@@ -302,16 +323,44 @@ impl Ap2Doc {
         new_label: &str,
         remap: &TagRemap,
     ) -> Option<()> {
+        self.clone_labeled_segment_placements_only_ex(
+            path,
+            src_label,
+            new_label,
+            remap,
+            SegmentCloneOpts::default(),
+        )
+    }
+
+    /// [`Ap2Doc::clone_labeled_segment_placements_only`] with
+    /// [`SegmentCloneOpts`] — HSL-update dropping and DoAction label
+    /// retargeting for cloned looping/animated segments. Default opts are
+    /// byte-identical to the plain variant.
+    pub fn clone_labeled_segment_placements_only_ex(
+        &mut self,
+        path: &SpritePath,
+        src_label: &str,
+        new_label: &str,
+        remap: &TagRemap,
+        opts: SegmentCloneOpts,
+    ) -> Option<()> {
         // Phase 1 — read-only validation + clone construction. Unlike the
         // verbatim clone's contiguous [lo, hi) copy, the filter forces a
         // per-frame walk; under the module contract (consecutive disjoint
         // spans) the two traversals cover identical tags.
-        let (new_tags, new_frames, label_frame) = {
+        let (mut new_tags, new_frames, label_frame, action_fixups) = {
             let sec = self.section(path)?;
             let bounds = segment_clone_bounds(sec, src_label, new_label)?;
             let base = u32::try_from(sec.tags.len()).ok()?;
             let mut new_tags: Vec<Tag> = Vec::new();
             let mut new_frames = Vec::with_capacity(bounds.end - bounds.start);
+            // (object_id, depth) keys of segment CREATE records placing a
+            // remapped character — the HSL-drop scope (creates precede
+            // their updates in frame order, so one forward pass suffices).
+            let mut recolored: Vec<(u16, u16)> = Vec::new();
+            // Byte positions of DoAction string-table entries to re-point
+            // (index into new_tags, byte offset of the u16 entry).
+            let mut action_fixups: Vec<(usize, usize)> = Vec::new();
             for f in &sec.frames[bounds.start..bounds.end] {
                 let s = f.start_tag as usize;
                 let e = s.checked_add(f.tag_count as usize)?;
@@ -323,6 +372,33 @@ impl Ap2Doc {
                 for tag in &sec.tags[s..e] {
                     if is_definition_tag_id(tag.tag_id()) {
                         continue; // the dictionary is not duplicated
+                    }
+                    if opts.drop_hsl_updates_on_remapped {
+                        if let Tag::PlaceObject(po) = tag {
+                            // Pre-remap view: remap keys are the OLD ids.
+                            let view = po.view()?;
+                            let is_update = view.flags & 0x1 != 0;
+                            if !is_update {
+                                if let Some(src) = view.source_tag_id {
+                                    if remap.contains_key(&src) {
+                                        recolored.push((view.object_id, view.depth));
+                                    }
+                                }
+                            } else if view.flags & 0x2000_0000 != 0
+                                && recolored.contains(&(view.object_id, view.depth))
+                            {
+                                continue; // pure hue-rotation frame — dropped
+                            }
+                        }
+                    }
+                    if opts.retarget_actions && tag.tag_id() == TAG_DO_ACTION {
+                        if let Tag::Opaque(o) = tag {
+                            for entry_at in
+                                do_action_string_entries_matching(&o.data, &self.strings, src_label)
+                            {
+                                action_fixups.push((new_tags.len(), entry_at));
+                            }
+                        }
                     }
                     new_tags.push(remap_tag(tag, remap)?);
                     copied += 1;
@@ -362,11 +438,24 @@ impl Ap2Doc {
                 p.data.get_mut(6..8)?.copy_from_slice(&new_id.to_le_bytes());
             }
 
-            (new_tags, new_frames, bounds.label_frame)
+            (new_tags, new_frames, bounds.label_frame, action_fixups)
         };
 
         // Phase 2 — last fallible step (table untouched on failure).
         let name_offset = self.strings.intern(new_label)?;
+
+        // Phase 2b — DoAction retargets, positions pre-validated in Phase 1
+        // (the entry was read there; new_tags is still ours). A failed
+        // splice here would mean Phase 1 lied — refuse without mutating the
+        // document (new_tags is discarded on None).
+        for &(tag_idx, entry_at) in &action_fixups {
+            let Some(Tag::Opaque(o)) = new_tags.get_mut(tag_idx) else {
+                return None;
+            };
+            o.data
+                .get_mut(entry_at..entry_at + 2)?
+                .copy_from_slice(&name_offset.to_le_bytes());
+        }
 
         // Phase 3 — infallible appends (appends never move existing
         // tag indices or frame numbers, so nothing else needs fixups).
@@ -856,6 +945,39 @@ fn is_definition_tag_id(id: u16) -> bool {
     )
 }
 
+/// Byte offsets (within a DoAction payload) of string-offset-table entries
+/// whose target string equals `needle`. DoAction layout (bemaniutils
+/// swf.py `__parse_bytecode` ~567): `[0]` = 0xFF AP2 sentinel, `[1]` =
+/// flags; flags&1 ⇒ u16 LE entry count at +2, then count u16 LE STRING
+/// TABLE offsets at +4 — the table bytecode `PUSH` string-consts index
+/// into. Matching is by string CONTENT (the table may hold duplicate
+/// strings at different offsets — an offset-equality match could miss).
+/// Malformed/short payloads yield no entries (the clone then copies the
+/// tag verbatim — fail-open to stock behavior).
+fn do_action_string_entries_matching(
+    data: &[u8],
+    strings: &super::model::StringTable,
+    needle: &str,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    if data.len() < 4 || data[0] != 0xFF || data[1] & 0x1 == 0 {
+        return out;
+    }
+    let Some(count) = read_u16(data, 2) else {
+        return out;
+    };
+    for i in 0..count as usize {
+        let at = 4 + i * 2;
+        let Some(off) = read_u16(data, at) else {
+            return out;
+        };
+        if strings.get(off) == Some(needle) {
+            out.push(at);
+        }
+    }
+    out
+}
+
 /// Validate an insert of `n` tags at tag index `insert_index`, attributed to
 /// `frame`'s span: bounds, span sanity, containment (the index must lie
 /// within the frame's span, `start ..= end`), and the fixup arithmetic
@@ -1123,10 +1245,51 @@ impl Ap2Doc {
         new_label: &str,
         shape_ids: &[u16],
     ) -> Option<MultiShapeSegmentClone> {
+        self.clone_segment_with_new_shapes_ex(
+            src_label,
+            new_label,
+            shape_ids,
+            SegmentCloneOpts::default(),
+        )
+    }
+
+    /// [`Ap2Doc::clone_segment_with_new_shapes`] with [`SegmentCloneOpts`]
+    /// threaded through to every per-section segment clone (HSL-update
+    /// dropping / DoAction loop retargeting — looping segments like
+    /// result_fc's `loop_mfc`). Default opts are byte-identical to the
+    /// plain recipe.
+    pub fn clone_segment_with_new_shapes_ex(
+        &mut self,
+        src_label: &str,
+        new_label: &str,
+        shape_ids: &[u16],
+        opts: SegmentCloneOpts,
+    ) -> Option<MultiShapeSegmentClone> {
         if shape_ids.is_empty() {
             return None;
         }
         let path = self.find_sprite_by_label(src_label)?;
+
+        // Two dictionary topologies exist in the shipped templates:
+        // dance_fullcombo (Step 6) defines the art shapes INSIDE the label
+        // section; result_root (Step 9) carries the label in a nested
+        // sprite (the fc timeline) while every definition lives in ROOT.
+        // The section-local resolution below is kept byte-identical for
+        // the first (cabinet-validated Step 6); the split path handles the
+        // second with a SEGMENT-SCOPED downward closure (never cloning the
+        // label-carrying sprite itself — it contains the segment, it is
+        // not placed by it).
+        let local = {
+            let sec = self.section(&path)?;
+            shape_ids.iter().all(|sid| {
+                sec.tags
+                    .iter()
+                    .any(|t| matches!(t, Tag::Shape(s) if s.id == *sid))
+            })
+        };
+        if !local {
+            return self.clone_segment_with_new_shapes_split(src_label, new_label, shape_ids, opts);
+        }
 
         // Read-only resolution: dictionary frames + the sprite subgraph.
         let (donors, clone_order) = {
@@ -1237,14 +1400,189 @@ impl Ap2Doc {
             result.sprites.push((old_sprite, new_sprite));
         }
         let path = self.find_sprite_by_label(src_label)?;
-        self.clone_labeled_segment_placements_only(&path, src_label, new_label, &remap)?;
+        self.clone_labeled_segment_placements_only_ex(&path, src_label, new_label, &remap, opts)?;
         let mut extra_paths: Vec<SpritePath> = Vec::new();
         collect_sections_with_label(&self.root, src_label, &mut Vec::new(), &mut extra_paths);
         for p in extra_paths {
             if p == path {
                 continue;
             }
-            self.clone_labeled_segment_placements_only(&p, src_label, new_label, &remap)?;
+            self.clone_labeled_segment_placements_only_ex(&p, src_label, new_label, &remap, opts)?;
+        }
+        Some(result)
+    }
+
+    /// The split-dictionary variant of the multi-shape recipe (see
+    /// [`Ap2Doc::clone_segment_with_new_shapes_ex`]): the labeled segment
+    /// lives in a NESTED sprite while every definition (target shapes +
+    /// wrapper sprites) lives in the ROOT section — result_root's fc
+    /// timeline (sprite 243) is the shipped case.
+    ///
+    /// The sprite closure is SEGMENT-SCOPED and DOWNWARD: it starts from
+    /// the source ids the labeled segment places and recurses into those
+    /// sprites' own placements — never walking UP (a whole-section fixpoint
+    /// would absorb the label sprite's ancestors and clone the scene).
+    /// Only closure sprites that reach a target shape are cloned.
+    fn clone_segment_with_new_shapes_split(
+        &mut self,
+        src_label: &str,
+        new_label: &str,
+        shape_ids: &[u16],
+        opts: SegmentCloneOpts,
+    ) -> Option<MultiShapeSegmentClone> {
+        let root = SpritePath {
+            tag_indices: Vec::new(),
+        };
+        let label_path = self.find_sprite_by_label(src_label)?;
+
+        // Read-only resolution against ROOT definitions.
+        let (donors, clone_order) = {
+            let root_sec = self.section(&root)?;
+            let label_sec = self.section(&label_path)?;
+            if label_sec.labels.iter().any(|l| l.name == new_label) {
+                return None;
+            }
+            // Donor shapes: (id, unknown, ROOT dictionary frame).
+            let mut donors: Vec<(u16, u16, usize)> = Vec::with_capacity(shape_ids.len());
+            for &sid in shape_ids {
+                let ti = root_sec
+                    .tags
+                    .iter()
+                    .position(|t| matches!(t, Tag::Shape(s) if s.id == sid))?;
+                let Tag::Shape(donor) = &root_sec.tags[ti] else {
+                    return None;
+                };
+                let frame = root_sec.frames.iter().position(|f| {
+                    let s = f.start_tag as usize;
+                    s <= ti && ti - s < f.tag_count as usize
+                })?;
+                donors.push((sid, donor.unknown, frame));
+            }
+
+            // Segment-scoped downward closure over ROOT sprites.
+            let seg_start = label_sec.label_frame(src_label)? as usize;
+            let seg_end = segment_end(label_sec, seg_start);
+            let mut work: Vec<u16> = Vec::new();
+            for f in label_sec.frames.get(seg_start..seg_end)? {
+                let s = f.start_tag as usize;
+                let e = s.checked_add(f.tag_count as usize)?;
+                for t in label_sec.tags.get(s..e)? {
+                    if let Tag::PlaceObject(po) = t {
+                        if let Some(id) = po.view().and_then(|v| v.source_tag_id) {
+                            if !work.contains(&id) {
+                                work.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+            let find_sprite = |id: u16| {
+                root_sec.tags.iter().find_map(|t| match t {
+                    Tag::DefineSprite(s) if s.id == id => Some(s),
+                    _ => None,
+                })
+            };
+            // Downward closure (bounded — ids are unique, each visited once).
+            let mut closure: Vec<u16> = Vec::new();
+            let mut i = 0usize;
+            while i < work.len() {
+                let id = work[i];
+                i += 1;
+                let Some(sp) = find_sprite(id) else { continue };
+                if closure.contains(&id) {
+                    continue;
+                }
+                closure.push(id);
+                for t in &sp.section.tags {
+                    if let Tag::PlaceObject(po) = t {
+                        if let Some(child) = po.view().and_then(|v| v.source_tag_id) {
+                            if !work.contains(&child) {
+                                work.push(child);
+                            }
+                        }
+                    }
+                }
+            }
+            // Reaching subset: sprite places a target shape or a reaching
+            // sprite (fixpoint within the closure).
+            let mut reaching: Vec<u16> = Vec::new();
+            loop {
+                let mut grew = false;
+                for &id in &closure {
+                    if reaching.contains(&id) {
+                        continue;
+                    }
+                    let Some(sp) = find_sprite(id) else { continue };
+                    let hits = sp.section.tags.iter().any(|t| match t {
+                        Tag::PlaceObject(po) => match po.view().and_then(|v| v.source_tag_id) {
+                            Some(c) => shape_ids.contains(&c) || reaching.contains(&c),
+                            None => false,
+                        },
+                        _ => false,
+                    });
+                    if hits {
+                        reaching.push(id);
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            if reaching.is_empty() {
+                return None; // segment never reaches the shapes — wrong ids
+            }
+            // Children-first clone order within the reaching set.
+            let mut order: Vec<u16> = Vec::with_capacity(reaching.len());
+            while order.len() < reaching.len() {
+                let before = order.len();
+                for &rid in &reaching {
+                    if order.contains(&rid) {
+                        continue;
+                    }
+                    let sp = find_sprite(rid)?;
+                    let ready = sp.section.tags.iter().all(|t| match t {
+                        Tag::PlaceObject(po) => match po.view().and_then(|v| v.source_tag_id) {
+                            Some(id) if reaching.contains(&id) => order.contains(&id),
+                            _ => true,
+                        },
+                        _ => true,
+                    });
+                    if ready {
+                        order.push(rid);
+                    }
+                }
+                if order.len() == before {
+                    return None; // cycle — fail closed
+                }
+            }
+            (donors, order)
+        };
+
+        // Mutations against ROOT (definitions), then the segment clone(s)
+        // in every section carrying the label. Root-section inserts never
+        // shift nested paths' tag indices... except they DO (the label
+        // sprite's tag index moves when a root insert lands before it), so
+        // paths are re-resolved between steps like the local variant.
+        let mut result = MultiShapeSegmentClone::default();
+        let mut remap = TagRemap::new();
+        for (old_id, unknown, frame) in donors {
+            let new_id = self.add_shape(&root, frame, unknown)?;
+            remap.insert(old_id, new_id);
+            result.shapes.push((old_id, new_id));
+        }
+        for old_sprite in clone_order {
+            let new_sprite = self.clone_sprite_definition(&root, old_sprite, &remap)?;
+            remap.insert(old_sprite, new_sprite);
+            result.sprites.push((old_sprite, new_sprite));
+        }
+        let mut label_paths: Vec<SpritePath> = Vec::new();
+        collect_sections_with_label(&self.root, src_label, &mut Vec::new(), &mut label_paths);
+        if label_paths.is_empty() {
+            return None;
+        }
+        for p in label_paths {
+            self.clone_labeled_segment_placements_only_ex(&p, src_label, new_label, &remap, opts)?;
         }
         Some(result)
     }

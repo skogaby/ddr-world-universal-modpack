@@ -47,6 +47,7 @@ use std::sync::Mutex;
 use retour::GenericDetour;
 
 use crate::core::memory;
+use crate::core::msvc::{MsvcString, MsvcVec};
 use crate::core::signatures::SignatureStore;
 use crate::services::stage_records;
 use crate::{log_info, log_warn};
@@ -80,18 +81,9 @@ const MARVELOUS_LEGEND_RGBA: u32 = 0xF0F0_F0FF;
 /// GraphTab rebuild — vslot 7, `fn(this)`.
 type RebuildFn = unsafe extern "C" fn(*mut u8) -> u64;
 /// Chart series append: (chart, &vector<double>, &callable).
-type ChartAppendFn = unsafe extern "C" fn(*mut u8, *mut MsvcVecF64, *mut ColorCallable) -> u64;
+type ChartAppendFn = unsafe extern "C" fn(*mut u8, *mut MsvcVec<f64>, *mut ColorCallable) -> u64;
 /// Legend line: (&ctx {rect*, cursor*, tab*}, &string, rgba).
-type LegendFn = unsafe extern "C" fn(*mut u8, *const MsvcStringSso, u32) -> u64;
-
-/// MSVC `vector<double>` header. The append DEEP-COPIES the data, so a
-/// stack view over our registry-owned buffer is safe.
-#[repr(C)]
-struct MsvcVecF64 {
-    begin: *const f64,
-    end: *const f64,
-    cap_end: *const f64,
-}
+type LegendFn = unsafe extern "C" fn(*mut u8, *const MsvcString, u32) -> u64;
 
 /// The rebuild's stack shape for the color functor: a 0x20-byte MSVC
 /// `std::function` with inline storage — `{impl vftable, rgba, pad,
@@ -105,29 +97,6 @@ struct ColorCallable {
     _pad: u32,
     _pad2: u64,
     impl_ptr: *mut ColorCallable,
-}
-
-/// MSVC `std::string`, SSO form only (all our graph strings are ≤ 15
-/// bytes). 0x20 bytes — the legend fn takes it by const pointer (no
-/// vector stride in play here).
-#[repr(C)]
-struct MsvcStringSso {
-    buf: [u8; 16],
-    len: u64,
-    cap: u64,
-}
-
-impl MsvcStringSso {
-    fn new(bytes: &[u8]) -> MsvcStringSso {
-        let n = bytes.len().min(15);
-        let mut buf = [0u8; 16];
-        buf[..n].copy_from_slice(&bytes[..n]);
-        MsvcStringSso {
-            buf,
-            len: n as u64,
-            cap: 0xF,
-        }
-    }
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -387,7 +356,7 @@ unsafe fn series_slice(tab: *mut u8, offset: usize) -> Option<(*mut f64, usize)>
 
 unsafe extern "C" fn append_hook(
     chart: *mut u8,
-    vec: *mut MsvcVecF64,
+    vec: *mut MsvcVec<f64>,
     callable: *mut ColorCallable,
 ) -> u64 {
     // Capture the color functor's impl vftable BEFORE the original runs —
@@ -424,7 +393,7 @@ unsafe extern "C" fn append_hook(
 /// same `(uint,double,double)` lambda family, so a `{vft, violet}` clone
 /// is a valid color functor). Our injected call re-enters the hook but
 /// fails the vec-identity gate (its source is our stack view).
-fn maybe_inject_series(chart: *mut u8, vec: *mut MsvcVecF64, vft: usize) {
+fn maybe_inject_series(chart: *mut u8, vec: *mut MsvcVec<f64>, vft: usize) {
     unsafe {
         if chart.is_null() || vec.is_null() {
             return;
@@ -449,7 +418,7 @@ fn maybe_inject_series(chart: *mut u8, vec: *mut MsvcVecF64, vft: usize) {
             return; // judge page only
         }
 
-        let mut our_vec = MsvcVecF64 {
+        let mut our_vec = MsvcVec::<f64> {
             begin,
             end: begin.add(len),
             cap_end: begin.add(len),
@@ -470,7 +439,7 @@ fn maybe_inject_series(chart: *mut u8, vec: *mut MsvcVecF64, vft: usize) {
 
 // ── Legend detour: "■S-MARVELOUS" line ───────────────────────────────
 
-unsafe extern "C" fn legend_hook(ctx: *mut u8, text: *const MsvcStringSso, rgba: u32) -> u64 {
+unsafe extern "C" fn legend_hook(ctx: *mut u8, text: *const MsvcString, rgba: u32) -> u64 {
     // PRE-original on the stock white "■MARVELOUS" line: our violet entry
     // goes in first, so S-Marv leads the judge legend (maintainer
     // directive 2026-08-30).
@@ -512,7 +481,7 @@ fn maybe_inject_legend(ctx: *mut u8) {
         if !draw || memory::read_i32(tab.add(TAB_PAGE)) != 0 {
             return;
         }
-        let text = MsvcStringSso::new(LEGEND_TEXT);
+        let text = MsvcString::sso_bytes(LEGEND_TEXT);
         if let Some(d) = LEGEND_DETOUR.get() {
             d.call(ctx, &text, VIOLET_RGBA);
         }

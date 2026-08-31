@@ -15,10 +15,10 @@ feature directory throughout (per AGENTS.md).
 - [x] Step 4: Gameplay flash end-to-end (first synthesized AFP on cabinet)
 - [x] Step 5: Combo digits
 - [x] Step 6: Full-combo splash
-- [ ] Step 7: Results score tab row + exclusive MARVELOUS
-- [ ] Step 8: Results judgement graph
-- [ ] Step 9: Full-combo emblems (per-stage + total results)
-- [ ] Step 10: Integration hardening and documentation
+- [x] Step 7: Results score tab row + exclusive MARVELOUS
+- [x] Step 8: Results judgement graph
+- [x] Step 9: Full-combo emblems (per-stage + total results)
+- [x] Step 10: Integration hardening and documentation
 
 ---
 

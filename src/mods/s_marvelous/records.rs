@@ -101,11 +101,20 @@ unsafe fn read_vec_bounds<T>(record: *const u8, offset: usize) -> Option<(*const
 }
 
 /// Copy the record's grade + ms-error streams out into owned buffers,
-/// fail-closed (design §5.2). The copy (a few KiB) decouples every later
-/// computation from the live record.
+/// JUDGED SLOTS ONLY, fail-closed (design §5.2). The copy (a few KiB)
+/// decouples every later computation from the live record.
 ///
-/// Consistency gate: the grade stream's Marvelous count must equal the
-/// record's own per-grade Marvelous counter (`+0x28`). A disagreement
+/// Judged gating (Step-10 hardening): the streams carry one slot per
+/// flag≥0 note entry ALLOCATED UP FRONT — on a partial play (quick fail)
+/// unjudged slots keep their initial grade-0 value, which would both
+/// poison the Marvelous count and trip the counter cross-check below
+/// (stock tab after every quick-fail). The note-entry vector carries the
+/// per-slot judged flag (stream-aligned by construction — the graph's
+/// ingest mirror); slots without a judged note entry are dropped. Full
+/// plays filter to identity (cabinet-validated behavior unchanged).
+///
+/// Consistency gate: the judged grade stream's Marvelous count must equal
+/// the record's own per-grade Marvelous counter (`+0x28`). A disagreement
 /// means the assumed layout drifted — refuse rather than render wrong
 /// numbers.
 ///
@@ -123,14 +132,33 @@ pub unsafe fn read_streams(record: *const u8) -> Option<(Vec<u8>, Vec<i16>)> {
     // Empty streams are legal (a quick-failed song can end with zero judged
     // notes — the tab shows all zeros); the counter cross-check below still
     // applies (must be 0).
-    let grades = std::slice::from_raw_parts(g_ptr, g_len).to_vec();
-    let errors = std::slice::from_raw_parts(e_ptr, e_len).to_vec();
+    let raw_grades = std::slice::from_raw_parts(g_ptr, g_len);
+    let raw_errors = std::slice::from_raw_parts(e_ptr, e_len);
+    let notes = read_note_refs(record)?;
+    let (grades, errors) = filter_judged(raw_grades, raw_errors, &notes);
 
     let marv_counter = (record.add(REC_GRADE_COUNTS) as *const i32).read_unaligned();
     if marv_counter < 0 || count_grade(&grades, GRADE_MARVELOUS) != marv_counter as u32 {
         return None;
     }
     Some((grades, errors))
+}
+
+/// Keep only stream slots whose note entry was JUDGED (pure core of the
+/// [`read_streams`] gating — see its docs for the partial-play rationale).
+/// Slots past the note list are dropped (unjudged-unknown, mirroring the
+/// graph ingest's `idx < len` gate).
+pub fn filter_judged(grades: &[u8], errors: &[i16], notes: &[NoteRef]) -> (Vec<u8>, Vec<i16>) {
+    let n = grades.len().min(errors.len()).min(notes.len());
+    let mut g = Vec::with_capacity(n);
+    let mut e = Vec::with_capacity(n);
+    for i in 0..n {
+        if notes[i].judged {
+            g.push(grades[i]);
+            e.push(errors[i]);
+        }
+    }
+    (g, e)
 }
 
 /// The results-side recompute (design §4.7): S-Marvelous count for a stage
@@ -366,5 +394,27 @@ mod tests {
         let notes = [note(true, 0)];
         assert!(smarv_per_second(&notes, &[0u8, 0], &[0i16], 12).is_none());
         assert!(smarv_per_second(&notes, &[0u8], &[0i16], 0).is_none());
+    }
+
+    #[test]
+    fn filter_judged_drops_unjudged_and_tail() {
+        // Partial play: slots 1 and 3 unjudged (grade-0 garbage), slot 4
+        // past the note list (unjudged-unknown) — all dropped.
+        let grades = [0u8, 0, 1, 0, 0];
+        let errors = [3i16, 0, 20, 0, 0];
+        let notes = [note(true, 0), note(false, 0), note(true, 0), note(false, 0)];
+        let (g, e) = filter_judged(&grades, &errors, &notes);
+        assert_eq!(g, vec![0, 1]);
+        assert_eq!(e, vec![3, 20]);
+    }
+
+    #[test]
+    fn filter_judged_full_play_is_identity() {
+        let grades = [0u8, 1, 6];
+        let errors = [1i16, 2, 3];
+        let notes = [note(true, 0), note(true, 0), note(true, 0)];
+        let (g, e) = filter_judged(&grades, &errors, &notes);
+        assert_eq!(g, grades.to_vec());
+        assert_eq!(e, errors.to_vec());
     }
 }

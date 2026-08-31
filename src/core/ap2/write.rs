@@ -13,7 +13,7 @@
 
 use super::align4;
 use super::model::{
-    Ap2Doc, FileOrder, PlaceObject, PlaceObjectParams, RegionKind, Tag, TagSection,
+    Ap2Doc, FileOrder, Label, PlaceObject, PlaceObjectParams, RegionKind, Tag, TagSection,
     FILE_HEADER_MIN, FILE_HEADER_MIN_FLAG4, FRAME_COUNT_MAX, FRAME_START_MAX, SECTION_HEADER_LEN,
     STRING_TABLE_MAX, TAG_DEFINE_SPRITE, TAG_ID_MAX, TAG_PLACE_OBJECT, TAG_SHAPE, TAG_SIZE_MAX,
 };
@@ -140,11 +140,21 @@ pub(super) fn serialize_section(sec: &TagSection) -> Option<Vec<u8>> {
     }
 
     // --- Name references: `<HH>` frame + string offset ---
+    //
+    // ENGINE INVARIANT (libafp RE, s-marvelous deploy #6): the label
+    // table is BINARY-SEARCHED by name at runtime (`FUN_18011dcc0` →
+    // bsearch with a name comparator) — an unsorted table makes labels
+    // silently unresolvable (bemaniutils scans linearly and cannot catch
+    // it). Emit name-sorted (stable): stock tables are already sorted, so
+    // round-trips stay byte-identical (Leg A, 76 templates), and any
+    // append-order drift from the editing primitives is corrected here.
     if sec.labels.len() > u16::MAX as usize {
         return None;
     }
-    let mut nr_bytes = Vec::with_capacity(sec.labels.len() * 4);
-    for l in &sec.labels {
+    let mut sorted_labels: Vec<&Label> = sec.labels.iter().collect();
+    sorted_labels.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut nr_bytes = Vec::with_capacity(sorted_labels.len() * 4);
+    for l in &sorted_labels {
         nr_bytes.extend_from_slice(&l.frame.to_le_bytes());
         nr_bytes.extend_from_slice(&l.name_offset.to_le_bytes());
     }

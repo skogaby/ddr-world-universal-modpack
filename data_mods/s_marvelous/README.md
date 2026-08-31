@@ -18,6 +18,8 @@ identical pixel rects so cloned geo UVs stay valid).
 | `dance_fullcombo/dafu_side_light_smarvelous.png` | dance_fullcombo0000 · `dafu_side_light_marvelous` | 770×76 | FC splash (Step 6) |
 | `scene_result/scre_tab_detail_judge.png` | scene_result_v3 · `scre_tab_detail_judge` | 108×118 | results row-label sheet, Details tab (Step 7) |
 | `scene_result/scre_tab_detail_base.png` | scene_result_v3 · `scre_tab_detail_base` | 108×118 | results row-label sheet, Simple results tab (Step 7) |
+| `scene_result/scre_fc_smarvelous.png` | scene_result_v3 · `scre_fc_marvelous` | 232×18 | per-stage S-MFC emblem caption (Step 9) |
+| `scene_result/scre_total_player_fc_smfc.png` | scene_result_v3 · `scre_total_player_fc_mfc` | 30×12 | total-results S-MFC badge (Step 9) |
 
 The two `scene_result` sheets are FULL REPLACEMENTS of the stock 6-row
 judgement-label sheets: the stock block is uniform-scaled ×16/19 (pitch
@@ -30,16 +32,19 @@ source art, not generated output) but MUST keep the 108×118 canvas and the
 2026-08-30: the base sheet's violet row carries a sliver of Perfect's shadow
 from the crop — hand cleanup planned).
 
-Still needed later (deferred until the exact atlas regions are mapped during
-those steps — the art lives inside larger sheets in the results packages):
-
-- Per-stage results FC emblem `loop_smfc` frames' art — Step 9.
-- Total-results emblem (`scre_total_player_*` family) — Step 9.
+The two Step-9 emblem textures are straight violet colorizes of their donors
+(same canvas — `scre_fc_smarvelous` is donor-anchored in the atlas, so the
+232×18 rect is load-bearing; the `..._fc_smfc` badge is a FRESH texturelist
+entry sized from the PNG). The per-stage emblem keeps the stock "Marvelous
+Fullcombo!!!" wording per the maintainer's art language (violet hue, no "S-"
+prefix); it renders STATIC violet — the AP2 patch drops the stock rainbow
+hue-rotation records, so no hue variation is needed in the art.
 
 Regeneration (dev machine, `DDR_WORLD_INSTALL` + sibling bemaniutils): the
 generators are one-shot inline scripts recorded in
 `.agents/planning/2026-08-29-s-marvelous-judgement/progress.md` (Step 4
-prep for the gameplay art; Step 7 prep for the results sheets); they decode
+prep for the gameplay art; Step 7 prep for the results sheets; Step 9 prep
+for the emblem colorizes); they decode
 the donors from the game arcs via bemaniutils' IFS class and apply an
 alpha-preserving HSV hue rotation (hue 280°, saturation floor 150,
 value ×0.82).

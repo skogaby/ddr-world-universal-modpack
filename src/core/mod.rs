@@ -23,6 +23,7 @@ pub mod memory_patch;
 #[cfg(test)]
 mod memory_patch_tests;
 pub mod module_resolver;
+pub mod msvc;
 pub mod platform;
 pub mod profiling;
 pub mod scanner;
