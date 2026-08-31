@@ -340,13 +340,16 @@ pub struct NonNativeOsSupportConfig {
     pub movie_mode: Option<String>,
 }
 
-/// Config for the `s-marvelous` mod (`s_marvelous` section). Operator-edited
-/// only — the DLL never writes this section back. Read once at mod enable.
+/// Config for the `s-marvelous` mod (`s_marvelous` section). Seeded from
+/// here at mod enable; ALSO live-editable from the overlay menu's
+/// S-MARVELOUS JUDGEMENT section (GLOBAL SETTINGS), which persists the
+/// section back (`save_json_key`). Overlay edits apply next song.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct SMarvelousConfig {
     /// S-Marvelous judgement window in ms (|delta| <= window, inclusive).
-    /// Default 12; clamped 1..=17 (stock Marvelous is +/-17, and S-Marvelous
-    /// must remain a strict subset). Tuning escape hatch — no UI.
+    /// Default 12; clamped 1..=16 — stock Marvelous is +/-17 and S-Marvelous
+    /// must remain a STRICT subset (a 17 ms window would classify every
+    /// Marvelous as S-Marvelous).
     #[serde(default)]
     pub window_ms: Option<i32>,
 }

@@ -27,7 +27,8 @@
     "non-native-operating-system-support": false,
     "quick-logout": true,
     "training-mode": true,
-    "decorative-option-headers": true
+    "decorative-option-headers": true,
+    "s-marvelous": true
   },
   "diagnostics": {
     "profiling": false
@@ -311,6 +312,9 @@
   },
   "per_song_judgement_offsets": {
     "mirror_players": true
+  },
+  "s_marvelous": {
+    "window_ms": 12
   },
   "non_native_os_support": {
     "movie_mode": "fallback"

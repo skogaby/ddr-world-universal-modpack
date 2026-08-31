@@ -24,7 +24,7 @@ pub mod results_score;
 pub mod splash;
 pub mod state;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::mods::config;
 use crate::mods::mod_trait::{Mod, ModContext};
@@ -36,6 +36,15 @@ use crate::{log_info, log_warn};
 /// Gates the scene/song-reset callback bodies: snapshot dispatch means a
 /// removed callback can fire one last time after `disable`.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// The LIVE S-Marvelous window (ms). Seeded from `s_marvelous.window_ms` at
+/// enable; the overlay menu's scalar row writes it. Read at each
+/// GAMEPLAY-entry arm, so an edit applies NEXT song (per-song latch, design
+/// D26) — a mid-song edit never changes the armed window.
+static LIVE_WINDOW_MS: AtomicI32 = AtomicI32::new(state::DEFAULT_WINDOW_MS);
+
+/// Overlay menu row key (GLOBAL SETTINGS, grouped under this mod's header).
+const WINDOW_ROW_KEY: &str = "smarv_window_ms";
 
 pub struct SMarvelousMod {
     data_feed_installed: bool,
@@ -80,15 +89,44 @@ fn configured_window() -> i32 {
     clamped
 }
 
+/// Register (or idempotently re-register — `register_scalar_row` replaces by
+/// key) the overlay menu's window row, seeded with `initial`. Renders on the
+/// GLOBAL SETTINGS tab under this mod's auto-generated section header
+/// (S-MARVELOUS JUDGEMENT). Edits write the live atomic (armed next song)
+/// and persist the `s_marvelous` config section.
+fn register_overlay_row(initial: i32) {
+    use crate::mods::mod_menu::{self, ScalarRowSpec};
+    mod_menu::register_scalar_row(ScalarRowSpec {
+        key: WINDOW_ROW_KEY.to_string(),
+        label: "S-Marvelous Window".to_string(),
+        hint: "S-Marvelous window (ms, stock Marvelous is 17). Applies next song.".to_string(),
+        parent_row_key: Some("s-marvelous".to_string()),
+        min: state::MIN_WINDOW_MS,
+        max: state::MAX_WINDOW_MS,
+        step_fine: 1,
+        step_coarse: 4,
+        initial,
+        on_change: std::sync::Arc::new(|v| {
+            let clamped = state::clamp_window(v);
+            LIVE_WINDOW_MS.store(clamped, Ordering::Relaxed);
+            config::save_json_key("s_marvelous", serde_json::json!({ "window_ms": clamped }));
+            log_info!(
+                "SMarvelous: window set to {} ms (applies next song)",
+                clamped
+            );
+        }),
+    });
+}
+
 impl Mod for SMarvelousMod {
     fn id(&self) -> &str {
         "s-marvelous"
     }
     fn name(&self) -> &str {
-        "S-Marvelous Judgement (12ms)"
+        "S-Marvelous Judgement"
     }
     fn description(&self) -> &str {
-        "Discrete S-Marvelous judgement for Marvelous steps within +/-12ms (display-only)"
+        "Discrete S-Marvelous judgement for Marvelous steps inside a tighter window (display-only)"
     }
     fn required_signatures(&self) -> &[&str] {
         &["judge_submit"]
@@ -149,6 +187,8 @@ impl Mod for SMarvelousMod {
             return;
         }
         let window = configured_window();
+        LIVE_WINDOW_MS.store(window, Ordering::Relaxed);
+        register_overlay_row(window);
         ACTIVE.store(true, Ordering::Release);
 
         if scene_manager::is_available() {
@@ -171,15 +211,17 @@ impl Mod for SMarvelousMod {
                                 side,
                                 smarv,
                                 marv,
-                                window
+                                state::last_armed_window(side)
                             );
                         }
                     }
                     state::disarm_all();
                 }
                 if next == scene::GAMEPLAY {
-                    // Per-song latch: mid-song config/toggle changes apply
-                    // next song (design D26).
+                    // Per-song latch: mid-song config/toggle/overlay-row
+                    // changes apply next song (design D26) — the live window
+                    // is read here, at GAMEPLAY entry, and nowhere else.
+                    let window = LIVE_WINDOW_MS.load(Ordering::Relaxed);
                     state::reset_song_state();
                     state::arm(0, window);
                     state::arm(1, window);
@@ -247,6 +289,7 @@ impl Mod for SMarvelousMod {
 
     fn disable(&mut self) {
         ACTIVE.store(false, Ordering::Release);
+        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY]);
         afp_patches::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();

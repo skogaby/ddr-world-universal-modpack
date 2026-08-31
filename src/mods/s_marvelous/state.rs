@@ -15,12 +15,14 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-/// Stock Marvelous window is ±17 ms; S-Marvelous must be a strict subset.
+/// Stock Marvelous window is ±17 ms; S-Marvelous must be a STRICT subset,
+/// so the window caps at 16 (a 17 ms window would classify every Marvelous
+/// as S-Marvelous).
 pub const MIN_WINDOW_MS: i32 = 1;
-pub const MAX_WINDOW_MS: i32 = 17;
+pub const MAX_WINDOW_MS: i32 = 16;
 pub const DEFAULT_WINDOW_MS: i32 = 12;
 
-/// Clamp an operator-configured window into the valid 1..=17 range.
+/// Clamp an operator-configured window into the valid 1..=16 range.
 pub fn clamp_window(ms: i32) -> i32 {
     ms.clamp(MIN_WINDOW_MS, MAX_WINDOW_MS)
 }
@@ -275,11 +277,12 @@ mod tests {
         assert_eq!(clamp_window(0), 1);
         assert_eq!(clamp_window(1), 1);
         assert_eq!(clamp_window(12), 12);
-        assert_eq!(clamp_window(17), 17);
-        assert_eq!(clamp_window(18), 17);
+        assert_eq!(clamp_window(16), 16);
+        assert_eq!(clamp_window(17), 16); // strictly below stock Marvelous
+        assert_eq!(clamp_window(18), 16);
         assert_eq!(clamp_window(-5), 1);
         assert_eq!(clamp_window(i32::MIN), 1);
-        assert_eq!(clamp_window(i32::MAX), 17);
+        assert_eq!(clamp_window(i32::MAX), 16);
     }
 
     /// The wrapper shares process-wide statics, so exercise it as one
@@ -321,7 +324,8 @@ mod tests {
 
         // Arm clamps.
         arm(0, 40);
-        assert!(on_judge_event(0, 0, Some(17), 1)); // clamped window 17
+        assert!(on_judge_event(0, 0, Some(16), 1)); // clamped window 16
+        assert!(!on_judge_event(0, 0, Some(17), 2)); // stock Marvelous edge stays loose
         assert_eq!(smarv_count(0), 1);
 
         disarm_all();
