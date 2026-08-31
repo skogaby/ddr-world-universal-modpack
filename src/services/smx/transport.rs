@@ -43,9 +43,7 @@ use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentThread, ResetEvent, SetThreadPriority, WaitForSingleObject,
     THREAD_PRIORITY_ABOVE_NORMAL,
 };
-use windows::Win32::System::IO::{
-    CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
-};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use super::cabinet_map;
 use super::device::{self, DeviceKind};
@@ -308,6 +306,14 @@ struct Device {
     kind: DeviceKind,
     /// Overlapped write state for the in-flight command (worker thread only).
     write_ov: Box<OVERLAPPED>,
+    /// Manual-reset event backing `write_ov` (worker thread only). Waiting on
+    /// a dedicated event instead of the file handle matters twice over: the
+    /// file handle is also signaled by the READER thread's completions on the
+    /// same handle (spurious wakes), and the event path needs only
+    /// `GetOverlappedResult` — `GetOverlappedResultEx` doesn't exist on
+    /// Windows 7 and a static import of it makes the loader reject the whole
+    /// DLL there (tester-caught 2026-08-31).
+    write_event: HANDLE,
     /// Control commands (device info). Never replaced.
     queue: VecDeque<PendingCommand>,
     in_flight: Option<InFlight>,
@@ -359,6 +365,17 @@ impl Device {
             stop: AtomicBool::new(false),
             failed: AtomicBool::new(false),
         });
+        // Manual-reset event for overlapped writes (see `write_event` doc).
+        // Creation failure marks the device failed so the reap cycle drops it
+        // instead of ever issuing an event-less overlapped write.
+        let (write_event, event_failed) =
+            match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(e) => (e, false),
+                Err(_) => {
+                    log_warn!("SMX: failed to create write event; dropping device");
+                    (HANDLE::default(), true)
+                }
+            };
         let (tx, rx) = channel::<Vec<u8>>();
         // Dedicated event-driven reader thread: input reports → INPUT_MASKS
         // with ~0 latency, serial reports → the worker over `tx`.
@@ -376,6 +393,7 @@ impl Device {
             handle,
             kind,
             write_ov: Box::new(OVERLAPPED::default()),
+            write_event,
             queue: VecDeque::new(),
             in_flight: None,
             lights_active: VecDeque::new(),
@@ -389,7 +407,7 @@ impl Device {
             reader,
             reader_join,
             serial_rx: rx,
-            failed: false,
+            failed: event_failed,
         }
     }
 
@@ -473,6 +491,11 @@ fn teardown_device(dev: &mut Device) {
         let _ = join.join();
     }
     device::close_device(dev.handle);
+    if !dev.write_event.is_invalid() {
+        unsafe {
+            let _ = CloseHandle(dev.write_event);
+        }
+    }
     if let Some(slot) = dev.player_slot {
         INPUT_MASKS[slot].store(0, Ordering::Release);
     }
@@ -829,7 +852,13 @@ fn pump_writes(dev: &mut Device, now: Instant) {
         // interleaves the 61-byte chunks (cabinet-caught 2026-08-27:
         // garbled/partial arrow lights while single-command data
         // survived). Waiting per packet is correct on both platforms.
-        *dev.write_ov = OVERLAPPED::default();
+        *dev.write_ov = OVERLAPPED {
+            hEvent: dev.write_event,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = ResetEvent(dev.write_event);
+        }
         let result = unsafe {
             WriteFile(
                 dev.handle,
@@ -845,15 +874,28 @@ fn pump_writes(dev: &mut Device, now: Instant) {
                 return;
             }
             // Wait for this packet to land (bounded; a wedged device is
-            // failed and re-opened by discovery).
-            let mut bytes = 0u32;
-            let wait = unsafe {
-                GetOverlappedResultEx(dev.handle, &*dev.write_ov, &mut bytes, 500, false)
+            // failed and re-opened by discovery). Event + WaitForSingleObject
+            // + plain GetOverlappedResult, NOT GetOverlappedResultEx: the Ex
+            // variant is Windows 8+ and its static import made the Win7
+            // loader reject the entire DLL (tester-caught 2026-08-31), and
+            // an event-less wait would ride the file handle, which the
+            // reader thread's completions also signal.
+            let wait = unsafe { WaitForSingleObject(dev.write_event, 500) };
+            let landed = wait == WAIT_OBJECT_0 && {
+                let mut bytes = 0u32;
+                unsafe { GetOverlappedResult(dev.handle, &*dev.write_ov, &mut bytes, false) }
+                    .is_ok()
             };
-            if wait.is_err() {
+            if !landed {
                 unsafe {
-                    // Cancel just this write op — not the reader's pending read.
+                    // Cancel just this write op — not the reader's pending
+                    // read — then DRAIN it (blocking GetOverlappedResult):
+                    // the kernel writes the final status into write_ov when
+                    // the IRP completes, so it must stay untouched until
+                    // then. The device is failed and reaped either way.
                     let _ = CancelIoEx(dev.handle, Some(&*dev.write_ov));
+                    let mut b = 0u32;
+                    let _ = GetOverlappedResult(dev.handle, &*dev.write_ov, &mut b, true);
                 }
                 log_warn!("SMX: packet write did not complete; reconnecting device");
                 dev.failed = true;
