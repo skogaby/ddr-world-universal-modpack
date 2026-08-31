@@ -395,6 +395,39 @@ pub fn handle_texture(norm_path: &str) -> Option<String> {
     }
 }
 
+/// Purge a STOCK-NAME texture replacement: delete the converted cache file
+/// and drop its `CACHE_INDEX` entry so `handle_texture` stops short-circuiting
+/// to a file that no longer matches the caller's intent. Callers that stage
+/// stock-texture replacements gated on a mod's enable state (the
+/// s_marvelous results sheets — the only stock-name replacements a MOD owns;
+/// operator mod-folder replacements are unaffected) must call this whenever
+/// they remove the staged PNG, otherwise a stale cache entry keeps serving
+/// the old art (or, worse, an index entry pointing at a deleted file fails
+/// the game's open outright).
+pub fn purge_texture_replacement(ifs_mod_path: &str, image_name: &str) {
+    let name_md5 = format!("{:x}", md5::compute(image_name.as_bytes()));
+    let cache_file = format!("{}/{}/{}", CACHE_FOLDER, ifs_mod_path, name_md5);
+    let existed = std::path::Path::new(&cache_file).exists();
+    if existed {
+        if let Err(e) = std::fs::remove_file(&cache_file) {
+            log_warn!(
+                "LayeredFS: can't purge cached texture {}: {}",
+                cache_file,
+                e
+            );
+            return;
+        }
+    }
+    let dropped = CACHE_INDEX.lock().unwrap().remove(&cache_file);
+    if existed || dropped {
+        log_info!(
+            "LayeredFS: purged texture replacement cache for {} ({})",
+            image_name,
+            cache_file
+        );
+    }
+}
+
 /// Register an afplist `<geo>` id-list extension: `extra_ids` are appended
 /// to the EXISTING `<afp name="{afp_name}">` entry's geo list when the
 /// IFS's afplist is opened. Idempotent per (ifs, afp, id). Callers must

@@ -158,7 +158,13 @@ fn scan_pattern_inner(base: *const u8, size: usize, pattern: &str) -> Option<Sca
         }
     };
 
-    for m in ac.find_iter(bytes) {
+    // OVERLAPPING iteration is load-bearing (Step-8 cabinet regression,
+    // 2026-08-30): `find_iter` reports non-overlapping matches only, so a
+    // needle hit whose span intersects an earlier-ending hit (its own
+    // periodic self-overlap, or — in the batch scanner — ANOTHER pattern's
+    // needle sharing prologue bytes) is silently consumed and the pattern
+    // never resolves even though the bytes are present.
+    for m in ac.find_overlapping_iter(bytes) {
         let hit_start = m.start();
         if hit_start < run_offset {
             continue;
@@ -237,7 +243,9 @@ fn scan_pattern_all_inner(base: *const u8, size: usize, pattern: &str) -> Vec<Sc
     };
 
     let mut results = Vec::new();
-    for m in ac.find_iter(bytes) {
+    // Overlapping iteration — see scan_pattern_inner (a non-overlapping
+    // walk drops self-overlapping needle hits).
+    for m in ac.find_overlapping_iter(bytes) {
         let hit_start = m.start();
         if hit_start < run_offset {
             continue;
@@ -464,7 +472,14 @@ fn scan_patterns_batch_inner(
             .build(&needles)
         {
             Ok(ac) => {
-                for m in ac.find_iter(bytes) {
+                // Overlapping iteration is LOAD-BEARING here: with the
+                // non-overlapping `find_iter`, one pattern's needle hit
+                // can be consumed by a DIFFERENT pattern's earlier-ending
+                // hit over the same bytes (shared prologue idioms like
+                // `40 55 41 54 ...`), silently failing a resolvable
+                // signature (graph_tab_rebuild, Step-8 cabinet regression
+                // 2026-08-30).
+                for m in ac.find_overlapping_iter(bytes) {
                     let needle_id = m.pattern().as_usize();
                     let meta = &metas[needle_id];
                     if results.contains_key(&meta.name) {

@@ -739,6 +739,60 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 55 56 57 48 83 EC 60 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 80 00 00 00 0F 29 74 24 50 0F 29 7C 24 40 49 8B F0 48 8B D9 81 FA 34 10 00 00 0F 85",
         description: "sequence::dance::FullcomboActor message handler (this, msg, payload). Handles only 0x1034: SE + splash label goto + play/visible.",
     },
+    // PlaydataTab populate/update (s-marvelous results score tab, vslot 7 —
+    // runs every frame while a judgement-count tab is visible; the heavy
+    // populate is gated on the dirty byte this+0x151, consumed at its
+    // start). Prologue-anchored; the giant frame (SUB RSP,0xB70) plus the
+    // 0x151/0x110 field reads pin uniqueness — the string
+    // "marvelous_num_usr" has exactly one xref, inside this fn
+    // (0x1800F6BC0 on 20260721). Security-cookie RIP disp wildcarded.
+    SignatureDefinition {
+        name: "playdata_tab_update",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 68 F5 FF FF 48 81 EC 70 0B 00 00 48 C7 45 50 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 60 0A 00 00 4C 8B E1 4C 8B 81 10 01 00 00",
+        description: "sequence::result::PlaydataTab populate/update (this). Populates the judgement-count rows behind the +0x151 dirty byte, then lays out every widget in this+0x158 per frame.",
+    },
+    // PlaydataTab row-write helper (s-marvelous results score tab): builds a
+    // sequence::SpriteLayer number widget — make_shared, glyph conversion
+    // via "scre_tab_num_%s", parent = ctx wrapper, anchor-name assign,
+    // set-names, then PUSHES it into the tab's widget vector (tab+0x158) so
+    // the game owns layout + destruction. (ctx, out_shared_ptr, name_str,
+    // text_str) -> out_shared_ptr; ctx = {wrapper*, tab*} pair
+    // (0x1800F8370 on 20260721). Prologue-anchored, unique on the frame
+    // size + homing sequence.
+    SignatureDefinition {
+        name: "playdata_row_write",
+        pattern: "40 53 55 56 57 41 54 41 55 48 81 EC 98 00 00 00 48 C7 44 24 50 FE FF FF FF 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 80 00 00 00 49 8B D9 49 8B F0 48 8B EA 4C 8B E1 48 89 54 24 48 45 33 ED 44 89 6C 24 20",
+        description: "PlaydataTab row-write helper (ctx {wrapper,tab}, out shared_ptr, anchor-name string, text string). Creates a SpriteLayer row widget and pushes it into tab+0x158.",
+    },
+    // GraphTab per-frame rebuild (s-marvelous judgement graph, vslot 7 —
+    // clears + rebuilds all charts/legend texts every frame). Prologue
+    // anchored; the giant 0x12E0 chkstk frame pins uniqueness (verified
+    // exactly-once on 20260721 @0x1800ED610 and 20260616 @0x1800ED1B0).
+    // The chkstk call rel32 is wildcarded.
+    SignatureDefinition {
+        name: "graph_tab_rebuild",
+        pattern: "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 20 EE FF FF B8 E0 12 00 00 E8 ? ? ? ? 48 2B E0 48 C7 85 E8 07 00 00 FE FF FF FF",
+        description: "sequence::result::GraphTab rebuild (this). Rebuilds charts (tab+0x178) and legend texts (tab+0x1A0) per frame while the tab is visible.",
+    },
+    // Chart single-color series append (s-marvelous judgement graph):
+    // (chart, vector<double>*, callable {vft, rgba u32, pad, impl_ptr}) —
+    // DEEP-COPIES the data, CONSUMES the callable. Unique on 20260721
+    // @0x1801CFF60 / 20260616 @0x1801CF410; cookie disp wildcarded.
+    SignatureDefinition {
+        name: "graph_chart_append",
+        pattern: "40 55 53 56 57 41 54 48 8D 6C 24 C9 48 81 EC 00 01 00 00 48 C7 45 E7 FE FF FF FF 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 2F 49 8B F8 48 8B F1",
+        description: "Graph chart series append (chart, &vector<double>, &color callable). Copies the series data into the chart; the callable supplies the bar color.",
+    },
+    // GraphTab legend text helper (s-marvelous judgement graph):
+    // (ctx {rect block*, cursor*, tab*}, &string, rgba) — creates a scaled
+    // 0.6 text object, tints it, pushes into tab+0x1A0, advances the
+    // cursor by the text width. Unique on 20260721 @0x1800F15E0 /
+    // 20260616 @0x1800F1180 (exact bytes, no relocs in the window).
+    SignatureDefinition {
+        name: "graph_legend_text",
+        pattern: "48 8B C4 55 57 41 54 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 E7 FE FF FF FF 48 89 58 10 48 89 70 18 41 8B D8 4C 8B E1 48 8B 41 08 44 8B 08 41 FF C1",
+        description: "GraphTab legend-line helper (ctx, string, rgba). Appends one colored legend text to the tab and advances the layout cursor.",
+    },
     // CalcCalorieActor per-frame tick (vtable slot 6, shared Single/Double).
     // Reads the current measurement-window index (+0x92) and its closed flag
     // (+0x68 + idx*8); when closed, calls vtable slot 9 (+0x48) for the
@@ -1593,6 +1647,52 @@ impl SignatureStore {
         // uniqueness-revalidated wavebank_unregister match.
         self.derive_song_rate_io_callbacks();
         self.derive_preview_restart();
+        self.derive_smarv_results_course_gate();
+    }
+
+    /// Derive `results_course_gate_global` — the global the PlaydataTab
+    /// populate consults to pick the record it displays (`DAT_1806F14F8`
+    /// on 20260721): `**global + 0x70 != 0` ⇒ the tab reads the COURSE
+    /// record (`PlayerWork+0x2D8`), else the per-stage array
+    /// (`PlayerWork+0x590 + stage*0x2B8`). The s_marvelous results row
+    /// replicates the exact branch so its recompute always reads the SAME
+    /// record the tab renders (S-Marvelous is mode-agnostic — normal,
+    /// course/Dan, training all show it).
+    ///
+    /// Derivation: inside the first 0x100 bytes of `playdata_tab_update`,
+    /// the (single) sequence
+    ///   MOV RAX,[rip+disp32]  ; 48 8B 05 ..    the gate global
+    ///   MOV RCX,[RAX]         ; 48 8B 08
+    ///   CMP [RCX+0x70],RDI    ; 48 39 79 70
+    /// — verified byte-identical shape on 20260616/20260721. Fails closed.
+    fn derive_smarv_results_course_gate(&mut self) {
+        let populate = match self.get_address("playdata_tab_update") {
+            Some(a) => a,
+            None => {
+                log_warn!("  [-] results_course_gate_global -- playdata_tab_update unresolved");
+                return;
+            }
+        };
+        const PATTERN: &str = "48 8B 05 ? ? ? ? 48 8B 08 48 39 79 70";
+        let hits = scan_pattern_all(populate, 0x100, PATTERN);
+        if hits.len() != 1 {
+            log_warn!(
+                "  [-] results_course_gate_global -- expected 1 gate match, found {}",
+                hits.len()
+            );
+            return;
+        }
+        unsafe {
+            let global = decode_rip_relative(hits[0].address.add(3));
+            let off = global.offset_from(self.base) as usize;
+            if off >= self.size {
+                log_warn!("  [-] results_course_gate_global -- derived address outside module");
+                return;
+            }
+            self.resolved
+                .insert("results_course_gate_global".into(), global);
+            log_info!("  [+] results_course_gate_global (derived) @ +0x{:X}", off);
+        }
     }
 
     fn derive_song_rate_runtime_sites(&mut self) {

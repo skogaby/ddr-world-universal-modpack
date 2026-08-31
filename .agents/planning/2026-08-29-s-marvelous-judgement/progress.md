@@ -1,18 +1,193 @@
 # Progress — S-Marvelous Judgement
 
 Updated: 2026-08-30
-Status: Step 4 of 10 — implementation done; CABINET DEMO PENDING (maintainer)
-NEXT ACTION: maintainer deploys (`./scripts/deploy.sh`) and runs the Step 4
-demo (see Deploy & test log, deploy #2). NOTE: this deploy needs BOTH the
-DLL AND the `data_mods/s_marvelous/` asset dir on the cabinet, and the
-FIRST boot after deploy rebuilds the atlas — the flash may need ONE reboot
-to appear (house atlas-rebuild rule).
+Status: Step 8 of 10 — DONE (demo passed deploy #2). Next: Step 9 (FC
+emblems), then Step 10 (hardening + docs).
+NEXT ACTION: Step 9 per plan.md — dump the `fc_usr` host template +
+`total_result` package (Appendix-B), patch `loop_smfc`, signatures
+`result_window_build` (anchor `"scre_rank_%s"` xref, 20260721
+0x1800B8AA0) + `total_result_populate` (anchors `"total_result"` /
+`"fullcombo_usr"`, 0x1800CB090), post-original one-shot re-drives.
 
 Resume protocol: read `implementation/plan.md` (checklist = step status),
 `design/detailed-design.md` (Approved 2026-08-29), task files under
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
 
 ## Done
+
+- Step 8 implemented (judgement graph — uncommitted, maintainer commits):
+  - `records.rs`: `NoteRef` + pure `smarv_per_second` (mirror-bucketing:
+    one stream slot per flag≥0 note entry, judged gate entry+0x18==0,
+    t_first = first judged timestamp, bucket = (t−t_first)/1000) +
+    impure `read_note_refs` (0x60-stride note-entry reader, fail-closed).
+    5 new host tests (unjudged slots advance index, window edge, empty,
+    short streams, mismatch rejection).
+  - `core/signatures.rs`: `graph_tab_rebuild` / `graph_chart_append` /
+    `graph_legend_text` (all Ghidra-verified unique on 20260721 AND
+    20260616; addresses in the Step-8 RE entry below).
+  - `results_graph.rs` (NEW): the three-detour injection design from the
+    RE entry — rebuild pre-original one-shot (per-tab registry: build our
+    per-second vector, pad to the game series length, subtract from
+    marvelous(+0x5D8)/shimmer(+0x5F8) clamped, leftover WARN); chart-
+    append detour injects our violet series before the PERFECT append
+    (vec-identity gate `vec == tab+0x5B8`, live-captured lambda vftable,
+    stack callable+vec — the append deep-copies both); legend detour
+    re-calls the original with "■S-MARVELOUS" (SJIS ■) + violet after the
+    stock "■MARVELOUS" line (rgba 0xF0F0F0FF gate, still-live stack ctx
+    does the layout). Registry cleared on EVERY scene change (mod.rs
+    scene callback); re-entry from injected calls fails the gates; the
+    registry lock is never held across game calls. Gates: window>0,
+    entered side, non-virgin record, has-data byte, judge page only,
+    course branch shared with results_score (`course_active` now
+    pub(super)).
+  - mod.rs: `results_graph::install` at init (best-effort),
+    activate/deactivate, scene-change registry reset.
+  - Gates: 113 lib + 80 bin host tests, Legs A–F green, cargo check
+    clean, fmt, ./build.sh clean.
+  - CABINET DEMO PENDING — see "Step 8 deploy #1".
+
+- Step 8 RE settled (2026-08-30, Ghidra both builds):
+  - Ingest (`FUN_1800EB9C0`, vslot 6): ONE grade/ms stream slot per
+    flag≥0 note entry (unjudged entries ADVANCE the index but add
+    nothing — the judged gate is entry+0x18==0); t_first = first judged
+    entry's timestamp (entry+0x08); bucket = (t−t_first)/1000. Judge
+    series at tab+0x538+k*0x20 (MSVC vector<double>, 0x20-stride groups):
+    [0]=filler grey, [1]=miss, [2]=good, [3]=great, [4]=perfect,
+    [5]=+0x5D8 marvelous **+ O.K. combined**, [6]=+0x5F8 all-marv
+    shimmer (post-pass swaps a second's 5↔6 when pure). has-data =
+    tab+0x1C4; page = tab+0x138 (0=judge); display mode = tab+0x1C0.
+  - Rebuild (`FUN_1800ED610`, vslot 7, per frame): clears+rebuilds
+    charts (tab+0x178) and legend texts (tab+0x1A0) every frame behind a
+    current-frame≤label-frame gate. Page-0 legend via
+    `FUN_1800F15E0(&ctx{rect*,cursor*,tab}, &string, rgba)` — cursor is a
+    running x-advance the fn updates; MARVELOUS = "\x81\xA1MARVELOUS"
+    (SJIS ■) rgba 0xF0F0F0FF. Series appends: marvelous pair via
+    `FUN_1801CFEE0` (two-color), others via `FUN_1801CFF60`
+    (single-color) — callable = 0x20-byte MSVC std::function
+    {vft, rgba u32, pad, impl_ptr→self}; cff60 DEEP-COPIES the series
+    data (FUN_1801D10F0 push-back) and CONSUMES the callable (impl ptr
+    nulled) — stack-local args are safe.
+  - STRATEGY (zero new editing primitives, no rect/cursor math, no
+    static lambda-vft derivation): detour the rebuild (pre-original
+    per-tab ONE-SHOT: build our per-second smarv f64 vector from the
+    record, mirror-bucketing; subtract per second from series 5 then 6,
+    clamped; registry keyed by tab ptr) + detour cff60 (when
+    vec==registered_tab+0x5B8 (perfect) on page 0: INJECT our series
+    first — callable vft CAPTURED LIVE from the incoming argument's impl
+    (same (uint,double,double) lambda family), violet rgba — then pass
+    through ⇒ our series sits between marvelous and perfect) + detour
+    f15e0 (when ctx.tab registered, page 0, rgba==0xF0F0F0FF: pass
+    through MARVELOUS then call the original AGAIN with
+    "\x81\xA1S-MARVELOUS" + violet — the still-live stack ctx advances
+    the cursor for us). Re-entry from our own injected calls fails the
+    gates (different vec/rgba); drop the registry lock before calling
+    game code (same-thread Mutex re-entry = deadlock). Registry cleared
+    on every scene change (recycled tab allocations).
+  - Signatures (unique on 20260721 AND 20260616): `graph_tab_rebuild`
+    @0x1800ED610/@0x1800ED1B0, `graph_chart_append` (cff60)
+    @0x1801CFF60/@0x1801CF410, `graph_legend_text` (f15e0)
+    @0x1800F15E0/@0x1800F1180. cfee0 NOT needed (injection rides cff60).
+  - Violet: 0xB05CE0FF (art-matched deep violet, the combo tint's deep
+    member). Legend may be tight horizontally — if the cabinet shows
+    overflow, shorten to "\x81\xA1S-MARV.".
+
+- Step 7 implemented (results score tab — uncommitted, maintainer commits):
+  - `records.rs` (NEW, std-only, harness-mounted): pure `count_smarv` /
+    `count_grade` cores + fail-closed raw record-stream readers
+    (`read_streams` — MSVC vector bounds checks, 64K note cap, empty
+    null/null vectors legal, marvelous-counter cross-check guards layout
+    drift; `smarv_count_from_record` / `marv_count_from_record`). 7 host
+    tests. `state.rs` grew `last_armed_window(side)` (sticky across the
+    GAMEPLAY-exit disarm — the results recompute needs the song's window).
+  - `core/ap2/edit.rs`: `shift_row_translates(rows, expected_each)` —
+    generic (depth, ty)-keyed row mover over f0 placements AND update
+    records, validate-then-mutate via a scratch-clone dry run (any count
+    mismatch ⇒ doc untouched). 2 host tests on a results-tab-shaped
+    fixture (dual timeline, guest updates, decoy row).
+  - `core/signatures.rs`: `playdata_tab_update` (populate vslot 7,
+    prologue AOB — giant 0xB70 frame + 0x151/0x110 reads; the
+    "marvelous_num_usr" string's ONLY xref is inside; Ghidra-verified
+    unique on 20260721 @0x1800F6BC0 AND 20260616 @0x1800F6140) +
+    `playdata_row_write` (the game's row-write helper @0x1800F8370 /
+    @0x1800F78F0 — make_shared SpriteLayer, glyph conversion, push into
+    tab+0x158 so the GAME owns layout + destruction) +
+    `derive_smarv_results_course_gate` (the populate's own record-branch
+    global: `*(**g+0x70)!=0` ⇒ course record; byte-identical shape both
+    builds).
+  - `results_score.rs` (NEW): ROW_MOVES table (6 rows → 16px grid,
+    Leg F extracts it mechanically — one source of truth) +
+    `apply_row_moves` (the transform the patch fn, staging dry-run AND
+    harness share); afp_patcher patch on `body_tab_detail_result`
+    (byte-gate vs staged stock; refusals PURGE the sheets so art and row
+    positions always move together); post-original detour on the populate
+    (dirty byte read PRE-call = exact populate detection): recomputes
+    smarv from the record (same course/stage branch as the game),
+    rewrites the stock marvelous widget's glyphs to `stock − smarv` via
+    `spritelayer_set_names` (widget found by anchor-name in tab+0x158;
+    ours distinguished by its −16 offset_y), then creates the S-MARV row
+    through the game's OWN row-write helper (anchor `marvelous_num_usr`,
+    offset_y −16 ⇒ inherits the anchor's guest-move + fade updates; the
+    game lays it out per frame and destroys it with the tab; our
+    shared_ptr ref released with the full MSVC dtor dance). Idempotent
+    across re-populates (existing row reused). Gates: entered-side +
+    non-virgin record + window>0 (silent bails), latched WARNs otherwise.
+  - `assets.rs`: `stage_results` (template extract/descramble/dry-run +
+    sheet staging) / `restage_result_sheets` / `purge_results`. The
+    sheets are STOCK-NAME replacements served passively from disk, so
+    `mod.rs::init` purges them unconditionally (init runs even
+    config-disabled — a disabled boot must not leave 7-row art under
+    6-row positions) and enable restages; `ifs_textures` grew
+    `purge_texture_replacement` (cache file + CACHE_INDEX entry).
+  - Harness Leg F: `smarv-rows` mode runs the DLL's real transform on the
+    real template (rows extracted from results_score.rs via sed) — all 6
+    rows moved (4 records each: f0+f127, root+sprite130), zero stale
+    positions, serializes; bemaniutils cross-check confirms the six named
+    instances at ty 59/75/91/107/123/139 in both timelines.
+  - Gates: 108 lib + 80 bin host tests, Legs A–F green, cargo check
+    clean, fmt, ./build.sh clean.
+  - CABINET DEMO PENDING — see Deploy & test log "Step 7 deploy #1".
+
+- Step 7 strategy settled + art shipped (2026-08-30, maintainer-approved):
+  - Package dump (scene_result_v3): ONE template `body_tab_detail_result`
+    (exported name = the afp_patcher key) serves BOTH judgement-count tabs
+    via frame labels — `loop_registered`@f18 = Details (numbers tx=139),
+    `loop_guest`@f130 = Simple results (numbers tx=264 via translate
+    UPDATE records at f127). Row labels are ONE stacked sheet texture per
+    style: `scre_tab_detail_judge` (Details, baked via shape 74 / instance
+    `judge` at (56,91)) and `scre_tab_detail_base` (Simple — no geo
+    references it ⇒ runtime bitmap swap into the same instance; Ghidra
+    confirm pending). Six num-row instances `marvelous_num_usr`..
+    `miss_num_usr` at ty=43..138 (19px pitch), depths d23..d18, duplicated
+    root + sprite 130 (dual timeline), alpha fades at f150/151. Digit
+    glyphs `scre_tab_num_0..9` are 10×12 px.
+  - STRATEGY (Option 1 of 3, approved): sheet swap + translate-only
+    compression. Replace both sheets with 7-row art (same 108×118 canvas,
+    16px pitch, S-MARVELOUS top); AP2 patch = translate-only
+    `adjust_placements` splices moving the 6 stock num instances to the
+    16px grid (f0 placements + f127 guest updates, both timelines) — NO
+    new objects/shapes/labels ⇒ none of the engine invariants in play; the
+    S-MARV number = mod SpriteLayer anchored on `marvelous_num_usr` with
+    offset_y=−16 ⇒ inherits the guest-tab move AND the fades from the
+    anchor's own update records. Rejected: full structural patch (new
+    instance needs cloned f127/f150/f151 update records = new editing
+    primitive + id/death-frame care in a 300-frame section); zero-edit
+    overlay (crams the 7th row against the gauge/panel edge).
+  - New-row grid (template coords): ty 43,59,75,91,107,123,139
+    (S-MARV..Miss); sheet-local row centers 11,27,43,59,75,91,107.
+  - Art SHIPPED to `data_mods/s_marvelous/scene_result/` (maintainer will
+    hand-polish; likely ships as-is): stock sheet uniform-scaled ×16/19
+    (LANCZOS), right-aligned (paste x = 108−91=17), 6-row block at y=+18;
+    S-MARV row = scaled-sheet crop y0..20 with 4px bottom alpha feather,
+    colorized hue 280° / sat floor 150 / value ×0.82 (parameters recovered
+    pixel-exact from `dance_judge/smarvelous.png` vs its donor, max diff
+    2), pasted at y=+2. Known flaw (maintainer accepted, hand cleanup
+    planned): base sheet's violet row carries a sliver of Perfect's shadow
+    (the crop cuts into the row below). Generator (one-shot, PIL):
+    extract sheets via `arcutils`+`ifsutils --convert-texture-files` from
+    `scene_result_v3.arc`, then per sheet:
+    `scaled = stock.resize((91,99), LANCZOS)`; compose 108×118 with
+    `scaled @ (17,18)`; `marv = scaled.crop((0,0,91,20))` + linear alpha
+    feather rows 16..19 + colorize(280,150,0.82) `@ (17,2)`.
 
 - Step 6 implemented (S-MFC splash — uncommitted, maintainer commits):
   - Appendix-B dump DONE: the four main templates are SELF-CONTAINED
@@ -245,6 +420,92 @@ Resume protocol: read `implementation/plan.md` (checklist = step status),
 - Step 1 cabinet demo (maintainer gate — see Deploy & test log).
 
 ## Deploy & test log
+- Step 8 deploy #1 (2026-08-30): **FAIL — root-caused same day, CORE
+  SCANNER BUG.** Boot log: `[-] graph_tab_rebuild -- pattern not found`
+  (other two graph sigs resolved; fail-open kept the graph stock, no
+  crash). The pattern's bytes ARE in the cabinet DLL (file offset
+  0xECA10 — byte-verified against the on-disk gamemdx). Host repro
+  (temp crate over the real DLL bytes + all 109 signature patterns)
+  pinned it: `scan_patterns_batch` builds ONE aho-corasick automaton
+  over every signature's literal run and iterates with `find_iter` —
+  which is NON-OVERLAPPING across the whole automaton, so one pattern's
+  needle hit gets consumed by a DIFFERENT pattern's earlier-ending hit
+  over the same bytes (shared prologue idioms — graph_tab_rebuild
+  starts `40 55 41 54 41 55 41 56 41 57`, an extremely common frame
+  setup). A LATENT bug that could silently eat any future signature;
+  individual `scan_pattern` calls also drop periodic self-overlapping
+  needles. FIX: `find_overlapping_iter` in all three AC paths
+  (scan_pattern_inner / scan_pattern_all_inner /
+  scan_patterns_batch_inner); host repro confirms graph_tab_rebuild
+  resolves and no other signature changes address. LEARNINGS-SWEEP
+  ITEM (Step 10): scanner-core entry + "byte-verify AOBs against the
+  CABINET DLL file, not just Ghidra" habit.
+  ALSO (maintainer directives from the demo, implemented): the S-Marv
+  legend entry goes FIRST (before the stock white ■MARVELOUS, injection
+  moved pre-original) and reads just "■MARVELOUS" in violet (no "S-"
+  prefix — matches the shipped art language); the series injection
+  moved from after-marvelous to after-FILLER (vec gate tab+0x538,
+  post-original with the functor vftable captured BEFORE the original
+  consumes the callable) so the violet series leads the judge stack.
+  Gates re-green: 113/80 host tests, Legs A–F, check/fmt/build clean.
+- Step 8 deploy #2 (PENDING, DLL only): same checklist as deploy #1
+  (violet bars now FIRST among judge colors; violet ■MARVELOUS legend
+  entry before the white one); boot log must show
+  `[+] graph_tab_rebuild @ +0xED610`.
+- Step 8 deploy #1 pre-flight expectations (kept for reference):
+  `[+] graph_tab_rebuild` / `[+] graph_chart_append` /
+  `[+] graph_legend_text` + `SMarvelous: judgement-graph detours
+  installed`; on the Play Graph tab
+  `SMarvelous: graph series prepared (side S, N buckets)` (first tab
+  only, latched). Demo checklist:
+  1. Manual play with a smarv/marv mix → Play Graph tab: violet bars in
+     the NOTES/SEC chart adjacent to the white marvelous segments; the
+     white segments correspondingly reduced; "■S-MARVELOUS" legend entry
+     (violet) after ■MARVELOUS. Watch for legend overflow past the panel
+     edge — fallback is shortening to "■S-MARV.".
+  2. Autoplay (all S-Marv): white marvelous bars ≈ only O.K. counts;
+     violet carries the rest; shimmer seconds (all-marv) show
+     shimmer-minus-violet + violet.
+  3. Page switch (Play Graph → timing page and back): no violet residue
+     on the timing page; series/legend reappear on return.
+  4. Display-mode toggle (NORMAL → detail/gauge/bpm, the "Switch
+     display" control): violet series behaves on all modes' judge chart.
+  5. Two songs in a session: second song's graph correct (per-tab
+     one-shot + scene reset).
+- Step 7 deploy #1 (2026-08-30, autoplay song): **NEAR-PASS.** Both tabs
+  (Simple + Details) show the 7-row sheet at 16px pitch, violet
+  S-MARVELOUS on top with the full count (514), alignment good on both
+  layouts, S-MARV row follows the guest move. ONE discrepancy: the
+  exclusive MARVELOUS row rendered NO glyph instead of "0". Root cause
+  pinned same day: results_score's re-derived `MsvcString` was 0x20 bytes
+  but the game's `vector<string>` elements are 0x28-STRIDE (16-byte
+  buf/ptr union + len + cap + 8 TRAILING PAD — music_wheel's
+  cabinet-proven GameString had the pad; the re-derivation dropped it).
+  `set_names` walks the source at 0x28 stride ⇒ my 1-element 0x20-stride
+  array measured ZERO elements ⇒ empty glyph list. The S-MARV row was
+  immune (single-string params are read by pointer, no stride). FIX:
+  `_pad: u64` on the struct (both ctors zero it). Step-10 note: promote
+  GameString/GameVec to a shared core module — two hand-copies now exist.
+  Gates re-green: check/fmt/build clean.
+- Step 7 deploy #2 (2026-08-30, DLL only): **PASS.** Autoplay: MARVELOUS
+  row shows "0" (stride fix confirmed), S-MARV carries the full count.
+  Manual play: correct smarv/marv split, rows sum to the note total,
+  alignment good on both tabs. STEP 7 DEMO DONE. Deferred to the Step-10
+  sweep (maintainer choice): versus, course, disable-toggle stock revert.
+- Step 7 deploy #1 pre-flight expectations (kept for reference):
+  1. Normal 1P song → BOTH tabs (Simple results + Details): 7 rows at the
+     compressed pitch, violet S-MARVELOUS on top with its count;
+     MARVELOUS shows `total − smarv` (cross-check vs the song-end log
+     line `smarv=N marv_total=M`); the seven rows sum to the stock total.
+  2. Label↔number alignment on both tabs (the Simple tab is the moved
+     +125px guest layout — our row must follow it).
+  3. Autoplay: MARVELOUS row 0, S-MARVELOUS row = all marvelous.
+  4. Versus: per-side counts on each side's window.
+  5. Digit size vs the smaller labels (maintainer wanted an on-cabinet
+     look before deciding on scaling — one-line change if crowded).
+  6. Course/Dan if convenient (course-record branch).
+  7. Mod toggle OFF → next boot: stock 6-row sheet + stock positions
+     (init purge log line `SMarvelous: unstaged ...`).
 - Deploy #2 (2026-08-30, Step 4 demo attempt): **FAIL — root-caused + fixed
   same day.** Chain worked end-to-end until the skin gate: the game loads
   the UNSUFFIXED `dance_judge_v3.arc` (log: `no mod folder for

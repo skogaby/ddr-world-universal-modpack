@@ -434,6 +434,184 @@ pub fn stage_combo_digits() -> bool {
     }
 }
 
+// ── Results score tab (Step 7) ───────────────────────────────────────
+
+pub const SCENE_RESULT_ARC: &str = "data/arc/bm2d/scene_result_v3.arc";
+pub const SCENE_RESULT_IFS: &str = "scene_result_v3.ifs";
+pub const RESULT_IFS_MOD_PATH: &str = "scene_result_v3_ifs";
+/// The judgement-count tab template (exported name = the afp_patcher key).
+/// ONE template serves BOTH tabs: kind 6 "Details" plays `loop_registered`,
+/// kind 1 "Simple results" plays `loop_guest` (same rows, moved +125px by
+/// f127 translate updates).
+pub const RESULT_TEMPLATE: &str = "body_tab_detail_result";
+/// The 7-row label sheets (maintainer-approved 2026-08-30): STOCK-NAME
+/// replacements of the 108×118 judgement-word sheets. `_judge` is the one
+/// the template's shape 74 actually draws (maintainer screenshot-verified);
+/// `_base` ships too as a just-in-case (no consumer found in the package or
+/// gamemdx, but it is the same sheet family).
+pub const RESULT_SHEETS: [&str; 2] = ["scre_tab_detail_judge", "scre_tab_detail_base"];
+const RESULT_PNG_DIR: &str = "./data_mods/s_marvelous/scene_result";
+
+/// Stage the results score-tab assets: copy the 7-row label sheets to the
+/// stock-texture replacement serving path and extract + descramble the
+/// stock tab template for the patch's byte gate. `None` ⇒ WARN already
+/// logged, results tab stays stock (the caller must then NOT register the
+/// patch — a 7-row sheet without the row repositioning misaligns).
+pub struct StagedResultPatch {
+    pub stock_bytes: Vec<u8>,
+}
+
+pub fn stage_results(dry_run_rows: impl Fn(&Ap2Doc) -> bool) -> Option<StagedResultPatch> {
+    // Sheet PNGs first — missing art fails the whole staging (sheet and
+    // row positions must move together).
+    for sheet in RESULT_SHEETS {
+        let src = format!("{}/{}.png", RESULT_PNG_DIR, sheet);
+        if !std::path::Path::new(&src).exists() {
+            log_warn!(
+                "SMarvelous: results sheet missing at {} — results tab stays stock",
+                src
+            );
+            return None;
+        }
+    }
+
+    // ── Extract + descramble the stock tab template ─────────────────
+    let arc_data = match std::fs::read(SCENE_RESULT_ARC) {
+        Ok(d) => d,
+        Err(e) => {
+            log_warn!("SMarvelous: can't read {}: {}", SCENE_RESULT_ARC, e);
+            return None;
+        }
+    };
+    let Some(entries) = arc::parse(&arc_data) else {
+        log_warn!("SMarvelous: failed to parse {}", SCENE_RESULT_ARC);
+        return None;
+    };
+    let Some(ifs_entry) = entries.iter().find(|e| e.path.ends_with(SCENE_RESULT_IFS)) else {
+        log_warn!(
+            "SMarvelous: {} not in {}",
+            SCENE_RESULT_IFS,
+            SCENE_RESULT_ARC
+        );
+        return None;
+    };
+    let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
+        log_warn!("SMarvelous: failed to extract {}", SCENE_RESULT_IFS);
+        return None;
+    };
+    let tpl = RESULT_TEMPLATE.to_string();
+    let afp_files = ifs::extract_files(&ifs_data, "afp", std::slice::from_ref(&tpl));
+    let bsi_files = ifs::extract_files(&ifs_data, "afp/bsi", std::slice::from_ref(&tpl));
+    let (Some((_, afp_raw)), Some((_, bsi_raw))) =
+        (afp_files.into_iter().next(), bsi_files.into_iter().next())
+    else {
+        log_warn!(
+            "SMarvelous: {} AFP/BSI not found in the IFS",
+            RESULT_TEMPLATE
+        );
+        return None;
+    };
+    let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
+        log_warn!("SMarvelous: {} descramble failed", RESULT_TEMPLATE);
+        return None;
+    };
+    let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
+        log_warn!("SMarvelous: stock {} did not parse", RESULT_TEMPLATE);
+        return None;
+    };
+    if doc.exported_name() != RESULT_TEMPLATE {
+        log_warn!(
+            "SMarvelous: unexpected exported name '{}' — results tab stays stock",
+            doc.exported_name()
+        );
+        return None;
+    }
+
+    // Dry-run the row repositioning the patch fn will apply (the caller
+    // supplies the transform so patch and staging share ONE code path).
+    if !dry_run_rows(&doc) {
+        log_warn!(
+            "SMarvelous: {} row-shift dry run failed (layout drift?) — results tab stays stock",
+            RESULT_TEMPLATE
+        );
+        return None;
+    }
+
+    // ── Stage the sheets at the serving path (enable-gated stock-name
+    // replacement; init/disable purge them — see purge_results) ──────
+    if !restage_result_sheets() {
+        purge_results();
+        return None;
+    }
+
+    log_info!(
+        "SMarvelous: results tab staged ({} sheets, template {} bytes)",
+        RESULT_SHEETS.len(),
+        stock_bytes.len()
+    );
+    Some(StagedResultPatch { stock_bytes })
+}
+
+/// Copy the 7-row sheets to the serving path + drop any stale converted
+/// cache. Factored from [`stage_results`] because a disable→re-enable
+/// cycle purges the sheets but keeps the staged template bytes.
+pub fn restage_result_sheets() -> bool {
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, RESULT_IFS_MOD_PATH);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!(
+            "SMarvelous: mkdir {}: {} — results tab stays stock",
+            tex_dir,
+            e
+        );
+        return false;
+    }
+    for sheet in RESULT_SHEETS {
+        let src = format!("{}/{}.png", RESULT_PNG_DIR, sheet);
+        let dst = format!("{}/{}.png", tex_dir, sheet);
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            log_warn!(
+                "SMarvelous: can't stage {}: {} — results tab stays stock",
+                dst,
+                e
+            );
+            return false;
+        }
+        // A stale converted-cache copy of the STOCK art may exist from a
+        // session where the mod was disabled; drop it so the next open
+        // reconverts from the staged 7-row PNG.
+        ifs_textures::purge_texture_replacement(RESULT_IFS_MOD_PATH, sheet);
+    }
+
+    // First-boot mod-path visibility (house rule).
+    let probe_rel = format!("{}/tex/{}.png", RESULT_IFS_MOD_PATH, RESULT_SHEETS[0]);
+    if mod_paths::find_first_modfile(&probe_rel).is_none() {
+        log_info!("SMarvelous: results assets not in mod-path cache — rescanning");
+        mod_paths::init_mod_paths();
+    }
+    true
+}
+
+/// Remove the staged results sheets + their converted-cache entries. Runs
+/// at mod INIT (covers the config-disabled boot — the PNGs are stock-name
+/// replacements that LayeredFS serves passively from disk, so a disabled
+/// mod must not leave them staged: 7-row art under 6-row stock positions
+/// misaligns) and at disable (live toggle: future opens revert; textures
+/// already mounted this session stay, consistent with the in-memory
+/// template patch persisting).
+pub fn purge_results() {
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, RESULT_IFS_MOD_PATH);
+    for sheet in RESULT_SHEETS {
+        let png = format!("{}/{}.png", tex_dir, sheet);
+        if std::path::Path::new(&png).exists() {
+            match std::fs::remove_file(&png) {
+                Ok(()) => log_info!("SMarvelous: unstaged {}", png),
+                Err(e) => log_warn!("SMarvelous: can't unstage {}: {}", png, e),
+            }
+        }
+        ifs_textures::purge_texture_replacement(RESULT_IFS_MOD_PATH, sheet);
+    }
+}
+
 // ── Full-combo splash (Step 6) ───────────────────────────────────────
 
 pub const DANCE_FC_ARC: &str = "data/arc/bm2d/dance_fullcombo_v3.arc";

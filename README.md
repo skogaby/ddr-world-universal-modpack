@@ -117,7 +117,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 | **Song Limit Expansion** | Raises the loadable song cap by ~8× for large custom libraries. |
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |
 | **Non-Native OS Support** | Keeps the game stable under CrossOver/Wine (background-movie handling). |
-| **SMX Hardware** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
+| **SMX Hardware and Touchscreen Overlay** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
 
 ## Your Scores Are Safe
 
@@ -156,7 +156,7 @@ All keys are optional; missing keys use sensible defaults.
 
 Custom songs, textures, and assets are served from the `data_mods/` folder — drop-in PNGs are converted automatically, no repacking tools needed.
 
-## StepManiaX Cabinet Support
+## StepManiaX Cabinet and Touchscreen Support
 
 If your DDR World rig is built on a **StepManiaX Dedicated Cabinet**, the
 `smx-hardware` mod drives the whole cabinet natively over USB.
@@ -178,6 +178,8 @@ Setup notes:
   uses). The Insert Card button only appears when a card is configured.
 - Overlay opacity/scale, the light toggles, and the pad style live in the mod
   menu's **SMX HARDWARE** section (GLOBAL SETTINGS tab).
+- SMX hardware is not required to enable the mod, if you simply want a touchscreen
+  overlay experience. The touchscreen overlay still functions without SMX hardware.
 
 ## Playing on macOS / Linux (CrossOver/Wine)
 

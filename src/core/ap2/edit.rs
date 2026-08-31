@@ -696,6 +696,45 @@ impl Ap2Doc {
         }
         walk(&mut self.root, &pred, dxy)
     }
+    /// Shift display-list "rows" identified by `(depth, ty_raw)` — every
+    /// PlaceObject in the document (root + nested sprites, initial
+    /// placements AND update records alike) whose depth equals the entry's
+    /// and whose translate.y equals `ty_raw` (raw fixed-point /20 units)
+    /// gets its translate shifted by `(0, dy_raw)`.
+    ///
+    /// Validate-then-mutate (atomicity contract of this module): each row
+    /// is first dry-run counted on a scratch clone; unless EVERY row
+    /// matches exactly `expected_each` records, `None` is returned and the
+    /// document is untouched. This is the S-Marvelous results-tab
+    /// repositioning primitive, but the shape is generic: "rows" are any
+    /// depth-keyed placements whose vertical position identifies them.
+    pub fn shift_row_translates(
+        &mut self,
+        rows: &[(u16, i32, i32)],
+        expected_each: usize,
+    ) -> Option<()> {
+        // Dry run on a clone — adjust_placements is the exact matcher the
+        // real pass uses (including its skip rules for translate-less or
+        // undecodable records), so the counts here are the counts there.
+        let mut scratch = self.clone();
+        for &(depth, ty_raw, dy_raw) in rows {
+            let n = scratch.adjust_placements(
+                |v| v.depth == depth && v.translate.is_some_and(|(_, ty)| ty == ty_raw),
+                (0, dy_raw),
+            );
+            if n != expected_each {
+                return None;
+            }
+        }
+        // Committed pass — same predicates on the real document.
+        for &(depth, ty_raw, dy_raw) in rows {
+            self.adjust_placements(
+                |v| v.depth == depth && v.translate.is_some_and(|(_, ty)| ty == ty_raw),
+                (0, dy_raw),
+            );
+        }
+        Some(())
+    }
 }
 
 // ---------------------------------------------------------------------------

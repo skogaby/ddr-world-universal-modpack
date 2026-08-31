@@ -17,6 +17,9 @@ pub mod afp_patches;
 pub mod assets;
 pub mod combo;
 pub mod flash;
+pub mod records;
+pub mod results_graph;
+pub mod results_score;
 pub mod splash;
 pub mod state;
 
@@ -37,6 +40,8 @@ pub struct SMarvelousMod {
     data_feed_installed: bool,
     combo_installed: bool,
     splash_installed: bool,
+    results_installed: bool,
+    graph_installed: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -47,6 +52,8 @@ impl SMarvelousMod {
             data_feed_installed: false,
             combo_installed: false,
             splash_installed: false,
+            results_installed: false,
+            graph_installed: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -88,6 +95,13 @@ impl Mod for SMarvelousMod {
     }
 
     fn init(&mut self, ctx: &ModContext) -> bool {
+        // The results sheets are STOCK-NAME texture replacements that
+        // LayeredFS serves passively from disk — purge any staged copies
+        // from a previous session up front. init runs even when the mod is
+        // config-disabled, so a disabled boot always reverts to stock art;
+        // enable() restages (Step 7).
+        assets::purge_results();
+
         self.data_feed_installed = data_feed::install(ctx.signatures);
         if !self.data_feed_installed {
             log_warn!("SMarvelous: judge_submit tap unavailable -- mod inert");
@@ -112,6 +126,13 @@ impl Mod for SMarvelousMod {
         if self.data_feed_installed {
             self.combo_installed = combo::install(ctx.signatures);
             self.splash_installed = splash::install(ctx.signatures);
+            // Results score tab (Step 7): populate detour + the game's
+            // row-write helper. Best-effort — without it the results tab
+            // stays fully stock (no sheets, no patch, no row).
+            self.results_installed = results_score::install(ctx.signatures);
+            // Judgement graph (Step 8): rebuild/append/legend detours.
+            // Best-effort — without them the graph stays stock.
+            self.graph_installed = results_graph::install(ctx.signatures);
         }
         true
     }
@@ -128,6 +149,10 @@ impl Mod for SMarvelousMod {
                 if !ACTIVE.load(Ordering::Acquire) {
                     return;
                 }
+                // The graph registry keys on tab POINTERS — allocations
+                // recycle across scenes, so every transition drops it
+                // (Step 8).
+                results_graph::on_scene_change();
                 if prev == scene::GAMEPLAY && next != scene::GAMEPLAY {
                     // Per-song report (Step 1's cabinet demo), then disarm.
                     for side in 0..2usize {
@@ -190,6 +215,19 @@ impl Mod for SMarvelousMod {
             splash::activate();
         }
 
+        // Results score tab (Step 7): stage the 7-row label sheets +
+        // register the row-repositioning patch. Best-effort — failure
+        // leaves the stock tab (sheets are purged on any refusal so art
+        // and row positions always move together).
+        if self.results_installed {
+            results_score::activate();
+        }
+
+        // Judgement graph (Step 8): pure detour work, no assets.
+        if self.graph_installed {
+            results_graph::activate();
+        }
+
         log_info!("SMarvelous: enabled (window {} ms)", window);
     }
 
@@ -198,6 +236,8 @@ impl Mod for SMarvelousMod {
         afp_patches::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();
+        results_score::deactivate();
+        results_graph::deactivate();
         state::disarm_all();
         state::reset_song_state();
         if let Some(id) = self.scene_cb_id.take() {

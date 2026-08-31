@@ -1723,6 +1723,108 @@ fn edit_adjust_placements_preserves_unmodeled_bytes() {
     assert_eq!(p.data, expect);
 }
 
+/// A doc shaped like the results score tab's judgement rows: two "rows"
+/// (depths 23/22 at ty 860/1240 raw) placed in ROOT and duplicated in a
+/// nested sprite (the dual-timeline pattern), each with a later same-depth
+/// translate UPDATE record at a different tx but the same ty (the guest
+/// layout move), plus a same-depth record at a DIFFERENT ty that must never
+/// match. Each row therefore matches exactly 4 records.
+fn row_shift_fixture() -> Ap2Doc {
+    let mut b = FixtureBuilder::new("tab");
+    b.push_shape(&[], 0, 1);
+    let sp = b.push_sprite(&[], 2);
+    for path in [vec![], vec![sp]] {
+        for (i, (depth, ty)) in [(23u16, 860i32), (22, 1240)].into_iter().enumerate() {
+            let name = format!("row{depth}");
+            // f0 initial placement (tx = the registered layout column).
+            b.push_place(
+                &path,
+                PlaceObjectParams {
+                    depth,
+                    object_id: 300 + i as u16,
+                    source_tag_id: Some(1),
+                    translate: Some((2780, ty)),
+                    ..Default::default()
+                },
+                Some(&name),
+            );
+        }
+        // Decoy: same depth as row 23, different ty — must not match.
+        b.push_place(
+            &path,
+            PlaceObjectParams {
+                depth: 23,
+                object_id: 310,
+                source_tag_id: Some(1),
+                translate: Some((2780, 999)),
+                ..Default::default()
+            },
+            None,
+        );
+        // f1 guest-move updates: same depth + ty, different tx.
+        for (depth, ty) in [(23u16, 860i32), (22, 1240)] {
+            b.push_place(
+                &path,
+                PlaceObjectParams {
+                    depth,
+                    object_id: 300,
+                    translate: Some((5280, ty)),
+                    ..Default::default()
+                },
+                None,
+            );
+        }
+        // Frame spans: the root section carries the shape + sprite tags
+        // ahead of the placements; the sprite section starts at its rows.
+        let lead = if path.is_empty() { 2u32 } else { 0 };
+        b.push_frame(&path, 0, lead + 3);
+        b.push_frame(&path, lead + 3, 2);
+    }
+    b.finish()
+}
+
+#[test]
+fn edit_shift_row_translates_moves_all_and_only_matches() {
+    let mut doc = row_shift_fixture();
+    let rows = [(23u16, 860i32, 320i32), (22, 1240, 260)];
+    doc.shift_row_translates(&rows, 4).expect("shifts");
+    // Root: initial placements moved (ty 860+320 / 1240+260), decoy kept.
+    assert_eq!(place_view(&doc.root.tags[2]).translate, Some((2780, 1180)));
+    assert_eq!(place_view(&doc.root.tags[3]).translate, Some((2780, 1500)));
+    assert_eq!(place_view(&doc.root.tags[4]).translate, Some((2780, 999)));
+    // Root: guest updates moved too (tx untouched).
+    assert_eq!(place_view(&doc.root.tags[5]).translate, Some((5280, 1180)));
+    assert_eq!(place_view(&doc.root.tags[6]).translate, Some((5280, 1500)));
+    // Nested sprite copy moved identically.
+    let sp = SpritePath {
+        tag_indices: vec![1],
+    };
+    let sec = doc.section(&sp).unwrap();
+    assert_eq!(place_view(&sec.tags[0]).translate, Some((2780, 1180)));
+    assert_eq!(place_view(&sec.tags[3]).translate, Some((5280, 1180)));
+    // Still serializes and re-parses.
+    let bytes = doc.serialize().expect("serializes");
+    Ap2Doc::parse(&bytes).expect("re-parses");
+}
+
+#[test]
+fn edit_shift_row_translates_count_mismatch_is_identity() {
+    let mut doc = row_shift_fixture();
+    let baseline = doc.serialize().unwrap();
+    // Expected count wrong (rows match 4 each, we demand 5) — refused,
+    // untouched.
+    assert!(doc
+        .shift_row_translates(&[(23, 860, 320), (22, 1240, 260)], 5)
+        .is_none());
+    assert_unchanged(&doc, &baseline, "count-mismatch shift");
+    // One row valid + one row absent — refused ATOMICALLY (the valid row
+    // must not move either).
+    assert!(doc
+        .shift_row_translates(&[(23, 860, 320), (21, 777, 100)], 4)
+        .is_none());
+    assert_unchanged(&doc, &baseline, "partial-match shift");
+}
+
 #[test]
 fn edit_integration_smarvelous_clone() {
     let (mut doc, _) = edit_fixture();

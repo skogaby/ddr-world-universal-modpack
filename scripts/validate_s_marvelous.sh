@@ -37,6 +37,12 @@ skip() { echo "[skip] $*"; }
 # module name -> repo-relative source path. Names must be unique.
 declare -a MODULE_NAMES=(s_marvelous_state)
 declare -a MODULE_PATHS=("src/mods/s_marvelous/state.rs")
+# s_marvelous/records (std-only record-stream recompute — Step 7; mounted
+# for its pure-core test suite).
+if [[ -r "$REPO_ROOT/src/mods/s_marvelous/records.rs" ]]; then
+  MODULE_NAMES+=(s_marvelous_records)
+  MODULE_PATHS+=("src/mods/s_marvelous/records.rs")
+fi
 # avs_layeredfs/afplist_ext (std-only afplist <geo> list transform — the
 # deploy-#4 geo-registration fix; mounted for its test suite).
 if [[ -r "$REPO_ROOT/src/services/avs_layeredfs/afplist_ext.rs" ]]; then
@@ -150,6 +156,13 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(smarv_fc(&args[1], &args[2], &args[3]));
+    }
+    if mode == "smarv-rows" {
+        if args.len() != 6 {
+            eprintln!("usage: ap2check smarv-rows <afp> <bsi> <rows d:ty:dy,..> <expected_each> <out_afp>");
+            std::process::exit(2);
+        }
+        std::process::exit(smarv_rows(&args[1], &args[2], &args[3], &args[4], &args[5]));
     }
     if mode == "geo-rewrite" {
         if args.len() != 5 {
@@ -317,6 +330,96 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
         return 1;
     }
     println!("smarv-patch OK: wrote {out_afp} ({} bytes)", out.len());
+    0
+}
+
+/// Step-7 (Leg F): the REAL row-repositioning transform — the same
+/// core/ap2 method the DLL's body_tab_detail_result patch calls — on a
+/// real template. Rows arrive as "depth:ty:dy,..." (extracted by the
+/// script from results_score.rs::ROW_MOVES so the table has ONE source of
+/// truth). Verifies the shifted counts, serializes, and writes the
+/// re-scrambled output for the bemaniutils position cross-check.
+fn smarv_rows(afp: &str, bsi: &str, rows: &str, expected: &str, out_afp: &str) -> i32 {
+    let Some(data) = descramble(afp, bsi) else {
+        println!("FAIL smarv-rows: descramble");
+        return 1;
+    };
+    let Some(mut doc) = ap2::Ap2Doc::parse(&data) else {
+        println!("FAIL smarv-rows: parse");
+        return 1;
+    };
+    let mut table: Vec<(u16, i32, i32)> = Vec::new();
+    for entry in rows.split(',') {
+        let parts: Vec<&str> = entry.split(':').collect();
+        let (Some(d), Some(ty), Some(dy)) = (
+            parts.first().and_then(|s| s.parse().ok()),
+            parts.get(1).and_then(|s| s.parse().ok()),
+            parts.get(2).and_then(|s| s.parse().ok()),
+        ) else {
+            println!("FAIL smarv-rows: bad row entry '{entry}'");
+            return 1;
+        };
+        table.push((d, ty, dy));
+    }
+    let Ok(expected_each) = expected.parse::<usize>() else {
+        println!("FAIL smarv-rows: bad expected_each '{expected}'");
+        return 1;
+    };
+    if doc.shift_row_translates(&table, expected_each).is_none() {
+        println!("FAIL smarv-rows: shift_row_translates refused (count mismatch?)");
+        return 1;
+    }
+    let Some(mut out) = doc.serialize() else {
+        println!("FAIL smarv-rows: serialize");
+        return 1;
+    };
+    // Re-parse and verify each row now matches at the SHIFTED position
+    // (and no longer at the stock one).
+    let Some(re) = ap2::Ap2Doc::parse(&out) else {
+        println!("FAIL smarv-rows: re-parse");
+        return 1;
+    };
+    fn count_rows(doc: &ap2::Ap2Doc, depth: u16, ty: i32) -> usize {
+        fn walk(sec: &ap2::TagSection, depth: u16, ty: i32) -> usize {
+            let mut n = 0;
+            for tag in &sec.tags {
+                match tag {
+                    ap2::Tag::PlaceObject(p) => {
+                        if let Some(v) = p.view() {
+                            if v.depth == depth && v.translate.map(|(_, y)| y) == Some(ty) {
+                                n += 1;
+                            }
+                        }
+                    }
+                    ap2::Tag::DefineSprite(s) => n += walk(&s.section, depth, ty),
+                    _ => {}
+                }
+            }
+            n
+        }
+        walk(&doc.root, depth, ty)
+    }
+    for &(depth, ty, dy) in &table {
+        let moved = count_rows(&re, depth, ty + dy);
+        let stale = count_rows(&re, depth, ty);
+        if moved != expected_each || stale != 0 {
+            println!(
+                "FAIL smarv-rows: d{depth} ty{ty}+{dy}: moved={moved} (want {expected_each}), stale={stale}"
+            );
+            return 1;
+        }
+        println!("row d{depth}: ty {ty} -> {} ({moved} records)", ty + dy);
+    }
+    // Re-scramble the string table for bemaniutils consumption.
+    let st_off = u32::from_le_bytes(out[48..52].try_into().unwrap()) as usize;
+    let st_size = u32::from_le_bytes(out[52..56].try_into().unwrap()) as usize;
+    let scrambled = ap2::encode_string_table(&out[st_off..st_off + st_size]);
+    out[st_off..st_off + st_size].copy_from_slice(&scrambled);
+    if std::fs::write(out_afp, &out).is_err() {
+        println!("FAIL smarv-rows: write {out_afp}");
+        return 1;
+    }
+    println!("smarv-rows OK: wrote {out_afp} ({} bytes)", out.len());
     0
 }
 
@@ -907,4 +1010,63 @@ for tpl in 01_fullcombo_single_normal 01_fullcombo_single_reverse \
   echo "$OUT" | grep -q "smarv-fc OK" || die "Leg E: $tpl failed"
 done
 note "Leg E OK (4 templates)"
+
+# ── Leg F: results-tab row repositioning on the REAL template ────────
+# Runs the DLL's actual transform (Ap2Doc::shift_row_translates with the
+# ROW_MOVES table extracted from results_score.rs — one source of truth),
+# then cross-checks the six named row instances' new positions with
+# bemaniutils.
+note "Leg F: body_tab_detail_result row repositioning"
+SR_AFP_DIR="$TMP/dev/scene_result_v3/x/afp" # extracted by Leg A
+ROWS_SRC="$REPO_ROOT/src/mods/s_marvelous/results_score.rs"
+ROWS=$(awk '/pub const ROW_MOVES/,/^\];/' "$ROWS_SRC" \
+  | grep -oE '\([0-9]+, [0-9]+, [0-9]+\)' \
+  | sed -E 's/\(([0-9]+), ([0-9]+), ([0-9]+)\)/\1:\2:\3/' | paste -sd, -)
+EXPECTED=$(grep -oE 'ROW_MOVES_EXPECTED_EACH: usize = [0-9]+' "$ROWS_SRC" | grep -oE '[0-9]+$')
+[[ -n "$ROWS" && -n "$EXPECTED" ]] || die "Leg F: could not extract ROW_MOVES from results_score.rs"
+note "Leg F rows: $ROWS (expected_each $EXPECTED)"
+DETAIL_OUT="$TMP/dev/smarv_rows"
+mkdir -p "$DETAIL_OUT"
+OUT=$("$AP2CHECK" smarv-rows "$SR_AFP_DIR/body_tab_detail_result" \
+  "$SR_AFP_DIR/bsi/body_tab_detail_result" "$ROWS" "$EXPECTED" \
+  "$DETAIL_OUT/body_tab_detail_result")
+echo "$OUT" | sed 's/^/    /'
+echo "$OUT" | grep -q "smarv-rows OK" || die "Leg F: transform failed"
+cp "$SR_AFP_DIR/bsi/body_tab_detail_result" "$DETAIL_OUT/bsi_body_tab_detail_result" 2>/dev/null || true
+: >"$DETAIL_OUT/empty_bsi"
+(cd "$BEMANIUTILS_DIR" && ./afputils parseafp "$DETAIL_OUT/body_tab_detail_result" "$DETAIL_OUT/empty_bsi") \
+  >"$DETAIL_OUT/patched.json" 2>/dev/null || die "Leg F: afputils parseafp rejected the patched file"
+python3 - "$DETAIL_OUT/patched.json" <<'PYEOF' || die "Leg F: row positions wrong in bemaniutils view"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+# Target grid: 16px pitch from ty 43 (S-MARV slot on top); the six stock
+# rows land at 59..139.
+want = {
+    "marvelous_num_usr": 59.0, "perfect_num_usr": 75.0, "great_num_usr": 91.0,
+    "good_num_usr": 107.0, "ok_num_usr": 123.0, "miss_num_usr": 139.0,
+}
+seen = {}
+def walk(tags, where):
+    for t in tags:
+        ty = t.get("type")
+        if ty == "AP2DefineSpriteTag":
+            walk(t.get("tags", []), f"sprite{t.get('id')}")
+        elif ty == "AP2PlaceObjectTag":
+            n = t.get("movie_name")
+            if n in want:
+                tr = t.get("transform") or {}
+                seen.setdefault(n, []).append((where, tr.get("ty")))
+walk(doc["tags"], "root")
+ok = True
+for name, target in want.items():
+    got = seen.get(name, [])
+    # Named f0 placement exists in root AND the sprite copy, both at target.
+    if len(got) != 2 or any(ty != target for _, ty in got):
+        print(f"    [F] {name}: want ty {target} x2, got {got}")
+        ok = False
+    else:
+        print(f"    [F] {name}: ty {target} (root + sprite copy)")
+sys.exit(0 if ok else 1)
+PYEOF
+note "Leg F OK"
 note "OK"

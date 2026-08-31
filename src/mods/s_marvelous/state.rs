@@ -94,6 +94,8 @@ static WINDOW_MS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 static SMARV_COUNT: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 static MARV_TOTAL: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 static COMBO_HAS_LOOSE_MARV: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// Sticky copy of the last armed window (see [`last_armed_window`]).
+static LAST_WINDOW_MS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 
 /// Whether a side is armed. The ONLY cost the judge hook pays when the
 /// feature is off/disarmed: one relaxed load.
@@ -104,13 +106,23 @@ pub fn is_armed(side: usize) -> bool {
 
 /// Arm a side with the given (already clamped) window at GAMEPLAY entry.
 pub fn arm(side: usize, window_ms: i32) {
-    WINDOW_MS[side & 1].store(clamp_window(window_ms), Ordering::Relaxed);
+    let clamped = clamp_window(window_ms);
+    WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
+    LAST_WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
 }
 
 /// Disarm both sides (GAMEPLAY exit).
 pub fn disarm_all() {
     WINDOW_MS[0].store(0, Ordering::Relaxed);
     WINDOW_MS[1].store(0, Ordering::Relaxed);
+}
+
+/// The window the side was LAST armed with (sticky across the GAMEPLAY-exit
+/// disarm — the results surfaces recompute S-Marv counts from the stage
+/// record with the window that was live during the song). 0 = never armed
+/// this session; results consumers fail closed to stock display on 0.
+pub fn last_armed_window(side: usize) -> i32 {
+    LAST_WINDOW_MS[side & 1].load(Ordering::Relaxed)
 }
 
 /// Clear per-song counters/bits for both sides (GAMEPLAY entry and every
