@@ -129,6 +129,64 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B 05 ?? ?? ?? ?? 4C 8B 00 48 63 C1 48 8D 0D ?? ?? ?? ?? 49 83 78 ?? 00 48 8B 04 C1 48 8B 00 74 07 48 05 ?? ?? 00 00 C3 48 63 CA 48 69 C9 ?? ?? 00 00 48 8D 84 08 ?? ?? 00 00 C3",
         description: "getStageRecord(side, stage) accessor — sources the game-work ptr global, player-work table, course-mode field offset, per-stage record stride and base. Consumed by the premium-free stale-record fix.",
     },
+    // ── Premium Free ghost cache (same-credit PB ghost under a frozen stage) ──
+    // `sequence::dance::GhostActor` init (20260721 `FUN_180056ad0`; 20260616
+    // `0x180056b00`, 20260825 `0x180056a40` — match+0x0D..). Resolves the ghost
+    // id via the score-DB lookup, then either copies a LOCAL stage slot's
+    // grade stream (negative id → `PlayerWork[side] + 0x590 + stage*0x2B8 +
+    // 0xB8`), kicks the network load (positive id), or leaves the vector
+    // empty (id 0). Fields it pins (byte-identical on the 2026 builds):
+    //
+    //   40 53 48 83 EC 40          PUSH RBX; SUB RSP,0x40
+    //   48 8B 05 ?? ?? ?? ??       MOV RAX,[security cookie]
+    //   48 33 C4 48 89 44 24 30    cookie xor/store
+    //   48 8B D9                   MOV RBX,RCX            (actor)
+    //   8B 89 84 00 00 00          MOV ECX,[RCX+0x84]     (side)
+    //   E8 ?? ?? ?? ??             CALL ghost-id lookup
+    //   4C 8B D8                   MOV R11,RAX
+    //   48 89 83 90 00 00 00       MOV [RBX+0x90],RAX     (ghost id)
+    //   48 85 C0 75                TEST RAX,RAX; JNZ
+    //
+    // Detoured post-original by premium_free's ghost cache: when the game
+    // resolved an EMPTY ghost vector (the frozen-stage slot was virginised
+    // + re-prepared at song select), inject the cached same-chart stream.
+    SignatureDefinition {
+        name: "ghost_actor_init",
+        pattern: "40 53 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 30 48 8B D9 8B 89 84 00 00 00 E8 ?? ?? ?? ?? 4C 8B D8 48 89 83 90 00 00 00 48 85 C0 75",
+        description: "sequence::dance::GhostActor init — ghost id lookup + local-slot / network ghost resolution. Detoured by the premium-free ghost cache.",
+    },
+    // The local-slot copy site INSIDE `ghost_actor_init` (match+0x1A1 on
+    // 20260721): `IMUL R8,R8,0x2B8; MOV RCX,[RAX]; LEA RDX,[R8+RCX+0x648];
+    // LEA RCX,[RBX+0x98]; CALL vector<u8>::assign`. 0x648 = 0x590 + 0xB8 (the
+    // record's grade stream). The CALL rel32 at +25 resolves the game's own
+    // `vector<u8>` copy-assign (`ghost_vec_copy`, derived) — the allocator-
+    // correct way to fill `actor+0x98`. Unique on 20260616/0721/0825.
+    SignatureDefinition {
+        name: "ghost_local_slot_copy_site",
+        pattern: "4D 69 C0 B8 02 00 00 48 8B 08 49 8D 94 08 48 06 00 00 48 8D 8B 98 00 00 00 E8",
+        description: "GhostActor init local-slot copy site — CALL at +25 is the game's vector<u8> copy-assign (derived as ghost_vec_copy).",
+    },
+    // The song-end result commit — GamePlayActor vtable +0x28 (20260721
+    // `FUN_18005d970`, 20260526 `FUN_18005d180`). Copies the actor's live
+    // judge counters / score cluster / grade decision / note + grade + ms
+    // streams / gauge map into `PlayerWork + 0x590 + (GameWork+0xC)*0x2B8`
+    // with REPLACE semantics. Two early-outs skip the whole commit:
+    //
+    //   40 53 56 57 48 81 EC 80 00 00 00   prologue
+    //   80 B9 80 02 00 00 00               CMP byte [RCX+0x280],0   (skip flag 1)
+    //   48 8B F1 0F 85 ?? ?? ?? ??         MOV RSI,RCX; JNZ skip
+    //   8B 81 94 01 00 00 03 81 9C 01 00 00  taps + shocks judged
+    //   75 ??                              JNZ (else "MDX1529" no-judge report)
+    //   48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ??
+    //   48 83 BE 88 02 00 00 00            CMP qword [RSI+0x288],0  (skip flag 2)
+    //
+    // Detoured post-original by premium_free's ghost cache (snapshot the
+    // committed grade stream) + the bug-1 diagnostic (log the early-outs).
+    SignatureDefinition {
+        name: "result_commit",
+        pattern: "40 53 56 57 48 81 EC 80 00 00 00 80 B9 80 02 00 00 00 48 8B F1 0F 85 ?? ?? ?? ?? 8B 81 94 01 00 00 03 81 9C 01 00 00 75 ?? 48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ?? 48 83 BE 88 02 00 00 00",
+        description: "GamePlayActor result commit (vtable +0x28) — writes the per-stage play record at song end. Detoured by the premium-free ghost cache + diagnostic.",
+    },
     // The in-song speed-mod adjustment window's kill gate, inside
     // `sequence::dance::ControlSpeedActor`'s message handler (vtable+0x40).
     // Each frame the gameplay sequence broadcasts msg 0x1045 with the elapsed
@@ -1678,6 +1736,7 @@ impl SignatureStore {
         self.derive_song_rate_io_callbacks();
         self.derive_preview_restart();
         self.derive_smarv_results_course_gate();
+        self.derive_ghost_vec_copy();
     }
 
     /// Derive `results_course_gate_global` — the global the PlaydataTab
@@ -1722,6 +1781,46 @@ impl SignatureStore {
             self.resolved
                 .insert("results_course_gate_global".into(), global);
             log_info!("  [+] results_course_gate_global (derived) @ +0x{:X}", off);
+        }
+    }
+
+    /// `ghost_vec_copy` — the game's `std::vector<u8>` copy-assign, decoded
+    /// from the CALL rel32 at `ghost_local_slot_copy_site + 25`. Cross-checked
+    /// to sit inside `ghost_actor_init`'s body (the site is that function's
+    /// local-slot branch), and the target must lie inside the module. Any miss
+    /// leaves the ghost cache fail-open (no injection).
+    fn derive_ghost_vec_copy(&mut self) {
+        let (Some(site), Some(init)) = (
+            self.get_address("ghost_local_slot_copy_site"),
+            self.get_address("ghost_actor_init"),
+        ) else {
+            log_warn!("  [-] ghost_vec_copy -- copy site / GhostActor init unresolved");
+            return;
+        };
+        // The copy site must be a forward reference inside the init function
+        // (its body is ~0x2B7 bytes on 20260721; allow generous slack).
+        let rel = (site as usize).wrapping_sub(init as usize);
+        if rel == 0 || rel > 0x800 {
+            log_warn!(
+                "  [-] ghost_vec_copy -- copy site {:p} not inside GhostActor init {:p}",
+                site,
+                init
+            );
+            return;
+        }
+        unsafe {
+            if *site.add(25) != 0xE8 {
+                log_warn!("  [-] ghost_vec_copy -- expected CALL rel32 at site+25");
+                return;
+            }
+            let target = decode_call_rel32(site.add(25));
+            let off = (target as usize).wrapping_sub(self.base as usize);
+            if off >= self.size {
+                log_warn!("  [-] ghost_vec_copy -- derived target outside module");
+                return;
+            }
+            self.resolved.insert("ghost_vec_copy".into(), target);
+            log_info!("  [+] ghost_vec_copy (derived) @ +0x{:X}", off);
         }
     }
 

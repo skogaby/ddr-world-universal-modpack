@@ -118,3 +118,159 @@ fails the mod closed (freeze without the fix poisons server data).
 **Known limitation:** event/special modes (`GameWork+0xD0 ∈ {1,2}`) may use
 the override record index (`DAT_1806f290c`) at counter==0; the fix targets the
 counter-indexed record, so that niche combination retains pre-fix behavior.
+
+---
+
+## Addendum 2026-09-01 — same-credit ghost cache + diagnostics (gamemdx 20260721)
+
+Prompted by two field reports (results **graph tab** shows the previous
+song's timing stats with an empty visualisation; **STAGE_INDICATOR** shows the
+previous difficulty on a same-song/different-difficulty re-pick) and by the
+DDR A3 `pfree_ghost` community hook.
+
+### Verified record path under the freeze
+
+| Piece | 20260721 | Stage index used |
+|---|---|---|
+| Song-select commit | `FUN_1800fdfa0` | `FUN_1800fced0()` (= `GameWork+0xC` or the event override). Guard: `if (new_mcode != rec->mcode) { FUN_1801e5110(rec, mcode, diff, style); FUN_1800fcf40(this, diff, side); }` |
+| `FUN_1800fcf40` | | Clamps the difficulty (`style==1 ⇒ ≥1`, `≤ this+0`) and writes **`PlayerWork+0x5C`** (+ `SelectMusicSeq+4+side*4`) — the side's "selected difficulty" display field. **Also under the mcode guard**, so the virginise fix refreshes it too. `PlayerWork+0x54` = selected mcode. |
+| Result commit | `FUN_18005d970` (GamePlayActor vt+0x28) | `GameWork+0xC`. Early-outs: `actor+0x280 != 0`, `actor+0x288 != 0` (commit skipped entirely). Stream writers **replace**: `FUN_180060760` → `rec+0x98` (note entries, 0x60 stride, from `actor+0x90`), `FUN_1801e5510` → `rec+0xB8` grades + `rec+0xD8` ms (from the active-note ring `actor+0xB0`, trimmed at the first note with `+0x30 == 0`), `FUN_1801e53e0` → gauge map `rec+0x78/+0x80` (from `actor+0x110` per-second doubles). |
+| GraphTab ctor | `FUN_1800eb3a0` | stamps `tab+0x14C = GameWork+0xC` at results build (scene 30, BEFORE the scene-31 bump) |
+| GraphTab ingest (vslot 6) | `FUN_1800eb9c0` | `rec = PW+0x590+tab_stage*0x2B8`. Numeric stats: mean `tab+0x1C8` / stddev `tab+0x1D0` from `rec+0xD8` (grades 0..3 only). Graph window: first note with `+0x18==0` → `tab` start; `has_data (tab+0x1C4) = first_ts < max(note_ts + max(len[8]))`. Series bucketed by `(ts − first)/1000`. Also reads `PlayerWork+0x1D/+0x68/+0x6C/+0x70/+0x74` → `tab+0x138/+0x1C0` (page / cycling params). |
+
+Conclusion: commit, result commit and GraphTab all index the SAME frozen
+record and every graph-tab input is rewritten by the result commit — no
+static mechanism found for report 1 on the shipped code. The only escape is
+a skipped result commit (early-outs). Report 2's display field sits under the
+same guard the fix opens. Both are therefore instrumented (see below) rather
+than "fixed" blind.
+
+### The ghost bug (real, A3-identical)
+
+`sequence::dance::GhostActor` init = **`FUN_180056ad0`** (A3's
+`GhostInit`; A3's 64-bit actor offsets match World exactly):
+
+| Field | Offset | Meaning |
+|---|---|---|
+| state pairs | `+0x58 + idx*8` (`i32 state, f32 timer`), idx at `+0x82` (u16), count `+0x80` | 0 = network load pending, 1 = polling, 2 = ready |
+| side | `+0x84` | |
+| NoteResultActor* | `+0x88` | its `+0xC0` byte = pacemaker visibility (the byte `pacemaker_swap` forces) |
+| ghost id | `+0x90` (i64) | from `FUN_18001dc00(side)`: score-DB entry (`PW+0x178`, keyed `PW+0x54 mcode / GameWork+4 style / PW+0x5C diff`) `+0x10` |
+| ghost vector | `+0x98` (`vector<u8>`, grade byte per note) | |
+
+Resolution: `id == 0` → state 2, empty. `id > 0` → state 0 (network load
+via `ark::network::GhostDataLoadRequest`; on success `FUN_18001e140` decodes
+the server string into `+0x98`, ready byte = 1). **`id < 0` → local slot**:
+`side = (-1-id)/5, stage = (-1-id)%5`, `FUN_180056f80(actor+0x98,
+PW[side]+0x590+stage*0x2B8+0xB8)` (vector<u8> copy-assign), state 2, ready
+byte 1. Course mode (`GameWork+0x70 && GameWork+0xC ≥ 1`) copies the course
+record's `+0x2A8` vector instead.
+
+Under the freeze the local slot is always `record[frozen]`, which the
+virginise fix + the game's re-prepare have just emptied ⇒ the copy yields an
+EMPTY vector ⇒ pacemaker target 0 on any replay of a chart PB'd this credit.
+A3's "ghost is 0" bug, 1:1.
+
+### Fix (shipped, `mods/premium_free/ghost_cache.rs`)
+
+Post-original detour on `result_commit`: snapshot `rec+0xB8..0xC0` keyed by
+`(side, rec+0x00, rec+0x08, rec+0x04)`, keep-if-better on `rec+0x10`
+(course mode skipped). Post-original detour on `ghost_actor_init`: when the
+freeze is on, `actor+0x98` is empty (or id < 0) and no network load is in
+flight (`state==0 && id>0`), look the chart up via the freshly prepared
+`record[frozen]` header, copy the cached bytes in via the game's own
+`ghost_vec_copy` (derived from the CALL at `ghost_local_slot_copy_site+25`),
+set state 2 / timer 0 / ready byte — exactly the local-slot branch. Cache is
+session-scoped (cleared at EAM_EXIT / attract). Fail-open.
+
+Signatures (unique on 20260616/0721/0825; absent on 20250805, which already
+fails `stage_records` closed): `ghost_actor_init`, `ghost_local_slot_copy_site`,
+`result_commit`. Derived: `ghost_vec_copy`.
+
+### Diagnostics (`mods/premium_free/diag.rs`, freeze-gated — REMOVED after the run below; recipe kept for re-use)
+
+Per scene entry (25 post-virginise, 26, 27, 28, 30): frozen index, per
+entered side `rec[frozen]` mcode/diff/style/score, `PW+0x54/+0x5C`, note /
+grade / ms stream lengths, gauge-map size. WARN `BUG-2 SIGNATURE` when the
+record header ≠ PlayerWork display fields at GAMEPLAY entry; WARN
+`BUG-1 SIGNATURE` when streams are non-empty at GAMEPLAY entry (record not
+re-prepared) or when the result commit's early-outs fire. Plus a post-commit
+line with what landed in the record.
+
+### 2P toggle plumbing (fixed 2026-09-01)
+
+Cabinet test of the diag build (1P) reproduced neither report but exposed a
+real 2P defect in the option plumbing: profile loads d
+### Cabinet run 2026-09-01 (1P, 20260825 build) — result
+
+Three plays of one chart (diff 3 → 2 → 3) under the freeze:
+
+- Every DECIDE / STAGE_INDICATOR / GAMEPLAY line showed `rec[0]` and
+  `PW+0x54/+0x5C` in agreement, streams empty at GAMEPLAY entry, and
+  RESULTS_DETAIL reading the just-played record. **Neither field report
+  reproduced in 1P.**
+- Ghost fix confirmed: 3rd play logged
+  `ghost injected P1 mcode=38909 diff=3 id=-1 state=2 had=0 bytes=442` —
+  the game resolved ghost id **−1** (local slot side 0 / stage 0 = the
+  frozen record), copied an EMPTY vector, and the cache re-supplied the
+  442-byte stream from play 1. Pacemaker target followed the first attempt.
+- `BUG-1 SIGNATURE` fired during the ATTRACT DEMO (`actor+0x280 = 1`, both
+  sides) — that byte is the demo's "never commit" flag, not a bug. The tap is
+  now gated to `current_scene() == GAMEPLAY`.
+- The song-select commit writes BOTH sides' `record[0]` regardless of who is
+  entered (`reset frozen stage-1 record for P2 (was mcode 38909)` in a 1P
+  session).
+
+### 2P / versus: option plumbing defect (fixed the same day)
+
+The tester's session was 2P. `custom_options::resolve_from_load` fires
+`on_change` on every accepted profile load, and the former
+`premium_free_on_change` did an unconditional `set_value(other_side, v)`.
+With two carded-in profiles whose saved values differ the freeze therefore
+followed whichever load landed LAST, and that load also overwrote the other
+player's cached preference (persisted at logout). Whether that is the
+tester's root cause is unproven (the reports did not reproduce in 1P), but it
+is a real defect in the shape "can't tell whether pfree was on for both".
+
+Fix: per-side `DESIRED` atomics; the APPLIED freeze = `effective_freeze()`
+over the ENTERED sides (P1 governs when both in; `p1 || p2` when entered
+state is unknown), re-resolved at every option change and every scene
+change; the row is registered with `services/versus_mirror` (P1 seeds at
+the first both-entered song-select frame, live edits propagate, disengages
+when either side leaves). A load on one side no longer touches the other.
+
+### 2P RE pass (2026-09-01, 20260721) — pre-diagnostic-run facts
+
+- **READY panel** (`ShutterActor` kind 3 populate `FUN_1800359f0`, layout
+  `shutter_play`): per side `rec = PW + 0x590 + (GameWork+0xC)*0x2B8`;
+  **difficulty label = `rec+0x04`** (`cosh_dif_%s`, `cosh_dif_%s_level_%02d`
+  via the music-info vfunc `+0x78(style, diff)`), panel shown iff `PW+0x04`
+  (entered) && !course; target score = score-DB lookup
+  `FUN_1801e1e00(PW+0x178, GameWork+0x18, GameWork+4, rec+0x04)`; stage
+  caption `cosh_call_{1st,2nd,3rd,4th,final,extra}` from `GameWork+0xC`.
+  ⇒ Report 2 is "record difficulty stale at scene 27" — the display face of
+  the original stale-record bug; `PW+0x5C` is NOT what the panel reads.
+- **Confirm paths.** Solo `FUN_18010d9e0` (once-gated `seq+0x1E0`): plays
+  `select_difficulty`, `FUN_1800fdc80` (writes `PW+0x54` mcode + side-panel
+  cursors for entered sides), then the commit `FUN_1800fdfa0`. Versus
+  `FUN_180114ef0` (once-gated `seq+0x2E1`): `FUN_1800fcf40(seq,
+  cursor[side], side)` for both sides (writes `PW+0x5C` unconditionally),
+  then the same commit (skipped in event modes). The commit loops both sides
+  with the per-side `new_mcode != rec->mcode` guard; `FUN_1800fced0()` is the
+  stage source (`GameWork+0xC`, or `DAT_1806f396c` in event modes at
+  counter 0). No double-commit path found; no 2P-only stale path found
+  statically — hence the diagnostic run.
+
+### 2P cabinet run 2026-09-01 — result
+
+Both carded in (P1 profile pfree ON, P2 OFF), song A diff 3 → song A diff 2.
+The mirror seeded P2 ← P1 at the first both-entered song-select frame
+(`side=1 desired ON`); every scene line showed both sides' `rec[0]` and
+`PW+0x54/+0x5C` agreeing, `mcode=-1` on BOTH sides after each virginise,
+streams empty at GAMEPLAY entry, both result commits landing, results reading
+the fresh record. **Neither report reproduced in 2P either.** The diag was
+trimmed to WARN-only signatures and left in place so a recurring field report
+carries the evidence (WARN lines reach spice2x's log.txt — the level is only
+a tag in the OutputDebugString text). Diag note: the result commit runs after
+the scene id has advanced past GAMEPLAY, so its attract gate is
+`>= SONG_SELECT`, not `== GAMEPLAY`.
