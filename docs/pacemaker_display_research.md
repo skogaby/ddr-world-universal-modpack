@@ -1,9 +1,11 @@
-# Pacemaker Display (dance_score_compare) — Visibility & Outro-Latch Research
+# Pacemaker Display (dance_score_compare) — Visibility, Outro-Latch & White-Zone Research
 
-RE notes for two PowerUserStatistics `pacemaker_to_mserror` bug fixes
-(2026-08-18): (1) the pacemaker readout dying across in-place song resets
+RE notes for three PowerUserStatistics `pacemaker_to_mserror` bug fixes:
+2026-08-18: (1) the pacemaker readout dying across in-place song resets
 (instant restart / Training Mode SONG LOOP), and (2) the readout only
-showing when ghost/rival-target data exists.
+showing when ghost/rival-target data exists. 2026-08-31: (3) the white
+zone blanking the displayed number (port deviation from the original
+hex-edit mod) — see §7.
 
 All addresses are file-relative to `gamemdx.dll`'s `0x180000000` base,
 from **20260721** unless noted. Layout attestations cross-checked on
@@ -134,3 +136,118 @@ rewind only.
   NoteResultActor is created asynchronously (DPS state 1) and the ghost
   download completes mid-run — the per-dispatch stub write is the only
   spot that is both after creation and authoritative.
+
+## 7. White-zone color decoupling (bug 3, 2026-08-31)
+
+### The port deviation
+
+Inside case 0x1036, ONE register carries the delta to two consumers:
+
+```text
+0x18007b432  MOVSXD RSI,[R14+8]           ; ← the 11-byte swap patch site
+0x18007b436  MOV    RDX,[RDI+0xB0]
+0x18007b43d  MOVD   XMM0,ESI              ; → |value| → digit formatter FUN_1801ae0a0
+...
+0x18007b48b  TEST   ESI,ESI               ; → color branch
+0x18007b48d  JNZ    colored
+```
+
+The original hex-edit mod forced ZF at the TEST site while ESI held the
+real ms error — real digits, white color. The first port instead
+returned 0 from the stub callback for `|error| < threshold`, which also
+fed 0 to the digit formatter: **the whole white zone displayed the
+value 0, not the real error** (tester-reported as "no number shows").
+
+### The color branch (byte-identical shape on 20250805/20260616/20260721/20260825)
+
+`SetColor` = clip-wrapper vtable **+0x90** (the same slot
+overlay_element_styling's color_hook detours). Three paths:
+
+| path | condition | components |
+|---|---|---|
+| white | `ESI == 0` | all four from `[rip] → 1.0f` (`0x180359eb8` on 20260721) |
+| positive | `ESI > 0` | 1.0 / **0.5** / **0.5** / 1.0 |
+| negative | `ESI < 0` | 1.0 / 1.0 / **0.5** / **0.5** |
+
+Both colored paths source their 0.5 component from ONE shared constant
+via `MOVSS xmm,[rip+disp32]` (`F3 0F 10 15` @ patch+0x8A and
+`F3 0F 10 1D` @ patch+0x9D on 20260721; same offsets ±0 on all four
+builds). The 1.0 loads and the pow-base 10.0 load are the only other
+rip-form MOVSS loads within 0x100 bytes of the patch site.
+
+### Fix (pacemaker_swap, cull_window-style disp32 redirect)
+
+At enable, `install_color_patch` scans `[patch+11, patch+0x10B)` for
+rip-form `MOVSS` loads whose target reads **exactly 0.5f**
+(content-identified — register allocation is unverified on future
+builds, the loaded value cannot change), requires EXACTLY two, and
+redirects both disp32s at a mod-owned f32 co-located in the stub's
+`alloc_near` block. The stub callback then always returns the REAL ms
+error and writes the slot per dispatch: `1.0` (⇒ both colored paths
+degenerate to (1,1,1,1), the white branch's exact SetColor) inside the
+white zone, `0.5` (stock) otherwise and on every option-off/early-return
+path. Sign choice + sign-slot placement read the real ESI, so a
+white-zone readout is correct digits + correct sign in white. Disable
+restores both displacements. Fail-open: derivation failure ⇒ one WARN +
+the legacy value-zeroing behavior.
+
+The `pacemaker_threshold` option's clamp was extended to 0..50
+(0 = white zone disabled, always colored).
+
+### The "exact 0 renders no digit" mystery (RESOLVED 2026-09-01)
+
+Symptom: autoplay (true 0 ms errors) showed the `dascco_plusminus` sign
+but no digit. Static analysis said a lone "0" SHOULD render — and it was
+right about the image on disk. The running process differed.
+
+**Root cause: the real-speed-fix mod's ported "logf guard" (R15/R16)
+was patching THIS function.** The original hex-edit modpack's research
+notes attributed R15/R16 to "the scroll-speed display function"; that
+attribution was wrong. The anchor AOB
+(`0F 28 C7 E8 ?? ?? ?? ?? F3 0F 58 C6` — `movaps xmm0,xmm7; call
+log10f; addss xmm0,xmm6`) matches EXACTLY ONE site on every attested
+build (20250805 `0x180077be6`, 20260616 `0x18007b0e6`, 20260721
+`0x18007b4e6`, 20260825 `0x18007b8f6`) — and that site is the log10f
+call inside `NoteResultActor::onMessage` case 0x1036, i.e. the
+pacemaker readout itself (on 20250805 the anchor sits at the
+documented R16 VA `0x180077bea`, inside `FUN_180077a00` = this
+handler; there is no separate scroll-speed match).
+
+The R15 patch (single byte `0x48 → 0x37` at anchor−0x38) rewrote the
+zero branch's `LEA R13D,[RSI+1]; JMP +0x48` (skip the log path — R13D
+already holds the digit count 1) into `JMP +0x37`, which lands ON the
+log10f call sequence. Exact-0 dispatches then recomputed
+`R13D = trunc(guarded_log(0) + XMM6)` — and XMM6 is only loaded (with
+1.0f) in the NONZERO branch, so the zero branch consumed the caller's
+stale XMM6. Observed at runtime: `R13D = 0` → sign slot =
+`powf(10, 0) = 1` → `"00000001_usr"` = the ONES slot — the same slot
+the digit formatter had just written `dascco_0` into. The sign loop
+runs after the formatter, so the `±` overwrote the `0`.
+
+Evidence chain (2026-09-01 live session, 20260721):
+
+1. Visual localiser (v3 diagnostic): forcing `dascco_8` onto the ones
+   slot replaced the `±`; forcing it onto the tens slot showed `8 ±` —
+   the sign provably rendered on the ONES slot for value 0.
+2. CE non-breaking register captures: at the zero-branch `LEA`
+   (`+0x7B4A9`) RSI=0 as expected; at the sprintf (`+0x7B525`)
+   **R13=0, R9D=1** — impossible from the static code (only a JMP sits
+   between the LEA setting R13D=1 and the powf), proving the control
+   flow had been altered.
+3. Runtime byte read at `+0x7B4AD`: `EB 37` where the static image has
+   `EB 48` — `0x37` is `logf_stub.rs`'s `R15_PATCHED` constant.
+
+Fix: the logf guard (`logf_stub.rs` + the `real_speed_logf_anchor`
+signature) was retired outright. It was never part of the Real Speed
+math (that is the independent R24/R25/R26 Core-BPM divisor swap at
+`real_speed_bpm_anchor`, byte-identical shape verified on all four
+builds), and it protects nothing in stock flow: the nonzero branch only
+reaches log10f with |v| ≥ 1, and the stock zero branch never calls it.
+With the mispatch gone, stock behavior is correct by construction:
+`R13D = 1 → powf(10,1) = 10 → "00000010_usr"` — sign at tens, digit at
+ones, matching the stock `±0` reference capture.
+
+Corollary of the mechanism: while the mispatch was live, exact-0 was
+the ONLY affected value (nonzero single digits take the nonzero branch,
+which loads XMM6 = 1.0 before its log10f → `R13D = trunc(log10(v)+1)` =
+correct), which is why `±30`/`-10`/single digits all rendered fine.

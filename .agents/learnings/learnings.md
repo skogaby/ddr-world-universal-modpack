@@ -685,3 +685,45 @@ General rule: before calling a per-side UI mutator from a NEW context
 (especially for the non-editing side), check what its existing callers
 implicitly guarantee — "runs only while that side views tab X" is easy
 to encode nowhere and violate silently.
+
+## A ported patch's AOB can silently land in the wrong function — trust the LIVE bytes over the docs (2026-09-01)
+
+The pacemaker→ms-error "exact 0 renders no digit" bug resisted three
+diagnostic rewrites and a full static RE of the render case, because
+static analysis was performed against the ON-DISK image while the
+RUNNING process had been altered by an UNRELATED mod: real-speed-fix's
+ported "logf guard" (R15/R16 from the original hex-edit modpack, whose
+research notes attributed the site to "the scroll-speed display
+function"). The anchor AOB actually matches — uniquely, on all four
+attested builds — the log10f call INSIDE the pacemaker 0x1036 case, and
+its single-byte JMP-displacement rewrite rerouted the zero branch
+through the log path with a stale XMM6, collapsing the sign slot onto
+the digit slot.
+
+What finally cracked it (in order of decisiveness):
+
+1. **CE non-breaking register captures** on the live process: two
+   register values (R13=0, R9D=1) that were IMPOSSIBLE from the static
+   listing (only a JMP sits between `LEA R13D,[RSI+1]` and the reader)
+   — an impossible register state is a proof of altered control flow,
+   not a mystery to theorize around.
+2. **Diffing runtime bytes against Ghidra**: `EB 37` live vs `EB 48` on
+   disk at the zero-branch JMP. The `0x37` was grep-able to
+   `R15_PATCHED` in our own source.
+
+General rules:
+- When runtime behavior contradicts a verified static listing, diff the
+  LIVE bytes of the whole affected region against the image FIRST —
+  before any more decompilation or visual experiments. Every mod patch
+  in this DLL (and any coexisting hex-edit) is a suspect.
+- When porting someone else's binary patches, never trust their notes'
+  function attribution: re-derive what function each AOB actually lands
+  in (Ghidra `get_function_by_address` on every build) and read the
+  surrounding code until the patch's MECHANISM is understood. R15/R16
+  were ported faithfully but understood by nobody — the guard protected
+  a call that can never receive 0, and the jump rewrite actively broke
+  a working zero branch.
+- Non-breaking hardware breakpoints (CE `set_breakpoint` with register
+  capture) are cheap and game-safe even mid-song; prefer them over
+  in-DLL diagnostic builds for register-level questions — one deploy
+  cycle vs zero.

@@ -1296,11 +1296,13 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "F2 0F 5E 01 48 8D 4C 24 40",
         description: "ddr::player::Option::SetScrollSpeed — divsd xmm0,[rcx]; lea rcx,[rsp+0x40]. Anchor for R24/R25/R26 BPM divisor swap patches.",
     },
-    SignatureDefinition {
-        name: "real_speed_logf_anchor",
-        pattern: "0F 28 C7 E8 ? ? ? ? F3 0F 58 C6",
-        description: "FUN_18007ba70 scroll display — movaps xmm0,xmm7; call logf; addss xmm0,xmm6. Anchor for R15/R16 logf guard patches.",
-    },
+    // NOTE: the former `real_speed_logf_anchor` (R15/R16 logf-guard) was
+    // retired 2026-09-01: its AOB (`0F 28 C7 E8 ? ? ? ? F3 0F 58 C6`)
+    // actually lands inside NoteResultActor::onMessage case 0x1036 — the
+    // PACEMAKER readout, not any scroll-speed code (single match, same
+    // function, on 20250805/20260616/20260721/20260825). Its R15 byte
+    // rewrote the pacemaker zero-branch JMP and broke the exact-0 digit
+    // render. See src/mods/real_speed_fix/mod.rs.
     // ── Music Wheel Song Length signatures ──────────────────────────
     // sequence::SpriteLayer — the game's "row of bitmaps by texture name"
     // widget class that renders the song-select header's BPM digits (and

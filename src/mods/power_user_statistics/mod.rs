@@ -101,13 +101,13 @@ impl Mod for PowerUserStatisticsMod {
                 .description("Replaces the pacemaker readout with your latest step's ms error"),
             RegisterSpec::scalar(
                 "pacemaker_threshold",
-                1,
+                0,
                 50,
                 1,
                 ScalarFormat::Unit { unit: "ms" },
             )
             .display_name("White Threshold")
-            .description("Largest ms error that still displays white instead of colored")
+            .description("Largest ms error shown white instead of colored (0 = always colored)")
             .default_value(10)
             .show_when(ShowWhen::Equals {
                 parent_id: "pacemaker_to_mserror".into(),

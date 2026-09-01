@@ -189,6 +189,19 @@ Patches in `FUN_180077a00` and the surrounding scroll-speed display function:
 | `0x00076fea` (R16) | `0x180077bea` | `call 0x18126e000` → `call 0x1812703b0` (4-byte rel32 displacement change) | Inside the same scroll-speed display function, swaps the raw `logf` call (cave 2's bare implementation) for a guarded version that returns 0 on input == 0. This prevents the display from showing NaN before the song starts. |
 | `0x00076fae` (R15) | `0x180077bae` | Single-byte `JMP rel8` displacement: `48` → `37` | Adjusts a forward jump to skip 0x37 bytes instead of 0x48 — lands at the now-modified `call 0x1812703b0` site instead of the unguarded `call 0x18126e000` site. |
 
+> **CORRECTION (2026-09-01): the R15/R16 attribution above is wrong.**
+> `0x180077bea` is NOT in any scroll-speed display function — it is the
+> log10f call inside `NoteResultActor::onMessage` case 0x1036
+> (`FUN_180077a00` on 20250805), i.e. the PACEMAKER readout's sign-slot
+> computation. R16 guards a log10f that only ever receives |v| ≥ 1 (a
+> no-op), and R15 rewrites the pacemaker ZERO branch's `LEA
+> R13D,[RSI+1]; JMP +0x48` to jump into the log path with a stale XMM6 —
+> which breaks the exact-0 `±0` render (the sign lands on the ones slot
+> and overwrites the digit). The stock zero branch was never broken and
+> needs no patch. Our port of R15/R16 (`logf_stub.rs`) was retired for
+> this reason; only R24/R25/R26 constitute the Real Speed fix. Full
+> analysis: `docs/pacemaker_display_research.md` (resolved §).
+
 The `+0x88` offset for Core BPM is on the `ChartData` struct; in this codebase's terminology that's the `chart_metadata` / `ssq_chunk_metadata` row-block. Stock uses `[rcx]`, where `rcx` is loaded from a different struct slot for Max BPM display.
 
 **Port strategy:**

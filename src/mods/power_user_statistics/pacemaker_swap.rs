@@ -1,14 +1,51 @@
 //! Pacemaker → MsError swap — when the per-player option is ON, replaces
 //! the pacemaker score-delta readout with the most recent ms-error, and
-//! optionally forces the white color when |error| < threshold.
+//! forces the white color when |error| < threshold.
 //!
 //! Patches the 7-byte `MOV RDX, [RDI+0xB0]` instruction inside the
 //! pacemaker render case (opcode 0x1036) of the score-render function.
 //! A JMP to a hand-assembled stub overrides ESI (the formatter input)
-//! with our ms-error value before proceeding. The white-zone color
-//! trigger (the downstream `TEST ESI, ESI; JNE`) is handled by zeroing
-//! ESI when |ms_error| < threshold, causing the fall-through to the
-//! white path.
+//! with our ms-error value before proceeding.
+//!
+//! # White-zone color (decoupled from the value, 2026-08-31)
+//!
+//! ESI feeds BOTH the digit formatter and the downstream color branch
+//! (`TEST ESI,ESI` — zero takes the white path, nonzero picks the
+//! plus/minus color). The original hex-edit mod forced the flags at the
+//! TEST site so the REAL digits rendered in white; the first port of this
+//! mod instead zeroed ESI, which also blanked the displayed number for
+//! the whole white zone (tester-reported 2026-08-31). The color is now
+//! forced without touching the value: both colored paths load their 0.5
+//! color component RIP-relative from one shared constant
+//! (`MOVSS xmm,[rip]` reading 0.5f — twice, once per sign path; byte
+//! shape identical on 20250805/20260616/20260721). At enable both
+//! disp32s are redirected (cull_window-style content-verified rewrite)
+//! at a mod-owned float co-located with the stub allocation; the
+//! callback writes it per dispatch — 0.5 = stock colors, 1.0 degenerates
+//! both colored paths to (1,1,1,1) = the white branch's exact SetColor.
+//! Sign choice and sign-slot placement keep using the REAL value, so a
+//! white-zone readout is correct digits + correct sign in white.
+//!
+//! Fail-open: if the two 0.5 loads can't be derived, the callback falls
+//! back to the legacy value-zeroing white zone (one WARN).
+//!
+//! # Exact-0 digit render (RESOLVED 2026-09-01)
+//!
+//! For a long time a value of exactly 0 rendered sign-only (the `±`
+//! glyph with no `0` digit). Root cause was NOT this mod: the
+//! real-speed-fix mod's ported "logf guard" (R15/R16 from the original
+//! hex-edit modpack) anchored on an AOB that actually matches inside
+//! THIS function's 0x1036 case, and its R15 byte rewrote the zero
+//! branch's `LEA R13D,[RSI+1]; JMP +0x48` to `JMP +0x37` — rerouting
+//! exact-0 dispatches through the log10f path with a STALE XMM6 (only
+//! the nonzero branch loads it), so the sign-slot index collapsed to the
+//! ONES slot and the sign overwrote the digit (the sign loop runs after
+//! the digit formatter). Live-confirmed via CE register captures
+//! (R13D=0/R9D=1 at the sprintf despite the LEA setting R13D=1) and the
+//! runtime byte read `EB 37` where the image has `EB 48`. Fixed by
+//! retiring the logf guard outright (see `mods/real_speed_fix/mod.rs`);
+//! stock's zero branch needs no help (`R13D=1 → powf(10,1)=10` → sign at
+//! the tens slot, digit at ones).
 //!
 //! The stub also passes RDI (= the `sequence::dance::NoteResultActor`
 //! whose msg handler hosts the patch site) so the Rust callback can force
@@ -83,6 +120,10 @@ const NOTE_RESULT_VIS_OFFSET: usize = 0xC0;
 const NOTE_RESULT_PACEMAKER_CLIP_OFFSET: usize = 0xB0;
 /// CMovieClip wrapper: AFP layer id.
 const CLIP_LAYER_ID_OFFSET: usize = 0x08;
+/// CMovieClip wrapper: AFP MovieClip id (the engine's own case-0x1032
+/// SetFrame reads it there; the digit formatter receives `wrapper+0x10`
+/// and reads the id at its +0x100 = this offset).
+const CLIP_MC_ID_OFFSET: usize = 0x110;
 /// `afp_layer_set_attribute` visibility bit.
 const LAYER_ATTR_VISIBLE: u32 = 0x1;
 
@@ -95,6 +136,25 @@ static STUB_ADDR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static NOTE_RESULT_VTABLE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 /// Set to true once the JMP patch is live; guards enable() against re-entry.
 static PATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// ── White-zone color redirect state ──────────────────────────────────
+/// Mod-owned f32 the colored branch's two 0.5f loads are redirected at
+/// (co-located in the stub allocation). 0.5 = stock colors, 1.0 = white.
+static COLOR_SLOT: AtomicPtr<f32> = AtomicPtr::new(std::ptr::null_mut());
+/// The two patched disp32 addresses (instruction+4) + their original
+/// displacements, for the disable() restore.
+static COLOR_DISP_ADDRS: [AtomicPtr<u8>; 2] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+];
+static COLOR_ORIG_DISPS: [std::sync::atomic::AtomicI32; 2] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
+/// True while the two color disp32 rewrites are live. When false the
+/// callback falls back to the legacy value-zeroing white zone.
+static COLOR_PATCHED: AtomicBool = AtomicBool::new(false);
+
 static ORIGINAL_BYTES: [std::sync::atomic::AtomicU8; PATCH_SIZE] = [
     std::sync::atomic::AtomicU8::new(0),
     std::sync::atomic::AtomicU8::new(0),
@@ -111,10 +171,10 @@ static ORIGINAL_BYTES: [std::sync::atomic::AtomicU8; PATCH_SIZE] = [
 
 /// Rust-side logic called from the stub. Returns the ESI value to use.
 /// If the option is OFF, returns the original score delta unchanged.
-/// If ON, returns the ms-error (or 0 if below threshold for white-zone),
-/// and forces the pacemaker's visibility for sides with no ghost/rival
-/// data (see the module doc). `actor` = the NoteResultActor (RDI at the
-/// patch site).
+/// If ON, returns the REAL ms-error (never zeroed — the white-zone color
+/// is forced through the redirected color loads instead), and forces the
+/// pacemaker's visibility for sides with no ghost/rival data (see the
+/// module doc). `actor` = the NoteResultActor (RDI at the patch site).
 #[no_mangle]
 unsafe extern "C" fn pacemaker_swap_get_esi(
     original_esi: i32,
@@ -127,18 +187,32 @@ unsafe extern "C" fn pacemaker_swap_get_esi(
     }
 }
 
+/// Write the white-force float consumed by the redirected color loads
+/// downstream in the SAME dispatch (same thread — plain program order).
+fn set_white_force(white: bool) {
+    let slot = COLOR_SLOT.load(Ordering::Acquire);
+    if !slot.is_null() {
+        unsafe { *slot = if white { 1.0 } else { 0.5 } };
+    }
+}
+
 fn pacemaker_swap_inner(original_esi: i32, player_side: i32, actor: *mut u8) -> i32 {
+    let color_live = COLOR_PATCHED.load(Ordering::Acquire);
+
     let side = player_side as u32;
     if side > 1 {
+        set_white_force(false);
         return original_esi;
     }
 
     if !custom_options::is_available() {
+        set_white_force(false);
         return original_esi;
     }
 
     let option_on = custom_options::get_value(side as u8, "pacemaker_to_mserror").unwrap_or(0) != 0;
     if !option_on {
+        set_white_force(false);
         return original_esi;
     }
 
@@ -147,6 +221,7 @@ fn pacemaker_swap_inner(original_esi: i32, player_side: i32, actor: *mut u8) -> 
     // leaks the signal being calibrated). Set before the first judgment, so
     // the visibility byte is never latched during a calibration song.
     if super::calibration_suppressed() {
+        set_white_force(false);
         return original_esi;
     }
 
@@ -154,12 +229,22 @@ fn pacemaker_swap_inner(original_esi: i32, player_side: i32, actor: *mut u8) -> 
 
     let ms_error = data_feed::latest_ms_error(side as usize);
 
-    let threshold = custom_options::get_value(side as u8, "pacemaker_threshold").unwrap_or(10);
-    if ms_error.unsigned_abs() < threshold as u32 {
-        return 0;
-    }
+    let threshold = custom_options::get_value(side as u8, "pacemaker_threshold")
+        .unwrap_or(10)
+        .max(0);
+    let in_white_zone = threshold > 0 && ms_error.unsigned_abs() < threshold as u32;
 
-    ms_error
+    if color_live {
+        set_white_force(in_white_zone);
+        ms_error
+    } else if in_white_zone {
+        // Legacy fallback (color loads underivable): zeroing ESI is the
+        // only way to reach the stock white branch, at the cost of also
+        // blanking the displayed number for the whole white zone.
+        0
+    } else {
+        ms_error
+    }
 }
 
 /// With MS ERROR on, the readout is OUR display — show it even when the
@@ -208,6 +293,110 @@ pub fn init(signatures: &SignatureStore) -> bool {
         ),
     }
     true
+}
+
+/// Locate the colored branch's two `MOVSS xmm, [rip+disp32]` loads whose
+/// current target reads exactly 0.5f, and redirect both displacements at
+/// `slot`. Content-identified within a bounded window past the patch site
+/// (register allocation may differ across builds, the loaded VALUE cannot).
+/// Requires EXACTLY two matches; any refusal patches nothing and returns
+/// false (the callback keeps the legacy value-zeroing white zone).
+unsafe fn install_color_patch(patch_site: *const u8, slot: *mut f32) -> bool {
+    /// Scan window past the patch site (the color branch sits ~0x80 bytes
+    /// in on all attested builds; the next unrelated MOVSS rip-load past
+    /// the sign-placement code is well outside 0x100).
+    const WINDOW: usize = 0x100;
+
+    // RIP targets are verified to sit inside the module image before the
+    // 0.5f content read (a junk match from mid-instruction bytes could
+    // otherwise point at unmapped memory).
+    let Some(module) = crate::core::module_resolver::get_game_module() else {
+        return false;
+    };
+    let mod_lo = module.base as usize;
+    let mod_hi = mod_lo + module.size;
+
+    // (disp32 address, original displacement, instruction end)
+    let mut hits: Vec<(*mut u8, i32, *const u8)> = Vec::new();
+    let start = patch_site.add(PATCH_SIZE);
+    let mut i = 0usize;
+    while i + 9 <= WINDOW {
+        let p = start.add(i);
+        // MOVSS xmm, m32: F3 [44] 0F 10 modrm; RIP form = mod 00, rm 101.
+        let (modrm_off, len) = if memory::read_u8(p) == 0xF3
+            && memory::read_u8(p.add(1)) == 0x0F
+            && memory::read_u8(p.add(2)) == 0x10
+        {
+            (3usize, 8usize)
+        } else if memory::read_u8(p) == 0xF3
+            && memory::read_u8(p.add(1)) == 0x44
+            && memory::read_u8(p.add(2)) == 0x0F
+            && memory::read_u8(p.add(3)) == 0x10
+        {
+            (4usize, 9usize)
+        } else {
+            i += 1;
+            continue;
+        };
+        if memory::read_u8(p.add(modrm_off)) & 0xC7 != 0x05 {
+            i += 1;
+            continue;
+        }
+        let disp_addr = p.add(modrm_off + 1);
+        let insn_end = p.add(len);
+        let target = crate::core::scanner::decode_rip_relative(disp_addr) as usize;
+        if target >= mod_lo && target + 4 <= mod_hi && memory::read_f32(target as *const u8) == 0.5
+        {
+            hits.push((disp_addr as *mut u8, memory::read_i32(disp_addr), insn_end));
+        }
+        i += len;
+    }
+
+    if hits.len() != 2 {
+        log_warn!(
+            "pacemaker_swap: expected exactly 2 white-zone color loads, found {}",
+            hits.len()
+        );
+        return false;
+    }
+    // Both new displacements must be RIP-reachable (guaranteed in practice:
+    // the slot lives in the alloc_near stub block).
+    for (_, _, insn_end) in &hits {
+        let disp = slot as i64 - *insn_end as i64;
+        if disp > i32::MAX as i64 || disp < i32::MIN as i64 {
+            log_warn!("pacemaker_swap: color slot not RIP-reachable");
+            return false;
+        }
+    }
+
+    for (idx, (disp_addr, orig, insn_end)) in hits.iter().enumerate() {
+        let disp = (slot as i64 - *insn_end as i64) as i32;
+        let old = memory::make_writable(*disp_addr, 4);
+        memory::write_i32(*disp_addr, disp);
+        memory::restore_protection(*disp_addr, 4, old);
+        COLOR_DISP_ADDRS[idx].store(*disp_addr, Ordering::Release);
+        COLOR_ORIG_DISPS[idx].store(*orig, Ordering::Release);
+    }
+    COLOR_PATCHED.store(true, Ordering::Release);
+    true
+}
+
+/// Restore the two color-load displacements written by
+/// [`install_color_patch`]. No-op when the patch was never installed.
+unsafe fn remove_color_patch() {
+    if !COLOR_PATCHED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    for idx in 0..2 {
+        let disp_addr = COLOR_DISP_ADDRS[idx].load(Ordering::Acquire);
+        if disp_addr.is_null() {
+            continue;
+        }
+        let old = memory::make_writable(disp_addr, 4);
+        memory::write_i32(disp_addr, COLOR_ORIG_DISPS[idx].load(Ordering::Acquire));
+        memory::restore_protection(disp_addr, 4, old);
+        COLOR_DISP_ADDRS[idx].store(std::ptr::null_mut(), Ordering::Release);
+    }
 }
 
 pub fn enable() {
@@ -311,7 +500,11 @@ pub fn enable() {
         stub_bytes.push(0xE9);
         stub_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // placeholder disp32
 
-        let stub = memory::alloc_near(patch_site as *const u8, stub_bytes.len());
+        // Allocate the stub with 8 spare bytes: the white-force float slot
+        // is carved from the tail of the same near allocation (RIP-reachable
+        // from the color-branch loads, which sit ~0x80 bytes past the patch
+        // site).
+        let stub = memory::alloc_near(patch_site as *const u8, stub_bytes.len() + 8);
         if stub.is_null() {
             log_warn!("pacemaker_swap: alloc_near failed");
             PATCH_ACTIVE.store(false, Ordering::Release);
@@ -331,6 +524,23 @@ pub fn enable() {
 
         std::ptr::copy_nonoverlapping(stub_bytes.as_ptr(), stub, stub_bytes.len());
         STUB_ADDR.store(stub, Ordering::Release);
+
+        // Carve the white-force float slot from the allocation tail (4-byte
+        // aligned) and initialize it STOCK (0.5) before any load can be
+        // redirected at it.
+        let slot = stub.add((stub_bytes.len() + 3) & !3) as *mut f32;
+        *slot = 0.5;
+        COLOR_SLOT.store(slot, Ordering::Release);
+
+        // Redirect the colored branch's two 0.5f component loads at the
+        // slot (fail-open: the callback falls back to value-zeroing).
+        if install_color_patch(patch_site as *const u8, slot) {
+            log_info!("pacemaker_swap: white-zone color loads redirected (slot @ {slot:p})");
+        } else {
+            log_warn!(
+                "pacemaker_swap: color loads not derived -- white zone falls back to value zeroing"
+            );
+        }
 
         // Write the 7-byte patch: E9 <disp32> 90 90
         // The displacement is from the end of the 5-byte JMP (patch_site+5) to stub.
@@ -360,6 +570,12 @@ pub fn disable() {
     }
 
     unsafe {
+        // Restore the color-load displacements FIRST (while they still
+        // point at our slot the callback keeps it stock-correct), then the
+        // main patch.
+        remove_color_patch();
+        COLOR_SLOT.store(std::ptr::null_mut(), Ordering::Release);
+
         let old_prot = memory::make_writable(patch_site as *const u8, PATCH_SIZE);
         for i in 0..PATCH_SIZE {
             memory::write_u8(patch_site.add(i), ORIGINAL_BYTES[i].load(Ordering::Acquire));
