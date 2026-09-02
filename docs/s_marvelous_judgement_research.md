@@ -660,3 +660,84 @@ S-MFC predicate (record-only): `clear_kind(+0x54)==10 && smarv==marv &&
 marv>0` with the side's last-armed window. Full display-side RE (exact
 addresses both builds, template dumps, suffix tables):
 `.agents/planning/2026-08-29-s-marvelous-judgement/research/display-side-re.md`.
+
+---
+
+## Addendum 2026-09-01 — attract-demo arming + Marvelous FAST/SLOW
+
+Two follow-ups from cabinet testing of the shipped mod.
+
+### A. Attract demo "hodgepodge" (violet combo under a white MARVELOUS)
+
+The mod armed the classification tap only at GAMEPLAY (0-idx 28) entry. The
+attract demo (0-idx 16) runs its autoplay through the same GamePlayActor /
+`judge_submit` / NoteResultActor / ComboActor chain, so during the demo:
+
+- the tap was disarmed ⇒ no `in_smarvelous` re-drive ⇒ stock white word;
+- but `state::combo_is_all_smarv` was a bare `!combo_has_loose_marv`, and a
+  never-armed side's bit is trivially false ⇒ the combo override painted the
+  S-Marvelous digits/violet tint for a combo the mod never classified.
+
+Fix: (1) `combo_is_all_smarv` now requires `is_armed(side)` — the combo
+override AND the S-MFC splash decline for any side whose judgements were not
+classified; (2) the scene callback arms/disarms for a *play scene* =
+GAMEPLAY ∪ ATTRACT_DEMO (`is_play_scene`), so with the mod enabled the demo
+shows the full S-Marvelous presentation (flash word, combo, splash) exactly
+like a credit. Autoplay steps land at delta 0 ⇒ every demo Marvelous is an
+S-Marvelous.
+
+### B. Marvelous FAST/SLOW (gameplay indicator + results totals)
+
+Stock excludes Marvelous from FAST/SLOW in two independent places:
+
+1. **Gameplay indicator** — NoteResultActor handler (`FUN_18007B300`,
+   20260721), grade case, right after the word drive:
+
+   ```
+   18007b6f1  83 BF 98 00 00 00 00   CMP dword [RDI+0x98], 0   ; ms delta == 0
+   18007b6f8  74 7B                  JZ  hide
+   18007b6fa  83 BF 94 00 00 00 00   CMP dword [RDI+0x94], 0   ; grade == 0 (Marvelous)
+   18007b701  74 72                  JZ  hide
+   18007b703  ... show: play, set_attribute(1,1), in_fast/in_slow (CMOVL on the
+              delta sign), goto-frame, SetPosition(this+0x108, this+0x10C) via vt+0x38
+   ```
+
+   `hide` = play + `set_attribute(1,0)`. Signature `note_result_fast_slow_gate`
+   (`83 BF 98 00 00 00 00 74 ?? 83 BF 94 00 00 00 00 74 ??`) — unique and
+   byte-identical on 20250805/20260616/20260721/20260825 (`0x180077DF1` /
+   `0x18007B2F1` / `0x18007B6F1` / `0x18007BB01`). `fast_slow.rs` rewrites the
+   grade CMP's imm8 (match+15) `00 → FF` on enable: grade ∈ 0..=5 in this
+   branch so `grade == -1` never holds and the JZ is never taken; restored on
+   disable. The delta==0 hide is kept (exactly on time is neither). The clip
+   at `this+0xA8` is only created when the player's FAST/SLOW option is on —
+   the patch respects that (null clip ⇒ nothing shown). Cabinet-wide, one
+   aligned byte, no thread suspension needed.
+
+   **Top-tier exemption (cabinet test #1 → fix):** the gate cannot tell an
+   S-Marvelous from a Marvelous (a display-layer notion), so with the patch
+   alone S-Marvelous steps showed FAST/SLOW too. Rule: the HIGHEST tier is
+   exempt — stock Marvelous, now S-Marvelous. `flash::on_smarvelous` (already
+   post-original on every S-Marv event with the NoteResultActor resolved)
+   calls `fast_slow::hide_for_smarvelous`, which clears the `+0xA8` clip's
+   visibility bit (`afp_layer_set_attribute(layer, 1, 0)` — the stock hide
+   branch minus the redundant play) one event later in the same frame. Runs
+   even when the word re-drive declines (unpatched template).
+
+2. **Results totals** — `judge_submit` step 2 (`grade-1U < 4`) only
+   accumulates `actor+0x1C4/+0x1C8` → record `+0x6C/+0x70` for grades 1..=4,
+   and the score-tab populate (`FUN_1800F6BC0`) writes those into the
+   SpriteLayer widgets anchored `fast_usr/num_usr` / `slow_usr/num_usr`
+   (`%d` glyphs, alignment 1/1). The mod does NOT touch the counters (the
+   score save marshals from the same record) — `results_score.rs` step 5
+   rewrites the two widgets' glyphs to `stock + LOOSE-marvelous share`, the
+   share recomputed from the record's grade/ms streams
+   (`records::count_marv_fast_slow(grades, ms, window)`: grade-0 slots with
+   `|ms| > window` — S-Marvelous is the exempt top tier — `ms<0` fast /
+   `ms>0` slow, the stock counters' own sign rule), judged-slots-only like
+   every other recompute, fail-open per widget. Invariant (host-tested):
+   `smarv + marv_fast + marv_slow == marvelous total`.
+
+Not changed: the graph tab's per-beat-division FAST / MARVELOUS / SLOW
+statistics box (`GraphTab+0x4B8`, ingest `FUN_1800EB9C0`) — the game files
+every grade-0/6 note into its own MARVELOUS column there (`iVar26 == 2`), so
+Marvelous is already accounted for in that box by design.

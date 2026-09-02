@@ -16,6 +16,7 @@
 pub mod afp_patches;
 pub mod assets;
 pub mod combo;
+pub mod fast_slow;
 pub mod flash;
 pub mod records;
 pub mod results_emblem;
@@ -53,6 +54,7 @@ pub struct SMarvelousMod {
     results_installed: bool,
     graph_installed: bool,
     emblem_installed: bool,
+    fast_slow_installed: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -66,6 +68,7 @@ impl SMarvelousMod {
             results_installed: false,
             graph_installed: false,
             emblem_installed: false,
+            fast_slow_installed: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -116,6 +119,48 @@ fn register_overlay_row(initial: i32) {
             );
         }),
     });
+}
+
+/// Scenes whose judge dispatches the mod classifies: real gameplay AND the
+/// attract demo (its autoplay routes through the same GamePlayActor /
+/// judge_submit / NoteResultActor chain — with the mod enabled the demo
+/// shows S-Marvelous exactly like a credit does; 2026-09-01 directive). An
+/// unarmed play scene is what produced the attract "hodgepodge": stock
+/// white word (no re-drive) under a violet combo (see
+/// `state::combo_is_all_smarv`).
+fn is_play_scene(scene_id: i32) -> bool {
+    scene_id == scene::GAMEPLAY || scene_id == scene::ATTRACT_DEMO
+}
+
+/// Per-song report (Step 1's cabinet demo) for every side that saw a
+/// Marvelous-grade event, then disarm both sides.
+fn report_and_disarm() {
+    for side in 0..2usize {
+        let marv = state::marv_total(side);
+        let smarv = state::smarv_count(side);
+        if marv > 0 || smarv > 0 {
+            log_info!(
+                "SMarvelous: song end side={} smarv={} marv_total={} window={}",
+                side,
+                smarv,
+                marv,
+                state::last_armed_window(side)
+            );
+        }
+    }
+    state::disarm_all();
+}
+
+/// Arm both sides for a play scene. Per-song latch: mid-song config/toggle/
+/// overlay-row changes apply next song (design D26) — the live window is
+/// read here, at play-scene entry, and nowhere else.
+fn arm_for_play_scene() {
+    let window = LIVE_WINDOW_MS.load(Ordering::Relaxed);
+    state::reset_song_state();
+    state::arm(0, window);
+    state::arm(1, window);
+    flash::reset_latches();
+    splash::reset_latches();
 }
 
 impl Mod for SMarvelousMod {
@@ -178,6 +223,10 @@ impl Mod for SMarvelousMod {
             // Best-effort per surface — without them the emblems stay
             // stock (violet stage emblem and/or total badge).
             self.emblem_installed = results_emblem::install(ctx.signatures);
+            // Marvelous FAST/SLOW gate (2026-09-01): one-byte patch site.
+            // Best-effort — without it Marvelous never shows FAST/SLOW
+            // (stock).
+            self.fast_slow_installed = fast_slow::install(ctx.signatures);
         }
         true
     }
@@ -200,33 +249,11 @@ impl Mod for SMarvelousMod {
                 // recycle across scenes, so every transition drops it
                 // (Step 8).
                 results_graph::on_scene_change();
-                if prev == scene::GAMEPLAY && next != scene::GAMEPLAY {
-                    // Per-song report (Step 1's cabinet demo), then disarm.
-                    for side in 0..2usize {
-                        let marv = state::marv_total(side);
-                        let smarv = state::smarv_count(side);
-                        if marv > 0 || smarv > 0 {
-                            log_info!(
-                                "SMarvelous: song end side={} smarv={} marv_total={} window={}",
-                                side,
-                                smarv,
-                                marv,
-                                state::last_armed_window(side)
-                            );
-                        }
-                    }
-                    state::disarm_all();
+                if is_play_scene(prev) && !is_play_scene(next) {
+                    report_and_disarm();
                 }
-                if next == scene::GAMEPLAY {
-                    // Per-song latch: mid-song config/toggle/overlay-row
-                    // changes apply next song (design D26) — the live window
-                    // is read here, at GAMEPLAY entry, and nowhere else.
-                    let window = LIVE_WINDOW_MS.load(Ordering::Relaxed);
-                    state::reset_song_state();
-                    state::arm(0, window);
-                    state::arm(1, window);
-                    flash::reset_latches();
-                    splash::reset_latches();
+                if is_play_scene(next) {
+                    arm_for_play_scene();
                 }
             }));
             self.scene_cb_id = Some(id);
@@ -284,6 +311,13 @@ impl Mod for SMarvelousMod {
             results_emblem::activate();
         }
 
+        // Marvelous FAST/SLOW indicator: flip the NoteResultActor gate so
+        // Marvelous steps show FAST/SLOW during gameplay (the results-tab
+        // FAST/SLOW totals gain the Marvelous share via results_score).
+        if self.fast_slow_installed {
+            fast_slow::activate();
+        }
+
         log_info!("SMarvelous: enabled (window {} ms)", window);
     }
 
@@ -296,6 +330,7 @@ impl Mod for SMarvelousMod {
         results_score::deactivate();
         results_graph::deactivate();
         results_emblem::deactivate();
+        fast_slow::deactivate();
         state::disarm_all();
         state::reset_song_state();
         if let Some(id) = self.scene_cb_id.take() {

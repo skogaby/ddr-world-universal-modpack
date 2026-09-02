@@ -146,10 +146,17 @@ pub fn marv_total(side: usize) -> u32 {
     MARV_TOTAL[side & 1].load(Ordering::Relaxed)
 }
 
-/// True while the current combo contains no Marvelous looser than the
-/// window.
+/// True while the side is ARMED and the current combo contains no
+/// Marvelous looser than the window.
+///
+/// The armed gate is load-bearing: a disarmed side never classifies, so
+/// its loose-marv bit stays false and a bare `!bit` would read "all
+/// S-Marvelous" for a combo the mod never looked at. That was the attract
+/// demo's violet combo tint under a stock white MARVELOUS word (2026-09-01)
+/// — the consumers (combo override, S-MFC splash) must decline for a side
+/// whose judgements were not classified.
 pub fn combo_is_all_smarv(side: usize) -> bool {
-    !COMBO_HAS_LOOSE_MARV[side & 1].load(Ordering::Relaxed)
+    is_armed(side) && !COMBO_HAS_LOOSE_MARV[side & 1].load(Ordering::Relaxed)
 }
 
 /// Hot-path entry, called from the judge_submit tap for every grade opcode
@@ -289,17 +296,21 @@ mod tests {
     /// sequential scenario rather than parallel tests.
     #[test]
     fn wrapper_sequence() {
-        // Disarmed: inert.
+        // Disarmed: inert — and never "all S-Marv" (the consumers must
+        // decline for a side the mod is not classifying).
         disarm_all();
         reset_song_state();
         assert!(!on_judge_event(0, 0, Some(1), 1));
         assert_eq!(smarv_count(0), 0);
         assert!(!is_armed(0));
+        assert!(!combo_is_all_smarv(0));
 
         // Arm side 0 only.
         arm(0, 12);
         assert!(is_armed(0));
         assert!(!is_armed(1));
+        assert!(combo_is_all_smarv(0));
+        assert!(!combo_is_all_smarv(1)); // disarmed side, clean bit: still false
 
         assert!(on_judge_event(0, 0, Some(-4), 1));
         assert!(on_judge_event(0, 0, Some(12), 2));
@@ -331,6 +342,7 @@ mod tests {
         disarm_all();
         assert!(!on_judge_event(0, 0, Some(1), 2)); // disarmed again
         assert_eq!(smarv_count(0), 1);
+        assert!(!combo_is_all_smarv(0)); // disarm alone drops the predicate
         reset_song_state();
     }
 }

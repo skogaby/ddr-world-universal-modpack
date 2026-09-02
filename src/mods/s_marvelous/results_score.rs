@@ -32,6 +32,14 @@
 //! 4. **Exclusive MARVELOUS** — the stock marvelous widget's glyphs are
 //!    rewritten to `stock − smarv` via `spritelayer_set_names`, so the
 //!    seven rows sum to the stock total.
+//! 5. **Marvelous FAST/SLOW** (2026-09-01) — the stock `fast_usr/num_usr` /
+//!    `slow_usr/num_usr` widgets show `record+0x6C/+0x70`, which
+//!    `judge_submit` only accumulates for grades 1..=4; the same glyph
+//!    rewrite adds the LOOSE-Marvelous share (grade-0 slots OUTSIDE the
+//!    S-Marv window, `ms<0`/`ms>0`) recomputed from the record streams. The
+//!    highest tier is exempt from FAST/SLOW — stock Marvelous, now
+//!    S-Marvelous — matching the gameplay indicator (`fast_slow.rs`). The
+//!    record's own counters — and therefore the score save — are untouched.
 //!
 //! Counts are recomputed from the stage record's per-note grade/ms streams
 //! ([`super::records`]) with the window the side was last armed with —
@@ -105,6 +113,10 @@ const SL_OFFSET_Y: usize = 0xC8;
 const SMARV_OFFSET_Y: f64 = -16.0;
 /// The anchor instance our row rides (17 bytes — heap-form MSVC string).
 const ANCHOR_NAME: &[u8] = b"marvelous_num_usr";
+/// The stock FAST/SLOW number widgets' anchor instances (populate RE:
+/// `fast_usr/num_usr` ← record+0x6C, `slow_usr/num_usr` ← record+0x70).
+const FAST_ANCHOR_NAME: &[u8] = b"fast_usr/num_usr";
+const SLOW_ANCHOR_NAME: &[u8] = b"slow_usr/num_usr";
 
 // ── Game function ABIs ───────────────────────────────────────────────
 
@@ -149,6 +161,7 @@ static REGISTER_ONCE: Once = Once::new();
 
 static WARN_RECORD: AtomicBool = AtomicBool::new(false);
 static WARN_STOCK_WIDGET: AtomicBool = AtomicBool::new(false);
+static WARN_FAST_SLOW_WIDGET: AtomicBool = AtomicBool::new(false);
 static WARN_VARIANT: AtomicBool = AtomicBool::new(false);
 static WARN_TRANSFORM: AtomicBool = AtomicBool::new(false);
 static FIRST_ROW_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -353,7 +366,16 @@ fn populate_smarv_row(tab: *mut u8) {
             return;
         }
 
-        let Some(smarv) = records::smarv_count_from_record(record, window) else {
+        // One stream read serves every recompute below (fail-closed —
+        // design §6: malformed streams ⇒ the whole tab stays stock).
+        let Some((grades, errors)) = records::read_streams(record) else {
+            warn_once(
+                &WARN_RECORD,
+                "SMarvelous: record streams unreadable/mismatched -- tab stays stock",
+            );
+            return;
+        };
+        let Some(smarv) = records::count_smarv(&grades, &errors, window) else {
             warn_once(
                 &WARN_RECORD,
                 "SMarvelous: record streams unreadable/mismatched -- tab stays stock",
@@ -390,18 +412,64 @@ fn populate_smarv_row(tab: *mut u8) {
             return;
         }
 
+        // 3) FAST/SLOW totals gain the LOOSE-Marvelous share (the stock
+        //    counters skip grade 0; S-Marvelous is the exempt top tier).
+        //    Independent of the rows above — a failure here leaves the
+        //    stock FAST/SLOW numbers with one WARN.
+        let marv_fs = rewrite_fast_slow(tab, record, &grades, &errors, window);
+
         // First-fire only — the populate re-runs on every tab revisit and
         // a per-populate line spams the log (Step-10 hardening).
         if !FIRST_ROW_LOGGED.swap(true, Ordering::Relaxed) {
             log_info!(
-                "SMarvelous: results row live (side {}, stage {}, smarv {}, marv_excl {})",
+                "SMarvelous: results row live (side {}, stage {}, smarv {}, marv_excl {}, marv fast/slow {:?})",
                 side,
                 stage,
                 smarv,
-                exclusive
+                exclusive,
+                marv_fs
             );
         }
     }
+}
+
+/// Rewrite the stock FAST/SLOW widgets to `stock + loose-Marvelous share`
+/// (grade 0 outside the S-Marv window — S-Marvelous is the exempt top
+/// tier). Returns the share applied, `None` when it declined (stock
+/// numbers stand).
+unsafe fn rewrite_fast_slow(
+    tab: *mut u8,
+    record: *const u8,
+    grades: &[u8],
+    errors: &[i16],
+    window: i32,
+) -> Option<(u32, u32)> {
+    let Some((marv_fast, marv_slow)) = records::count_marv_fast_slow(grades, errors, window) else {
+        warn_once(
+            &WARN_RECORD,
+            "SMarvelous: record streams unreadable for FAST/SLOW -- stock FAST/SLOW stands",
+        );
+        return None;
+    };
+    let Some((stock_fast, stock_slow)) = records::stock_fast_slow_from_record(record) else {
+        warn_once(
+            &WARN_RECORD,
+            "SMarvelous: record FAST/SLOW counters implausible -- stock FAST/SLOW stands",
+        );
+        return None;
+    };
+    if marv_fast == 0 && marv_slow == 0 {
+        return Some((0, 0)); // nothing to add; the stock glyphs are already right
+    }
+    let fast_ok = rewrite_named_widget(tab, FAST_ANCHOR_NAME, stock_fast + marv_fast);
+    let slow_ok = rewrite_named_widget(tab, SLOW_ANCHOR_NAME, stock_slow + marv_slow);
+    if !fast_ok || !slow_ok {
+        warn_once(
+            &WARN_FAST_SLOW_WIDGET,
+            "SMarvelous: stock FAST/SLOW widget not found -- FAST/SLOW stays stock",
+        );
+    }
+    Some((marv_fast, marv_slow))
 }
 
 /// The populate fn's own record-selection gate: `*(**global + 0x70) != 0`
@@ -488,6 +556,17 @@ unsafe fn rewrite_stock_marvelous(tab: *mut u8, exclusive: u32) -> bool {
         return false;
     };
     set_widget_names_digits(widget, &format_count(exclusive));
+    true
+}
+
+/// Rewrite the glyphs of the (unique) stock widget on `anchor` to `count`.
+/// The FAST/SLOW anchors carry exactly one widget each (no mod-owned row
+/// shares them), so a plain name match suffices.
+unsafe fn rewrite_named_widget(tab: *mut u8, anchor: &[u8], count: u32) -> bool {
+    let Some(widget) = widget_vector(tab).find(|&w| widget_anchor_is(w, anchor)) else {
+        return false;
+    };
+    set_widget_names_digits(widget, &format_count(count));
     true
 }
 

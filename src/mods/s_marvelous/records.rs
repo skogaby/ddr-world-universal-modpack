@@ -68,6 +68,62 @@ pub fn count_grade(grades: &[u8], grade: u8) -> u32 {
     grades.iter().filter(|&&g| g == grade).count() as u32
 }
 
+/// Pure core: `(fast, slow)` counts over the NON-S Marvelous slots of
+/// aligned grade/ms streams — grade 0 AND outside the S-Marvelous window.
+/// This is the share the stock FAST/SLOW counters leave out
+/// (`judge_submit` only counts grades 1..=4; research §2 step 2) that the
+/// mod adds back: the highest tier is exempt from FAST/SLOW, and with the
+/// mod on that tier is S-Marvelous, not Marvelous. Sign convention matches
+/// the stock counters and the gameplay indicator: `ms < 0` fast,
+/// `ms > 0` slow (an S-Marv window ≥ 1 already covers `ms == 0`).
+///
+/// `None` on a stream length mismatch or a non-positive window (fail
+/// closed, like [`count_smarv`]).
+pub fn count_marv_fast_slow(
+    grades: &[u8],
+    errors_ms: &[i16],
+    window_ms: i32,
+) -> Option<(u32, u32)> {
+    if grades.len() != errors_ms.len() || window_ms <= 0 {
+        return None;
+    }
+    let mut fast = 0u32;
+    let mut slow = 0u32;
+    for (&g, &ms) in grades.iter().zip(errors_ms.iter()) {
+        if g != GRADE_MARVELOUS || (ms as i32).abs() <= window_ms {
+            continue; // not Marvelous, or S-Marvelous (top tier: exempt)
+        }
+        if ms < 0 {
+            fast += 1;
+        } else {
+            slow += 1;
+        }
+    }
+    Some((fast, slow))
+}
+
+/// Record field offsets of the stock FAST/SLOW counters (result commit
+/// copies GamePlayActor `+0x1C4/+0x1C8` here; research §3.6).
+const REC_FAST: usize = 0x6C;
+const REC_SLOW: usize = 0x70;
+
+/// The record's own stock FAST/SLOW counters — exactly the values the
+/// populate wrote into `fast_usr/num_usr` / `slow_usr/num_usr`.
+///
+/// # Safety
+/// `record` must point at a live stage record, on the game thread.
+pub unsafe fn stock_fast_slow_from_record(record: *const u8) -> Option<(u32, u32)> {
+    if record.is_null() {
+        return None;
+    }
+    let fast = (record.add(REC_FAST) as *const i32).read_unaligned();
+    let slow = (record.add(REC_SLOW) as *const i32).read_unaligned();
+    if fast < 0 || slow < 0 || fast > MAX_NOTES as i32 || slow > MAX_NOTES as i32 {
+        return None;
+    }
+    Some((fast as u32, slow as u32))
+}
+
 /// Read an MSVC `vector<T>` header (begin/end pair) at `record + offset`
 /// into a bounded element count. `None` on null/backwards/oversized/
 /// misaligned vectors.
@@ -322,6 +378,53 @@ mod tests {
         assert_eq!(count_grade(&grades, 0), 3);
         assert_eq!(count_grade(&grades, 6), 1);
         assert_eq!(count_grade(&grades, 5), 0);
+    }
+
+    #[test]
+    fn marv_fast_slow_excludes_smarvelous_and_keeps_sign_convention() {
+        // Window 12: |ms| ≤ 12 is S-Marvelous (top tier, exempt); only the
+        // loose Marvelous count — negative = fast, positive = slow.
+        let grades = [0u8, 0, 0, 0, 0, 0, 0];
+        let errors = [-1i16, -12, 0, 3, 12, -13, 16];
+        assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((1, 1)));
+    }
+
+    #[test]
+    fn marv_fast_slow_window_edge_is_smarvelous() {
+        // Exactly |window| is S-Marvelous (inclusive, like count_smarv);
+        // window+1 is a loose Marvelous.
+        let grades = [0u8, 0, 0, 0];
+        let errors = [16i16, -16, 17, -17];
+        assert_eq!(count_marv_fast_slow(&grades, &errors, 16), Some((1, 1)));
+        assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((2, 2)));
+    }
+
+    #[test]
+    fn marv_fast_slow_partitions_marvelous_with_count_smarv() {
+        // Every Marvelous slot is exactly one of: S-Marv, loose-fast,
+        // loose-slow (the results rows must sum to the stock totals).
+        let grades = [0u8, 0, 0, 0, 0, 0, 1, 6];
+        let errors = [-20i16, -12, -3, 0, 5, 15, 40, 0];
+        let smarv = count_smarv(&grades, &errors, 12).unwrap();
+        let (fast, slow) = count_marv_fast_slow(&grades, &errors, 12).unwrap();
+        assert_eq!((smarv, fast, slow), (4, 1, 1));
+        assert_eq!(smarv + fast + slow, count_grade(&grades, GRADE_MARVELOUS));
+    }
+
+    #[test]
+    fn marv_fast_slow_ignores_other_grades() {
+        // Lower grades are already in the stock counters; OK carries no
+        // delta. Only loose grade-0 slots contribute.
+        let grades = [1u8, 2, 3, 4, 6, 0];
+        let errors = [-30i16, 40, -60, 90, 0, -14];
+        assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((1, 0)));
+    }
+
+    #[test]
+    fn marv_fast_slow_rejects_length_mismatch_bad_window_and_handles_empty() {
+        assert_eq!(count_marv_fast_slow(&[0u8, 0], &[1i16], 12), None);
+        assert_eq!(count_marv_fast_slow(&[0u8], &[15i16], 0), None);
+        assert_eq!(count_marv_fast_slow(&[], &[], 12), Some((0, 0)));
     }
 
     #[test]

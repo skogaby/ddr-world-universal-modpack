@@ -789,6 +789,29 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 98 48 81 EC 40 01 00 00 48 C7 44 24 50 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 18 48 89 4C 24 38 C7 45 F8 EC FE A9 00 C7 45 FC EF A6 DF 00",
         description: "sequence::dance::ComboActor digit refresh (this in RCX). Repaints digit art per layer/place + applies the per-grade tint pairs.",
     },
+    // NoteResultActor msg handler (`FUN_18007B300` on 20260721), grade case
+    // 0x1028..0x102D: the FAST/SLOW indicator's show/hide gate. After the
+    // judgement word is driven, the `dance_fast_slow` clip (this+0xA8) is
+    // HIDDEN when either the ms delta (this+0x98) is 0 or the grade
+    // (this+0x94) is 0 = Marvelous; otherwise shown at in_fast/in_slow:
+    //
+    //   83 BF 98 00 00 00 00   CMP dword [RDI+0x98], 0   ; delta == 0 → hide
+    //   74 ??                  JZ  hide
+    //   83 BF 94 00 00 00 00   CMP dword [RDI+0x94], 0   ; grade == 0 → hide
+    //   74 ??                  JZ  hide
+    //
+    // The s-marvelous mod rewrites the second CMP's imm8 (match+15, `00` →
+    // `FF`): grade is 0..=5 in this branch so `grade == -1` never holds and
+    // the JZ is never taken — Marvelous judgements show FAST/SLOW like every
+    // other grade (the delta==0 hide stays — an exactly-on-time step is
+    // neither). Single-byte store, no tearing. Both JZ rel8s wildcarded
+    // (7B/72 on 20250805/20260616/20260721/20260825, but structurally
+    // free). Unique single match, byte-identical on all four.
+    SignatureDefinition {
+        name: "note_result_fast_slow_gate",
+        pattern: "83 BF 98 00 00 00 00 74 ?? 83 BF 94 00 00 00 00 74 ??",
+        description: "NoteResultActor grade-case FAST/SLOW gate — CMP [RDI+0x98],0; JZ; CMP [RDI+0x94],0; JZ. S-Marvelous rewrites the grade CMP imm8 at match+15 (0→-1) so Marvelous shows FAST/SLOW.",
+    },
     // FullcomboActor::onMessage (s-marvelous FC splash). Prologue-anchored;
     // the `CMP EDX,0x1034` (its only handled message) pins uniqueness —
     // `81 FA 34 10 00 00` is module-unique on 20260721.

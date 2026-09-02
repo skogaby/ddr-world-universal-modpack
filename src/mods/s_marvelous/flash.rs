@@ -98,6 +98,14 @@ const NOTE_RESULT_JUDGE_WRAPPER_OFFSET: usize = 0xA0;
 /// caller's classification return gates this). `judge_actor` = the
 /// judge_submit dispatch actor (the NoteResultActor lives in its subtree).
 pub fn on_smarvelous(side: usize, judge_actor: *mut u8) {
+    let nra = unsafe { find_note_result_actor(judge_actor, 0) };
+
+    // S-Marvelous is the highest tier ⇒ exempt from FAST/SLOW: re-hide the
+    // indicator the patched gate just showed for this grade-0 event.
+    // Independent of the word re-drive below (which needs the patched
+    // template) — the hide is correct even when the word shows stock.
+    super::fast_slow::hide_for_smarvelous(nra);
+
     // Without the patched template the label does not exist — a goto would
     // be a benign no-op, but skipping keeps the fail-open contract exact
     // (stock word shows, one WARN came from the patch layer already).
@@ -109,7 +117,7 @@ pub fn on_smarvelous(side: usize, judge_actor: *mut u8) {
     // captured pool wrapper (known-wrong outer instance, kept only so a
     // failed walk still logs through the old path).
     let actor_wrapper = unsafe {
-        find_note_result_actor(judge_actor, 0).and_then(|nra| {
+        nra.and_then(|nra| {
             let w = (nra.add(NOTE_RESULT_JUDGE_WRAPPER_OFFSET) as *const *mut u8).read_unaligned();
             if w.is_null() {
                 None

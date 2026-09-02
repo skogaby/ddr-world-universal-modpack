@@ -29,7 +29,7 @@ use crate::core::memory;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec};
 use crate::services::judge_hook::{self, CallbackHandle, Priority};
-use crate::services::{scene_manager, score_guard, widget_renderer};
+use crate::services::{scene_manager, score_guard, stage_records, widget_renderer};
 use crate::types::scenes::scene;
 use crate::widgets::bounce::{hsv_to_rgb, Bouncer};
 use crate::widgets::text_widget::TextWidget;
@@ -147,7 +147,15 @@ fn autoplay_post_judge(actor: *mut u8, _music_count: i32) {
 // Visibility is re-evaluated every tick from current state — never
 // latched to a specific scene transition — so quick-fail redirects,
 // in-place quick restarts, and session ends all behave correctly:
-//   * Observing (scene == GAMEPLAY && either side's autoplay ON) arms it.
+//   * Observing (scene == GAMEPLAY && an ENTERED side's autoplay ON) arms
+//     it. Entered-gated because the per-side option values outlive the
+//     player: the JSON cache primes BOTH sides at boot and a profile load
+//     only overwrites the side that carded in, so a stale `p2.autoplay=1`
+//     from an earlier 2P session lit the watermark over a solo P1 whose
+//     own autoplay was OFF (cabinet, 2026-09-01). A non-entered side has
+//     no GamePlayActor, so its flag never engages autoplay anyway. When
+//     entered-state is unavailable the side counts as entered (fail toward
+//     showing the anti-fake mark, never toward hiding it).
 //   * Any scene outside {GAMEPLAY, STAGE_RESULT, RESULTS_DETAIL} disarms
 //     it (STAGE_RESULT is the post-song loader between gameplay and the
 //     results detail screen — included so the label doesn't blink off
@@ -194,14 +202,21 @@ fn new_watermark_state() -> WatermarkState {
     }
 }
 
+/// Whether `side`'s autoplay flag should count toward the watermark: ON and
+/// the side is entered (unknown entered-state ⇒ counts — see the rules
+/// above).
+fn side_autoplay_engaged(side: usize) -> bool {
+    AUTOPLAY_ENABLED[side].load(Ordering::Acquire)
+        && stage_records::side_entered(side).unwrap_or(true)
+}
+
 fn watermark_tick(st: &Arc<Mutex<WatermarkState>>) {
     let current = if scene_manager::is_available() {
         scene_manager::current_scene()
     } else {
         -1
     };
-    let autoplay_on =
-        AUTOPLAY_ENABLED[0].load(Ordering::Acquire) || AUTOPLAY_ENABLED[1].load(Ordering::Acquire);
+    let autoplay_on = side_autoplay_engaged(0) || side_autoplay_engaged(1);
     let in_results_flow = matches!(
         current,
         scene::GAMEPLAY | scene::STAGE_RESULT | scene::RESULTS_DETAIL

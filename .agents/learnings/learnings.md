@@ -727,3 +727,24 @@ General rules:
   capture) are cheap and game-safe even mid-song; prefer them over
   in-DLL diagnostic builds for register-level questions — one deploy
   cycle vs zero.
+
+## Per-side option values OUTLIVE the player — gate cabinet-wide effects on ENTERED sides (2026-09-01)
+
+**Symptom:** the "Autoplay Enabled" watermark bounced over a solo P1 play
+whose autoplay was OFF.
+
+**Cause:** the JSON cache primes BOTH sides' `PersistMode::Full` values at
+boot (`Autoplay: side=0 ON` / `side=1 ON` from a previous 2P test), and a
+profile load only overwrites the side that carded in. P2 never entered, so
+`AUTOPLAY_ENABLED[1]` stayed at the stale cached `1`, and the watermark
+armed on a plain `p1 || p2`. Autoplay itself was unaffected (no P2
+GamePlayActor ⇒ the per-actor judge swap never fires) — only the derived
+cabinet-wide consumer misread it.
+
+Rule: any consumer that folds BOTH sides' option values into one
+cabinet-wide decision (watermarks, announcer mute, premium-free freeze,
+versus mirrors, S-Marvelous arming…) must restrict to
+`stage_records::side_entered(side)` sides — a non-entered side's value is
+whatever the last session left in `mod-config.json`. Decide the
+unavailable-entered-state fallback per feature (autoplay's watermark fails
+toward SHOWING; announcer_mute falls back to `p1 || p2`).
