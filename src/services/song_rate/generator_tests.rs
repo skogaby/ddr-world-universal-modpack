@@ -152,6 +152,89 @@ pub(super) fn replay_fixture(preview_first: bool) -> Vec<u8> {
     build_bank_bytes(preview_first, [fmt, fmt], payloads, durations, loops)
 }
 
+/// A `goru`-shaped (GOLD RUSH) 4-entry fixture: `goru_cs` / `goru` /
+/// `goru_ac` / `goru_s`, the ONLY stock World song bank with more than two
+/// waves. The three long entries share the main tone with a different
+/// seed byte-shift so a region mix-up between variants is visible.
+pub(super) fn goru_fixture() -> Vec<u8> {
+    let fmt = format(8_000, 2);
+    let names = ["goru_cs", "goru", "goru_ac", "goru_s"];
+    let mut payloads = Vec::new();
+    for (index, _) in names.iter().enumerate() {
+        let frames = if index == 3 {
+            PREVIEW_PAYLOAD_FRAMES
+        } else {
+            MAIN_FRAMES
+        };
+        let mut pcm = tone_pcm(frames, 2);
+        for sample in &mut pcm {
+            *sample = sample.wrapping_add(index as i16 * 97);
+        }
+        payloads.push(adpcm::encode_interleaved(&pcm, fmt).expect("encode entry"));
+    }
+    let durations = [
+        MAIN_FRAMES as u32,
+        MAIN_FRAMES as u32,
+        MAIN_FRAMES as u32,
+        PREVIEW_FRAMES as u32,
+    ];
+
+    let count = names.len();
+    let meta_off = 148;
+    let names_off = meta_off + count * 24;
+    let wave_off = round_up(names_off + count * 64, 2048);
+    let mut offsets = Vec::with_capacity(count);
+    let mut cursor = 0usize;
+    for (index, payload) in payloads.iter().enumerate() {
+        let off = if index == 0 {
+            0
+        } else {
+            round_up(cursor, 2048)
+        };
+        offsets.push(off);
+        cursor = off + payload.len();
+    }
+    let mut bytes = vec![0; wave_off + cursor];
+    bytes[0..4].copy_from_slice(b"WBND");
+    put_u32(&mut bytes, 4, 43);
+    put_u32(&mut bytes, 8, 42);
+    for (index, (offset, length)) in [
+        (52, 96),
+        (meta_off, count * 24),
+        (names_off, 0),
+        (names_off, count * 64),
+        (wave_off, cursor),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_u32(&mut bytes, 12 + index * 8, offset as u32);
+        put_u32(&mut bytes, 16 + index * 8, length as u32);
+    }
+    put_u32(&mut bytes, 52, 0x0009_0001);
+    put_u32(&mut bytes, 56, count as u32);
+    bytes[60..124].copy_from_slice(&fixed_name("goru"));
+    put_u32(&mut bytes, 124, 24);
+    put_u32(&mut bytes, 128, 64);
+    put_u32(&mut bytes, 132, 2048);
+    put_u32(&mut bytes, 136, 0);
+    bytes[140..148].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    for index in 0..count {
+        let meta = meta_off + index * 24;
+        put_u32(&mut bytes, meta, durations[index] << 4);
+        put_u32(&mut bytes, meta + 4, fmt.packed());
+        put_u32(&mut bytes, meta + 8, offsets[index] as u32);
+        put_u32(&mut bytes, meta + 12, payloads[index].len() as u32);
+        put_u32(&mut bytes, meta + 16, 0);
+        put_u32(&mut bytes, meta + 20, durations[index]);
+        let name_at = names_off + index * 64;
+        bytes[name_at..name_at + 64].copy_from_slice(&fixed_name(names[index]));
+        let data_at = wave_off + offsets[index];
+        bytes[data_at..data_at + payloads[index].len()].copy_from_slice(&payloads[index]);
+    }
+    bytes
+}
+
 /// The whole-buffer oracle: parse → plan → stretch the MAIN entry
 /// (decode → reference stretch → whole-buffer encode) with the non-main
 /// entry passed through VERBATIM (the preview passthrough, step05-fix v2)
@@ -184,7 +267,7 @@ pub(super) fn transform_bank_oracle_target(
 ) -> Vec<u8> {
     let bank = xwb::parse_song_bank(source).expect("oracle parse");
     let layout = virtual_bank::plan_virtual_bank(&bank, percent, target).expect("oracle plan");
-    let streamed = [layout.entries[0].streamed, layout.entries[1].streamed];
+    let streamed: Vec<_> = layout.entries.iter().map(|plan| plan.streamed).collect();
     let mut encoded = Vec::new();
     for (index, entry) in bank.entries.iter().enumerate() {
         if index != layout.target_entry_index {
@@ -323,7 +406,7 @@ fn replay_via_serve(binding: &Binding, core: &mut GeneratorCore<'_>) -> Vec<u8> 
     let header = serve_pumped(binding, core, &mut file, 0, 0x1000, &mut accumulator);
     assert_eq!(header, 0x1000, "the header read completes in full");
 
-    for entry in 0..2 {
+    for entry in 0..binding.layout().entries.len() {
         let data_len = binding.layout().entries[entry].streamed.data_len as u64;
         let block_align = u64::from(binding.entry_format(entry).block_align());
         let packet = 65_536 / block_align * block_align;
@@ -565,7 +648,7 @@ fn mid_stream_producer_death_switches_to_valid_silence() {
     };
 
     assert_eq!(read_all(&mut file, 0, 0x1000), 0x1000);
-    for entry in 0..2 {
+    for entry in 0..binding.layout().entries.len() {
         let data_len = binding.layout().entries[entry].streamed.data_len as u64;
         let block_align = u64::from(binding.entry_format(entry).block_align());
         let packet = 65_536 / block_align * block_align;
@@ -682,7 +765,7 @@ fn spawned_generator_covers_the_bank_and_records_metrics() {
     };
 
     assert_eq!(read_all(&mut file, 0, 0x1000), 0x1000);
-    for entry in 0..2 {
+    for entry in 0..binding.layout().entries.len() {
         let data_len = binding.layout().entries[entry].streamed.data_len as u64;
         let block_align = u64::from(binding.entry_format(entry).block_align());
         let packet = 65_536 / block_align * block_align;
@@ -959,6 +1042,64 @@ fn side_target_replay_matches_the_oracle() {
                     adpcm::decode_interleaved(entry.data, entry.format, entry.duration)
                         .expect("served entry decodes");
                 }
+            }
+        }
+    }
+}
+
+/// The 4-entry `goru` shape through the REAL serve dispatch: exactly one
+/// entry rides the ring (the `goru` main for gameplay, `goru_s` for the
+/// preview bind); `goru_cs` / `goru_ac` and the other role entry serve
+/// verbatim from the resident source, and the reassembled file is the
+/// whole-buffer oracle byte for byte.
+#[test]
+fn four_entry_bank_replay_matches_the_oracle_for_both_targets() {
+    for (target, expected_target) in [
+        (virtual_bank::StretchTarget::Main, 1usize),
+        (virtual_bank::StretchTarget::Side, 3usize),
+    ] {
+        for percent in [50u32, 175] {
+            let label = format!("goru {percent}% target={target:?}");
+            let source = goru_fixture();
+            let oracle = transform_bank_oracle_target(&source, percent, true, target);
+            let binding = make_binding_target(source.clone(), percent, true, None, target);
+            let layout = binding.layout();
+            assert_eq!(layout.entries.len(), 4, "{label}");
+            assert_eq!(layout.main_entry_index, 1, "{label}");
+            assert_eq!(layout.preview_entry_index, 3, "{label}");
+            assert_eq!(layout.target_entry_index, expected_target, "{label}");
+            let mut core = GeneratorCore::new(&binding).expect("core constructs");
+
+            let file = replay_via_serve(&binding, &mut core);
+            assert!(
+                file == oracle,
+                "{label}: served bytes diverge from the oracle"
+            );
+
+            let produced = binding.ring_produced();
+            assert!(
+                produced >= binding.target_data_start() && produced <= binding.target_data_end(),
+                "{label}: production left the target range"
+            );
+
+            // Every verbatim entry is the STOCK bytes, at the header's offsets.
+            let served = xwb::parse_song_bank(&file).expect("served file reparses");
+            let stock = xwb::parse_song_bank(&source).expect("stock parses");
+            assert_eq!(served.entry_count(), 4);
+            for index in 0..4 {
+                if index != expected_target {
+                    assert_eq!(
+                        served.entries[index].data, stock.entries[index].data,
+                        "{label}: entry {index}"
+                    );
+                    assert_eq!(served.entries[index].name(), stock.entries[index].name());
+                }
+                adpcm::decode_interleaved(
+                    served.entries[index].data,
+                    served.entries[index].format,
+                    served.entries[index].duration,
+                )
+                .expect("served entry decodes");
             }
         }
     }

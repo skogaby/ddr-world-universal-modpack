@@ -1111,18 +1111,17 @@ pub struct Binding {
     source: Box<[u8]>,
     /// Per-entry formats, reparsed once from the source copy (the layout's
     /// entry plans carry stretched values, not formats).
-    formats: [WaveFormat; 2],
+    formats: Vec<WaveFormat>,
     /// One pre-encoded silent ADPCM block per entry, so SilenceFill serving
     /// is allocation-free in detour context (req 28).
-    silent_blocks: [Vec<u8>; 2],
+    silent_blocks: Vec<Vec<u8>>,
     ring: Ring,
-    /// The VERBATIM-served entry's index (`1 − layout.target_entry_index`
-    /// — the entry the ring/producer never touch).
-    verbatim_entry: usize,
-    /// The verbatim entry's stock data range within `source` (its bytes
-    /// are served verbatim — resident from construction, always
-    /// available).
-    verbatim_source_offset: usize,
+    /// Every entry's stock data offset within `source`. Entries other than
+    /// `layout.target_entry_index` are served VERBATIM from here (the
+    /// `<code>_s` preview during gameplay, the main + any `goru_ac`-style
+    /// variants during a preview bind) — resident from construction, always
+    /// available; the ring/producer never touch them.
+    entry_source_offsets: Vec<usize>,
     /// The TARGET (ring-served) entry's stock data range within `source` —
     /// the identity passthrough's verbatim serving base (unused in Stretch
     /// mode).
@@ -1144,6 +1143,11 @@ pub struct Binding {
     fault_kill_after_blocks: AtomicU64,
     started_at: Instant,
     metrics: MetricCells,
+}
+
+/// Byte offset of `bank.entries[index]`'s data within `source`.
+fn entry_source_offsets_target(bank: &xwb::SongBank<'_>, source: &[u8], index: usize) -> usize {
+    bank.entries[index].data.as_ptr() as usize - source.as_ptr() as usize
 }
 
 impl Binding {
@@ -1232,34 +1236,36 @@ impl Binding {
         ring_capacity: usize,
         serve_mode: ServeMode,
     ) -> Result<Self, BindingError> {
-        let verbatim_entry = 1 - layout.target_entry_index;
-        let (
-            formats,
-            silent_blocks,
-            verbatim_source_offset,
-            target_source_offset,
-            target_source_len,
-        ) = {
+        let (formats, silent_blocks, entry_source_offsets, target_source_offset, target_source_len) = {
             let bank = xwb::parse_song_bank(&source)
                 .map_err(|error| BindingError::UnparseableSource(error.to_string()))?;
-            let formats = [bank.entries[0].format, bank.entries[1].format];
-            let mut silent_blocks = [Vec::new(), Vec::new()];
-            for entry in 0..2 {
-                let format = formats[entry];
+            if bank.entries.len() != layout.entries.len()
+                || layout.target_entry_index >= bank.entries.len()
+            {
+                return Err(BindingError::IdentityLayoutMismatch);
+            }
+            let mut formats = Vec::with_capacity(bank.entries.len());
+            let mut silent_blocks = Vec::with_capacity(bank.entries.len());
+            let mut entry_source_offsets = Vec::with_capacity(bank.entries.len());
+            for (index, entry) in bank.entries.iter().enumerate() {
+                let format = entry.format;
                 let frames = format.samples_per_block() as usize;
                 let zeros = vec![0i16; frames * format.channels() as usize];
-                adpcm::encode_block(&zeros, format, &mut silent_blocks[entry])
+                let mut block = Vec::new();
+                adpcm::encode_block(&zeros, format, &mut block)
                     .map_err(|error| BindingError::SilenceEncode(error.to_string()))?;
+                formats.push(format);
+                silent_blocks.push(block);
+                // Each entry's data slice borrows `source`; its offset is
+                // that entry's verbatim serving base. The passthrough plan
+                // guarantees a non-target entry's declared length equals
+                // the stock length.
+                debug_assert!(
+                    index == layout.target_entry_index
+                        || entry.data.len() == layout.entries[index].streamed.data_len
+                );
+                entry_source_offsets.push(entry.data.as_ptr() as usize - source.as_ptr() as usize);
             }
-            // The verbatim entry's data slice borrows `source`; its offset
-            // is the verbatim serving base. The passthrough plan guarantees
-            // the declared length equals the stock length.
-            let verbatim_data = bank.entries[verbatim_entry].data;
-            debug_assert_eq!(
-                verbatim_data.len(),
-                layout.entries[verbatim_entry].streamed.data_len
-            );
-            let verbatim_offset = verbatim_data.as_ptr() as usize - source.as_ptr() as usize;
             // The TARGET entry's stock range: the identity passthrough's
             // serving base. An identity layout that diverges from the
             // stock length would serve out of the source's bounds —
@@ -1270,12 +1276,11 @@ impl Binding {
             {
                 return Err(BindingError::IdentityLayoutMismatch);
             }
-            let target_offset = target_data.as_ptr() as usize - source.as_ptr() as usize;
             (
                 formats,
                 silent_blocks,
-                verbatim_offset,
-                target_offset,
+                entry_source_offsets,
+                entry_source_offsets_target(&bank, &source, layout.target_entry_index),
                 target_data.len() as u64,
             )
         };
@@ -1294,8 +1299,7 @@ impl Binding {
             formats,
             silent_blocks,
             ring: Ring::new(ring_capacity, ring_base),
-            verbatim_entry,
-            verbatim_source_offset,
+            entry_source_offsets,
             target_source_offset,
             target_source_len,
             pending: [
@@ -1730,7 +1734,8 @@ impl Binding {
                 offset: within,
             } = span.region
             {
-                if entry != self.verbatim_entry && self.serve_mode == ServeMode::Stretch {
+                if entry == self.layout.target_entry_index && self.serve_mode == ServeMode::Stretch
+                {
                     if self.mapping_pending().is_some() {
                         return SpanCheck::NotProduced;
                     }
@@ -1772,14 +1777,14 @@ impl Binding {
                 Region::EntryData {
                     entry,
                     offset: within,
-                } if entry == self.verbatim_entry => {
+                } if entry != self.layout.target_entry_index => {
                     // Verbatim passthrough: the stock bytes from the
                     // resident source copy (resolve clamped `within` to
                     // the declared — stock — length).
                     std::ptr::copy_nonoverlapping(
                         self.source
                             .as_ptr()
-                            .add(self.verbatim_source_offset + within as usize),
+                            .add(self.entry_source_offsets[entry] + within as usize),
                         out,
                         span_len,
                     );
@@ -1879,14 +1884,14 @@ impl Binding {
                     entry,
                     offset: within,
                 } => {
-                    if entry == self.verbatim_entry {
-                        // The verbatim entry is static source data — no
+                    if entry != self.layout.target_entry_index {
+                        // Verbatim entries are static source data — no
                         // producer involvement, so silence-fill serves the
                         // real bytes.
                         std::ptr::copy_nonoverlapping(
                             self.source
                                 .as_ptr()
-                                .add(self.verbatim_source_offset + within as usize),
+                                .add(self.entry_source_offsets[entry] + within as usize),
                             out,
                             span_len,
                         );

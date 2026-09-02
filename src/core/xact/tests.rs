@@ -252,21 +252,40 @@ fn rejects_malformed_entry_identity_format_and_ranges() {
 }
 
 #[test]
-fn accepts_only_documented_stock_tail_remainders_and_duration_equations() {
-    for remainder in [0, BLOCK_ALIGN - 1, BLOCK_ALIGN - 2] {
+fn accepts_any_partial_tail_block_but_enforces_the_duration_equation() {
+    // Common stock tails (0 / 139 / 138 bytes) plus the odd DDR-era preview
+    // tails seen in the 2026-09-02 install sweep (103–137 bytes; `abys`,
+    // `inse`, `eran`, `agai`, `orio`, `baby`, …) and a 1-byte tail: every
+    // partial trailing block is ignored, never decoded.
+    for remainder in [
+        0,
+        BLOCK_ALIGN - 1,
+        BLOCK_ALIGN - 2,
+        137,
+        136,
+        130,
+        124,
+        110,
+        103,
+        1,
+    ] {
         let bytes = build_bank(false, remainder);
-        let bank = xwb::parse_song_bank(&bytes).expect("documented tail must parse");
+        let bank = xwb::parse_song_bank(&bytes).expect("partial tail must parse");
         let pcm = adpcm::decode_interleaved(
             bank.entries[0].data,
             bank.entries[0].format,
             bank.entries[0].duration,
         )
-        .expect("documented tail must decode");
+        .expect("partial tail must decode");
         assert_eq!(pcm.len(), bank.entries[0].duration as usize * 2);
     }
 
-    assert_rejected(build_bank(false, 1), |_| {});
-    assert_rejected(build_bank(false, BLOCK_ALIGN - 3), |_| {});
+    // The tail must never be NEEDED: a duration that requires one more
+    // block than the complete ones is refused regardless of the tail size.
+    assert_rejected(build_bank(false, BLOCK_ALIGN - 1), |b| {
+        put_u32(b, 148, (2 * SAMPLES_PER_BLOCK + 1) << 4);
+        put_u32(b, 168, 2 * SAMPLES_PER_BLOCK + 1);
+    });
     assert_rejected(build_bank(false, 0), |b| {
         put_u32(b, 148, (SAMPLES_PER_BLOCK << 4) as u32);
     });
@@ -489,9 +508,12 @@ fn block_codec_and_cache_reject_malformed_inputs() {
         adpcm::BlockCachePcm::new(&bad_predictor, stereo, logical),
         Err(adpcm::AdpcmError::BadPredictor { index: 7 })
     ));
-    let mut bad_tail = data.clone();
-    bad_tail.push(0);
-    assert!(adpcm::BlockCachePcm::new(&bad_tail, stereo, logical).is_err());
+    // A partial trailing block is ignored (legal) — but it never counts
+    // toward the declared duration.
+    let mut tail = data.clone();
+    tail.push(0);
+    assert!(adpcm::BlockCachePcm::new(&tail, stereo, logical).is_ok());
+    assert!(adpcm::BlockCachePcm::new(&tail, stereo, logical + 1).is_err());
     assert!(adpcm::BlockCachePcm::new(&data, stereo, stereo.samples_per_block()).is_err());
     assert!(adpcm::BlockCachePcm::new(&data, zero_channels, logical).is_err());
 }
@@ -1236,8 +1258,8 @@ fn layout_payload(len: usize, seed: u8) -> Vec<u8> {
 /// streamed entry values and payload bytes.
 fn streamed_bank_bytes(
     bank: &xwb::SongBank<'_>,
-    entries: &[xwb::StreamedEntry; 2],
-    payloads: &[Vec<u8>; 2],
+    entries: &[xwb::StreamedEntry],
+    payloads: &[Vec<u8>],
 ) -> Vec<u8> {
     use std::io::Write;
 
@@ -1254,7 +1276,7 @@ fn streamed_bank_bytes(
 /// resolve call serves at most the containing region's remainder).
 fn serve_virtual_bank(
     layout: &virtual_bank::VirtualBankLayout,
-    payloads: &[Vec<u8>; 2],
+    payloads: &[Vec<u8>],
     mut chunk: impl FnMut(usize) -> u32,
 ) -> Vec<u8> {
     let mut assembled = Vec::new();
@@ -1588,6 +1610,306 @@ fn identity_plan_is_stock_shaped_where_plan_entry_100_is_not() {
         identity.entries[main].streamed.duration,
         bank.entries[main].duration
     );
+}
+
+/// Turn a named fixture into the NAMELESS stock shape ~33 World-era song
+/// banks ship in (`acef`, `neut`, `dais`, `rhyz`, … — the 2026-09-02 "song
+/// speed does nothing for specific songs" report): segment 3 = offset 0 /
+/// length 0, `WAVEBANK_FLAGS_ENTRYNAMES` cleared, the 128 name bytes zeroed.
+fn strip_entry_names(bytes: &mut [u8]) {
+    put_u32(bytes, 36, 0);
+    put_u32(bytes, 40, 0);
+    put_u32(bytes, 52, 0x0008_0001);
+    bytes[196..324].fill(0);
+}
+
+/// A nameless fixture whose LONGER entry sits at `main_index` (durations are
+/// the only identity signal left, so the fixture must separate them clearly).
+fn build_nameless_bank(main_index: usize) -> Vec<u8> {
+    let lengths = if main_index == 0 {
+        [8 * BLOCK_ALIGN, 2 * BLOCK_ALIGN]
+    } else {
+        [2 * BLOCK_ALIGN, 8 * BLOCK_ALIGN]
+    };
+    let mut bytes = build_bank_with_data_lengths(false, lengths);
+    strip_entry_names(&mut bytes);
+    bytes
+}
+
+#[test]
+fn nameless_bank_resolves_identity_by_duration_and_synthesizes_role_names() {
+    for main_index in [0, 1] {
+        let bytes = build_nameless_bank(main_index);
+        let bank = xwb::parse_song_bank(&bytes).expect("nameless stock shape must parse");
+        assert!(!bank.has_entry_names());
+        assert_eq!(bank.flags, 0x0008_0001);
+        assert_eq!(bank.identity_source(), xwb::EntryIdentitySource::Duration);
+        assert_eq!(bank.main_entry_index(), main_index);
+        assert_eq!(bank.preview_entry_index(), 1 - main_index);
+        // Name-keyed consumers keep working on the synthesized role names.
+        assert_eq!(bank.entries[main_index].name(), "tst1");
+        assert_eq!(bank.entries[1 - main_index].name(), "tst1_s");
+        assert!(bank.entries[main_index].duration > bank.entries[1 - main_index].duration);
+
+        // The named shape still reports its provenance.
+        let named = build_bank(false, 0);
+        let named = xwb::parse_song_bank(&named).expect("named parse");
+        assert!(named.has_entry_names());
+        assert_eq!(named.identity_source(), xwb::EntryIdentitySource::Names);
+        assert_eq!(named.main_entry_index(), 0);
+    }
+}
+
+#[test]
+fn nameless_bank_rejects_inconsistent_flags_and_ambiguous_durations() {
+    // Names table present but the ENTRYNAMES flag cleared.
+    assert_rejected(build_bank(false, 0), |b| put_u32(b, 52, 0x0008_0001));
+    // No names table but the ENTRYNAMES flag still set.
+    assert_rejected(build_nameless_bank(0), |b| put_u32(b, 52, 0x0009_0001));
+    // Half a names table.
+    assert_rejected(build_nameless_bank(0), |b| {
+        put_u32(b, 36, 196);
+        put_u32(b, 40, 64);
+    });
+    // Durations too close to tell a ~15 s preview from a main wave
+    // (2 vs 3 blocks — the default fixture proportions).
+    let mut bytes = build_bank(false, 0);
+    strip_entry_names(&mut bytes);
+    assert!(matches!(
+        xwb::parse_song_bank(&bytes),
+        Err(xwb::XwbError::InvalidEntryIdentity)
+    ));
+}
+
+#[test]
+fn nameless_bank_round_trips_and_plans_in_the_stock_shape() {
+    for main_index in [0, 1] {
+        let source = build_nameless_bank(main_index);
+        let bank = xwb::parse_song_bank(&source).expect("nameless parse");
+
+        // Identity plan: the streaming pre-data must be the stock prefix
+        // byte-for-byte — segment 3 stays 0/0, no names are invented.
+        let identity = virtual_bank::plan_identity_bank(&bank).expect("identity plan");
+        assert_eq!(identity.main_entry_index, main_index);
+        assert_eq!(identity.pre_data, source[..SEGMENT_FOUR_OFFSET]);
+
+        // Rate plan: main entry stretched, preview verbatim, header nameless.
+        let plan = virtual_bank::plan_virtual_bank(&bank, 80, virtual_bank::StretchTarget::Main)
+            .expect("rate plan");
+        assert_eq!(plan.main_entry_index, main_index);
+        assert_eq!(plan.target_entry_index, main_index);
+        let mut full = plan.pre_data.clone();
+        full.resize(plan.virtual_size as usize, 0);
+        let reparsed = xwb::parse_song_bank(&full).expect("planned nameless header reparses");
+        assert!(!reparsed.has_entry_names());
+        assert_eq!(reparsed.main_entry_index(), main_index);
+        assert_eq!(&plan.pre_data[196..324], &[0u8; 128][..]);
+
+        // Whole-bank serializer: same contract.
+        let main_data = vec![0; 6 * BLOCK_ALIGN];
+        let preview_data = vec![0; 2 * BLOCK_ALIGN];
+        let mut replacements = [
+            xwb::EntryReplacement {
+                data: &main_data,
+                duration: 6 * SAMPLES_PER_BLOCK,
+                loop_start: 0,
+                loop_length: 6 * SAMPLES_PER_BLOCK,
+            },
+            xwb::EntryReplacement {
+                data: &preview_data,
+                duration: 2 * SAMPLES_PER_BLOCK,
+                loop_start: 0,
+                loop_length: 2 * SAMPLES_PER_BLOCK,
+            },
+        ];
+        if main_index == 1 {
+            replacements.swap(0, 1);
+        }
+        let output = xwb::serialize_song_bank(&bank, &replacements).expect("serialize");
+        let reparsed = xwb::parse_song_bank(&output).expect("reparse");
+        assert!(!reparsed.has_entry_names());
+        assert_eq!(reparsed.flags, 0x0008_0001);
+        assert_eq!(reparsed.main_entry_index(), main_index);
+        assert_eq!(reparsed.entries[main_index].name(), "tst1");
+        assert_eq!(reparsed.entries[1 - main_index].name(), "tst1_s");
+        assert_eq!(&output[36..44], &[0u8; 8][..], "segment 3 must stay 0/0");
+    }
+}
+
+/// A `goru`-shaped (GOLD RUSH) 4-entry bank: `goru_cs` / `goru` / `goru_ac`
+/// / `goru_s` in that physical order — the only stock World song bank with
+/// more than two waves (the `_ac`/`_cs` lyric variants are unreachable
+/// through the `<code>` / `<code>_s` cues gamemdx requests). `main_blocks`
+/// sizes the three long entries, `preview_blocks` the preview.
+fn build_goru_bank(main_blocks: usize, preview_blocks: usize) -> Vec<u8> {
+    let names = ["goru_cs", "goru", "goru_ac", "goru_s"];
+    let lengths = [
+        main_blocks * BLOCK_ALIGN + BLOCK_ALIGN - 1,
+        main_blocks * BLOCK_ALIGN + BLOCK_ALIGN - 1,
+        main_blocks * BLOCK_ALIGN + BLOCK_ALIGN - 1,
+        preview_blocks * BLOCK_ALIGN + BLOCK_ALIGN - 1,
+    ];
+    build_named_bank("goru", &names, &lengths)
+}
+
+/// Generic named N-entry builder (stock packer layout: entry i's data at the
+/// next 2048 boundary after entry i−1's; durations block-exact, whole-loop).
+fn build_named_bank(code: &str, names: &[&str], lengths: &[usize]) -> Vec<u8> {
+    let count = names.len();
+    assert_eq!(count, lengths.len());
+    let meta_off = 148;
+    let names_off = meta_off + count * 24;
+    let wave_off = round_up(names_off + count * 64, 2048);
+    let mut offsets = Vec::with_capacity(count);
+    let mut cursor = 0usize;
+    for (index, &len) in lengths.iter().enumerate() {
+        let off = if index == 0 {
+            0
+        } else {
+            round_up(cursor, 2048)
+        };
+        offsets.push(off);
+        cursor = off + len;
+    }
+    let mut bytes = vec![0; wave_off + cursor];
+    bytes[0..4].copy_from_slice(b"WBND");
+    put_u32(&mut bytes, 4, 43);
+    put_u32(&mut bytes, 8, 42);
+    for (index, (offset, length)) in [
+        (52, 96),
+        (meta_off, count * 24),
+        (names_off, 0),
+        (names_off, count * 64),
+        (wave_off, cursor),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_u32(&mut bytes, 12 + index * 8, offset as u32);
+        put_u32(&mut bytes, 16 + index * 8, length as u32);
+    }
+    put_u32(&mut bytes, 52, 0x0009_0001);
+    put_u32(&mut bytes, 56, count as u32);
+    bytes[60..124].copy_from_slice(&fixed_name(code));
+    put_u32(&mut bytes, 124, 24);
+    put_u32(&mut bytes, 128, 64);
+    put_u32(&mut bytes, 132, 2048);
+    put_u32(&mut bytes, 136, 0);
+    bytes[140..148].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    for index in 0..count {
+        let duration = (lengths[index] / BLOCK_ALIGN) as u32 * SAMPLES_PER_BLOCK;
+        let meta = meta_off + index * 24;
+        put_u32(&mut bytes, meta, duration << 4);
+        put_u32(&mut bytes, meta + 4, format(44_100, 2).packed());
+        put_u32(&mut bytes, meta + 8, offsets[index] as u32);
+        put_u32(&mut bytes, meta + 12, lengths[index] as u32);
+        put_u32(&mut bytes, meta + 16, 0);
+        put_u32(&mut bytes, meta + 20, duration);
+        let name_at = names_off + index * 64;
+        bytes[name_at..name_at + 64].copy_from_slice(&fixed_name(names[index]));
+    }
+    bytes
+}
+
+#[test]
+fn four_entry_bank_resolves_main_and_preview_among_variants() {
+    let source = build_goru_bank(8, 2);
+    let bank = xwb::parse_song_bank(&source).expect("goru-shaped bank parses");
+    assert_eq!(bank.entry_count(), 4);
+    assert_eq!(bank.name(), "goru");
+    assert_eq!(bank.main_entry_index(), 1);
+    assert_eq!(bank.preview_entry_index(), 3);
+    assert_eq!(bank.identity_source(), xwb::EntryIdentitySource::Names);
+    assert_eq!(bank.entries[0].name(), "goru_cs");
+    assert_eq!(bank.entries[2].name(), "goru_ac");
+    assert_eq!(bank.entries[3].data_offset % 2048, 0);
+
+    // Two `<code>` entries, or no `<code>_s`, are not a song bank.
+    assert_rejected(build_goru_bank(8, 2), |b| {
+        b[196 + 64..196 + 128].copy_from_slice(&fixed_name("goru_cs"));
+    });
+    assert_rejected(build_goru_bank(8, 2), |b| {
+        b[196 + 3 * 64..196 + 4 * 64].copy_from_slice(&fixed_name("goru_x"));
+    });
+    // 4 entries WITHOUT names: duration can't pick the main among three
+    // equal long waves — refuse rather than guess.
+    assert_rejected(build_goru_bank(8, 2), |b| {
+        put_u32(b, 36, 0);
+        put_u32(b, 40, 0);
+        put_u32(b, 52, 0x0008_0001);
+        b[196..196 + 256].fill(0);
+    });
+    // Entry count outside the profile.
+    assert_rejected(
+        build_named_bank("solo", &["solo"], &[8 * BLOCK_ALIGN]),
+        |_| {},
+    );
+}
+
+#[test]
+fn four_entry_bank_plans_and_serves_with_one_stretched_entry() {
+    let source = build_goru_bank(8, 2);
+    let bank = xwb::parse_song_bank(&source).expect("goru-shaped bank parses");
+
+    // Identity: byte-identical stock prefix, all four passthrough.
+    let identity = virtual_bank::plan_identity_bank(&bank).expect("identity plan");
+    assert_eq!(identity.entries.len(), 4);
+    assert_eq!(identity.pre_data, source[..identity.pre_data.len()]);
+    assert_eq!(identity.virtual_size as usize, source.len());
+
+    for (target, expected_index) in [
+        (virtual_bank::StretchTarget::Main, 1usize),
+        (virtual_bank::StretchTarget::Side, 3usize),
+    ] {
+        let layout = virtual_bank::plan_virtual_bank(&bank, 80, target).expect("rate plan");
+        assert_eq!(layout.main_entry_index, 1);
+        assert_eq!(layout.preview_entry_index, 3);
+        assert_eq!(layout.target_entry_index, expected_index);
+        for (index, plan) in layout.entries.iter().enumerate() {
+            if index == expected_index {
+                assert!(plan.streamed.duration > bank.entries[index].duration);
+            } else {
+                assert_streamed_eq(
+                    &plan.streamed,
+                    &stock_streamed(&bank.entries[index]),
+                    &format!("entry {index} passthrough"),
+                );
+            }
+        }
+        // Offsets follow the stock packer rule and the header reparses with
+        // the SAME wave indices (the XSB references waves by index).
+        for index in 1..4 {
+            let previous_end = layout.entry_offsets[index - 1]
+                + layout.entries[index - 1].streamed.data_len as u64;
+            assert_eq!(
+                layout.entry_offsets[index],
+                previous_end.div_ceil(2048) * 2048
+            );
+        }
+        let mut header = layout.pre_data.clone();
+        header.resize(layout.virtual_size as usize, 0);
+        let reparsed = xwb::parse_song_bank(&header).expect("planned header reparses");
+        assert_eq!(reparsed.entry_count(), 4);
+        assert_eq!(reparsed.main_entry_index(), 1);
+        assert_eq!(reparsed.preview_entry_index(), 3);
+
+        // Region resolution reassembles the streaming oracle across all four
+        // entries and three gaps, under engine-shaped and pathological chunks.
+        let streamed: Vec<_> = layout.entries.iter().map(|plan| plan.streamed).collect();
+        let payloads: Vec<Vec<u8>> = streamed
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| layout_payload(entry.data_len, 3 + 2 * index as u8))
+            .collect();
+        let oracle = streamed_bank_bytes(&bank, &streamed, &payloads);
+        for chunk in [1u32, 2_047, 4_097, 0x1_0000, u32::MAX] {
+            let assembled = serve_virtual_bank(&layout, &payloads, |_| chunk);
+            assert_eq!(
+                assembled, oracle,
+                "target {target:?} chunk {chunk} diverges"
+            );
+        }
+    }
 }
 
 /// Field-level equality for [`xwb::StreamedEntry`] (no `PartialEq` derive on

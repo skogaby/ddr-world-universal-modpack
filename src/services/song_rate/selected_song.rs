@@ -127,10 +127,10 @@ pub fn selected_song() -> Option<SelectedSongInfo> {
 pub fn publication_from_bank(path: &str, bytes: &[u8]) -> Option<(u64, u32)> {
     let code = dance_bank_song_code(path)?;
     let bank = xwb::parse_song_bank(bytes).ok()?;
-    // The main entry is the one named exactly like the bank (the other is
-    // `<code>_s` — `virtual_bank::plan_virtual_bank`'s identity rule).
-    let main = usize::from(bank.entries[1].name() == bank.name());
-    let entry = &bank.entries[main];
+    // The parser resolves the `<code>` main entry (by name, or by duration
+    // for the nameless World-era banks) — the same rule `plan_virtual_bank`
+    // uses.
+    let entry = &bank.entries[bank.main_entry_index()];
     let rate = entry.format.sample_rate();
     if rate == 0 {
         return None;

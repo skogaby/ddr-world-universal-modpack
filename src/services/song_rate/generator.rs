@@ -402,10 +402,11 @@ pub struct GeneratorCore<'a> {
     /// The binding's latched DSP mode, read once at construction.
     preserve_pitch: bool,
     bank: xwb::SongBank<'a>,
-    feeds: [Option<Feed<'a>>; 2],
+    /// One slot per bank entry (only the target's is ever populated).
+    feeds: Vec<Option<Feed<'a>>>,
     /// Best loop-start checkpoint per entry; survives feed recreation (the
     /// regeneration anchor must outlive the pass that captured it).
-    checkpoints: [Option<StretchCheckpoint>; 2],
+    checkpoints: Vec<Option<StretchCheckpoint>>,
     /// Next absolute virtual offset to produce (mirrors `ring.produced`).
     cursor: u64,
     /// The applied content mapping's byte-domain snapshot (training design
@@ -429,12 +430,18 @@ impl<'a> GeneratorCore<'a> {
         }
         let bank = xwb::parse_song_bank(binding.source())
             .map_err(|error| GeneratorError::Source(error.to_string()))?;
+        let entry_count = bank.entries.len();
+        if entry_count != binding.layout().entries.len() {
+            return Err(GeneratorError::Source(
+                "layout/source entry count mismatch".to_owned(),
+            ));
+        }
         let mut core = Self {
             binding,
             preserve_pitch: binding.preserve_pitch(),
             bank,
-            feeds: [None, None],
-            checkpoints: [None, None],
+            feeds: (0..entry_count).map(|_| None).collect(),
+            checkpoints: vec![None; entry_count],
             cursor: binding.target_data_start(),
             lead_bytes: 0,
             shift_bytes: 0,
@@ -482,7 +489,7 @@ impl<'a> GeneratorCore<'a> {
             // invalidate on every mapping change (training design §4.5
             // amendment): the current epoch's runs are the byte authority
             // and reposition without them.
-            self.checkpoints = [None, None];
+            self.checkpoints.iter_mut().for_each(|slot| *slot = None);
             let start = self.binding.target_data_start();
             self.binding.ring_rewind(start);
             self.cursor = start;

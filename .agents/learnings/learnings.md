@@ -748,3 +748,46 @@ versus mirrors, S-Marvelous arming…) must restrict to
 whatever the last session left in `mod-config.json`. Decide the
 unavailable-entered-state fallback per feature (autoplay's watermark fails
 toward SHOWING; announcer_mute falls back to `p1 || p2`).
+
+## Strict format parsers must be validated against the WHOLE local corpus, not fixtures (2026-09-02)
+
+**Symptom:** field report — SONG SPEED did nothing for "specific songs"
+(Neutrino, A4A, Daisycutter, rhyze…); every other song rate-shifted fine.
+The log showed the preview binding refused `UnsupportedProfile` with
+`InvalidSegment { index: 3, field: "order or length" }` for `acef.xwb` /
+`neut.xwb`.
+
+**Cause:** the XWB song-bank profile (`core/xact/xwb.rs`) hard-required the
+segment-3 entry-name table (2×64 bytes, flags `0x0009_0001`) and derived the
+main/preview identity from the names. 33 stock World song banks were built
+WITHOUT `WAVEBANK_FLAGS_ENTRYNAMES` (flags `0x0008_0001`, segment 3 = 0/0).
+The engine never needed the names (the XSB references waves by index), so
+the songs play fine stock and the refusal is silent apart from the WARN.
+The fixtures were all "named", so host tests could not see it (the same
+"fixtures cleaner than real data" trap as the 2026-08-10 HeaderSynth
+refusal).
+
+Rules:
+- Any new strict parser of a game format gets a one-off sweep over EVERY
+  instance in `$DDR_WORLD_INSTALL` before it ships (a throwaway `#[path]`
+  harness mounting `core/xact` takes minutes — `cargo test` can't run on
+  the ARM host, but the pure modules can). Keep the sweep result in the
+  research doc; it's how the 33 affected codes were named in the report.
+- Optional-by-spec sections (XACT flags gate the seek table AND the entry
+  names) must be optional in the parser too; validate the flag ↔ segment
+  consistency instead of assuming one shape.
+- Identity should come from structure the ENGINE relies on (index /
+  duration), not cosmetic metadata (friendly names).
+- The same sweep surfaced a second silent class — 10 DDR-era previews with
+  103–137-byte ADPCM tails refused by a `{0,138,139}` whitelist — fixed in
+  the same pass (any ignored tail is legal; the duration↔complete-blocks
+  equation is the real guard), and a third — `goru` (GOLD RUSH) is a
+  4-ENTRY bank (`goru_cs`/`goru`/`goru_ac`/`goru_s`; the cues gamemdx
+  requests map to waves 1 and 3) that the 2-entry profile refused
+  outright; generalized to 2..=8 entries with every non-target entry
+  served verbatim. Sweep after all three: 1456/1456 real song banks parse
+  and plan (the rest are PNG placeholders in the stock dump and `_c`
+  course banks). See `docs/xact_streaming_research.md` §7.
+- Don't trust the packaged `musicdb.xml` for "is this song selectable":
+  its `diffLv 255` placeholders are overwritten by the server. Ask the
+  maintainer / check the game.

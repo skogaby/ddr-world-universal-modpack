@@ -228,9 +228,10 @@ pub fn encode_interleaved_to_with(
 
 /// Decode complete blocks and trim the result to the declared logical frames.
 ///
-/// Stock DDR banks may append an unusable `block_align - 1` or
-/// `block_align - 2` byte remainder. Those bytes are ignored only when the
-/// declared logical duration requires exactly the available complete blocks.
+/// Stock DDR banks may append an unusable partial trailing block (usually
+/// `block_align - 1` or `- 2` bytes, occasionally shorter). Those bytes are
+/// ignored only when the declared logical duration requires exactly the
+/// available complete blocks.
 pub fn decode_interleaved(
     data: &[u8],
     format: WaveFormat,
@@ -420,13 +421,15 @@ pub(crate) fn validate_encoded_layout(
     logical_frames: u32,
 ) -> Result<usize, AdpcmError> {
     let (_, block_align, samples_per_block) = validate_format(format)?;
-    let remainder = data_len % block_align;
-    if remainder != 0 && remainder != block_align - 1 && remainder != block_align - 2 {
-        return Err(AdpcmError::UnsupportedTail {
-            remainder,
-            block_align,
-        });
-    }
+    // A partial trailing block is legal and IGNORED. Stock DDR banks end in a
+    // `block_align - 1` / `- 2` byte tail almost everywhere, but 10 DDR-era
+    // previews (`abys agai baby dgra ecst eran feal feax inse orio`, 2026-09-02
+    // install sweep) carry 103–137-byte tails — refusing them silently pinned
+    // those songs to stock speed. The safety property is the equation below:
+    // the declared duration must fit inside the COMPLETE blocks, so the tail
+    // bytes are never decoded. (Corpus fact, not enforced:
+    // `duration == blocks·spb − (remainder − 12)` for every tail-bearing
+    // stock entry.)
 
     let complete_blocks = data_len / block_align;
     let expected_blocks = (logical_frames as usize)

@@ -255,6 +255,62 @@ entry outlive the Destroy call by microseconds only.
   `docs/xact_audio_research.md` §1 amendment); a virtual bank must keep the stock
   internal name to bind with the stock XSB — which is exactly what serving a
   stock-shaped header achieves.
+- **Not every song bank carries entry names (2026-09-02 bug report).** 33 of the
+  ~1440 World song banks (`acef`, `aceo`, `awak`, `blco`, `dais`, `ding`, `edmj`,
+  `expl`, `gale`, `hane`, `haps`, `help`, `hope`, `kuka`, `kuns`, `kura`, `losp`,
+  `neut`, `pooc`, `ramp`, `rein`, `rhyz`, `rodi`, `sans`, `sans0`, `scar`, `shik`,
+  `spgo`, `stch`, `tiho`, `tnaw`, `twme`, `yaoy`) were built WITHOUT
+  `WAVEBANK_FLAGS_ENTRYNAMES`: bank flags `0x0008_0001` (not `0x0009_0001`) and
+  segment 3 = offset 0 / length 0. Both physical entry orders occur among them.
+  The XSB still names its cues `<code>` / `<code>_s` and references waves by
+  INDEX, so the engine never needed the names; the XWB parser did (its identity
+  rule was name-based) and refused every one of them `UnsupportedProfile` — the
+  song played at stock speed with the preview WARN
+  `InvalidSegment { index: 3, field: "order or length" }`. Fix: `xwb.rs` accepts
+  the nameless shape, resolves main/preview by DURATION (the strictly longer
+  entry is the main wave; every stock preview is a ~15 s clip against ≥ 95 s
+  mains, refusal when the ratio is < 2), synthesizes the role names for
+  name-keyed consumers, and the writers reproduce the stock shape (no invented
+  name table, stock flags). Consumers must read `SongBank::main_entry_index()`
+  rather than comparing names.
+- **Partial trailing ADPCM blocks come in more sizes than 138/139 (same sweep).**
+  10 DDR-era songs (`abys` Abyss, `agai` LOVE AGAIN TONIGHT, `baby` BABY BABY
+  GIMME YOUR LOVE, `dgra` GRADIUSIC CYBER, `ecst` ECSTASY, `eran` era (nostalmix),
+  `feal`/`feax` Healing Vision, `inse` INSERTiON, `orio` ORION.78) have a
+  PREVIEW entry whose data length is 103–137 bytes mod 140 (mains are normal).
+  `adpcm::validate_encoded_layout` accepted only `{0, 138, 139}`, so the whole
+  bank failed to parse → gameplay AND preview at stock speed. Corpus invariant
+  over all 2926 tail-bearing stock entries: `duration == blocks·128 − (rem − 12)`
+  — the declared duration always fits inside the COMPLETE blocks and the tail
+  bytes are never decoded. The rule is now "any remainder, but
+  `ceil(duration/128) == complete_blocks`" (the tail can't stand in for a needed
+  block); the passthrough entry streams its bytes verbatim, tail included, as
+  before.
+- Corpus sweep residue that is NOT a mod bug: 72 `*.xwb` under the STOCK
+  `data/sound/win/dance/` are one identical 256×256 PNG (the dump's placeholder
+  for removed/licensed audio — only 7 are still in `musicdb.xml`: `glac2 hart
+  itiz mixn plah saik souv`; the rest are delisted codes with orphan .xsb/.ssq);
+  `<code>_c` banks are course banks.
+- **`goru` (GOLD RUSH) is a 4-entry bank — and selectable** (the packaged
+  `musicdb.xml`'s `diffLv 255` placeholders mean nothing; real difficulties come
+  from the server). Physical order `goru_cs` (0) / `goru` (1) / `goru_ac` (2) /
+  `goru_s` (3), flags `0x0009_0001`, all three long waves the same length.
+  gamemdx has NO `_ac`/`_cs` logic (no such strings; the only suffix literal is
+  `_s`): it requests cue `<code>` for gameplay and `<code>_s` at song select,
+  and the XSB (decoded 2026-09-02) maps cue `goru` → **wave index 1**, cue
+  `goru_s` → wave 3 (complex sound, track event wave 3), `goru_cs` → 0,
+  `goru_ac` → 2 — the variants are unreachable. The old 2-entry profile refused
+  the bank (`InvalidSegment { index: 1, field: "length" }` — 4×24 metadata
+  rows), so GOLD RUSH played at stock speed. Fix: the profile is now
+  `2..=8` entries (`xwb::MIN/MAX_ENTRY_COUNT`), identity = exactly one
+  `<code>` + exactly one `<code>_s` among the names (nameless banks stay
+  2-entry-only — duration can't pick one of three equal long waves), the
+  writers emit N rows + N names, `VirtualBankLayout` carries `Vec` entries /
+  offsets with an N-region `resolve`, and the binding serves EVERY non-target
+  entry verbatim from the resident source (`entry_source_offsets`) while the
+  ring/producer cover only the target — so wave indices in the served header
+  are the stock ones and the stock XSB keeps binding. Host-tested end to end
+  (`four_entry_bank_replay_matches_the_oracle_for_both_targets`).
 
 ## 8. Implementation-time findings (2026-08-10/11, live bring-up)
 

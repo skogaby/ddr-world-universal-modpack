@@ -97,18 +97,24 @@ pub enum StretchTarget {
 /// its virtual offset, zero fill between them, EOF at `virtual_size`.
 #[derive(Debug)]
 pub struct VirtualBankLayout {
-    /// Both entry plans, in the source bank's physical order.
-    pub entries: [EntryPlan; 2],
+    /// Every entry's plan, in the source bank's physical (wave-index) order —
+    /// 2 for every song bank but `goru` (4: `goru_cs`/`goru`/`goru_ac`/`goru_s`).
+    /// Exactly ONE entry (`target_entry_index`) is rate-planned; all others
+    /// pass through verbatim.
+    pub entries: Vec<EntryPlan>,
     /// Index of the entry named exactly like the bank (the `<code>` wave).
     pub main_entry_index: usize,
+    /// Index of the `<code>_s` preview wave.
+    pub preview_entry_index: usize,
     /// Index of the STRETCHED (rate-planned) entry — the one the ring and
     /// producer serve. Equals `main_entry_index` for [`StretchTarget::Main`]
     /// (and for the identity plan, where the distinction is inert);
-    /// `1 − main_entry_index` for [`StretchTarget::Side`].
+    /// `preview_entry_index` for [`StretchTarget::Side`].
     pub target_entry_index: usize,
-    /// Virtual file offset of each entry's data (entry 0 at 2048; entry 1 at
-    /// the next 2048-aligned offset after entry 0's data).
-    pub entry_offsets: [u64; 2],
+    /// Virtual file offset of each entry's data (entry 0 at 2048; each later
+    /// entry at the next 2048-aligned offset after the previous entry's data
+    /// — the stock packer's rule, so physical order == index order).
+    pub entry_offsets: Vec<u64>,
     /// Synthesized stock-shaped pre-data block — exactly the first
     /// `wave-data offset` (2048) bytes of the virtual file, emitted by the
     /// canonical `xwb` streaming layout.
@@ -157,7 +163,6 @@ impl VirtualBankLayout {
         }
         let clamped = u64::from(len).min(self.virtual_size - offset);
         let pre_data_end = self.pre_data.len() as u64;
-        let entry_zero_end = self.entry_offsets[0] + self.entries[0].streamed.data_len as u64;
         let (region, region_end) = if offset < pre_data_end {
             (
                 Region::PreData {
@@ -165,24 +170,34 @@ impl VirtualBankLayout {
                 },
                 pre_data_end,
             )
-        } else if offset < entry_zero_end {
-            (
-                Region::EntryData {
-                    entry: 0,
-                    offset: offset - self.entry_offsets[0],
-                },
-                entry_zero_end,
-            )
-        } else if offset < self.entry_offsets[1] {
-            (Region::Gap, self.entry_offsets[1])
         } else {
-            (
-                Region::EntryData {
-                    entry: 1,
-                    offset: offset - self.entry_offsets[1],
-                },
-                self.virtual_size,
-            )
+            // Entries are laid out in index order (see `entry_offsets`);
+            // walk them: inside an entry's data → EntryData, before the next
+            // entry's start → Gap. Past the last entry's data there is no
+            // gap (segment 4 ends exactly at the last byte).
+            let mut resolved = None;
+            for (entry, (&start, plan)) in self.entry_offsets.iter().zip(&self.entries).enumerate()
+            {
+                let end = start + plan.streamed.data_len as u64;
+                if offset < start {
+                    resolved = Some((Region::Gap, start));
+                    break;
+                }
+                if offset < end {
+                    resolved = Some((
+                        Region::EntryData {
+                            entry,
+                            offset: offset - start,
+                        },
+                        end,
+                    ));
+                    break;
+                }
+            }
+            // Unreachable for a consistent layout (virtual_size == last
+            // entry end); serve zeros to EOF rather than panic in detour
+            // context.
+            resolved.unwrap_or((Region::Gap, self.virtual_size))
         };
         ResolvedSpan {
             region,
@@ -211,40 +226,53 @@ pub fn plan_virtual_bank(
     percent: u32,
     target: StretchTarget,
 ) -> Result<VirtualBankLayout, PlanError> {
-    // `parse_song_bank` guarantees exactly one entry carries the bank code
-    // (`validate_identity`), so the main entry is entry 1 iff entry 1
-    // matches the bank name.
-    let main_entry_index = usize::from(source.entries[1].name() == source.name());
+    // `parse_song_bank` resolves which entry is the `<code>` main wave —
+    // from the entry-name table when the bank has one, from the durations
+    // for the nameless World-era banks (`acef`, `neut`, `dais`, `rhyz`, …).
+    let main_entry_index = source.main_entry_index();
     debug_assert_eq!(source.entries[main_entry_index].name(), source.name());
+    let preview_entry_index = source.preview_entry_index();
     let target_entry_index = match target {
         StretchTarget::Main => main_entry_index,
-        StretchTarget::Side => 1 - main_entry_index,
+        StretchTarget::Side => preview_entry_index,
     };
-    let plan_indexed = |index: usize| {
-        if index == target_entry_index {
-            plan_entry(index, &source.entries[index], percent).map_err(|error| match error {
+    let mut entries = Vec::with_capacity(source.entries.len());
+    for (index, entry) in source.entries.iter().enumerate() {
+        entries.push(if index == target_entry_index {
+            plan_entry(index, entry, percent).map_err(|error| match error {
                 PlanError::Rate(rate_error) => PlanError::EntryRate {
                     index,
                     source: rate_error,
                 },
                 other => other,
-            })
+            })?
         } else {
-            Ok(passthrough_plan(&source.entries[index]))
-        }
-    };
-    let entries = [plan_indexed(0)?, plan_indexed(1)?];
-    let streamed = [entries[0].streamed, entries[1].streamed];
+            passthrough_plan(entry)
+        });
+    }
+    finish_layout(source, entries, target_entry_index)
+}
+
+/// Emit the pre-data for a set of entry plans and assemble the layout.
+fn finish_layout(
+    source: &xwb::SongBank<'_>,
+    entries: Vec<EntryPlan>,
+    target_entry_index: usize,
+) -> Result<VirtualBankLayout, PlanError> {
+    let streamed: Vec<StreamedEntry> = entries.iter().map(|plan| plan.streamed).collect();
     let pre_data = xwb::stream_pre_data(source, &streamed)
         .map_err(|error| PlanError::PreData(error.to_string()))?;
+    let entry_offsets = pre_data
+        .data_offsets
+        .iter()
+        .map(|&offset| (pre_data.wave_data_offset + offset) as u64)
+        .collect();
     Ok(VirtualBankLayout {
         entries,
-        main_entry_index,
+        main_entry_index: source.main_entry_index(),
+        preview_entry_index: source.preview_entry_index(),
         target_entry_index,
-        entry_offsets: [
-            (pre_data.wave_data_offset + pre_data.data_offsets[0]) as u64,
-            (pre_data.wave_data_offset + pre_data.data_offsets[1]) as u64,
-        ],
+        entry_offsets,
         virtual_size: pre_data.total_length as u64,
         pre_data: pre_data.bytes,
     })
@@ -261,28 +289,12 @@ pub fn plan_virtual_bank(
 /// happens at serve time in the binding, never in the plan (the engine
 /// parses this header once per bank — research §5.1).
 pub fn plan_identity_bank(source: &xwb::SongBank<'_>) -> Result<VirtualBankLayout, PlanError> {
-    let main_entry_index = usize::from(source.entries[1].name() == source.name());
+    let main_entry_index = source.main_entry_index();
     debug_assert_eq!(source.entries[main_entry_index].name(), source.name());
-    let entries = [
-        passthrough_plan(&source.entries[0]),
-        passthrough_plan(&source.entries[1]),
-    ];
-    let streamed = [entries[0].streamed, entries[1].streamed];
-    let pre_data = xwb::stream_pre_data(source, &streamed)
-        .map_err(|error| PlanError::PreData(error.to_string()))?;
-    Ok(VirtualBankLayout {
-        entries,
-        main_entry_index,
-        // Both entries are verbatim; the target distinction is inert. The
-        // field is populated coherently (== main) for downstream consumers.
-        target_entry_index: main_entry_index,
-        entry_offsets: [
-            (pre_data.wave_data_offset + pre_data.data_offsets[0]) as u64,
-            (pre_data.wave_data_offset + pre_data.data_offsets[1]) as u64,
-        ],
-        virtual_size: pre_data.total_length as u64,
-        pre_data: pre_data.bytes,
-    })
+    let entries = source.entries.iter().map(passthrough_plan).collect();
+    // Every entry is verbatim; the target distinction is inert. The field is
+    // populated coherently (== main) for downstream consumers.
+    finish_layout(source, entries, main_entry_index)
 }
 
 /// The non-main entry's verbatim plan: the virtual header advertises the
