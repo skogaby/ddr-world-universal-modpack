@@ -65,7 +65,7 @@
     "hide_difficulty_pane": true
   },
   "custom_options": {
-    "persist_network": true,
+    "persist_network": false,
     "persist_json": true,
     "lane_gamma_correction": 3.0,
     "preview_window": 3,
