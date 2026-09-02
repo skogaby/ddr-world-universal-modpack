@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="640" viewBox="0 0 560 640" role="img" aria-labelledby="title desc">
+  <title id="title">Pinpad hotkeys</title>
+  <desc id="desc">Pinpad key legend for the DDR World Universal Modpack in-game gestures. During gameplay: 7 rewind, 9 fast forward, 4 set loop start, 5 clear loop markers, 6 set loop end, 1 quick restart, 3 quick exit. At song select: 9 pressed three times logs out. Anywhere: 0 pressed three times opens the mod menu.</desc>
+  <defs>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#343b48"/>
+      <stop offset="1" stop-color="#282e39"/>
+    </linearGradient>
+    <linearGradient id="cap-dim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262b35"/>
+      <stop offset="1" stop-color="#20252e"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <style>
+      text { font-family: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 22px; font-weight: 700; fill: #eceff4; letter-spacing: 0.2px; }
+      .h2 { font-size: 12.5px; font-weight: 500; fill: #8b94a5; }
+      .digit { font-size: 36px; font-weight: 700; fill: #eceff4; text-anchor: middle; }
+      .digit.dim { fill: #4c5464; }
+      .label { font-size: 11.5px; font-weight: 700; text-anchor: middle; letter-spacing: 1.1px; }
+      .leg { font-size: 12px; font-weight: 600; fill: #c2c9d6; }
+      .play { fill: #5fd3c0; }
+      .sel  { fill: #f5b453; }
+      .any  { fill: #b990ff; }
+      .key { stroke: #3d4553; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <!-- panel -->
+  <rect x="0.5" y="0.5" width="559" height="639" rx="18" fill="#1a1e26" stroke="#2c323e"/>
+
+  <!-- heading -->
+  <text x="40" y="46" class="h1">Pinpad Hotkeys</text>
+  <text x="40" y="66" class="h2">In-game gestures with the full modpack suite enabled</text>
+
+  <!-- plate: 14px padding around the 3x4 key grid -->
+  <rect x="26" y="88" width="508" height="486" rx="14" fill="#141820" stroke="#242a35"/>
+
+  <!-- keys: 150x104, cols at x=41/205/369, rows at y=102/220/338/456 -->
+
+  <!-- row 1: 7 8 9 -->
+  <g transform="translate(41 102)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="58" class="digit">7</text>
+    <text x="75" y="86" class="label play">REWIND</text>
+  </g>
+  <g transform="translate(205 102)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap-dim)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)" opacity="0.5"/>
+    <text x="75" y="66" class="digit dim">8</text>
+  </g>
+  <!-- 9 carries two bindings: single press in gameplay, triple press at song select -->
+  <g transform="translate(369 102)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="59" height="3" rx="1.5" class="play"/>
+    <rect x="77" y="8" width="59" height="3" rx="1.5" class="sel"/>
+    <text x="75" y="50" class="digit">9</text>
+    <text x="75" y="74" class="label play">FAST FORWARD</text>
+    <text x="75" y="92" class="label sel">×3 QUICK LOGOUT</text>
+  </g>
+
+  <!-- row 2: 4 5 6 -->
+  <g transform="translate(41 220)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="58" class="digit">4</text>
+    <text x="75" y="86" class="label play">SET LOOP START</text>
+  </g>
+  <g transform="translate(205 220)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="52" class="digit">5</text>
+    <text x="75" y="78" class="label play">CLEAR LOOP</text>
+    <text x="75" y="93" class="label play">MARKERS</text>
+  </g>
+  <g transform="translate(369 220)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="58" class="digit">6</text>
+    <text x="75" y="86" class="label play">SET LOOP END</text>
+  </g>
+
+  <!-- row 3: 1 2 3 -->
+  <g transform="translate(41 338)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="58" class="digit">1</text>
+    <text x="75" y="86" class="label play">QUICK RESTART</text>
+  </g>
+  <g transform="translate(205 338)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap-dim)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)" opacity="0.5"/>
+    <text x="75" y="66" class="digit dim">2</text>
+  </g>
+  <g transform="translate(369 338)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="play"/>
+    <text x="75" y="58" class="digit">3</text>
+    <text x="75" y="86" class="label play">QUICK EXIT</text>
+  </g>
+
+  <!-- row 4: 0 00 (blank) -->
+  <g transform="translate(41 456)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)"/>
+    <rect x="14" y="8" width="122" height="3" rx="1.5" class="any"/>
+    <text x="75" y="58" class="digit">0</text>
+    <text x="75" y="86" class="label any">×3 MOD MENU</text>
+  </g>
+  <g transform="translate(205 456)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap-dim)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)" opacity="0.5"/>
+    <text x="75" y="66" class="digit dim">00</text>
+  </g>
+  <g transform="translate(369 456)">
+    <rect class="key" width="150" height="104" rx="12" fill="url(#cap-dim)"/>
+    <rect x="1" y="1" width="148" height="52" rx="11" fill="url(#shine)" opacity="0.5"/>
+  </g>
+
+  <!-- legend: where each gesture is active (centered; item widths 120/104/79, 40px gaps) -->
+  <g transform="translate(88 605)">
+    <rect x="0" y="-6" width="14" height="12" rx="3" class="play"/>
+    <text x="22" y="4" class="leg">During gameplay</text>
+    <rect x="160" y="-6" width="14" height="12" rx="3" class="sel"/>
+    <text x="182" y="4" class="leg">At song select</text>
+    <rect x="304" y="-6" width="14" height="12" rx="3" class="any"/>
+    <text x="326" y="4" class="leg">Anywhere</text>
+  </g>
+</svg>

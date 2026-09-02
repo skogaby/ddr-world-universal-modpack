@@ -42,6 +42,13 @@ Press **0 three times** on either pinpad to open the in-game mod menu. Navigate 
 ![Menu Image 2](screenshots/menu_2.png)
 Per-player options (autoplay, assist tick, song speed, styling, cosmetics, etc.) also live in the game's **own options menu** on a new **MODPACK** tab, right alongside the stock options — and they follow your player profile.
 ![Menu Image 3](screenshots/menu_3.png)
+
+### Pinpad Hotkeys
+
+With the full suite enabled, the cabinet pinpads double as a hotkey panel — no extra hardware needed:
+
+<p align="center"><img src="screenshots/key_legend.svg" alt="Pinpad hotkey legend: 7 rewind, 9 fast forward, 4 set loop start, 5 clear loop markers, 6 set loop end, 1 quick restart, 3 quick exit, 0 pressed three times opens the mod menu; 9 pressed three times at song select logs out" width="560"></p>
+
 ## Highlights
 
 ### Song Playback Speed
