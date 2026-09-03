@@ -1,6 +1,6 @@
 # Progress — S-Marvelous Judgement
 
-Updated: 2026-08-30
+Updated: 2026-09-03
 Status: **FEATURE COMPLETE (uncommitted — maintainer commits manually).**
 All 10 plan steps done; both Step-9 surfaces cabinet-verified (per-stage
 banner + end-of-credit badge); Step-10 hardening + docs done; feature
@@ -13,6 +13,60 @@ the new README hero section, then commits.
 Resume protocol: read `implementation/plan.md` (checklist = step status),
 `design/detailed-design.md` (Approved 2026-08-29), task files under
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
+
+## Post-completion tweak — "Marvelous Shimmer" row (2026-09-03, uncommitted)
+
+- Maintainer request: a GLOBAL SETTINGS row to disable the STOCK Marvelous
+  word's additive `marvelous_ef` shimmer (S-Marv's copy stays muted
+  unconditionally — the pulse looks bad on violet). Rationale: with a
+  higher tier on screen some players want Marvelous to stop glowing.
+- `core/ap2/edit.rs`: `WordCloneOpts::mute_source_additive_glow` — the
+  same in-place mult-alpha zeroing (`mute_additive_glow_in_definition`)
+  walked over the SOURCE chain sprites AFTER the copies are made (so
+  `muted_records` stays a pure function of the template); result gains
+  `muted_source_records`. Two new fixture tests (both-mute ⇒ stock 46 and
+  copy 50 both silent, same output size; source-only ⇒ copy keeps pulse).
+- `assets.rs`: `WORD_CLONE_OPTS` const → `word_clone_opts(mute_stock)`;
+  `run_word_clone(doc, shape, mute_stock)` ladder: both mutes → S-Marv
+  mute only (+WARN once) → unmuted (+WARN once). Dry run passes `false`
+  (ids are mute-independent).
+- `afp_patches.rs`: `MUTE_STOCK_GLOW` atomic + `set_marvelous_shimmer(on)`;
+  the patch fn reads it per dance_judge load (⇒ next song) and logs both
+  mute counts + the shimmer state.
+- `mod.rs`: `smarv_marvelous_shimmer` ON/OFF enum row (third in the
+  section, default ON), `LIVE_SHIMMER_ON`, seeded from
+  `s_marvelous.marvelous_shimmer` (config.rs), emitted by
+  `persist_section`, removed on disable. `config.rs` + README config table
+  updated.
+- Harness Leg D: second pass with the shimmer-OFF options on the real
+  `dance_judge_v3` — 3 stock records muted, ids identical, output size
+  identical (11532 bytes both ways).
+- Gates: `validate_s_marvelous.sh` green (132 lib + 91 bin tests, Legs
+  A–G), `validate_custom_options.sh` display-string lint OK, `cargo check`
+  clean, `cargo fmt`. CABINET-VERIFIED 2026-09-03 (maintainer: "everything
+  looks good in-game").
+
+## Post-completion tweak — graph O.K. → violet (2026-09-03, uncommitted)
+
+- Maintainer request: freeze O.K.s (grade 6) should ride the graph's
+  VIOLET series, not the stock opal marvelous colour. Rationale: freezes
+  are binary hit/miss and the stock ingest folds O.K. into its
+  marvelous+O.K. series (5/6) as the highest tier it knows — with the mod
+  on, the highest tier is S-Marvelous.
+- `records.rs`: `GRADE_OK = 6`; `smarv_per_second` RENAMED
+  `violet_per_second` and now counts `(grade 0 && |ms| ≤ window) ||
+  grade 6` per second (same mirror bucketing). Tests updated + two new
+  O.K. cases (O.K. counts regardless of its unused ms slot; loose
+  Marvelous still excluded).
+- `results_graph.rs`: caller + docs only — the per-second subtraction from
+  series 5/6 is unchanged and covers the O.K. share by construction
+  (every O.K. is in the stock marvelous+O.K. series).
+- Scope deliberately NOT touched: the score tab's exclusive-MARVELOUS /
+  S-MARVELOUS counts (O.K. has its own row there), combo/flash surfaces
+  (O.K. was already tier-neutral), the legend wording.
+- Gates: `validate_s_marvelous.sh` green (130 lib tests, Legs A–G),
+  `cargo check` clean, `cargo fmt` no churn. CABINET-VERIFIED 2026-09-03
+  (maintainer: "everything looks good in-game").
 
 ## Residual sweep items (accepted-deferred at completion, 2026-08-30)
 

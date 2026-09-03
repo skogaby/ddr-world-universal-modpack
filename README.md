@@ -160,7 +160,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
-| `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–17, default 12) |
+| `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–16, default 12), judgement word art (`judgement_color`: `purple_shadow` / `all_purple`), stock Marvelous word shimmer (`marvelous_shimmer`, default `true`) — all also editable in the mod menu |
 | `shader_fixes` | Arrow anti-aliasing toggle (also editable in the mod menu) |
 | `overlay_menu` | Mod-menu theme/opacity (managed by the APPEARANCE tab) |
 | `smx_hardware` | SMX cabinet support: card ids, overlay opacity/scale, light toggles, pad style (most also editable in the mod menu) |

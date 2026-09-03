@@ -3116,6 +3116,7 @@ fn edit_word_clone_mutes_additive_glow_in_clone_only() {
             41,
             WordCloneOpts {
                 mute_additive_glow: true,
+                ..Default::default()
             },
         )
         .expect("clone");
@@ -3165,6 +3166,74 @@ fn edit_word_clone_mutes_additive_glow_in_clone_only() {
 }
 
 #[test]
+fn edit_word_clone_source_mute_silences_stock_chain_too() {
+    // The "Marvelous shimmer OFF" option: both the clone AND the stock
+    // sprite 46 end up with every additive record at α0; the normal word
+    // placements are untouched and the clone's own count is unchanged.
+    let mut doc = glow_template_fixture(true);
+    let clone = doc
+        .clone_word_segment_with_new_shape_ex(
+            "seg1",
+            "seg1_s",
+            41,
+            WordCloneOpts {
+                mute_additive_glow: true,
+                mute_source_additive_glow: true,
+            },
+        )
+        .expect("clone");
+    assert_eq!(clone.muted_records, 3);
+    assert_eq!(clone.muted_source_records, 3);
+    assert_eq!(clone.new_sprite_id, 50);
+
+    let bytes = doc.serialize().expect("serializes");
+    let re = Ap2Doc::parse(&bytes).expect("re-parses");
+    let muted = vec![
+        (60, 2, false, None, None),
+        (60, 3, false, Some(8), Some(0)),
+        (60, 3, true, None, Some(0)),
+        (60, 3, true, None, Some(0)),
+    ];
+    assert_eq!(sprite_place_records(&re, 50), muted);
+    assert_eq!(sprite_place_records(&re, 46), muted);
+    // Byte-size identical to the clone-only mute (in-place edits only).
+    let mut clone_only = glow_template_fixture(true);
+    clone_only
+        .clone_word_segment_with_new_shape_ex(
+            "seg1",
+            "seg1_s",
+            41,
+            WordCloneOpts {
+                mute_additive_glow: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(bytes.len(), clone_only.serialize().unwrap().len());
+}
+
+#[test]
+fn edit_word_clone_source_mute_alone_leaves_clone_pulsing() {
+    // Source mute without the clone mute: stock 46 silenced, copy 50 keeps
+    // the inherited pulse (the option flags are independent).
+    let mut doc = glow_template_fixture(true);
+    let clone = doc
+        .clone_word_segment_with_new_shape_ex(
+            "seg1",
+            "seg1_s",
+            41,
+            WordCloneOpts {
+                mute_additive_glow: false,
+                mute_source_additive_glow: true,
+            },
+        )
+        .expect("clone");
+    assert_eq!((clone.muted_records, clone.muted_source_records), (0, 3));
+    assert_eq!(sprite_place_records(&doc, 50)[1].4, Some(51));
+    assert_eq!(sprite_place_records(&doc, 46)[1].4, Some(0));
+}
+
+#[test]
 fn edit_word_clone_default_opts_byte_identical_to_plain() {
     let mut a = glow_template_fixture(true);
     let mut b = glow_template_fixture(true);
@@ -3193,6 +3262,7 @@ fn edit_word_clone_mute_fails_closed_without_mult_field() {
             41,
             WordCloneOpts {
                 mute_additive_glow: true,
+                ..Default::default()
             },
         )
         .is_none());

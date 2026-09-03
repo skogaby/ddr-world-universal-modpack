@@ -10,10 +10,13 @@
 //! (2026-08-30 RE — `progress.md` Step 8 entry):
 //!
 //! 1. **Rebuild detour (pre-original, one-shot per tab)**: build our
-//!    per-second S-Marv vector from the stage record (mirror bucketing —
-//!    [`records::smarv_per_second`]), SUBTRACT it from the marvelous
-//!    series (+0x5D8) / shimmer (+0x5F8) per second (whichever holds the
-//!    second's content, clamped), and register the tab.
+//!    per-second VIOLET vector from the stage record (mirror bucketing —
+//!    [`records::violet_per_second`]: S-Marvelous hits PLUS freeze O.K.s,
+//!    since the stock ingest folds grade 6 into the marvelous+O.K. series
+//!    as the highest tier it knows, and with the mod on that tier is
+//!    violet — 2026-09-03), SUBTRACT it from the marvelous series (+0x5D8)
+//!    / shimmer (+0x5F8) per second (whichever holds the second's
+//!    content, clamped), and register the tab.
 //! 2. **Chart-append detour** (`graph_chart_append` — the single-color
 //!    series append the rebuild calls once per series): after the FILLER
 //!    series (`vec == tab+0x538`) of a registered tab on the judge page,
@@ -112,7 +115,8 @@ static LEGEND_DETOUR: once_cell::sync::OnceCell<GenericDetour<LegendFn>> =
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct TabState {
-    /// Our per-second S-Marv counts (padded to the game series length).
+    /// Our per-second violet counts — S-Marv + freeze O.K. (padded to the
+    /// game series length).
     smarv: Vec<f64>,
     /// Whether there is anything to draw (all-zero vectors skip
     /// injection so we never add an empty series/legend line).
@@ -272,7 +276,7 @@ fn prepare_tab(tab: *mut u8) {
             );
             return;
         };
-        let Some(mut smarv) = records::smarv_per_second(&notes, &grades, &errors, window) else {
+        let Some(mut smarv) = records::violet_per_second(&notes, &grades, &errors, window) else {
             warn_once(
                 &WARN_RECORD,
                 "SMarvelous: graph bucketing failed -- graph stays stock",
@@ -293,8 +297,9 @@ fn prepare_tab(tab: *mut u8) {
         smarv.resize(marv_len, 0.0);
 
         // Subtract per second from whichever series holds the second's
-        // marvelous content (the ingest's shimmer post-pass moves pure
-        // seconds' counts 5 → 6).
+        // marvelous+O.K. content (the ingest's shimmer post-pass moves pure
+        // seconds' counts 5 → 6). Every O.K. is in the stock series 5/6 by
+        // construction, so the subtraction always covers the O.K. share.
         let mut leftover = 0.0f64;
         let mut any = false;
         for (s, &c) in smarv.iter().enumerate() {

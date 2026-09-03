@@ -45,15 +45,22 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LIVE_WINDOW_MS: AtomicI32 = AtomicI32::new(state::DEFAULT_WINDOW_MS);
 
 /// Overlay menu row keys (GLOBAL SETTINGS, grouped under this mod's header;
-/// registration order = display order: window, then colour).
+/// registration order = display order: window, colour, then shimmer).
 const WINDOW_ROW_KEY: &str = "smarv_window_ms";
 const COLOR_ROW_KEY: &str = "smarv_judgement_color";
+const SHIMMER_ROW_KEY: &str = "smarv_marvelous_shimmer";
 
 /// The LIVE "Judgement Color" choice as a `JudgementColor::index()`. Seeded
 /// from `s_marvelous.judgement_color` at enable; the overlay row writes it
 /// and re-stages the word art on the spot (the game picks the new bytes up
 /// when it next loads the dance_judge package — normally next song).
 static LIVE_COLOR_IDX: AtomicI32 = AtomicI32::new(0);
+
+/// The LIVE "Marvelous Shimmer" choice (`true` = stock pulse ON). Seeded
+/// from `s_marvelous.marvelous_shimmer` at enable; the overlay row writes it
+/// and forwards it to the dance_judge patch, which reads it per template
+/// load — applies next song. Default ON (stock).
+static LIVE_SHIMMER_ON: AtomicBool = AtomicBool::new(true);
 
 fn live_color() -> assets::JudgementColor {
     assets::JudgementColor::from_index(LIVE_COLOR_IDX.load(Ordering::Relaxed))
@@ -69,6 +76,7 @@ fn persist_section() {
         serde_json::json!({
             "window_ms": LIVE_WINDOW_MS.load(Ordering::Relaxed),
             "judgement_color": live_color().key(),
+            "marvelous_shimmer": LIVE_SHIMMER_ON.load(Ordering::Relaxed),
         }),
     );
 }
@@ -138,6 +146,15 @@ fn configured_color() -> assets::JudgementColor {
     }
 }
 
+/// Read the operator/persisted "Marvelous Shimmer" choice from
+/// `s_marvelous.marvelous_shimmer` (absent ⇒ stock ON).
+fn configured_shimmer() -> bool {
+    config::get()
+        .and_then(|c| c.s_marvelous.as_ref())
+        .and_then(|s| s.marvelous_shimmer)
+        .unwrap_or(true)
+}
+
 /// Register (or idempotently re-register — `register_scalar_row` replaces by
 /// key) the overlay menu's window row, seeded with `initial`. Renders on the
 /// GLOBAL SETTINGS tab under this mod's auto-generated section header
@@ -170,8 +187,8 @@ fn register_overlay_row(initial: i32) {
 /// The "Judgement Color" enum row (ALL PURPLE / PURPLE SHADOW), directly
 /// under the window row. Edits update the live choice, persist the section
 /// and re-stage the word art immediately — the additive `marvelous_ef`
-/// glow stays muted regardless of the choice (`assets::WORD_CLONE_OPTS`),
-/// so an all-violet word renders static too.
+/// glow stays muted on the S-Marv copy regardless of the choice
+/// (`assets::word_clone_opts`), so an all-violet word renders static too.
 fn register_color_row(initial: assets::JudgementColor) {
     use crate::mods::mod_menu::{self, EnumRowSpec};
     use assets::JudgementColor;
@@ -196,6 +213,36 @@ fn register_color_row(initial: assets::JudgementColor) {
                     color.key()
                 );
             }
+        }),
+    });
+}
+
+/// The "Marvelous Shimmer" ON/OFF enum row, third in the section. OFF mutes
+/// the STOCK Marvelous word's additive `marvelous_ef` pulse in the
+/// dance_judge patch (the S-Marvelous word is always static) — for players
+/// who want the now-second tier to stop glowing. Edits persist the section
+/// and hand the flag to the patch, which reads it at the next template load
+/// (next song).
+fn register_shimmer_row(initial_on: bool) {
+    use crate::mods::mod_menu::{self, EnumRowSpec};
+    mod_menu::register_enum_row(EnumRowSpec {
+        key: SHIMMER_ROW_KEY.to_string(),
+        label: "Marvelous Shimmer".to_string(),
+        hint: "Stock Marvelous word glow pulse. S-Marvelous never shimmers. Applies next song."
+            .to_string(),
+        parent_row_key: Some("s-marvelous".to_string()),
+        values: vec![0, 1],
+        labels: vec!["OFF".to_string(), "ON".to_string()],
+        initial_value: i32::from(initial_on),
+        on_change: std::sync::Arc::new(|v| {
+            let on = v != 0;
+            LIVE_SHIMMER_ON.store(on, Ordering::Relaxed);
+            persist_section();
+            afp_patches::set_marvelous_shimmer(on);
+            log_info!(
+                "SMarvelous: Marvelous shimmer {} (applies next song)",
+                if on { "ON" } else { "OFF" }
+            );
         }),
     });
 }
@@ -320,6 +367,10 @@ impl Mod for SMarvelousMod {
         let color = configured_color();
         LIVE_COLOR_IDX.store(color.index(), Ordering::Relaxed);
         register_color_row(color);
+        let shimmer_on = configured_shimmer();
+        LIVE_SHIMMER_ON.store(shimmer_on, Ordering::Relaxed);
+        register_shimmer_row(shimmer_on);
+        afp_patches::set_marvelous_shimmer(shimmer_on);
         ACTIVE.store(true, Ordering::Release);
 
         if scene_manager::is_available() {
@@ -401,15 +452,16 @@ impl Mod for SMarvelousMod {
         }
 
         log_info!(
-            "SMarvelous: enabled (window {} ms, judgement color {})",
+            "SMarvelous: enabled (window {} ms, judgement color {}, Marvelous shimmer {})",
             window,
-            color.key()
+            color.key(),
+            if shimmer_on { "ON" } else { "OFF" }
         );
     }
 
     fn disable(&mut self) {
         ACTIVE.store(false, Ordering::Release);
-        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY]);
+        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY, SHIMMER_ROW_KEY]);
         afp_patches::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();

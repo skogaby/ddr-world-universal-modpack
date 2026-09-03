@@ -81,6 +81,15 @@ pub struct WordCloneOpts {
     /// (callers fall back to stock bytes / the unmuted recipe as they see
     /// fit). Cloned chains with no additive placement at all are a no-op.
     pub mute_additive_glow: bool,
+    /// ALSO silence the additive placements inside the SOURCE (stock) word
+    /// sprite chain — the same in-place mult-alpha zeroing as
+    /// `mute_additive_glow`, applied to the original definitions AFTER the
+    /// copies are made (so the copies' own mute count is unaffected). This
+    /// is the "Marvelous shimmer OFF" option: with a higher tier on screen
+    /// some players want the stock Marvelous word static too. The chain is
+    /// the word's own sprite lineage (resolved by content), so nothing
+    /// outside the labeled word segment is touched. Same fail-closed rule.
+    pub mute_source_additive_glow: bool,
 }
 
 /// The ids resolved/allocated by
@@ -96,9 +105,12 @@ pub struct WordSegmentClone {
     /// The cloned word sprite's character id.
     pub new_sprite_id: u16,
     /// Number of PlaceObject records whose mult alpha the additive-glow mute
-    /// zeroed (0 when the option is off or the chain has no additive
-    /// placement).
+    /// zeroed IN THE CLONED CHAIN (0 when the option is off or the chain has
+    /// no additive placement).
     pub muted_records: usize,
+    /// Number of records zeroed in the SOURCE (stock) chain by
+    /// `mute_source_additive_glow` (0 when that option is off).
+    pub muted_source_records: usize,
 }
 
 /// Inputs for [`Ap2Doc::add_place_object_named`]: a create-mode placement
@@ -661,6 +673,17 @@ impl Ap2Doc {
                 muted_records += self.mute_additive_glow_in_definition(&path, sid)?;
             }
         }
+        // Source-chain mute (the "Marvelous shimmer OFF" option) — the
+        // STOCK definitions this time, after the copies exist so the copy
+        // count above stays a pure function of the template. Same
+        // per-sprite walk over the resolved lineage.
+        let mut muted_source_records = 0usize;
+        if opts.mute_source_additive_glow {
+            for &sid in &chain {
+                let path = self.find_sprite_by_label(src_label)?;
+                muted_source_records += self.mute_additive_glow_in_definition(&path, sid)?;
+            }
+        }
 
         let path = self.find_sprite_by_label(src_label)?;
         let segment_remap = TagRemap::from([(mapped_old, mapped_new)]);
@@ -689,6 +712,7 @@ impl Ap2Doc {
             new_shape_id,
             new_sprite_id: mapped_new,
             muted_records,
+            muted_source_records,
         })
     }
 

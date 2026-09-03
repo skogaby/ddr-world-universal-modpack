@@ -26,6 +26,12 @@
 
 /// Grade-class byte for Marvelous in the record's grade stream.
 pub const GRADE_MARVELOUS: u8 = 0;
+/// Grade-class byte for a freeze-arrow O.K. — the binary "hit" grade for
+/// freezes. It carries no ms delta and the game maps it to the TOP tier
+/// everywhere it is tiered (combo worst-judgement tracking, the results
+/// graph's marvelous+O.K. series), so with the mod on it belongs to the
+/// S-Marvelous tier.
+pub const GRADE_OK: u8 = 6;
 
 /// Record field offsets (design §5.2).
 const REC_GRADE_COUNTS: usize = 0x28;
@@ -256,15 +262,22 @@ pub struct NoteRef {
     pub t_ms: i32,
 }
 
-/// Pure core: per-second S-Marvelous counts, mirroring the graph ingest's
+/// Pure core: per-second counts for the results graph's VIOLET series —
+/// S-Marvelous hits PLUS freeze O.K.s — mirroring the graph ingest's
 /// bucketing exactly so our vector's buckets align 1:1 with the game's
-/// judge series — `t_first` = the first JUDGED note's timestamp, bucket =
+/// judge series: `t_first` = the first JUDGED note's timestamp, bucket =
 /// `(t − t_first) / 1000`, one stream slot per entry, judged-only.
+///
+/// O.K. rides the violet series because the stock ingest folds grade 6
+/// into its marvelous+O.K. series (freezes are binary hit/miss, so the
+/// game colours the hit as the highest tier it knows); with S-Marvelous
+/// on, the highest tier is violet. The caller subtracts this vector from
+/// that stock series, so every O.K. moves from opal to violet.
 ///
 /// `None` when the streams disagree in length; an empty/never-judged
 /// record yields an empty vector (nothing to draw — matches the tab's
 /// has-data gate).
-pub fn smarv_per_second(
+pub fn violet_per_second(
     notes: &[NoteRef],
     grades: &[u8],
     errors_ms: &[i16],
@@ -282,7 +295,7 @@ pub fn smarv_per_second(
         if !note.judged || note.t_ms < t_first || idx >= grades.len() {
             continue;
         }
-        if grades[idx] == GRADE_MARVELOUS && (errors_ms[idx] as i32).abs() <= window_ms {
+        if is_violet_slot(grades[idx], errors_ms[idx], window_ms) {
             let bucket = ((note.t_ms - t_first) / 1000) as usize;
             if bucket >= out.len() {
                 out.resize(bucket + 1, 0.0);
@@ -291,6 +304,12 @@ pub fn smarv_per_second(
         }
     }
     Some(out)
+}
+
+/// Whether a judged stream slot belongs to the graph's violet tier: an
+/// S-Marvelous (grade 0 inside the window) or a freeze O.K. (grade 6).
+fn is_violet_slot(grade: u8, error_ms: i16, window_ms: i32) -> bool {
+    (grade == GRADE_MARVELOUS && (error_ms as i32).abs() <= window_ms) || grade == GRADE_OK
 }
 
 /// Copy the record's note-entry vector (+0x98, 0x60-stride) into
@@ -457,17 +476,30 @@ mod tests {
         let grades = [0u8, 0, 0, 0, 0];
         let errors = [0i16, 3, -12, 13, 0];
         // slot 0 skipped (unjudged), slot 3 loose (13 > 12).
-        let v = smarv_per_second(&notes, &grades, &errors, 12).unwrap();
+        let v = violet_per_second(&notes, &grades, &errors, 12).unwrap();
         assert_eq!(v, vec![2.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
-    fn per_second_counts_marvelous_grades_only() {
+    fn per_second_counts_smarvelous_and_ok_only() {
+        // Perfect (1) never counts; a tight Marvelous and a freeze O.K.
+        // (grade 6, no ms delta) both land in the violet series.
         let notes = [note(true, 0), note(true, 100), note(true, 200)];
         let grades = [1u8, 0, 6];
         let errors = [0i16, 0, 0];
-        let v = smarv_per_second(&notes, &grades, &errors, 12).unwrap();
-        assert_eq!(v, vec![1.0]);
+        let v = violet_per_second(&notes, &grades, &errors, 12).unwrap();
+        assert_eq!(v, vec![2.0]);
+    }
+
+    #[test]
+    fn per_second_ok_counts_regardless_of_ms_slot_and_loose_marvelous_does_not() {
+        // O.K. is binary: whatever the (unused) ms slot holds, it's violet.
+        // A loose Marvelous (|ms| > window) stays with the stock series.
+        let notes = [note(true, 0), note(true, 1000), note(true, 2000)];
+        let grades = [6u8, 6, 0];
+        let errors = [0i16, 500, 13];
+        let v = violet_per_second(&notes, &grades, &errors, 12).unwrap();
+        assert_eq!(v, vec![1.0, 1.0]);
     }
 
     #[test]
@@ -476,7 +508,7 @@ mod tests {
         let grades = [0u8, 0];
         let errors = [0i16, 0];
         assert_eq!(
-            smarv_per_second(&notes, &grades, &errors, 12).unwrap(),
+            violet_per_second(&notes, &grades, &errors, 12).unwrap(),
             Vec::<f64>::new()
         );
     }
@@ -488,15 +520,15 @@ mod tests {
         let notes = [note(true, 0), note(true, 1000), note(true, 2000)];
         let grades = [0u8, 0];
         let errors = [0i16, 0];
-        let v = smarv_per_second(&notes, &grades, &errors, 12).unwrap();
+        let v = violet_per_second(&notes, &grades, &errors, 12).unwrap();
         assert_eq!(v, vec![1.0, 1.0]);
     }
 
     #[test]
     fn per_second_rejects_stream_length_mismatch() {
         let notes = [note(true, 0)];
-        assert!(smarv_per_second(&notes, &[0u8, 0], &[0i16], 12).is_none());
-        assert!(smarv_per_second(&notes, &[0u8], &[0i16], 0).is_none());
+        assert!(violet_per_second(&notes, &[0u8, 0], &[0i16], 12).is_none());
+        assert!(violet_per_second(&notes, &[0u8], &[0i16], 0).is_none());
     }
 
     #[test]

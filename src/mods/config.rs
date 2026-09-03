@@ -359,6 +359,13 @@ pub struct SMarvelousConfig {
     /// use the default.
     #[serde(default)]
     pub judgement_color: Option<String>,
+    /// Stock Marvelous word shimmer (the additive `marvelous_ef` pulse on
+    /// the gameplay flash). Default `true` = stock; `false` mutes it in the
+    /// dance_judge patch so the stock Marvelous word renders static like the
+    /// S-Marvelous word (whose pulse is always muted). Live-editable from the
+    /// overlay menu's "Marvelous Shimmer" row; applies next song.
+    #[serde(default)]
+    pub marvelous_shimmer: Option<bool>,
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-

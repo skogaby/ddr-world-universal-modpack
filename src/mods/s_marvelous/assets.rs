@@ -137,30 +137,53 @@ const ATLAS_PREFIX: &str = "smarv_dj";
 /// + additive (blend 8) with mult alpha pulsing 0.20 → 0.098 → 0 every ~4–5
 /// frames. Additive blending clamps on white letters (invisible in stock);
 /// on the violet S-Marv art it is a ~12–15 Hz flicker (maintainer video
-/// 2026-09-03, art-only mitigation insufficient). The stock segment is
-/// untouched — the mute edits only the copies the clone creates.
-pub const WORD_CLONE_OPTS: crate::core::ap2::WordCloneOpts = crate::core::ap2::WordCloneOpts {
-    mute_additive_glow: true,
-};
+/// 2026-09-03, art-only mitigation insufficient). The S-Marv copy is ALWAYS
+/// muted; `mute_stock_glow` additionally silences the stock Marvelous
+/// word's own pulse (the "Marvelous Shimmer" OFF option).
+pub fn word_clone_opts(mute_stock_glow: bool) -> crate::core::ap2::WordCloneOpts {
+    crate::core::ap2::WordCloneOpts {
+        mute_additive_glow: true,
+        mute_source_additive_glow: mute_stock_glow,
+    }
+}
 
 /// The ONE word-clone recipe both the enable-time dry run and the live
 /// patch fn execute (identical bytes in ⇒ identical ids/bytes out — the
-/// staged-id equality check in the patch fn relies on that). Muted first;
-/// if the mute cannot apply on this template (an additive object without a
-/// mult-colour field — not a shape the live builds have) fall back to the
-/// unmuted clone with one WARN rather than losing the word entirely. The
-/// fallback is a pure function of the template bytes, so dry run and live
-/// patch always take the same branch.
+/// staged-id equality check in the patch fn relies on that; the mute
+/// options never change the allocated ids). Ladder: S-Marv mute (+ stock
+/// mute when asked) → S-Marv mute only → unmuted. Each step down WARNs
+/// once; a mute refusal (an additive object without a mult-colour field —
+/// not a shape the live builds have) never costs the word itself. Every
+/// branch is a pure function of the template bytes + `mute_stock_glow`, so
+/// dry run and live patch always take the same branch for the same inputs.
 pub fn run_word_clone(
     doc: &mut Ap2Doc,
     word_shape_id: u16,
+    mute_stock_glow: bool,
 ) -> Option<crate::core::ap2::WordSegmentClone> {
+    if mute_stock_glow {
+        let mut both = doc.clone();
+        if let Some(ids) = both.clone_word_segment_with_new_shape_ex(
+            SRC_LABEL,
+            NEW_LABEL,
+            word_shape_id,
+            word_clone_opts(true),
+        ) {
+            *doc = both;
+            return Some(ids);
+        }
+        if !WARN_STOCK_GLOW_UNMUTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log_warn!(
+                "SMarvelous: stock Marvelous glow could not be muted on this template — Marvelous shimmer stays ON"
+            );
+        }
+    }
     let mut muted = doc.clone();
     if let Some(ids) = muted.clone_word_segment_with_new_shape_ex(
         SRC_LABEL,
         NEW_LABEL,
         word_shape_id,
-        WORD_CLONE_OPTS,
+        word_clone_opts(false),
     ) {
         *doc = muted;
         return Some(ids);
@@ -173,6 +196,8 @@ pub fn run_word_clone(
     doc.clone_word_segment_with_new_shape(SRC_LABEL, NEW_LABEL, word_shape_id)
 }
 static WARN_GLOW_UNMUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WARN_STOCK_GLOW_UNMUTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Everything the patch fn needs, staged at enable.
 pub struct StagedPatch {
@@ -364,8 +389,10 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     let new_region = format!("{}{}", stem, REGION_SUFFIX_NEW);
 
     // ── Dry-run the REAL recipe to learn the ids the patch allocates ─
+    // (the mute options never change the ids — run without the stock mute
+    // so the dry run stays independent of the live shimmer choice).
     let mut scratch = doc.clone();
-    let Some(ids) = run_word_clone(&mut scratch, chain.word_shape_id) else {
+    let Some(ids) = run_word_clone(&mut scratch, chain.word_shape_id, false) else {
         log_warn!("SMarvelous: dance_judge patch dry-run failed — patch not staged");
         return None;
     };
