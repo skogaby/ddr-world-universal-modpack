@@ -145,6 +145,27 @@ overlay files) — regenerates only when an overlay changes.
 overlay is always seen. (LayeredFS hooks install during EA3/AVS boot, well
 before the D3D9 device/graphics init that pumps `shader.arc`.)
 
+> **2026-09-03 correction — that margin was a single-machine accident, not
+> a guarantee.** A Win7 tester's cabinet (real p4io/BMPU, LAN e-amusement
+> server answering `services.get` instantly, Haswell-era CPU) lost the race:
+> `overlay_draw diag … progs=1` all session, zero `shader_synthesis:` lines,
+> animated menu backgrounds static. Root cause: `lib.rs` installed LayeredFS
+> only AFTER `resolve_all` (127 AOB scans over 19 MB, 11 of them full-module
+> misses) + `early_apply` + `resolve_derived`, while the game's
+> `Application::onBoot` (`FUN_1800020b0` on 20260721) runs on its own thread
+> from the moment gamemdx loads: `startup.arc` drain → `FUN_1801f2420` (D3D
+> device init + **synchronous `shader.arc` drain**) → `FUN_1801b3d30`
+> (license/musicdb/coursedb `createLi`) → sound init → `soundbanks.arc`. The
+> shader open landed between our gamemdx wait and our hook install.
+> `musicdb.xml` (custom series/folder merges) sits in the same window a few
+> hundred ms later. Fix: LayeredFS now initializes at lib.rs **step 0b —
+> before the gamemdx wait and the signature scan** (it needs only libavs
+> exports, which `avs_resolver::wait_for_avs_dll` waits for, and
+> `./data_mods`). Detection: `overlay_draw::check_shader_arc_race` WARNs once
+> when the default container is live while `shader_synthesis::status()` is
+> still `NotSeen`; `ShaderFixes: enabled (…; synthesis: …)` reports the real
+> outcome instead of asserting it.
+
 ---
 
 ## 5. `gs_screencommand_arrow` — the palette pipeline, decoded from bytecode

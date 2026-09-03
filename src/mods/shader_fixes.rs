@@ -91,9 +91,19 @@ impl Mod for ShaderFixesMod {
         let aa = config::get()
             .and_then(|c| c.shader_fixes.as_ref().map(|s| s.anti_aliasing))
             .unwrap_or(true);
+        // Report what synthesis ACTUALLY did at the shader.arc open (the
+        // previous unconditional "synthesis ran at boot arc-open" wording
+        // masked a boot where the open was never intercepted at all).
+        use crate::services::avs_layeredfs::shader_synthesis::{status, SynthStatus};
+        let synth = match status() {
+            SynthStatus::Synthesized => "synthesized containers served",
+            SynthStatus::Stock => "shader.arc intercepted, stock served (see shader_synthesis log)",
+            SynthStatus::NotSeen => "shader.arc not opened yet (synthesis pending)",
+        };
         log_info!(
-            "ShaderFixes: enabled (anti_aliasing={}; synthesis ran at boot arc-open)",
-            aa
+            "ShaderFixes: enabled (anti_aliasing={}; synthesis: {})",
+            aa,
+            synth
         );
     }
 

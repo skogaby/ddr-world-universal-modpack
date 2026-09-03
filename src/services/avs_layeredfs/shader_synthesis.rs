@@ -38,8 +38,14 @@
 //! ## Where it runs
 //!
 //! Lazily inside `arc_handler::handle_arc` when the game opens
-//! `data/arc/shader.arc` (race-free by construction: the handler already
-//! intercepts that open). Synthesized containers are written to
+//! `data/arc/shader.arc`. That open happens ONCE per session, inside
+//! `Application::onBoot` within a few hundred ms of gamemdx loading — so
+//! the LayeredFS hooks must already be installed: `lib.rs` initializes
+//! LayeredFS at step 0b, BEFORE the gamemdx wait and the signature scan
+//! (a Win7 cabinet lost this race on 2026-09-03 when LayeredFS still
+//! installed after the scan; `overlay_draw` now WARNs when it sees a live
+//! default container while [`status`] is still `NotSeen`). Synthesized
+//! containers are written to
 //! `data_mods/_cache/shader_synthesis/*.gsp` behind a fingerprint sidecar
 //! ({stock arc, blob files, AA, persp}); warm boots reuse the files, and the
 //! outer arc cache hashes them like any other overlay input.
@@ -54,6 +60,7 @@
 //! `python3 scripts/gsp_pack.py inspect <file> --expect-name <name>`.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::core::arc;
 use crate::{log_info, log_warn};
@@ -61,6 +68,43 @@ use crate::{log_info, log_warn};
 use super::cache_hasher::CACHE_FOLDER;
 use super::mod_paths;
 use super::shader_layout;
+
+/// Outcome of the session's single `shader.arc` open, as seen by this
+/// module. Read by the shader-fixes mod's enable line (honest status
+/// instead of an assertion) and by the overlay-draw boot-order race
+/// detector: a live default shader container while this is still
+/// `NotSeen` means the game read shader.arc BEFORE the LayeredFS hooks
+/// were installed (the 2026-09-03 Win7 report).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SynthStatus {
+    /// `handle_arc("arc/shader.arc")` has not run (yet).
+    NotSeen,
+    /// The open was intercepted but nothing was overlaid (mod disabled,
+    /// features off, blobs missing, or a build error — the log says which).
+    Stock,
+    /// Synthesized containers were served.
+    Synthesized,
+}
+
+static STATUS: AtomicU8 = AtomicU8::new(0);
+
+fn set_status(s: SynthStatus) {
+    let v = match s {
+        SynthStatus::NotSeen => 0,
+        SynthStatus::Stock => 1,
+        SynthStatus::Synthesized => 2,
+    };
+    STATUS.store(v, Ordering::Release);
+}
+
+/// Current synthesis outcome (see [`SynthStatus`]).
+pub fn status() -> SynthStatus {
+    match STATUS.load(Ordering::Acquire) {
+        1 => SynthStatus::Stock,
+        2 => SynthStatus::Synthesized,
+        _ => SynthStatus::NotSeen,
+    }
+}
 
 /// Cache directory for synthesized containers.
 fn synth_cache_dir() -> String {
@@ -208,6 +252,16 @@ fn plan() -> Option<Plan> {
 /// `data/arc/shader.arc`. Returns the synthesized overlay entries (empty ⇒
 /// serve stock). `original_path` is the AVS path of the stock arc.
 pub(super) fn synthesize(original_path: &str) -> Vec<SynthEntry> {
+    let entries = synthesize_inner(original_path);
+    set_status(if entries.is_empty() {
+        SynthStatus::Stock
+    } else {
+        SynthStatus::Synthesized
+    });
+    entries
+}
+
+fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
     let plan = match plan() {
         Some(p) => p,
         None => return Vec::new(),

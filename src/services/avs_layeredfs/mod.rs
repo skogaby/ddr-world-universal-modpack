@@ -19,7 +19,7 @@ pub(crate) mod kbin;
 pub(crate) mod mod_paths;
 pub(super) mod ramfs_demangler;
 pub(crate) mod shader_layout;
-pub(super) mod shader_synthesis;
+pub(crate) mod shader_synthesis;
 pub(super) mod texture_packer;
 pub(super) mod xml_merger;
 
@@ -96,10 +96,16 @@ static STATE: Lazy<Mutex<LayeredFsInner>> = Lazy::new(|| {
 
 /// Initialize the LayeredFS service: load config, resolve AVS, scan mods.
 /// Returns true if AVS was resolved and hooks can be installed.
+///
+/// Runs BEFORE the gamemdx wait / signature scan (lib.rs step 0b): the
+/// game's `Application::onBoot` opens `shader.arc` exactly once, within a
+/// few hundred ms of gamemdx loading, and the shader-fixes / mod-menu theme
+/// synthesis rides that open. Nothing here depends on gamemdx.
 pub fn init() -> bool {
     let config = load_config();
     let verbose = config.verbose;
 
+    avs_resolver::wait_for_avs_dll();
     let resolution = match avs_resolver::resolve_avs() {
         Some(r) => r,
         None => {

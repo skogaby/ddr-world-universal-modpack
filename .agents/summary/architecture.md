@@ -42,12 +42,13 @@ sequenceDiagram
     participant D as DllMain thread
     participant G as Game boot
     D->>D: panic hook + SEH crash handler
+    D->>D: load mod-config.json
+    D->>G: wait for libavs, install LayeredFS fs hooks (BEFORE the gamemdx wait — shader.arc/musicdb race)
     D->>G: wait for gamemdx.dll (poll)
     D->>D: resolve all AOB signatures (batch scan)
-    D->>D: load mod-config.json
     D->>D: construct mods, run early_apply() (race-critical patches)
     D->>D: resolve derived addresses (RIP/vtable/xref walks)
-    D->>D: init services (layeredfs → rendering → options → persistence → scene/input/judge/audio…)
+    D->>D: init services (rendering → options → persistence → scene/input/judge/audio…)
     D->>D: register mods (init each; skip on missing required signatures)
     D->>D: enable mods per config (late-binding mods last)
     D->>D: register + enable mod-menu, flush label atlas
@@ -58,6 +59,7 @@ Key ordering constraints (why the phases exist):
 
 | Constraint | Reason |
 |---|---|
+| LayeredFS before the gamemdx wait + AOB scan | `Application::onBoot` drains `shader.arc` (the session's only shader read — theme/AA synthesis rides it) and `musicdb.xml` within a few hundred ms of gamemdx loading, concurrently with our init; the ~127-signature scan is long enough for a fast cabinet to win the race (Win7 report 2026-09-03) |
 | `early_apply` before derived signatures/services | Byte patches that must precede the game's first use of a code path (XML buffer size, FPS target) |
 | `stage_records` before `custom_options_persistence` | The logout-save sanitiser consumes record layout |
 | `judge_hook` / `analyze_hook` before mod enables | Shared dispatchers must exist before subscribers register |

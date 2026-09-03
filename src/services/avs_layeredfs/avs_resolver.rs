@@ -369,6 +369,22 @@ fn find_avs_dll() -> Option<HMODULE> {
     None
 }
 
+/// Block until a libavs module is loaded. LayeredFS now initializes BEFORE
+/// the gamemdx wait (the game's `Application::onBoot` drains shader.arc /
+/// musicdb.xml within a few hundred ms of gamemdx loading, so the fs hooks
+/// must already be in place), and spice2x loads `-k` DLLs after avs-core —
+/// so this normally returns immediately. Bounded: once gamemdx itself is
+/// loaded, libavs necessarily is too (ea3 loaded it), so we stop waiting
+/// and let `resolve_avs` report the real outcome.
+pub fn wait_for_avs_dll() {
+    loop {
+        if find_avs_dll().is_some() || crate::core::module_resolver::get_game_module().is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Returns the read-mode flag for avs_fs_open based on AVS version.
 /// New AVS (≥2.14) uses bitflags (R=1), old AVS uses enum (R=0).
 pub fn avs_open_mode_read(version: u16) -> u16 {

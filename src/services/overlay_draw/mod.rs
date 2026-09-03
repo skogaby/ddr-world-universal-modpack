@@ -482,6 +482,7 @@ static WARNED_BUMP_MISMATCH: AtomicBool = AtomicBool::new(false);
 static WARNED_ARENA_CAP: AtomicBool = AtomicBool::new(false);
 static WARNED_NO_SHADER: AtomicBool = AtomicBool::new(false);
 static WARNED_PROG_COUNT: AtomicBool = AtomicBool::new(false);
+static WARNED_ARC_RACE: AtomicBool = AtomicBool::new(false);
 
 fn warn_once(flag: &AtomicBool, msg: &str) {
     if !flag.swap(true, Ordering::Relaxed) {
@@ -615,6 +616,31 @@ fn diag_tick() {
         log_info!(
             "overlay_draw diag: scene={} cl={:p} size=0x{:X} write={:p} base={:p} bump_ok={} default_shader={:p} progs={}",
             scene, cl, size, write, base, bump_ok, shader, progs
+        );
+
+        check_shader_arc_race(shader, progs);
+    }
+}
+
+/// Boot-order race detector (2026-09-03 Win7 report). The game reads
+/// `data/arc/shader.arc` exactly once, inside `Application::onBoot`; the
+/// shader-fixes / theme synthesis rides that open through the LayeredFS
+/// `avs_fs_open` detour. If the default shader container is already LIVE
+/// but `shader_synthesis` never saw the open, the game won the race
+/// against our hook install — every theme background silently degrades to
+/// static for the session, and nothing else in the log says why. One WARN.
+fn check_shader_arc_race(shader: *const u8, progs: u32) {
+    use crate::services::avs_layeredfs::shader_synthesis::{status, SynthStatus};
+    if shader.is_null() || !crate::services::avs_layeredfs::is_available() {
+        return;
+    }
+    if status() == SynthStatus::NotSeen {
+        warn_once(
+            &WARNED_ARC_RACE,
+            &format!(
+                "default shader container is live (progs={}) but LayeredFS never intercepted the shader.arc open -- the game read it before the fs hooks installed (boot-order race); shader synthesis + animated menu backgrounds unavailable this session",
+                progs
+            ),
         );
     }
 }

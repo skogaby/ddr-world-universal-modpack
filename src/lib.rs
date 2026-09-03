@@ -58,6 +58,44 @@ fn init() {
     profiling::start();
     log_info!("DDR World Hook DLL starting...");
 
+    // 0. Centralized config store. Must be loaded BEFORE the LayeredFS init
+    // (its config section + the shader-synthesis plan) and the early_apply
+    // phase so race-critical mods can be config-gated, and before
+    // resolve_derived/services/mod-init for the same reason. The store has
+    // no dependency on signatures or services — it just reads JSON.
+    mods::config::init();
+    // Resolve the profiling gate from the parsed config. Until this point,
+    // ticks are buffered; after this they emit (or flush if the gate is on)
+    // / are dropped (if off).
+    let profiling_on = mods::config::get()
+        .and_then(|c| c.diagnostics.as_ref())
+        .map(|d| d.profiling)
+        .unwrap_or(false);
+    profiling::set_enabled(profiling_on);
+    profiling::tick("config_store");
+
+    // 0b. AVS LayeredFS — file replacement service. RACE-CRITICAL: this
+    // must run BEFORE the gamemdx wait + signature scan. The game's
+    // `Application::onBoot` synchronously drains `data/arc/startup.arc`,
+    // `data/arc/shader.arc` (the ONE shader read of the session — the
+    // shader-fixes / mod-menu theme synthesis rides that open) and then
+    // `musicdb.xml` (custom series/folder merges) within a few hundred ms
+    // of gamemdx loading, on the game's own thread, concurrently with this
+    // init thread. With LayeredFS installed after the ~127-signature AOB
+    // scan + early_apply + resolve_derived, a fast cabinet (Win7 tester,
+    // 2026-09-03: real p4io, LAN server) beat the hook to shader.arc and
+    // every animated menu background silently degraded to stock. LayeredFS
+    // depends only on libavs exports (loaded long before gamemdx — it
+    // waits for it) and `./data_mods`; its hook bodies are safe before any
+    // signature resolves.
+    let layeredfs_ok = avs_layeredfs::init();
+    if layeredfs_ok {
+        log_info!("AVS LayeredFS started");
+    } else {
+        log_warn!("AVS LayeredFS unavailable -- file replacement disabled");
+    }
+    profiling::tick("avs_layeredfs");
+
     // 1. Wait for gamemdx.dll
     let game_module = module_resolver::wait_for_game_module();
     profiling::tick("module_load");
@@ -80,21 +118,6 @@ fn init() {
     if !result.missing.is_empty() {
         log_warn!("Missing signatures: {}", result.missing.join(", "));
     }
-
-    // 2b. Centralized config store. Must be loaded BEFORE the early_apply
-    // phase so race-critical mods can be config-gated, and before
-    // resolve_derived/services/mod-init for the same reason. The store has
-    // no dependency on signatures or services — it just reads JSON.
-    mods::config::init();
-    // Resolve the profiling gate from the parsed config. Until this point,
-    // ticks are buffered; after this they emit (or flush if the gate is on)
-    // / are dropped (if off).
-    let profiling_on = mods::config::get()
-        .and_then(|c| c.diagnostics.as_ref())
-        .map(|d| d.profiling)
-        .unwrap_or(false);
-    profiling::set_enabled(profiling_on);
-    profiling::tick("config_store");
 
     // 2c. Construct mod instances and run early_apply on each (config-gated).
     //
@@ -186,14 +209,8 @@ fn init() {
     }
     profiling::tick("song_rate_clock");
 
-    // 3c. AVS LayeredFS — file replacement service
-    let layeredfs_ok = avs_layeredfs::init();
-    if layeredfs_ok {
-        log_info!("AVS LayeredFS started");
-    } else {
-        log_warn!("AVS LayeredFS unavailable -- file replacement disabled");
-    }
-    profiling::tick("avs_layeredfs");
+    // 3c. (AVS LayeredFS now installs at step 0b, ahead of the signature
+    // scan — see the race note there.)
 
     let wave_hooks_ok = song_rate::wavebank_hook::init(&signatures);
     // The streaming IO-callback detour pair must install BEFORE the

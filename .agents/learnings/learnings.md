@@ -882,3 +882,45 @@ Rules:
   vtable slots) are invisible to `validate_signatures.sh`. Mirror them in
   `scripts/sig_harness/ark_check.py` (byte-for-byte Python port, run by the
   same script) and KEEP THE PORT IN STEP with the Rust helper.
+
+## Boot ordering
+
+### The game's `Application::onBoot` races our init thread — anything that must intercept a boot-time file open has to install BEFORE the signature scan
+
+**Context (2026-09-03):** A Win7 tester reported the mod menu's animated
+backgrounds never rendering. Log: `overlay_draw diag … progs=1` (stock default
+container) on every scene, zero `shader_synthesis:` lines, while the mod
+cheerfully logged `ShaderFixes: enabled (…; synthesis ran at boot arc-open)`.
+`data_mods/shader_fixes/blobs` was intact — synthesis had simply never been
+invoked: the game read `data/arc/shader.arc` before the LayeredFS
+`avs_fs_open` detour existed.
+
+`DllMain` spawns `init()` on its own thread and the game keeps booting
+underneath it. `Application::onBoot` (`FUN_1800020b0` on 20260721) starts
+within ms of gamemdx loading and synchronously drains `startup.arc`, then
+`shader.arc` (`FUN_1801f2420` — the session's ONLY shader read), then loads
+`musicdb.xml`, then `soundbanks.arc`. Our old order was gamemdx wait →
+`resolve_all` (127 AOB scans over 19 MB; every MISS is a full-module scan) →
+config → `early_apply` → `resolve_derived` → LayeredFS. The dev cabinet's
+"~1 s margin" in `docs/shader_replacement_research.md` was one machine's
+luck (spice emulation + a slower server round-trip); a real-p4io cabinet with
+a LAN server and an older CPU flipped it.
+
+Rules:
+- LayeredFS (and anything else that only needs libavs / disk) installs at
+  lib.rs step 0b, BEFORE `wait_for_game_module` + `resolve_all`. Never move
+  it back below the scan. The scan is the single biggest block of our boot
+  and it runs concurrently with the game's first file opens.
+- A "the hook already intercepts that open" argument is only race-free if
+  the hook is provably installed before the game can reach the open. Check
+  the game-side ORDER (log lines are serialized in arrival order across the
+  game's AVS log and our OutputDebugString), not the timestamps — spice's
+  debughook stamps and the game's AVS clock disagree by minutes.
+- Boot-time single-shot interceptions must be self-diagnosing: publish a
+  seen/not-seen status (`shader_synthesis::status()`) and WARN when the
+  downstream object exists without the interception having happened
+  (`overlay_draw::check_shader_arc_race`). A log full of INFO lines and a
+  misleading "ran at boot" assertion cost a full round-trip with the tester.
+- The 11 `_v1` alternate-signature misses are expected on new builds but
+  each costs a full 19 MB scan; if boot-time races reappear, the scan cost
+  is the lever (batch scanning / early-out on build fingerprint).
