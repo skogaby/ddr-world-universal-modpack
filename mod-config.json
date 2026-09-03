@@ -28,7 +28,8 @@
     "quick-logout": true,
     "training-mode": true,
     "decorative-option-headers": true,
-    "s-marvelous": true
+    "s-marvelous": true,
+    "split-ssq-auto-discovery": true
   },
   "diagnostics": {
     "profiling": false

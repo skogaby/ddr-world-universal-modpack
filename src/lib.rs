@@ -141,6 +141,7 @@ fn init() {
         Box::new(mods::autoplay::AutoplayMod::new()),
         Box::new(mods::announcer_mute::AnnouncerMuteMod::new()),
         Box::new(mods::anytime_speedmod::AnytimeSpeedmodMod::new()),
+        Box::new(mods::split_ssq_auto_discovery::SplitSsqAutoDiscoveryMod::new()),
         Box::new(mods::series_expansion::SeriesExpansionMod::new()),
         Box::new(mods::folder_expansion::FolderExpansionMod::new()),
         Box::new(mods::note_types_expansion::NoteTypesExpansionMod::new()),

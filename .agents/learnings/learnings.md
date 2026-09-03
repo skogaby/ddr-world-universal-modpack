@@ -924,3 +924,32 @@ Rules:
 - The 11 `_v1` alternate-signature misses are expected on new builds but
   each costs a full 19 MB scan; if boot-time races reappear, the scan cost
   is the lever (batch scanning / early-out on build fingerprint).
+
+## 2026-09-03 — `musicdb.merged.xml` fragments do NOT reach the game's music DB
+
+While setting up the Split SSQ Auto-Discovery cabinet test (a cloned song
+`zzzt` injected via `data_mods/<mod>/gamedata/musicdb.merged.xml`), the boot
+log showed the DLL's own crawl seeing the fragment (`judgement_offsets:
+musicdb crawl found 1470 song(s) (1 fragment file(s))`) but NO `LayeredFS:
+merging XML for gamedata/musicdb.xml` line, no `can't load original` WARN, and
+the game never asked the SSQ builder about `zzzt`. Ghidra: the music DB loader
+(`FUN_1801b71e0` on 20260721, `music::createList`) does NOT `avs_fs_open`
+`/data/gamedata/musicdb.xml` — it registers the path with the FileManager
+(`FUN_1801fef30`) and reads the buffer the manager serves out of the already
+resident `startup.arc` (ARC alt-load provider); no hooked AVS open/lstat ever
+carries that path, so the `.merged.xml` machinery never runs for it.
+
+Rules:
+- To ADD/override music-DB entries the working mechanism is the startup.arc
+  OVERLAY: `data_mods/<mod>/arc/startup_arc/data/gamedata/musicdb.xml` (full
+  file; `arc_handler` repacks the arc into `_cache/arc/startup.arc`, proven by
+  shader.arc). The `gamedata/musicdb.merged.xml` fragment convention only feeds
+  our own disk crawls (`per_song_judgement_offsets::bootstrap`); don't tell
+  operators it adds songs. (Treat the same as suspect for `coursedb.xml` /
+  `license.xml` — same loader shape.)
+- "The LayeredFS hook already sees that file" needs a log line proving it for
+  files that live INSIDE an arc the FileManager holds resident. Loose files
+  (SSQs, XWBs) are AVS-opened; arc members are not.
+- `scripts/setup_split_ssq_test.sh` is the reusable clone-a-song fixture
+  (equal-length basename byte-rename of XSB/XWB/jacket-arc + startup.arc
+  overlay).

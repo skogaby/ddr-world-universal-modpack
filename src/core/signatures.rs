@@ -1724,6 +1724,27 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 48 8D 68 A1 48 81 EC E0 00 00 00 48 C7 45 C7 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 E8 0F 29 78 D8 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 2F 48 8B D9 0F B7 81 82 00 00 00 8B 4C C1 58 85 C9 0F 84",
         description: "In-game announcer/voice dispatcher entry — combo callouts, score-state cues and stage-clear cheer SFX. Detoured by the announcer-mute mod (conditional early-return).",
     },
+    // ── Split SSQ Auto-Discovery: the SSQ path builder ────────────────
+    // `void build_ssq_path(char out[0x100], const char* basename, int
+    // difficulty)` — the ONE function that decides which `<basename>[_N].ssq`
+    // file holds a chart, via a hardcoded per-build `repe cmpsb` song table
+    // (RE: `docs/split_ssq_research.md`). Pattern = prologue (`MOV
+    // [RSP+8],RSI; PUSH RDI; SUB RSP,0x30; MOV R10,RCX`) + the first table
+    // cell (`LEA RDI,["acef"]` disp32 wildcarded; `MOV RSI,RDX; MOV ECX,5;
+    // REPE CMPSB`) + `JZ rel32` opcode — the only unconditional-match cell
+    // (`acef` splits at every difficulty), present since 20250805. The
+    // inner `48 8B F2 B9 05 ...` fragment repeats ~30× in the body, so the
+    // `4C 8B D1` prefix is load-bearing. Exactly one hit on all four builds:
+    // 0x18019E8D0 (20250805), 0x1801A1730 (20260224), 0x1801B43F0
+    // (20260721), 0x1801B4090 (20260825). The consumer detours the entry
+    // and reads NOTHING at match+N (body size varies 0x3A9..0x70F with the
+    // table). Third-party hex-edited 20250805 DLLs rewrite this prologue —
+    // a miss there skips the mod cleanly.
+    SignatureDefinition {
+        name: "build_ssq_path",
+        pattern: "48 89 74 24 08 57 48 83 EC 30 4C 8B D1 48 8D 3D ?? ?? ?? ?? 48 8B F2 B9 05 00 00 00 F3 A6 0F 84",
+        description: "SSQ path builder entry (basename + difficulty → data/mdb_apx/ssq/<basename>[_N].ssq via a hardcoded split-song table). Detoured by split-ssq-auto-discovery (full replacement).",
+    },
     // ── Song playback speed: identity-only runtime transaction ────────
     // Byte-level evidence and per-build addresses live in
     // `.agents/planning/2026-08-05-song-playback-speed/research/runtime-integration.md`.

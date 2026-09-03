@@ -58,6 +58,7 @@ pub mod skip_intros;
 pub mod smx_hardware;
 pub mod song_limit_expansion;
 pub mod song_playback_speed;
+pub mod split_ssq_auto_discovery;
 pub mod timer_freeze;
 pub mod timing_offsets;
 pub mod training_mode;

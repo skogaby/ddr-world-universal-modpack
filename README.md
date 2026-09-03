@@ -124,6 +124,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 | **Music Wheel Song Length** | Shows each song's real play length (M:SS) next to the BPM at song select. |
 | **Movie Size Customization** | The web-portal VIDEO SIZE setting (fullscreen/on/off), in-game. |
 | **WebUI Options** | Web-portal cosmetics in-game with live previews, plus weight/calorie profile settings. |
+| **Split SSQ Auto-Discovery** | Finds split chart files (`<song>_N.ssq`) on disk instead of trusting the game's hardcoded per-version list — newer chart data loads correctly on older game builds. |
 | **Note Types Expansion** | New note types for custom charts — ITG-style **mines** are fully supported. |
 | **Series Expansion** | Custom VERSION filter categories for custom song packs (config-driven). |
 | **Folder Expansion** | Custom genre folders in the song wheel (config-driven). |
