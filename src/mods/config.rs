@@ -352,6 +352,13 @@ pub struct SMarvelousConfig {
     /// Marvelous as S-Marvelous).
     #[serde(default)]
     pub window_ms: Option<i32>,
+    /// Gameplay flash word art: `"all_purple"` (fully violet word) or
+    /// `"purple_shadow"` (stock white letters, violet extrusion — the
+    /// default). Live-editable from the overlay menu's "Judgement Color" row;
+    /// the DLL persists the whole section back. Unknown values warn once and
+    /// use the default.
+    #[serde(default)]
+    pub judgement_color: Option<String>,
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-

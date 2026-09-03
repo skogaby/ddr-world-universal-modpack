@@ -59,6 +59,30 @@ pub struct SegmentCloneOpts {
 /// intentional (shared masks / helper sprites keep one definition).
 pub type TagRemap = HashMap<u16, u16>;
 
+/// Options for [`Ap2Doc::clone_word_segment_with_new_shape_ex`]. `Default`
+/// = byte-identical to the plain recipe.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WordCloneOpts {
+    /// Silence ADDITIVE-blend placements inside the CLONED sprite chain
+    /// (the copies only — the stock definitions are untouched): every
+    /// PlaceObject record (create + updates) of an object whose create
+    /// carries blend mode 8 gets its multiplicative-colour alpha zeroed in
+    /// place. Background (dance_judge_v3 `dance_marvelous`, sprite 46): the
+    /// Marvelous word is stamped TWICE — a normal copy plus an additive
+    /// `marvelous_ef` copy pulsing mult alpha 0.20 → 0.098 → 0 every ~4–5
+    /// frames. Additive blending clamps on the stock white letters, so the
+    /// pulse is invisible there; on recoloured art it is a ~12–15 Hz
+    /// flicker (maintainer video, 2026-09-03). The stock frame-2 update
+    /// already sets alpha 0 and the glow vanishes, which is the engine
+    /// proving alpha 0 = fully muted.
+    ///
+    /// Fail-closed: a record of an additive object that carries NO mult
+    /// colour field cannot be muted in place ⇒ the recipe returns `None`
+    /// (callers fall back to stock bytes / the unmuted recipe as they see
+    /// fit). Cloned chains with no additive placement at all are a no-op.
+    pub mute_additive_glow: bool,
+}
+
 /// The ids resolved/allocated by
 /// [`Ap2Doc::clone_word_segment_with_new_shape`]. All dynamic — callers
 /// bind the new geo as `{exported_name}_shape{new_shape_id}` and must never
@@ -71,6 +95,10 @@ pub struct WordSegmentClone {
     pub new_shape_id: u16,
     /// The cloned word sprite's character id.
     pub new_sprite_id: u16,
+    /// Number of PlaceObject records whose mult alpha the additive-glow mute
+    /// zeroed (0 when the option is off or the chain has no additive
+    /// placement).
+    pub muted_records: usize,
 }
 
 /// Inputs for [`Ap2Doc::add_place_object_named`]: a create-mode placement
@@ -512,6 +540,26 @@ impl Ap2Doc {
         new_label: &str,
         word_shape_id: u16,
     ) -> Option<WordSegmentClone> {
+        self.clone_word_segment_with_new_shape_ex(
+            src_label,
+            new_label,
+            word_shape_id,
+            WordCloneOpts::default(),
+        )
+    }
+
+    /// [`Ap2Doc::clone_word_segment_with_new_shape`] with [`WordCloneOpts`]
+    /// (the additive-glow mute). Default opts are byte-identical to the
+    /// plain recipe; the mute runs on the cloned chain definitions right
+    /// after they are created, BEFORE the segment placements are cloned, so
+    /// every section's clone sees the same muted sprites.
+    pub fn clone_word_segment_with_new_shape_ex(
+        &mut self,
+        src_label: &str,
+        new_label: &str,
+        word_shape_id: u16,
+        opts: WordCloneOpts,
+    ) -> Option<WordSegmentClone> {
         let path = self.find_sprite_by_label(src_label)?;
 
         // Read-only resolution of everything the mutations need.
@@ -594,12 +642,26 @@ impl Ap2Doc {
         let new_shape_id = self.add_shape(&path, def_frame, donor_unknown)?;
         let mut mapped_old = word_shape_id;
         let mut mapped_new = new_shape_id;
+        let mut cloned_sprites: Vec<u16> = Vec::with_capacity(chain.len());
         for &sprite_id in chain.iter().rev() {
             let path = self.find_sprite_by_label(src_label)?;
             let remap = TagRemap::from([(mapped_old, mapped_new)]);
             mapped_new = self.clone_sprite_definition(&path, sprite_id, &remap)?;
             mapped_old = sprite_id;
+            cloned_sprites.push(mapped_new);
         }
+
+        // Additive-glow mute — on the COPIES only, before any placement
+        // clone references them. Each cloned sprite is a self-contained
+        // definition tree, so the mute never touches a shared/stock sprite.
+        let mut muted_records = 0usize;
+        if opts.mute_additive_glow {
+            for &sid in &cloned_sprites {
+                let path = self.find_sprite_by_label(src_label)?;
+                muted_records += self.mute_additive_glow_in_definition(&path, sid)?;
+            }
+        }
+
         let path = self.find_sprite_by_label(src_label)?;
         let segment_remap = TagRemap::from([(mapped_old, mapped_new)]);
         self.clone_labeled_segment_placements_only(&path, src_label, new_label, &segment_remap)?;
@@ -626,7 +688,52 @@ impl Ap2Doc {
             word_sprite_id,
             new_shape_id,
             new_sprite_id: mapped_new,
+            muted_records,
         })
+    }
+
+    /// Silence every ADDITIVE-blend object placed inside the `DefineSprite`
+    /// with id `sprite_id` (found in the section at `path`), recursively
+    /// through its nested sprite definitions: the CREATE record of an object
+    /// whose blend byte is 8 (`add`) and every UPDATE record with the same
+    /// `(object_id, depth)` in the same section get their multiplicative
+    /// colour alpha set to 0 in place. Returns the number of records edited
+    /// (0 = nothing additive in the definition — a legal no-op).
+    ///
+    /// Rejects (doc unchanged): unknown path / no such DefineSprite, an
+    /// undecodable PlaceObject anywhere in the definition, or an additive
+    /// object whose record carries no mult colour field (nothing to zero
+    /// without growing the payload — fail closed rather than half-mute).
+    /// Pass 1 is read-only over a private copy; pass 2 writes only after
+    /// every edit has been proven applicable.
+    pub fn mute_additive_glow_in_definition(
+        &mut self,
+        path: &SpritePath,
+        sprite_id: u16,
+    ) -> Option<usize> {
+        // Phase 1 — validate on a copy.
+        let (ti, edited) = {
+            let sec = self.section(path)?;
+            let ti = sec
+                .tags
+                .iter()
+                .position(|t| matches!(t, Tag::DefineSprite(s) if s.id == sprite_id))?;
+            let Tag::DefineSprite(def) = &sec.tags[ti] else {
+                return None; // unreachable: position matched DefineSprite
+            };
+            let mut copy = def.section.clone();
+            let edited = mute_additive_in_section(&mut copy)?;
+            (ti, edited)
+        };
+        if edited == 0 {
+            return Some(0);
+        }
+        // Phase 2 — the same walk on the live tree; Phase 1 proved it.
+        let sec = self.section_mut(path)?;
+        let Some(Tag::DefineSprite(def)) = sec.tags.get_mut(ti) else {
+            return None;
+        };
+        mute_additive_in_section(&mut def.section)
     }
 
     /// Resolve the WORD SHAPE of a labeled segment's section by GEO
@@ -1125,6 +1232,52 @@ fn remap_section_recursive(sec: &mut TagSection, remap: &TagRemap) -> Option<()>
         }
     }
     Some(())
+}
+
+/// Blend byte value for additive blending (SWF/AP2 `add`; bemaniutils
+/// `blend_addition`).
+const BLEND_ADD: u8 = 8;
+
+/// The additive-glow mute over one section, recursing into nested sprite
+/// definitions (each nested section has its own object-id/depth space, so
+/// the additive key set is per section). Tag order = frame order, and a
+/// create precedes its updates, so one forward pass keys every update.
+/// Returns the number of records edited; `None` on an undecodable
+/// PlaceObject or an additive object's record lacking a mult colour field
+/// (the caller runs this on a copy first, so `None` leaves the doc intact).
+fn mute_additive_in_section(sec: &mut TagSection) -> Option<usize> {
+    let mut additive: Vec<(u16, u16)> = Vec::new();
+    let mut edited = 0usize;
+    for tag in &mut sec.tags {
+        match tag {
+            Tag::PlaceObject(po) => {
+                let view = po.view()?;
+                let is_update = view.flags & 0x1 != 0;
+                let key = (view.object_id, view.depth);
+                if !is_update && view.blend == Some(BLEND_ADD) && !additive.contains(&key) {
+                    additive.push(key);
+                }
+                if additive.contains(&key) {
+                    // Every record of the object: the create and each update
+                    // that carries a mult colour (an update WITHOUT one leaves
+                    // the colour untouched, so it needs no edit — but the
+                    // engine's colour state then comes from the last record
+                    // that had one, all of which we zero).
+                    if view.mult_color.is_some() {
+                        po.set_mult_alpha(0)?;
+                        edited += 1;
+                    } else if !is_update {
+                        return None; // create with no mult field — unmutable in place
+                    }
+                }
+            }
+            Tag::DefineSprite(s) => {
+                edited += mute_additive_in_section(&mut s.section)?;
+            }
+            _ => {}
+        }
+    }
+    Some(edited)
 }
 
 /// Byte offsets of the two PlaceObject fields the editing surface splices.

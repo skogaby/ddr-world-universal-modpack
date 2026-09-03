@@ -3,7 +3,8 @@
 //! task-03's flash re-drive gates on.
 //!
 //! The doc-transform core is `core/ap2`'s host-tested
-//! [`Ap2Doc::clone_word_segment_with_new_shape`] recipe — this module is
+//! [`Ap2Doc::clone_word_segment_with_new_shape_ex`] recipe (run through
+//! [`super::assets::run_word_clone`] with the additive-glow mute) — this module is
 //! the thin impure wiring around it: staged-state storage, the v1 skin
 //! gate, latched WARNs, and the ready/applied atomics.
 //!
@@ -27,7 +28,7 @@ use crate::core::ap2::Ap2Doc;
 use crate::services::afp_patcher;
 use crate::{log_info, log_warn};
 
-use super::assets::{self, StagedPatch, NEW_LABEL, SRC_LABEL, TEMPLATE_NAME};
+use super::assets::{self, StagedPatch, NEW_LABEL, TEMPLATE_NAME};
 
 /// Assets staged + patch registered + mod enabled. Cleared by
 /// [`deactivate`]; the registered fn returns `None` while false.
@@ -66,17 +67,21 @@ pub fn patch_applied() -> bool {
     PATCH_APPLIED.load(Ordering::Acquire)
 }
 
-/// Stage assets + register the patch. Called from the mod's `enable()`.
-/// Staging runs once per boot (re-enable reuses the staged state — the
-/// inputs cannot change within a session).
-pub fn activate() {
+/// Stage assets (with the `color` word art) + register the patch. Called
+/// from the mod's `enable()`. Staging runs once per boot (re-enable reuses
+/// the staged state — the template inputs cannot change within a session);
+/// a re-enable with a DIFFERENT colour re-stages just the word art.
+pub fn activate(color: assets::JudgementColor) {
     {
         let mut staged = match STAGED.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        if staged.is_none() {
-            *staged = assets::stage();
+        match staged.as_ref() {
+            None => *staged = assets::stage(color),
+            Some(st) => {
+                assets::restage_word_art(color, &st.new_region);
+            }
         }
         if staged.is_none() {
             // assets::stage already WARNed with the specific reason.
@@ -89,6 +94,20 @@ pub fn activate() {
         afp_patcher::register_patch(TEMPLATE_NAME, Box::new(patch_dance_judge));
     });
     PATCH_READY.store(true, Ordering::Release);
+}
+
+/// Live "Judgement Color" apply: swap the staged word art to `color`. No-op
+/// (false) when the patch was never staged this session — there is no
+/// staged image to swap and nothing renders the word anyway.
+pub fn set_judgement_color(color: assets::JudgementColor) -> bool {
+    let region = match STAGED.lock() {
+        Ok(g) => g.as_ref().map(|st| st.new_region.clone()),
+        Err(_) => None,
+    };
+    match region {
+        Some(r) => assets::restage_word_art(color, &r),
+        None => false,
+    }
 }
 
 /// Make the registered patch fn inert (mod disable). Templates already
@@ -128,26 +147,26 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 
     // The real transform — the same host-tested recipe the enable-time dry
     // run executed on these exact bytes.
-    let run = || -> Option<Vec<u8>> {
+    let run = || -> Option<(Vec<u8>, usize)> {
         let mut doc = Ap2Doc::parse(afp)?;
-        let ids =
-            doc.clone_word_segment_with_new_shape(SRC_LABEL, NEW_LABEL, staged.word_shape_id)?;
+        let ids = assets::run_word_clone(&mut doc, staged.word_shape_id)?;
         // The staged geo/texture names were derived from the dry-run ids;
         // a mismatch would bind the new shape to a geo we never wrote.
         if ids.new_shape_id != staged.new_shape_id || ids.new_sprite_id != staged.new_sprite_id {
             return None;
         }
-        doc.serialize()
+        Some((doc.serialize()?, ids.muted_records))
     };
     match run() {
-        Some(out) => {
+        Some((out, muted)) => {
             PATCH_APPLIED.store(true, Ordering::Release);
             log_info!(
-                "SMarvelous: dance_judge patched ({} -> {} bytes, {} segment, shape {})",
+                "SMarvelous: dance_judge patched ({} -> {} bytes, {} segment, shape {}, additive glow records muted: {})",
                 afp.len(),
                 out.len(),
                 NEW_LABEL,
-                staged.new_shape_id
+                staged.new_shape_id,
+                muted
             );
             Some((out, vec![0u8; 2]))
         }

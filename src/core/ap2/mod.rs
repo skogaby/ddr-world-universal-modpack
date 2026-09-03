@@ -41,12 +41,14 @@ mod tests;
 // pattern per se_bank_synth/custom_options.
 #[allow(unused_imports)]
 pub use edit::{
-    MultiShapeSegmentClone, NamedPlacement, SegmentCloneOpts, TagRemap, WordSegmentClone,
+    MultiShapeSegmentClone, NamedPlacement, SegmentCloneOpts, TagRemap, WordCloneOpts,
+    WordSegmentClone,
 };
 #[allow(unused_imports)]
 pub use model::{
-    Ap2Doc, DefineSprite, FrameSpan, Label, OpaqueTag, PlaceObject, PlaceObjectParams,
-    PlaceObjectView, RegionKind, SectionLayout, Shape, SpritePath, StringTable, Tag, TagSection,
+    Ap2Doc, DefineSprite, FrameSpan, Label, MultColorField, OpaqueTag, PlaceObject,
+    PlaceObjectParams, PlaceObjectView, RegionKind, SectionLayout, Shape, SpritePath, StringTable,
+    Tag, TagSection,
 };
 
 /// Round up to 4-byte alignment (AP2 aligns tag payloads and string-table

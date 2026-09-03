@@ -44,8 +44,34 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// D26) — a mid-song edit never changes the armed window.
 static LIVE_WINDOW_MS: AtomicI32 = AtomicI32::new(state::DEFAULT_WINDOW_MS);
 
-/// Overlay menu row key (GLOBAL SETTINGS, grouped under this mod's header).
+/// Overlay menu row keys (GLOBAL SETTINGS, grouped under this mod's header;
+/// registration order = display order: window, then colour).
 const WINDOW_ROW_KEY: &str = "smarv_window_ms";
+const COLOR_ROW_KEY: &str = "smarv_judgement_color";
+
+/// The LIVE "Judgement Color" choice as a `JudgementColor::index()`. Seeded
+/// from `s_marvelous.judgement_color` at enable; the overlay row writes it
+/// and re-stages the word art on the spot (the game picks the new bytes up
+/// when it next loads the dance_judge package — normally next song).
+static LIVE_COLOR_IDX: AtomicI32 = AtomicI32::new(0);
+
+fn live_color() -> assets::JudgementColor {
+    assets::JudgementColor::from_index(LIVE_COLOR_IDX.load(Ordering::Relaxed))
+        .unwrap_or(assets::JudgementColor::DEFAULT)
+}
+
+/// Write the whole `s_marvelous` section from the live values —
+/// `save_json_key` REPLACES the section, so every row edit must emit every
+/// DLL-written key or the others silently reset on the next boot.
+fn persist_section() {
+    config::save_json_key(
+        "s_marvelous",
+        serde_json::json!({
+            "window_ms": LIVE_WINDOW_MS.load(Ordering::Relaxed),
+            "judgement_color": live_color().key(),
+        }),
+    );
+}
 
 pub struct SMarvelousMod {
     data_feed_installed: bool,
@@ -92,6 +118,26 @@ fn configured_window() -> i32 {
     clamped
 }
 
+/// Read the operator/persisted colour from `s_marvelous.judgement_color`
+/// (unknown key ⇒ one INFO + default).
+fn configured_color() -> assets::JudgementColor {
+    use assets::JudgementColor;
+    let raw = config::get()
+        .and_then(|c| c.s_marvelous.as_ref())
+        .and_then(|s| s.judgement_color.clone());
+    match raw {
+        None => JudgementColor::DEFAULT,
+        Some(k) => JudgementColor::from_key(&k).unwrap_or_else(|| {
+            log_info!(
+                "SMarvelous: judgement_color '{}' unknown -- using {}",
+                k,
+                JudgementColor::DEFAULT.key()
+            );
+            JudgementColor::DEFAULT
+        }),
+    }
+}
+
 /// Register (or idempotently re-register — `register_scalar_row` replaces by
 /// key) the overlay menu's window row, seeded with `initial`. Renders on the
 /// GLOBAL SETTINGS tab under this mod's auto-generated section header
@@ -112,11 +158,44 @@ fn register_overlay_row(initial: i32) {
         on_change: std::sync::Arc::new(|v| {
             let clamped = state::clamp_window(v);
             LIVE_WINDOW_MS.store(clamped, Ordering::Relaxed);
-            config::save_json_key("s_marvelous", serde_json::json!({ "window_ms": clamped }));
+            persist_section();
             log_info!(
                 "SMarvelous: window set to {} ms (applies next song)",
                 clamped
             );
+        }),
+    });
+}
+
+/// The "Judgement Color" enum row (ALL PURPLE / PURPLE SHADOW), directly
+/// under the window row. Edits update the live choice, persist the section
+/// and re-stage the word art immediately — the additive `marvelous_ef`
+/// glow stays muted regardless of the choice (`assets::WORD_CLONE_OPTS`),
+/// so an all-violet word renders static too.
+fn register_color_row(initial: assets::JudgementColor) {
+    use crate::mods::mod_menu::{self, EnumRowSpec};
+    use assets::JudgementColor;
+    mod_menu::register_enum_row(EnumRowSpec {
+        key: COLOR_ROW_KEY.to_string(),
+        label: "Judgement Color".to_string(),
+        hint: "S-Marvelous flash art: all-violet word, or white letters with a violet shadow. Applies next song."
+            .to_string(),
+        parent_row_key: Some("s-marvelous".to_string()),
+        values: JudgementColor::ALL.iter().map(|c| c.index()).collect(),
+        labels: JudgementColor::ALL.iter().map(|c| c.label().to_string()).collect(),
+        initial_value: initial.index(),
+        on_change: std::sync::Arc::new(|v| {
+            let Some(color) = JudgementColor::from_index(v) else {
+                return;
+            };
+            LIVE_COLOR_IDX.store(color.index(), Ordering::Relaxed);
+            persist_section();
+            if !afp_patches::set_judgement_color(color) {
+                log_info!(
+                    "SMarvelous: judgement color {} saved (word art not staged this session -- applies next launch)",
+                    color.key()
+                );
+            }
         }),
     });
 }
@@ -238,6 +317,9 @@ impl Mod for SMarvelousMod {
         let window = configured_window();
         LIVE_WINDOW_MS.store(window, Ordering::Relaxed);
         register_overlay_row(window);
+        let color = configured_color();
+        LIVE_COLOR_IDX.store(color.index(), Ordering::Relaxed);
+        register_color_row(color);
         ACTIVE.store(true, Ordering::Release);
 
         if scene_manager::is_available() {
@@ -276,7 +358,7 @@ impl Mod for SMarvelousMod {
         // the AP2 patch. Best-effort — a staging failure WARNs and leaves
         // the patch unstaged (stock template streams); classification and
         // logging above keep working regardless.
-        afp_patches::activate();
+        afp_patches::activate(color);
 
         // Combo digit textures (Step 5): FRESH atlas entries + per-image
         // PNGs. Best-effort — failure leaves the combo override dormant
@@ -318,12 +400,16 @@ impl Mod for SMarvelousMod {
             fast_slow::activate();
         }
 
-        log_info!("SMarvelous: enabled (window {} ms)", window);
+        log_info!(
+            "SMarvelous: enabled (window {} ms, judgement color {})",
+            window,
+            color.key()
+        );
     }
 
     fn disable(&mut self) {
         ACTIVE.store(false, Ordering::Release);
-        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY]);
+        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY]);
         afp_patches::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();

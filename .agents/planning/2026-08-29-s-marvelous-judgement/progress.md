@@ -940,6 +940,68 @@ fail-open — worst case is stock visuals + one latched WARN):
   one-line INFO.
 
 ## Deviations & open questions
+- 2026-09-03 art follow-up — gameplay flash "shimmer" (maintainer video):
+  ROOT CAUSE is stock, not ours: `dance_judge_v3` sprite 46
+  (`dance_marvelous`) places the word TWICE — depth 2 `marvelous` normal
+  + depth 3 `marvelous_ef` blend 8 (ADDITIVE), mult alpha 0.20/0.098/0
+  over frames 0–2 then `gotoAndPlay("loop")` @ f4 → a ~12–15 Hz additive
+  self-glow. Invisible on stock white (clamps at 255), visible on the
+  full-violet colorize (measured peak-vs-rest |ΔRGB| 52.5/px vs donor
+  31.7, concentrated in the letters). Fix shipped ART-ONLY (maintainer
+  picked mockup variant B): `dance_judge/smarvelous.png` regenerated
+  from the live v3 donor keeping donor-neutral pixels (sat < 0.12)
+  untouched and recoloring only saturated pixels (hue 280°, sat floor
+  0.55, value ×0.90); alpha byte-identical, 260×90. Generator (inline
+  numpy HSV; donor via bemaniutils `IFS(decode_textures=True)` →
+  `tex/daju_marvelous.png`): `neutral = s < 0.12; h' = 280/360; s' =
+  max(s, 0.55); v' = v*0.90` on `~neutral`, identity on `neutral`.
+  Runtime picks it up on next enable (assets.rs copies WORD_PNG
+  unconditionally; `cache_texture` mtime check invalidates the converted
+  cache). IN-GAME RESULT: letters static, but the violet SHADOW still
+  pulsed visibly (any non-white pixel gains 20 % of itself on the peak
+  frame — art alone cannot fix it). RECIPE FIX SHIPPED same day:
+  `core/ap2` `WordCloneOpts { mute_additive_glow }` +
+  `Ap2Doc::clone_word_segment_with_new_shape_ex` +
+  `mute_additive_glow_in_definition` — on the CLONED sprite chain only,
+  every PlaceObject record (create + updates) of an object whose create
+  has blend byte 8 gets its mult-colour alpha zeroed IN PLACE (payload
+  size unchanged; both encodings handled — flag 0x800 wide `<hhhh>` and
+  0x2000 packed u32 low byte — via the new `PlaceObjectView::mult_color`
+  + `PlaceObject::set_mult_alpha`). Fail-closed on an additive create
+  with no mult field ⇒ `None`; `assets::run_word_clone` (the ONE recipe
+  entry both the dry run and the live patch fn call) then falls back to
+  the unmuted clone + one WARN. Stock segment byte-identical. Engine
+  proof that alpha 0 = fully muted: the stock frame-2 update already
+  sets alpha 0 and the glow vanishes. Host tests: 5 new (`model_place_
+  view_decodes_both_mult_color_forms`, `edit_word_clone_mutes_additive_
+  glow_in_clone_only`, `..._default_opts_byte_identical_to_plain`,
+  `..._mute_fails_closed_without_mult_field`, `edit_mute_additive_glow_
+  no_additive_is_noop`); Leg D `smarv-patch` runs the muted recipe on
+  the REAL template and asserts `muted_records=3`, cloned additive
+  alphas `[0,0,0]`, stock `[51,25,0]`. Patch INFO line now ends
+  `additive glow records muted: N` (expect 3 on all live builds).
+  Awaiting in-game check of the DLL + PNG together.
+- 2026-09-03 (later) — "Judgement Color" option: maintainer wants BOTH
+  looks selectable. `assets::JudgementColor { AllPurple, PurpleShadow }`
+  (default PurpleShadow); art split into `dance_judge/smarvelous_all_purple
+  .png` (the original colorize, restored from git) + `smarvelous_purple_
+  shadow.png` (the 2026-09-03 variant); config `s_marvelous.judgement_color`
+  (`all_purple`/`purple_shadow`, unknown ⇒ INFO + default); overlay enum
+  row `smarv_judgement_color` "Judgement Color" registered right after the
+  window row under S-MARVELOUS JUDGEMENT. on_change: live atomic +
+  `persist_section()` (writes window_ms AND judgement_color — the old
+  window on_change wrote `{window_ms}` alone, which would have wiped the
+  new key; `save_json_key` replaces the section) +
+  `afp_patches::set_judgement_color` → `assets::restage_word_art` (copy
+  variant PNG over the staged `dance_judge_v3_ifs/tex/daju_smarvelous.png`
+  + `ifs_textures::purge_texture_replacement` so the converted cache/index
+  are dropped; `std::fs::copy` on Windows PRESERVES the source mtime, so
+  the purge — not the mtime check — is what forces re-conversion). Applies
+  when the gameplay loader next loads dance_judge (per song; a skip-results
+  fast exit leaves the package resident one song longer). `activate(color)`
+  re-stages on re-enable with a different colour. The additive-glow mute
+  stays on for BOTH variants (maintainer directive). Gates green: 129/89
+  host tests, Legs A–G, fmt, release build. Awaiting cabinet check.
 - Commits: maintainer commits manually (house rule) — code-assist Commit
   steps skipped; task completion recorded as
   `Complete (uncommitted — maintainer commits manually)`.

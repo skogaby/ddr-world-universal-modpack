@@ -2889,6 +2889,335 @@ fn edit_word_segment_recipe_nested_chain() {
     assert!(places(42, 41) && places(43, 42) && places(46, 43));
 }
 
+// --- Additive-glow mute (WordCloneOpts) ------------------------------------
+//
+// Models dance_judge_v3's `dance_marvelous` sprite: the word sprite chain
+// 46 → 43 → 42 → shape 41, where sprite 46 stamps 43 TWICE — depth 2 normal
+// + depth 3 ADDITIVE (`marvelous_ef`, blend 8) whose mult alpha pulses
+// 0.20 → 0.098 → 0 across three frames. The clone must mute the copy's
+// additive object (every record) and leave the stock sprite byte-identical.
+
+/// Raw additive CREATE: flags 0x2 (src) | 0x20000 (blend) | 0x800 (wide
+/// mult colour); src id, blend byte, realign to 4, then `<hhhh>` r/g/b/a.
+fn raw_additive_create(depth: u16, object_id: u16, src: u16, alpha: i16) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&0x0002_0802u32.to_le_bytes());
+    d.extend_from_slice(&depth.to_le_bytes());
+    d.extend_from_slice(&object_id.to_le_bytes());
+    d.extend_from_slice(&src.to_le_bytes()); // @8
+    d.push(8); // blend = add @10
+    d.push(0); // realign pad → 12
+    for v in [255i16, 255, 255, alpha] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
+/// Raw UPDATE carrying a PACKED mult colour (flag 0x2000): the u32 holds
+/// `r<<24 | g<<16 | b<<8 | a`, so little-endian byte 0 is the alpha.
+fn raw_update_packed_mult(depth: u16, object_id: u16, alpha: u8) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&0x0000_2001u32.to_le_bytes());
+    d.extend_from_slice(&depth.to_le_bytes());
+    d.extend_from_slice(&object_id.to_le_bytes());
+    d.extend_from_slice(&[alpha, 255, 255, 255]);
+    d
+}
+
+/// Raw UPDATE carrying a WIDE mult colour (flag 0x800).
+fn raw_update_wide_mult(depth: u16, object_id: u16, alpha: i16) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&0x0000_0801u32.to_le_bytes());
+    d.extend_from_slice(&depth.to_le_bytes());
+    d.extend_from_slice(&object_id.to_le_bytes());
+    for v in [255i16, 255, 255, alpha] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
+/// The nested fixture with the additive glow copy inside sprite 46.
+/// `mutable` = the additive create carries a mult colour field (the stock
+/// shape); `false` builds a create WITHOUT one (the unmutable shape).
+fn glow_template_fixture(mutable: bool) -> Ap2Doc {
+    let mut b = FixtureBuilder::new("dance_judge_v3_fx");
+    b.push_shape(&[], 3, 41);
+    b.push_shape(&[], 7, 8);
+    let s42 = b.push_sprite(&[], 42);
+    b.push_place(
+        &[s42],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 200,
+            source_tag_id: Some(41),
+            ..Default::default()
+        },
+        Some("word_art"),
+    );
+    b.push_frame(&[s42], 0, 1);
+    let s43 = b.push_sprite(&[], 43);
+    b.push_place(
+        &[s43],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 201,
+            source_tag_id: Some(42),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_frame(&[s43], 0, 1);
+    let s46 = b.push_sprite(&[], 46);
+    // Frame 0: normal word (depth 2) + additive glow copy (depth 3, α 51/255).
+    b.push_place(
+        &[s46],
+        PlaceObjectParams {
+            depth: 2,
+            object_id: 60,
+            source_tag_id: Some(43),
+            ..Default::default()
+        },
+        Some("marvelous"),
+    );
+    if mutable {
+        b.push_place_raw(&[s46], raw_additive_create(3, 60, 43, 51));
+    } else {
+        // blend byte but NO colour field: flags 0x2 | 0x20000.
+        let mut d = Vec::new();
+        d.extend_from_slice(&0x0002_0002u32.to_le_bytes());
+        d.extend_from_slice(&3u16.to_le_bytes());
+        d.extend_from_slice(&60u16.to_le_bytes());
+        d.extend_from_slice(&43u16.to_le_bytes());
+        d.push(8);
+        d.push(0);
+        b.push_place_raw(&[s46], d);
+    }
+    b.push_frame(&[s46], 0, 2);
+    // Frame 1: glow α → 25 (packed form). Frame 2: glow α → 0 (wide form).
+    b.push_place_raw(&[s46], raw_update_packed_mult(3, 60, 25));
+    b.push_frame(&[s46], 2, 1);
+    b.push_place_raw(&[s46], raw_update_wide_mult(3, 60, 0));
+    b.push_frame(&[s46], 3, 1);
+    // Root: the segment places sprite 46 + the shared flash shape.
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 2,
+            object_id: 300,
+            source_tag_id: Some(46),
+            ..Default::default()
+        },
+        Some("word_usr"),
+    );
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 3,
+            object_id: 301,
+            source_tag_id: Some(8),
+            ..Default::default()
+        },
+        None,
+    );
+    b.push_frame(&[], 0, 7);
+    b.push_opaque(&[], 0x05, &[0, 0, 0, 0]);
+    b.push_frame(&[], 7, 1);
+    b.push_opaque(&[], 0x05, &[1, 0, 0, 0]);
+    b.push_frame(&[], 8, 1);
+    b.add_label(&[], "seg1", 0);
+    b.add_label(&[], "seg2", 2);
+    b.finish()
+}
+
+/// `(object_id, depth, is_update, blend, mult alpha)` of every PlaceObject
+/// directly inside the DefineSprite `id` of the root section.
+fn sprite_place_records(doc: &Ap2Doc, id: u16) -> Vec<(u16, u16, bool, Option<u8>, Option<i32>)> {
+    let sp = doc
+        .root
+        .tags
+        .iter()
+        .find_map(|t| match t {
+            Tag::DefineSprite(s) if s.id == id => Some(s),
+            _ => None,
+        })
+        .expect("sprite exists");
+    sp.section
+        .tags
+        .iter()
+        .filter_map(|t| match t {
+            Tag::PlaceObject(po) => {
+                let v = po.view().expect("decodes");
+                Some((
+                    v.object_id,
+                    v.depth,
+                    v.flags & 0x1 != 0,
+                    v.blend,
+                    v.mult_color.map(|m| m.alpha),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn model_place_view_decodes_both_mult_color_forms() {
+    let wide = PlaceObject {
+        data: raw_additive_create(3, 60, 43, 51),
+        pad: Vec::new(),
+    };
+    let v = wide.view().unwrap();
+    assert_eq!(v.blend, Some(8));
+    let m = v.mult_color.unwrap();
+    assert!(m.wide);
+    assert_eq!((m.at, m.alpha), (12, 51));
+
+    let packed = PlaceObject {
+        data: raw_update_packed_mult(3, 60, 25),
+        pad: Vec::new(),
+    };
+    let v = packed.view().unwrap();
+    assert!(v.flags & 0x1 != 0);
+    let m = v.mult_color.unwrap();
+    assert!(!m.wide);
+    assert_eq!((m.at, m.alpha), (8, 25));
+
+    // set_mult_alpha edits in place, size unchanged, other bytes intact.
+    let mut w2 = wide.clone();
+    w2.set_mult_alpha(0).unwrap();
+    assert_eq!(w2.data.len(), wide.data.len());
+    assert_eq!(w2.view().unwrap().mult_color.unwrap().alpha, 0);
+    assert_eq!(&w2.data[..18], &wide.data[..18]);
+    let mut p2 = packed.clone();
+    p2.set_mult_alpha(0).unwrap();
+    assert_eq!(
+        p2.data,
+        vec![0x01, 0x20, 0, 0, 3, 0, 60, 0, 0, 255, 255, 255]
+    );
+    // A record without a mult field cannot be edited.
+    let plain = PlaceObject::build(&PlaceObjectParams {
+        depth: 1,
+        object_id: 1,
+        source_tag_id: Some(2),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(plain.view().unwrap().mult_color.is_none());
+    assert!(plain.clone().set_mult_alpha(0).is_none());
+}
+
+#[test]
+fn edit_word_clone_mutes_additive_glow_in_clone_only() {
+    let mut doc = glow_template_fixture(true);
+    let clone = doc
+        .clone_word_segment_with_new_shape_ex(
+            "seg1",
+            "seg1_s",
+            41,
+            WordCloneOpts {
+                mute_additive_glow: true,
+            },
+        )
+        .expect("clone");
+    // create (α51) + packed update (α25) + wide update (α0) = 3 records.
+    assert_eq!(clone.muted_records, 3);
+    assert_eq!(clone.new_sprite_id, 50);
+
+    let bytes = doc.serialize().expect("serializes");
+    let re = Ap2Doc::parse(&bytes).expect("re-parses");
+
+    // The CLONE (46 → 50): the additive object's records are all α0; the
+    // normal word placement (depth 2, no colour field) is untouched.
+    let cloned = sprite_place_records(&re, 50);
+    assert_eq!(
+        cloned,
+        vec![
+            (60, 2, false, None, None),
+            (60, 3, false, Some(8), Some(0)),
+            (60, 3, true, None, Some(0)),
+            (60, 3, true, None, Some(0)),
+        ]
+    );
+    // The STOCK sprite 46 keeps its pulse.
+    let stock = sprite_place_records(&re, 46);
+    assert_eq!(
+        stock,
+        vec![
+            (60, 2, false, None, None),
+            (60, 3, false, Some(8), Some(51)),
+            (60, 3, true, None, Some(25)),
+            (60, 3, true, None, Some(0)),
+        ]
+    );
+    // Stock 46's tags are byte-identical to the unedited fixture's.
+    let orig = glow_template_fixture(true);
+    let raw46 = |d: &Ap2Doc| {
+        d.root
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                Tag::DefineSprite(s) if s.id == 46 => Some(s.section.tags.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(raw46(&re), raw46(&orig));
+}
+
+#[test]
+fn edit_word_clone_default_opts_byte_identical_to_plain() {
+    let mut a = glow_template_fixture(true);
+    let mut b = glow_template_fixture(true);
+    let ra = a
+        .clone_word_segment_with_new_shape("seg1", "seg1_s", 41)
+        .unwrap();
+    let rb = b
+        .clone_word_segment_with_new_shape_ex("seg1", "seg1_s", 41, WordCloneOpts::default())
+        .unwrap();
+    assert_eq!(ra, rb);
+    assert_eq!(ra.muted_records, 0);
+    assert_eq!(a.serialize().unwrap(), b.serialize().unwrap());
+    // Without the mute the clone inherits the pulse (α51 create survives).
+    assert_eq!(sprite_place_records(&a, 50)[1].4, Some(51));
+}
+
+#[test]
+fn edit_word_clone_mute_fails_closed_without_mult_field() {
+    // An additive create with no colour field cannot be muted in place.
+    let mut doc = glow_template_fixture(false);
+    let before = doc.clone();
+    assert!(doc
+        .clone_word_segment_with_new_shape_ex(
+            "seg1",
+            "seg1_s",
+            41,
+            WordCloneOpts {
+                mute_additive_glow: true,
+            },
+        )
+        .is_none());
+    // Non-atomic recipe contract: the caller discards the doc on None. The
+    // fixture is otherwise clonable — the plain recipe (no mute) succeeds on
+    // a pristine copy, so the refusal is the mute's alone.
+    let mut plain = before;
+    assert!(plain
+        .clone_word_segment_with_new_shape("seg1", "seg1_s", 41)
+        .is_some());
+}
+
+#[test]
+fn edit_mute_additive_glow_no_additive_is_noop() {
+    // The plain nested fixture has no additive placement: mute = Some(0),
+    // document byte-identical.
+    let mut doc = nested_template_fixture();
+    let before = doc.serialize().unwrap();
+    let path = doc.find_sprite_by_label("seg1").unwrap();
+    assert_eq!(doc.mute_additive_glow_in_definition(&path, 46), Some(0));
+    assert_eq!(doc.serialize().unwrap(), before);
+    // Unknown sprite id → None.
+    assert!(doc.mute_additive_glow_in_definition(&path, 999).is_none());
+}
+
 #[test]
 fn edit_find_word_shape_by_geo() {
     // Geo-first resolution on the nested (v3-shaped) fixture: shape 41's

@@ -56,10 +56,123 @@ pub const NEW_LABEL: &str = "in_smarvelous";
 /// `smarvelous` for the suffix word (`daju_smarvelous`).
 const REGION_SUFFIX_OLD: &str = "marvelous";
 const REGION_SUFFIX_NEW: &str = "smarvelous";
-/// The maintainer-supplied word art (260×90 — the v3 donor uvrect exactly).
-pub const WORD_PNG: &str = "./data_mods/s_marvelous/dance_judge/smarvelous.png";
+/// Gameplay flash word art variants (both 260×90 — the v3 donor uvrect
+/// exactly; the donor-anchored atlas clone needs identical rects). Chosen by
+/// the "Judgement Color" overlay row / `s_marvelous.judgement_color`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JudgementColor {
+    /// Fully violet word (the original 2026-08-29 colorize).
+    AllPurple,
+    /// Stock white letters + violet extrusion/shadow (maintainer pick
+    /// 2026-09-03) — the default.
+    PurpleShadow,
+}
+
+impl JudgementColor {
+    pub const DEFAULT: JudgementColor = JudgementColor::PurpleShadow;
+    /// Overlay-row values (parallel to `ALL`).
+    pub const ALL: [JudgementColor; 2] = [JudgementColor::AllPurple, JudgementColor::PurpleShadow];
+
+    /// Config key (`s_marvelous.judgement_color`).
+    pub fn key(self) -> &'static str {
+        match self {
+            JudgementColor::AllPurple => "all_purple",
+            JudgementColor::PurpleShadow => "purple_shadow",
+        }
+    }
+    /// Overlay-row label.
+    pub fn label(self) -> &'static str {
+        match self {
+            JudgementColor::AllPurple => "ALL PURPLE",
+            JudgementColor::PurpleShadow => "PURPLE SHADOW",
+        }
+    }
+    pub fn from_key(key: &str) -> Option<JudgementColor> {
+        JudgementColor::ALL.into_iter().find(|c| c.key() == key)
+    }
+    /// Overlay-row value = index into `ALL`.
+    pub fn index(self) -> i32 {
+        JudgementColor::ALL
+            .iter()
+            .position(|c| *c == self)
+            .map(|i| i as i32)
+            .unwrap_or(0)
+    }
+    pub fn from_index(i: i32) -> Option<JudgementColor> {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| JudgementColor::ALL.get(i).copied())
+    }
+    /// The mod-folder PNG for this variant.
+    pub fn png_path(self) -> String {
+        format!("{}/dance_judge/smarvelous_{}.png", MOD_ROOT, self.key())
+    }
+}
+
+/// Resolve the word art to stage for `want`: that variant's PNG, or — when
+/// it is missing on disk — the other variant with one WARN (the two ship
+/// together; a half-installed data drop should not blank the word). `None`
+/// when neither exists.
+fn word_png_for(want: JudgementColor) -> Option<String> {
+    let path = want.png_path();
+    if std::path::Path::new(&path).exists() {
+        return Some(path);
+    }
+    let other = JudgementColor::ALL.into_iter().find(|c| *c != want)?;
+    let alt = other.png_path();
+    if std::path::Path::new(&alt).exists() {
+        log_warn!(
+            "SMarvelous: word art {} missing — using {} instead",
+            path,
+            alt
+        );
+        return Some(alt);
+    }
+    None
+}
 /// Cloned-atlas name prefix (short + unique per atlas_cloner docs).
 const ATLAS_PREFIX: &str = "smarv_dj";
+/// Word-clone options: mute the stock `marvelous_ef` additive self-glow in
+/// the CLONED chain. Stock `dance_marvelous` stamps the word twice — normal
+/// + additive (blend 8) with mult alpha pulsing 0.20 → 0.098 → 0 every ~4–5
+/// frames. Additive blending clamps on white letters (invisible in stock);
+/// on the violet S-Marv art it is a ~12–15 Hz flicker (maintainer video
+/// 2026-09-03, art-only mitigation insufficient). The stock segment is
+/// untouched — the mute edits only the copies the clone creates.
+pub const WORD_CLONE_OPTS: crate::core::ap2::WordCloneOpts = crate::core::ap2::WordCloneOpts {
+    mute_additive_glow: true,
+};
+
+/// The ONE word-clone recipe both the enable-time dry run and the live
+/// patch fn execute (identical bytes in ⇒ identical ids/bytes out — the
+/// staged-id equality check in the patch fn relies on that). Muted first;
+/// if the mute cannot apply on this template (an additive object without a
+/// mult-colour field — not a shape the live builds have) fall back to the
+/// unmuted clone with one WARN rather than losing the word entirely. The
+/// fallback is a pure function of the template bytes, so dry run and live
+/// patch always take the same branch.
+pub fn run_word_clone(
+    doc: &mut Ap2Doc,
+    word_shape_id: u16,
+) -> Option<crate::core::ap2::WordSegmentClone> {
+    let mut muted = doc.clone();
+    if let Some(ids) = muted.clone_word_segment_with_new_shape_ex(
+        SRC_LABEL,
+        NEW_LABEL,
+        word_shape_id,
+        WORD_CLONE_OPTS,
+    ) {
+        *doc = muted;
+        return Some(ids);
+    }
+    if !WARN_GLOW_UNMUTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log_warn!(
+            "SMarvelous: dance_judge additive glow could not be muted on this template — cloning unmuted (expect the stock pulse on the violet word)"
+        );
+    }
+    doc.clone_word_segment_with_new_shape(SRC_LABEL, NEW_LABEL, word_shape_id)
+}
+static WARN_GLOW_UNMUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Everything the patch fn needs, staged at enable.
 pub struct StagedPatch {
@@ -132,16 +245,53 @@ fn resolve_word_chain(doc: &Ap2Doc, ifs_data: &[u8]) -> Option<WordChain> {
     })
 }
 
-/// Stage the full dance_judge asset chain. Any failure WARNs with the
-/// reason and returns `None` (stock behavior — AC-3).
-pub fn stage() -> Option<StagedPatch> {
-    if !std::path::Path::new(WORD_PNG).exists() {
+/// The per-image texture path the game's `tex/md5(new_region)` open is
+/// served from (`handle_texture`'s `{ifs_mod_path}/tex/{image_name}.png`).
+fn staged_word_png(new_region: &str) -> String {
+    format!("{}/{}/tex/{}.png", MOD_ROOT, IFS_MOD_PATH, new_region)
+}
+
+/// Swap the STAGED word art to `color` (the "Judgement Color" row's live
+/// apply): overwrite the per-image PNG and purge LayeredFS's converted
+/// copy + index entry so the next `tex/md5(new_region)` open re-converts
+/// the new bytes. The AFP patch, geo and texturelist are untouched — both
+/// variants share the donor rect. Takes effect when the game next loads
+/// the dance_judge package (the gameplay loader reloads it per song; a
+/// skip-results fast exit can leave it resident one song longer).
+/// Best-effort: failure WARNs and leaves the previous art staged.
+pub fn restage_word_art(color: JudgementColor, new_region: &str) -> bool {
+    let Some(word_png) = word_png_for(color) else {
+        log_warn!(
+            "SMarvelous: word art missing at {} — keeping the staged art",
+            color.png_path()
+        );
+        return false;
+    };
+    let image_png = staged_word_png(new_region);
+    if let Err(e) = std::fs::copy(&word_png, &image_png) {
+        log_warn!("SMarvelous: can't restage {}: {}", image_png, e);
+        return false;
+    }
+    ifs_textures::purge_texture_replacement(IFS_MOD_PATH, new_region);
+    log_info!(
+        "SMarvelous: judgement color {} staged ({} -> {}); applies when dance_judge next loads",
+        color.key(),
+        word_png,
+        image_png
+    );
+    true
+}
+
+/// Stage the full dance_judge asset chain with the `color` word art. Any
+/// failure WARNs with the reason and returns `None` (stock behavior — AC-3).
+pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
+    let Some(word_png) = word_png_for(color) else {
         log_warn!(
             "SMarvelous: word art missing at {} — dance_judge patch not staged",
-            WORD_PNG
+            color.png_path()
         );
         return None;
-    }
+    };
 
     // ── Extract + descramble the stock template ─────────────────────
     let arc_data = match std::fs::read(DANCE_JUDGE_ARC) {
@@ -215,9 +365,7 @@ pub fn stage() -> Option<StagedPatch> {
 
     // ── Dry-run the REAL recipe to learn the ids the patch allocates ─
     let mut scratch = doc.clone();
-    let Some(ids) =
-        scratch.clone_word_segment_with_new_shape(SRC_LABEL, NEW_LABEL, chain.word_shape_id)
-    else {
+    let Some(ids) = run_word_clone(&mut scratch, chain.word_shape_id) else {
         log_warn!("SMarvelous: dance_judge patch dry-run failed — patch not staged");
         return None;
     };
@@ -263,7 +411,7 @@ pub fn stage() -> Option<StagedPatch> {
         specs: vec![OwnedTextureSpec {
             new_name: new_region.clone(),
             donor_name: chain.donor_region.clone(),
-            png_path: WORD_PNG.to_string(),
+            png_path: word_png.clone(),
         }],
         fresh: false, // donor-anchored: cloned geo UVs must stay valid
     }];
@@ -299,8 +447,8 @@ pub fn stage() -> Option<StagedPatch> {
         log_warn!("SMarvelous: mkdir {}: {} — patch not staged", tex_dir, e);
         return None;
     }
-    let image_png = format!("{}/{}.png", tex_dir, new_region);
-    if let Err(e) = std::fs::copy(WORD_PNG, &image_png) {
+    let image_png = staged_word_png(&new_region);
+    if let Err(e) = std::fs::copy(&word_png, &image_png) {
         log_warn!(
             "SMarvelous: can't stage {}: {} — patch not staged",
             image_png,

@@ -429,6 +429,25 @@ pub struct PlaceObjectView {
     pub rotate: Option<(i32, i32)>,
     /// Flag 0x400 — matrix tx/ty, stored s32, fixed-point /20.
     pub translate: Option<(i32, i32)>,
+    /// Multiplicative colour, if the record carries one — the first field
+    /// after the matrix (bemaniutils ~1418/1446): flag 0x800 = wide form,
+    /// 8 bytes `<hhhh>` r/g/b/a; flag 0x2000 = packed form, one u32 with
+    /// `rgba` big-endian in the word (alpha = low byte). Decoded because the
+    /// additive-glow mute edits its alpha in place (see
+    /// `edit.rs::mute_additive_glow_in_definition`).
+    pub mult_color: Option<MultColorField>,
+}
+
+/// Location + encoding of a PlaceObject's multiplicative colour field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultColorField {
+    /// Byte offset of the field within `PlaceObject::data`.
+    pub at: usize,
+    /// `true` = flag 0x800 wide `<hhhh>` (alpha i16 at `at + 6`);
+    /// `false` = flag 0x2000 packed u32 (alpha = byte at `at`).
+    pub wide: bool,
+    /// Alpha in 0..=255 (wide form: the i16, clamped to the byte range).
+    pub alpha: i32,
 }
 
 /// Inputs for [`PlaceObject::build`] — the modeled flags only. Field values
@@ -504,8 +523,51 @@ impl PlaceObject {
             view.translate = Some((read_i32(d, p)?, read_i32(d, p + 4)?));
             p += 8;
         }
-        let _ = p; // Tail (colors/events/filters/…) stays opaque.
+        // Colour fields follow the matrix in flag order 0x800 (wide mult),
+        // 0x1000 (wide add), 0x2000 (packed mult), 0x4000 (packed add). The
+        // mult colour is the first of them, so its position is exact; the
+        // packed form only needs the wide-add skip. Both forms being set on
+        // one record is not a shape the stock data uses — take the wide one.
+        if flags & 0x800 != 0 {
+            let alpha = read_u16(d, p + 6)? as i16 as i32;
+            view.mult_color = Some(MultColorField {
+                at: p,
+                wide: true,
+                alpha,
+            });
+            p += 8;
+        } else if flags & 0x2000 != 0 {
+            let mut q = p;
+            if flags & 0x1000 != 0 {
+                q += 8; // wide additive colour sits between
+            }
+            let alpha = *d.get(q)? as i32;
+            view.mult_color = Some(MultColorField {
+                at: q,
+                wide: false,
+                alpha,
+            });
+            p = q + 4;
+        }
+        let _ = p; // Tail (remaining colours/events/filters/…) stays opaque.
         Some(view)
+    }
+
+    /// Overwrite the multiplicative-colour ALPHA of a record that carries a
+    /// mult colour field (see [`PlaceObjectView::mult_color`]). Payload size
+    /// and every other byte are untouched. `None` when the record has no
+    /// mult colour field (nothing to edit in place) or fails to decode.
+    pub fn set_mult_alpha(&mut self, alpha: u8) -> Option<()> {
+        let field = self.view()?.mult_color?;
+        if field.wide {
+            let at = field.at + 6;
+            self.data
+                .get_mut(at..at + 2)?
+                .copy_from_slice(&(alpha as i16).to_le_bytes());
+        } else {
+            *self.data.get_mut(field.at)? = alpha;
+        }
+        Some(())
     }
 }
 

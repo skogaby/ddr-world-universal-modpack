@@ -296,6 +296,18 @@ impl FixtureBuilder {
         self
     }
 
+    /// Append a PlaceObject from a RAW payload (for fields `PlaceObject::build`
+    /// does not model — blend byte, colour transforms, HSL shifts).
+    pub fn push_place_raw(&mut self, path: &[usize], data: Vec<u8>) -> &mut Self {
+        self.section_mut(path)
+            .tags
+            .push(Tag::PlaceObject(PlaceObject {
+                data,
+                pad: Vec::new(),
+            }));
+        self
+    }
+
     /// Add a frame label to a section, interning the name.
     pub fn add_label(&mut self, path: &[usize], name: &str, frame: u16) -> &mut Self {
         let name_offset = self.intern(name);

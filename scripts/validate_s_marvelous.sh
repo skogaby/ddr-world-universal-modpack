@@ -294,12 +294,22 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
     };
     println!("word_shape_id={word_shape_id}");
     println!("donor_region={donor_region}");
-    let Some(ids) =
-        doc.clone_word_segment_with_new_shape("in_marvelous", "in_smarvelous", word_shape_id)
-    else {
+    // The DLL's exact options (assets::WORD_CLONE_OPTS): mute the additive
+    // marvelous_ef self-glow in the cloned chain. Muted-or-nothing here —
+    // the harness must prove the mute applies on the REAL template (the
+    // DLL's runtime fallback to an unmuted clone is for unknown skins).
+    let Some(ids) = doc.clone_word_segment_with_new_shape_ex(
+        "in_marvelous",
+        "in_smarvelous",
+        word_shape_id,
+        ap2::WordCloneOpts {
+            mute_additive_glow: true,
+        },
+    ) else {
         println!("FAIL smarv-patch: recipe returned None");
         return 1;
     };
+    println!("muted_records={}", ids.muted_records);
     let Some(mut out) = doc.serialize() else {
         println!("FAIL smarv-patch: serialize");
         return 1;
@@ -325,6 +335,45 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
     println!("new_sprite_id={}", ids.new_sprite_id);
     println!("label_frame={label_frame}");
     println!("section_frames={}", sec.frames.len());
+
+    // Mute proof on the serialized output: every additive-blend object in
+    // the CLONED top sprite has mult alpha 0 on all its records; the STOCK
+    // word sprite still carries a non-zero additive alpha (the pulse is
+    // real and was left alone).
+    let additive_alphas = |sprite_id: u16| -> Option<Vec<i32>> {
+        let sp = sec.tags.iter().find_map(|t| match t {
+            ap2::Tag::DefineSprite(s) if s.id == sprite_id => Some(s),
+            _ => None,
+        })?;
+        let mut keys: Vec<(u16, u16)> = Vec::new();
+        let mut alphas = Vec::new();
+        for t in &sp.section.tags {
+            let ap2::Tag::PlaceObject(po) = t else { continue };
+            let v = po.view()?;
+            let key = (v.object_id, v.depth);
+            if v.flags & 0x1 == 0 && v.blend == Some(8) {
+                keys.push(key);
+            }
+            if keys.contains(&key) {
+                if let Some(m) = v.mult_color {
+                    alphas.push(m.alpha);
+                }
+            }
+        }
+        Some(alphas)
+    };
+    let cloned = additive_alphas(ids.new_sprite_id).unwrap_or_default();
+    let stock = additive_alphas(ids.word_sprite_id).unwrap_or_default();
+    println!("cloned_additive_alphas={cloned:?}");
+    println!("stock_additive_alphas={stock:?}");
+    if cloned.is_empty() || cloned.iter().any(|&a| a != 0) {
+        println!("FAIL smarv-patch: cloned additive glow not muted");
+        return 1;
+    }
+    if !stock.iter().any(|&a| a != 0) {
+        println!("FAIL smarv-patch: stock additive glow altered (or absent)");
+        return 1;
+    }
 
     // Re-scramble the string table for bemaniutils consumption (its SWF
     // parser always runs the cipher).
@@ -1103,8 +1152,13 @@ note "Leg D: dance_judge patched-template render proof (real recipe + geo rewrit
 GEO_DIR="$TMP/dev/dance_judge_v3/x/geo"
 SMARV_DIR="$TMP/dev/smarv"
 mkdir -p "$SMARV_DIR"
-WORD_PNG="$REPO_ROOT/data_mods/s_marvelous/dance_judge/smarvelous.png"
-[[ -f "$WORD_PNG" ]] || die "Leg D: word art missing at $WORD_PNG"
+# Both "Judgement Color" variants must ship (assets::JudgementColor); the
+# render uses the default (PURPLE SHADOW).
+for v in all_purple purple_shadow; do
+  [[ -f "$REPO_ROOT/data_mods/s_marvelous/dance_judge/smarvelous_$v.png" ]] \
+    || die "Leg D: word art variant missing: smarvelous_$v.png"
+done
+WORD_PNG="$REPO_ROOT/data_mods/s_marvelous/dance_judge/smarvelous_purple_shadow.png"
 
 # bemaniutils oracle scan — CROSS-CHECK ONLY (the authoritative resolution
 # runs inside smarv-patch via the SHARED core/ap2+core/geo resolver, the
@@ -1146,6 +1200,10 @@ D_LABEL_FRAME=$(grep -oE '^label_frame=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= 
 D_SECTION_FRAMES=$(grep -oE '^section_frames=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
 [[ -n "$NEW_SHAPE_ID" && -n "$D_LABEL_FRAME" && -n "$D_SECTION_FRAMES" ]] \
   || die "Leg D: smarv-patch did not report ids"
+D_MUTED=$(grep -oE '^muted_records=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
+[[ -n "$D_MUTED" && "$D_MUTED" -gt 0 ]] \
+  || die "Leg D: additive-glow mute edited no records on the real template (expected the marvelous_ef create + updates)"
+echo "    [glow] $D_MUTED additive-glow records muted in the cloned chain (stock pulse untouched — asserted by smarv-patch)"
 
 # The REAL geo rewrite (same core/geo fn the DLL asset staging runs).
 "$AP2CHECK" geo-rewrite "$GEO_DIR/dance_judge_shape${WORD_SHAPE_ID}" \

@@ -8,7 +8,8 @@ identical pixel rects so cloned geo UVs stay valid).
 
 | file | donor (package · texture) | size | used by (plan step) |
 |---|---|---|---|
-| `dance_judge/smarvelous.png` | dance_judge0000 · `dance_judge0000_marvelous` | 344×61 | gameplay flash word (Step 4) |
+| `dance_judge/smarvelous_all_purple.png` | dance_judge_v3 · `daju_marvelous` | 260×90 | gameplay flash word, "Judgement Color" = ALL PURPLE (full violet colorize) |
+| `dance_judge/smarvelous_purple_shadow.png` | dance_judge_v3 · `daju_marvelous` | 260×90 | gameplay flash word, "Judgement Color" = PURPLE SHADOW (default; see below) |
 | `dance_combo/smarvelous_0..9.png` | dance_combo0000 · `dance_combo0000_marvelous_0..9` | 72×75 | combo digits (Step 5) |
 | `dance_combo/smarvelous_combo.png` | dance_combo0000 · `dance_combo0000_marvelous_combo` | 147×45 | combo caption (Step 5) |
 | `dance_fullcombo/dafu_eff_smar.png` | dance_fullcombo0000 · `dafu_eff_mar` | 559×67 | FC splash (Step 6) |
@@ -20,6 +21,34 @@ identical pixel rects so cloned geo UVs stay valid).
 | `scene_result/scre_tab_detail_base.png` | scene_result_v3 · `scre_tab_detail_base` | 108×118 | results row-label sheet, Simple results tab (Step 7) |
 | `scene_result/scre_fc_smarvelous.png` | scene_result_v3 · `scre_fc_marvelous` | 232×18 | per-stage S-MFC emblem caption (Step 9) |
 | `scene_result/scre_total_player_fc_smfc.png` | scene_result_v3 · `scre_total_player_fc_mfc` | 30×12 | total-results S-MFC badge (Step 9) |
+
+**Gameplay flash word (`dance_judge/smarvelous_*.png`) and the stock additive
+glow (2026-09-03).** The two variants are selected by the overlay menu's
+"Judgement Color" row (GLOBAL SETTINGS › S-MARVELOUS JUDGEMENT, persisted
+as `s_marvelous.judgement_color` = `all_purple` | `purple_shadow`); the DLL
+copies the chosen PNG to `dance_judge_v3_ifs/tex/daju_smarvelous.png` at
+enable and again on every row edit (purging LayeredFS's converted copy), so
+the change lands when the game next loads the dance_judge package
+(normally the next song). Both files MUST exist and share the 260×90 rect. The stock `dance_marvelous` sprite (sprite 46 in
+`dance_judge_v3`) stamps a SECOND copy of the word over itself in ADDITIVE
+blend (blend 8, instance `marvelous_ef`, mult alpha 0.20 → 0.098 → 0
+looping every ~4–5 frames). On the stock white letters the addition clamps
+at 255 and is invisible; on ANY coloured pixel it reads as a ~12–15 Hz
+brightness/hue flicker. Two-part fix: (1) the DLL's word clone now MUTES
+that layer in the cloned chain (`WordCloneOpts::mute_additive_glow` —
+every record of the additive object gets mult alpha 0; the stock segment
+is untouched; `assets::run_word_clone` falls back to an unmuted clone with
+one WARN on a template where the mute can't apply) — the mute is
+UNCONDITIONAL, independent of the colour choice, so ALL PURPLE renders
+static too; (2) the PURPLE SHADOW PNG keeps the
+donor's neutral pixels (saturation < 0.12 — white fill, black outline, AA
+greys) untouched and recolours only the saturated shadow/highlight pixels
+(hue 280°, saturation floor 0.55, value ×0.90) — maintainer-picked look.
+Generator: inline PIL/numpy HSV
+script (donor decoded from the live `dance_judge_v3.ifs` via bemaniutils'
+IFS class), recorded in
+`.agents/planning/2026-08-29-s-marvelous-judgement/progress.md`
+(2026-09-03 entries).
 
 The two `scene_result` sheets are FULL REPLACEMENTS of the stock 6-row
 judgement-label sheets: the stock block is uniform-scaled ×16/19 (pitch
