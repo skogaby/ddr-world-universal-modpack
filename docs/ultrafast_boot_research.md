@@ -69,7 +69,7 @@ payoff of the cache.
 | `0x1801cbdc0` | SSQ summarize (`SsqReader` chunk index) | Walks chunk list, caches tempo/step chunk pointers, converts tempo table to ms |
 | `0x1801c8680` | `IStepReader::Analyze` | Decodes one (side, difficulty) chart into note records; fills the 14-int result block + 5-int radar block. **Already detoured by NTX** |
 | `0x1801c8ea0` / `0x1801c9440` / `0x1801c9710` | Analyze helpers | Radar/measure computation (internals not fully decoded; outputs land in the blocks we cache) |
-| `0x1801b43f0` | SSQ path builder | `data/mdb_apx/ssq/<basename>.ssq`, with a hardcoded split-file table (`stvi`, `dopa2`, `sabm`, … → `<basename>_<1..5>.ssq`) |
+| `0x1801b43f0` | SSQ path builder (`build_ssq_path`) | `data/mdb_apx/ssq/<basename>.ssq`, with a hardcoded split-file table (`stvi`, `dopa2`, `sabm`, … → `<basename>_<1..5>.ssq`). Full decode + cross-build table + hook analysis: `split_ssq_research.md` |
 | `0x1801fef30` | Manager: register file | FNV-1a name hash dedupe; refcount at `rec+0x24`; new records status ← 1, pushed to pending queue |
 | `0x1801fdbf0` | Manager: pending-queue pump | Drives record status machine; **issues at most `mgr+0x70` (= 4) new file opens per call** |
 | `0x1801fe150` | Manager: release-queue pump | Cancels in-flight entries (→ status 7) or unregisters (refcount--, buffer free at 0) |
