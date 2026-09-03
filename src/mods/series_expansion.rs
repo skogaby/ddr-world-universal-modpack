@@ -634,8 +634,29 @@ impl Mod for SeriesExpansionMod {
         // VERSION builder is the one that seeds its result string with the
         // literal "DDR " (`LEA RDX, [rip→"DDR "]` shortly before the match). Keep
         // only that site; skip the look-alike sibling builders.
+        // The 0x64 backward distance to the table LEA is a fixed instruction
+        // layout (identical on 20250805 / 20260224 / 20260721 / 20260825) but
+        // NOT pinned by the AOB, so verify it is a `LEA RCX,[rip+disp32]`
+        // (48 8D 0D) whose target is the SAME vanilla table the predicate LEA
+        // points at before ever writing a disp32 there — a future reordering
+        // must skip the site, never patch arbitrary code.
+        let vanilla_table = unsafe { decode_rip_relative(self.pred_lea_addr.add(3)) };
         for addr in ctx.signatures.get_all_matches("filter_label_builder_count") {
             if unsafe { builder_seeds_with_ddr(addr) } {
+                let lea_addr = unsafe { addr.add(13).sub(0x64) };
+                let lea_ok = unsafe {
+                    *lea_addr == 0x48
+                        && *lea_addr.add(1) == 0x8D
+                        && *lea_addr.add(2) == 0x0D
+                        && decode_rip_relative(lea_addr.add(3)) == vanilla_table
+                };
+                if !lea_ok {
+                    log_warn!(
+                        "SeriesExpansion: VERSION label builder @ {:p} -- table LEA at -0x64 is not `LEA RCX,[vanilla table]`; site skipped (labels for custom series may be wrong in that filter chip)",
+                        addr
+                    );
+                    continue;
+                }
                 self.label_builder_sites.push(addr);
             } else {
                 log_info!(

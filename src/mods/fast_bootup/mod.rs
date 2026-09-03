@@ -196,8 +196,14 @@ const ENTRY_VARIABLE_BPM: usize = 0x124; // u8[10]
 const ENTRY_FLAG_12E: usize = 0x12E; // u8[10]
 const ENTRY_CORRUPT_FLAG: usize = 0x1B0; // u8 (flag ONLY, never the reporter)
 const ENTRY_EX_SCORE: usize = 0x1B4; // i32[10]
-/// Music-DB entry vtable byte offset of `hasChart(mode, difficulty) -> bool`.
-const ENTRY_HAS_CHART_VFUNC: usize = 0x70;
+                                     // Music-DB entry vtable byte offset of `hasChart(mode, difficulty) -> bool`:
+                                     // `+0x70` on 20260324+ but `+0x58` on 20250805 / 20260224 (three vtable
+                                     // entries were inserted; on the old builds `+0x70` is `isShock` — same
+                                     // argument shape, so a hardcoded slot returns a silently WRONG answer, not a
+                                     // crash). Derived by `SignatureStore::entry_has_chart_vslot` from the vcall
+                                     // CheckStepDataActor::onUpdate itself makes; 0 = underived ⇒ replay stays
+                                     // off (`has_chart` returns false and `enable` refuses to arm replay).
+static mut ENTRY_HAS_CHART_VFUNC: usize = 0;
 
 /// Step-data record field offsets (stride 0x40, base = `[table+0x08]`).
 const REC_STRIDE: usize = 0x40;
@@ -817,8 +823,9 @@ unsafe fn apply_db_writes(
     }
 }
 
-/// Call the music-DB entry's `hasChart(mode, difficulty)` vfunc (+0x70).
-/// False on any null pointer (never a chart ⇒ never a corruption flag).
+/// Call the music-DB entry's `hasChart(mode, difficulty)` vfunc (the
+/// build's derived slot). False on any null pointer or an underived slot
+/// (never a chart ⇒ never a corruption flag).
 unsafe fn has_chart(entry: *mut u8, mode: i32, difficulty: i32) -> bool {
     if entry.is_null() {
         return false;
@@ -827,7 +834,11 @@ unsafe fn has_chart(entry: *mut u8, mode: i32, difficulty: i32) -> bool {
     if vtable.is_null() {
         return false;
     }
-    let fptr = *(vtable.add(ENTRY_HAS_CHART_VFUNC) as *const *const u8);
+    let vslot = std::ptr::read(std::ptr::addr_of!(ENTRY_HAS_CHART_VFUNC));
+    if vslot == 0 {
+        return false;
+    }
+    let fptr = *(vtable.add(vslot) as *const *const u8);
     if fptr.is_null() {
         return false;
     }
@@ -1060,6 +1071,9 @@ impl Mod for FastBootupMod {
                 VARIABLE_BPM_THRESHOLD = *(a as *const f64);
                 THRESHOLD_RESOLVED = true;
             }
+            if let Some(slot) = ctx.signatures.entry_has_chart_vslot() {
+                ENTRY_HAS_CHART_VFUNC = slot;
+            }
         }
         // Register the boot-capture subscriber on the shared Analyze
         // dispatcher (harmless if the dispatcher never armed — the subscriber
@@ -1093,8 +1107,14 @@ impl Mod for FastBootupMod {
             let find_ok = std::ptr::addr_of!(FIND_MCODE).read().is_some();
             let release_ok = std::ptr::addr_of!(RELEASE_FN).read().is_some();
             let threshold_ok = std::ptr::read(std::ptr::addr_of!(THRESHOLD_RESOLVED));
+            let has_chart_ok = std::ptr::read(std::ptr::addr_of!(ENTRY_HAS_CHART_VFUNC)) != 0;
             let cache_armed = crate::services::analyze_hook::is_available();
-            let replay_armed = find_ok && release_ok && threshold_ok;
+            let replay_armed = find_ok && release_ok && threshold_ok && has_chart_ok;
+            if !has_chart_ok {
+                crate::log_warn!(
+                    "FastBootup: hasChart vtable slot underived -- step-data cache replay disabled (capture + loader pacing only)"
+                );
+            }
             CACHE_ARMED = cache_armed;
             REPLAY_ARMED = replay_armed;
             if cache_armed || replay_armed {

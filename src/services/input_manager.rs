@@ -328,14 +328,21 @@ struct ArkVtableSlots {
 
 /// Decode the vtable slot an `arkMDXGet*` export wrapper dispatches through.
 /// Every wrapper (verified byte-identical apart from the disp32 on the
-/// 20250805 and 20260721 arks) ends in `JMP qword [R10+disp32]`
-/// (`41 FF A2 d32`) or `CALL qword [R11+disp32]` (`41 FF 91 d32`): scan the
-/// first 0x80 bytes for a REX.B `FF /2` or `FF /4` with mod=10 and a
-/// non-SIB base, and take its disp32. Returns None when the shape is absent.
+/// 20250805 / 20260224 / 20260721 arks) dispatches through
+/// `CALL qword [R11+disp32]` (`41 FF 93 d32` — the panel getters) or the
+/// tail-jump `JMP qword [R10+disp32]` (`49 FF A2 d32` — the 10-key getter;
+/// MSVC emits REX.W on the tail JMP, so the prefix is `49`, NOT `41`):
+/// scan the first 0x80 bytes for a REX-prefixed `FF /2` or `FF /4` with
+/// mod=10 and a non-SIB base, and take its disp32. Any REX byte with the B
+/// bit set (`41`, `49`) is accepted — the 2026-09-03 regression was this
+/// helper accepting only `41`, which made the 10-key slot underivable on
+/// EVERY ark and disabled all injection detours (pinpad 0-0-0, menu bytes,
+/// card-in, stage panels) cabinet-wide. Returns None when the shape is absent.
 unsafe fn derive_vtable_slot_from_export(export: *const u8) -> Option<usize> {
     let body = std::slice::from_raw_parts(export, 0x80);
     for i in 0..body.len() - 7 {
-        if body[i] != 0x41 || body[i + 1] != 0xFF {
+        // REX prefix with REX.B (0x41 / 0x49 / any 0x4?, bit 0 set) + FF.
+        if (body[i] & 0xF1) != 0x41 || body[i + 1] != 0xFF {
             continue;
         }
         let modrm = body[i + 2];

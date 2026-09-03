@@ -791,3 +791,94 @@ Rules:
 - Don't trust the packaged `musicdb.xml` for "is this song selectable":
   its `diffLv 255` placeholders are overwritten by the server. Ask the
   maintainer / check the game.
+
+## A signature that hits on every build can still be wrong on half of them (2026-09-03)
+
+**Symptom:** none reported yet — this was the proactive sweep after the
+2026-09-03 field fixes. The offline harness (`scripts/validate_signatures.sh`,
+the DLL's REAL resolver over PE-mapped copies of all four builds) said every
+name resolves everywhere. The post-match shape diff
+(`scripts/sig_harness/shape_diff.py`) then showed 60-odd signatures whose
+instruction stream diverges within 0x200 bytes of the match on 20250805 /
+20260224, and the consumer review found three functional breaks hiding
+behind "green" AOBs:
+
+- `GamePlayActor` fields ≥ `+0x208` are 8 bytes LOWER on the old builds.
+  Three consumers hardcoded the 2026 values (`real_speed` `+0x290..`,
+  `song_reset` `+0x2A0..+0x2B8`, `quick_restart_or_fail` `+0x2B7/+0x2B8`)
+  and every one of their anchor signatures matched fine — they were
+  writing into neighbouring fields.
+- `ShutterActor` kind fields `+0x310/+0x314` are `+0x2E0/+0x2E4` on the old
+  builds and the stage panel is kind 1 not 3. The range checks turned a
+  wrong read into "fall back silently", so the fast path had simply never
+  worked there.
+- The music-DB entry `hasChart` vslot `+0x70` is `+0x58` on the old builds;
+  `+0x70` there is `isShock` with the SAME argument shape — no crash, wrong
+  boolean.
+
+Rules:
+- **Uniqueness ≠ compatibility.** An AOB proves the literal prefix exists.
+  Every `match+N` read, every hardcoded struct offset a consumer learned
+  from the instructions around the match, is a separate cross-build claim
+  that needs its own evidence. Run `shape_diff.py` after any signature or
+  consumer-offset change and read the consumers of every divergent
+  signature.
+- **Derive layouts from the ctor's seed block, not from a decompile of one
+  build.** A ctor that stores known immediates (1.0f, 100, -1) at the
+  fields you care about is an oracle: decode the stores after a unique
+  anchor, then demand each seed immediate at the predicted displacement
+  exactly once (`derive_gameplay_actor_layout`). Decode stores with a
+  register-agnostic ModRM/SIB walk — the same ctor keeps the actor in
+  `RDI` on one build and `R12` (SIB-encoded) on another.
+- **"Same argument shape, different function" is the nastiest vtable
+  drift.** When a consumer calls a vslot it hardcoded, find the site where
+  the GAME calls the same method and take the disp8 from there
+  (`entry_has_chart_vslot`), because a wrong slot with a compatible
+  signature returns garbage instead of crashing.
+- **Publish non-address derivations through `publish_value`.** Offsets,
+  vslots and kind ids ride the same `resolved` map as `base + value`, so
+  the boot log and the harness report show them (`name (derived) = 0x…`)
+  and a wrong value is visible in a user's `log.txt` without a repro.
+- **Range checks that turn "wrong layout" into "fallback" hide the bug.**
+  quick_restart's shutter reads were range-validated (good — no crash) but
+  the only trace of the old-build miss was a per-trigger INFO line. Every
+  layout-dependent path needs a derivation whose ABSENCE is a one-shot
+  boot WARN naming the build-dependent thing it couldn't find.
+- The same review caught a build-INDEPENDENT dead diagnostic: the
+  `result_commit` skip-offset decoder read +48/+51 where the instruction
+  sits at +56/+59, so its opcode check failed on every build and the tap
+  never armed. Documented offsets in a pattern comment are a claim too —
+  the shape-diff dump (or `python3 + pefile` on the raw DLL) settles them
+  in seconds.
+
+## A derivation that fails CLOSED on every build looks exactly like "the feature is off" (2026-09-03)
+
+**Symptom:** regression testing on 20260721 — pinpad 0-0-0 on the SMX touch
+overlay no longer opened the mod menu. One WARN in `log.txt`: `could not
+derive the arkMDXIO vtable slots from the export wrappers -- injection
+detours NOT installed`.
+
+**Cause:** commit `475d735` replaced the hardcoded arkMDXIO vtable slots
+with a derivation from the `arkMDXGet*` export wrappers, validated on the
+20250805 build the report came from. The helper accepted only a `41` REX
+byte before `FF /2|/4`, but `arkMDXGet10Key` TAIL-JUMPS (`49 FF A2 d32`,
+REX.WB). The 10-key slot therefore never derived, `derive_ark_vtable_slots`
+returned `None`, and EVERY injection detour (pinpad pulses, menu bytes,
+card-in, stage panels) was withheld — on all three arks, not just the new
+one. The old-build validation passed because the crash it targeted (calling
+a panel getter through the 4-arg 10-key detour) is also avoided by
+installing nothing.
+
+Rules:
+- A derivation's fail-closed branch must be exercised as a FAILURE in the
+  test, not accepted as a pass: "no crash" and "nothing installed" are
+  indistinguishable from the outside. Check the boot log for the `[+]`
+  line the derivation should print before calling the fix validated.
+- Any x64 `FF /2` / `FF /4` indirect-dispatch matcher must accept every
+  REX byte with the relevant extension bit (`(b & 0xF1) == 0x41` for
+  REX.B), not the single value seen in one decompile — MSVC emits REX.W on
+  tail jumps and not on calls to the same slot.
+- Derivations that live outside `signatures.rs` (input_manager's ark
+  vtable slots) are invisible to `validate_signatures.sh`. Mirror them in
+  `scripts/sig_harness/ark_check.py` (byte-for-byte Python port, run by the
+  same script) and KEEP THE PORT IN STEP with the Rust helper.

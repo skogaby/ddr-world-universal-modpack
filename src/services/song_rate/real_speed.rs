@@ -90,7 +90,7 @@ pub fn rate_adjusted_multiplier(
 
 #[cfg(windows)]
 mod glue {
-    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use super::rate_adjusted_multiplier;
@@ -104,13 +104,17 @@ mod glue {
     /// Offset of the play-side enum on the gameplay actor (the documented
     /// constant assist_tick/autoplay use).
     const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
-    /// The actor's multiplier cluster (RE record: context.md; the actor
-    /// latches these at construction and re-writes the renderers from the
-    /// two floats every frame). `+0x290` current, `+0x294` lerp target
-    /// (both f32, multiplier/100), `+0x29C` the int ×100 copy.
-    const ACTOR_SPEED_CURRENT: usize = 0x290;
-    const ACTOR_SPEED_TARGET: usize = 0x294;
-    const ACTOR_SPEED_INT: usize = 0x29C;
+    // The actor's multiplier cluster (RE record: context.md; the actor
+    // latches these at construction and re-writes the renderers from the
+    // two floats every frame): current f32, lerp-target f32 (both
+    // multiplier/100), the int ×100 copy. `+0x290/+0x294/+0x29C` on
+    // 20260324+ but `+0x288/+0x28C/+0x294` on 20250805 / 20260224 (the whole
+    // GamePlayActor region above ~+0x208 sits 8 bytes lower there) — so the
+    // offsets come from `SignatureStore::gameplay_actor_layout()` (derived
+    // from the ctor's seed block) and the recompute stays inert without it.
+    static ACTOR_SPEED_CURRENT: AtomicUsize = AtomicUsize::new(0);
+    static ACTOR_SPEED_TARGET: AtomicUsize = AtomicUsize::new(0);
+    static ACTOR_SPEED_INT: AtomicUsize = AtomicUsize::new(0);
     // The embedded `ddr::player::Option` offset within the side context is
     // build-dependent (0xE0 / 0xF0) — `stage_records::player_option_offset()`.
     /// `ddr::player::Option` fields (verified 20260721; layout stable since
@@ -138,6 +142,15 @@ mod glue {
 
     /// Resolve the option-table chain. Returns availability.
     pub fn init(signatures: &SignatureStore) -> bool {
+        let Some(layout) = signatures.gameplay_actor_layout() else {
+            log_warn!(
+                "song_rate/real_speed: GamePlayActor layout underived -- rate-aware Real Speed stays stock"
+            );
+            return false;
+        };
+        ACTOR_SPEED_CURRENT.store(layout.speed_current, Ordering::Release);
+        ACTOR_SPEED_TARGET.store(layout.speed_target, Ordering::Release);
+        ACTOR_SPEED_INT.store(layout.speed_int, Ordering::Release);
         match signatures.get_address("player_option_table") {
             Some(table) => {
                 PLAYER_OPTION_TABLE.store(table as *mut u8, Ordering::Release);
@@ -248,11 +261,17 @@ mod glue {
             // Option+0x10 keeps the game's own displays consistent. Writing
             // both lerp endpoints collapses any in-flight speed transition
             // to the adjusted value.
+            let speed_int = ACTOR_SPEED_INT.load(Ordering::Acquire);
+            let speed_current = ACTOR_SPEED_CURRENT.load(Ordering::Acquire);
+            let speed_target = ACTOR_SPEED_TARGET.load(Ordering::Acquire);
+            if speed_int == 0 || speed_current == 0 || speed_target == 0 {
+                return warn_chain_unreadable("GamePlayActor speed-cluster layout underived", side);
+            }
             *(option.add(OPTION_DERIVED_MULTIPLIER) as *mut i32) = multiplier;
-            *(actor.add(ACTOR_SPEED_INT) as *mut i32) = multiplier;
+            *(actor.add(speed_int) as *mut i32) = multiplier;
             let as_float = multiplier as f32 / 100.0;
-            *(actor.add(ACTOR_SPEED_CURRENT) as *mut f32) = as_float;
-            *(actor.add(ACTOR_SPEED_TARGET) as *mut f32) = as_float;
+            *(actor.add(speed_current) as *mut f32) = as_float;
+            *(actor.add(speed_target) as *mut f32) = as_float;
             log_info!(
                 "song_rate/real_speed: side {} multiplier {} (target {} core {:.2} at {}%)",
                 side,

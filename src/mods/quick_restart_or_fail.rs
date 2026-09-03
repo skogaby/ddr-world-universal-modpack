@@ -122,6 +122,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering}
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::core::signatures::{GamePlayActorLayout, ShutterActorLayout};
 use crate::core::{memory, module_resolver};
 use crate::mods::config;
 use crate::mods::mod_menu;
@@ -251,16 +252,14 @@ const STEP_GAME_OVER: u32 = 5;
 /// advanced past STEP_GAME_OVER. (Fallback path only.)
 const GAMEPLAY_ACTOR_IS_DEAD_OFFSET: usize = 0x1E8;
 
-/// `GamePlayActor::m_canInstantDeath`-equivalent gate at `+0x2B7`.
-/// `gauge::DEAD`'s case body in `GamePlayActor::onReceiveMessage` is
-/// guarded on this byte; writing 1 here mirrors the hard-gauge
-/// configuration the natural flow expects when the player dies.
-/// (Fallback path only.)
-const GAMEPLAY_ACTOR_DEATH_GATE_OFFSET: usize = 0x2B7;
-
-/// `GamePlayActor`'s death-result flag set by `gauge::DEAD`'s case
-/// body. Writing 1 here matches the post-DEAD state. (Fallback path only.)
-const GAMEPLAY_ACTOR_DEATH_RESULT_OFFSET: usize = 0x2B8;
+// `GamePlayActor::m_canInstantDeath`-equivalent gate (`gauge::DEAD`'s case
+// body in `GamePlayActor::onReceiveMessage` is guarded on this byte; writing
+// 1 mirrors the hard-gauge configuration the natural flow expects when the
+// player dies) and the death-result flag that case body sets. `+0x2B7/+0x2B8`
+// on 20260324+ but `+0x2AF/+0x2B0` on 20250805 / 20260224 — read from
+// `SignatureStore::gameplay_actor_layout()` at init. (Fallback path only;
+// without the layout the fallback still forces `m_isDead` + STEP_GAME_OVER.)
+static GPA_LAYOUT: std::sync::OnceLock<GamePlayActorLayout> = std::sync::OnceLock::new();
 
 /// Sanity bound for the stage counter / max-stage values read by the
 /// skip-results predicate; anything outside means a decode went wrong.
@@ -281,11 +280,14 @@ const SELECT_LOADER_1IDX: i32 = 0x19;
 /// StackStep shape as `GAMEPLAY_ACTOR_STEP_OFFSET`.
 const SHUTTER_STEP_BASE: usize = 0x58;
 const SHUTTER_STEP_INDEX: usize = 0x82;
-/// Active shutter kind (`-1` = none; `3` = the stage jacket panel).
-const SHUTTER_ACTIVE_KIND_OFFSET: usize = 0x310;
-/// Pending requested kind (written by msg 0x1007; `-1` = none).
-const SHUTTER_PENDING_KIND_OFFSET: usize = 0x314;
-const SHUTTER_KIND_STAGE: i32 = 3;
+// Active shutter kind (`-1` = none), pending requested kind (written by msg
+// 0x1007; `-1` = none) and the stage-jacket panel's kind id. `+0x310/+0x314`
+// and kind 3 on 20260324+, but `+0x2E0/+0x2E4` and kind 1 on 20250805 /
+// 20260224 (whose shutter has 6 kinds, not 9) — derived per build by
+// `SignatureStore::derive_shutter_actor_layout` from the onUpdate kind/layer
+// lookup + stage-kind compare. Without it every shutter read fails and the
+// fast paths fall back (the pre-2026-09 behavior on the old builds).
+static SHUTTER_LAYOUT: std::sync::OnceLock<ShutterActorLayout> = std::sync::OnceLock::new();
 /// Shutter states the fast path understands: 0 = idle (layer released),
 /// 4 = closed/covering (the READY-window park — the jacket panel fully
 /// displayed, waiting for DPS state 5's `stage_out` send), 5 = the
@@ -519,6 +521,22 @@ impl Mod for QuickRestartOrFailMod {
                 "QuickRestartOrFail: shutter_actor_global unresolved -- fast paths unavailable (natural fail flow only)"
             ),
         }
+        match ctx.signatures.shutter_actor_layout() {
+            Some(layout) => {
+                let _ = SHUTTER_LAYOUT.set(layout);
+            }
+            None => log_warn!(
+                "QuickRestartOrFail: ShutterActor layout underived -- fast paths unavailable (natural fail flow only)"
+            ),
+        }
+        match ctx.signatures.gameplay_actor_layout() {
+            Some(layout) => {
+                let _ = GPA_LAYOUT.set(layout);
+            }
+            None => log_warn!(
+                "QuickRestartOrFail: GamePlayActor layout underived -- fallback death simulation skips the death-gate/result bytes"
+            ),
+        }
         // Optional: the select-residency patch site (applied at enable()).
         match ctx.signatures.get_address("gameplay_loader_masks") {
             Some(addr) => LOADER_MASKS_SITE.store(addr as *mut u8, Ordering::Release),
@@ -697,8 +715,15 @@ fn find_gameplay_actors() -> Vec<*mut u8> {
 ///   which kicks the per-actor fade-out and bubbles up through
 ///   STEP_END → DPS::STEP_FINISH → STEP_CLOSING → `returnToParent`.
 unsafe fn force_game_over(actor: *mut u8) {
-    *(actor.add(GAMEPLAY_ACTOR_DEATH_GATE_OFFSET)) = 1;
-    *(actor.add(GAMEPLAY_ACTOR_DEATH_RESULT_OFFSET)) = 1;
+    match GPA_LAYOUT.get() {
+        Some(layout) => {
+            *(actor.add(layout.death_gate)) = 1;
+            *(actor.add(layout.death_result)) = 1;
+        }
+        None => log_warn!(
+            "QuickRestartOrFail: GamePlayActor layout underived -- forcing game over without the death-gate/result bytes"
+        ),
+    }
     *(actor.add(GAMEPLAY_ACTOR_IS_DEAD_OFFSET)) = 1;
     *(actor.add(GAMEPLAY_ACTOR_STEP_OFFSET) as *mut u32) = STEP_GAME_OVER;
 }
@@ -892,8 +917,11 @@ fn read_shutter() -> Result<Option<ShutterSnapshot>, &'static str> {
             return Err("step index out of range");
         }
         let state = *(actor.add(SHUTTER_STEP_BASE + idx * 8) as *const i32);
-        let active_kind = *(actor.add(SHUTTER_ACTIVE_KIND_OFFSET) as *const i32);
-        let pending_kind = *(actor.add(SHUTTER_PENDING_KIND_OFFSET) as *const i32);
+        let Some(layout) = SHUTTER_LAYOUT.get() else {
+            return Err("shutter layout underived");
+        };
+        let active_kind = *(actor.add(layout.active_kind) as *const i32);
+        let pending_kind = *(actor.add(layout.pending_kind) as *const i32);
         if !(0..=SHUTTER_STATE_MAX).contains(&state)
             || !(-1..=SHUTTER_STATE_MAX).contains(&active_kind)
             || !(-1..=SHUTTER_STATE_MAX).contains(&pending_kind)
@@ -940,7 +968,7 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
     if matches!(
         s.state,
         SHUTTER_STATE_COVERED | SHUTTER_STATE_REVEALING | SHUTTER_STATE_PARKED_REVEALED
-    ) && s.active_kind == SHUTTER_KIND_STAGE
+    ) && Some(s.active_kind) == SHUTTER_LAYOUT.get().map(|l| l.stage_kind)
         && s.pending_kind < 0
     {
         unsafe {
@@ -1030,8 +1058,11 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
 /// failed lookup just leaves the drain to its stock behavior.
 fn unblock_shutter_drain(actor: *mut u8) {
     unsafe {
-        let kind = *(actor.add(SHUTTER_ACTIVE_KIND_OFFSET) as *const i32);
-        if kind != SHUTTER_KIND_STAGE {
+        let Some(layout) = SHUTTER_LAYOUT.get() else {
+            return;
+        };
+        let kind = *(actor.add(layout.active_kind) as *const i32);
+        if kind != layout.stage_kind || kind < 0 {
             return;
         }
         let layer =

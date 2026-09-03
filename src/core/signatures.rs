@@ -24,6 +24,94 @@ pub struct ResolveResult {
     pub missing: Vec<String>,
 }
 
+/// Build-dependent `GamePlayActor` field offsets (see
+/// `SignatureStore::derive_gameplay_actor_layout`). All are byte offsets
+/// from the actor; the speed cluster is f32/f32/(unused)/i32, the gauge
+/// cluster five f32s, the death flags two bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GamePlayActorLayout {
+    /// f32 current speed multiplier (ctor 1.0).
+    pub speed_current: usize,
+    /// f32 lerp-target multiplier (ctor 1.0).
+    pub speed_target: usize,
+    /// i32 ×100 integer copy of the multiplier (ctor 100).
+    pub speed_int: usize,
+    /// Gauge-percent tracking: min (ctor 1.0), max, last, accumulated
+    /// loss, accumulated gain (ctor 0.0).
+    pub gauge_min: usize,
+    pub gauge_max: usize,
+    pub gauge_last: usize,
+    pub gauge_loss: usize,
+    pub gauge_gain: usize,
+    /// Instant-death gauge gate byte (`m_canInstantDeath`-equivalent).
+    pub death_gate: usize,
+    /// Death-result flag byte set by the `gauge::DEAD` handler.
+    pub death_result: usize,
+}
+
+/// Build-dependent `ShutterActor` layout (see
+/// `SignatureStore::derive_shutter_actor_layout`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShutterActorLayout {
+    /// i32 active shutter kind (-1 = none).
+    pub active_kind: usize,
+    /// i32 pending shutter kind (-1 = none).
+    pub pending_kind: usize,
+    /// The kind id of the stage-jacket "READY?" panel.
+    pub stage_kind: i32,
+}
+
+/// Decode one `MOV [base+disp32], src` store at `p` whose primary opcode is
+/// `opcode` (0x88 = r/m8,r8; 0x89 = r/m32,r32; 0xC6 = r/m8,imm8; 0xC7 =
+/// r/m32,imm32 — or r/m16,imm16 with `want_66`). Accepts an optional REX
+/// prefix and a SIB byte (so RDI- and R12-based actors decode alike), and
+/// requires ModRM mod=10 (disp32). Returns `(instruction length, disp32)`.
+///
+/// # Safety
+/// `p..p+16` must be readable.
+unsafe fn decode_mem_store_disp32(
+    p: *const u8,
+    opcode: u8,
+    want_66: bool,
+) -> Option<(usize, usize)> {
+    let mut i = 0usize;
+    if want_66 {
+        if *p != 0x66 {
+            return None;
+        }
+        i += 1;
+    }
+    if (*p.add(i) & 0xF0) == 0x40 {
+        i += 1; // REX
+    }
+    if *p.add(i) != opcode {
+        return None;
+    }
+    i += 1;
+    let modrm = *p.add(i);
+    if (modrm & 0xC0) != 0x80 {
+        return None;
+    }
+    i += 1;
+    if (modrm & 7) == 4 {
+        i += 1; // SIB
+    }
+    let disp = (p.add(i) as *const u32).read_unaligned() as usize;
+    i += 4;
+    i += match opcode {
+        0xC6 => 1,
+        0xC7 => {
+            if want_66 {
+                2
+            } else {
+                4
+            }
+        }
+        _ => 0,
+    };
+    Some((i, disp))
+}
+
 const SONG_RATE_CLOCK_ANCHOR_PATTERN: &str = "48 63 89 84 00 00 00 48 8D 35 ?? ?? ?? ?? 33 D2 48 8B 0C CE E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 92 48 02 00 00 44 8D 34 18 4C 8D 67 58 41 0F B7 54 24 2A";
 // Pre-20260324 codegen (20250805 @ 0x1800598D5, 20260224 @ 0x180058915): the
 // Option accessor takes no second argument, so the `33 D2` XOR EDX,EDX is
@@ -224,12 +312,12 @@ const SIGNATURES: &[SignatureDefinition] = &[
     //   8B 81 94 01 00 00 03 81 9C 01 00 00  taps + shocks judged
     //   75 ??                              JNZ (else "MDX1529" no-judge report)
     //   48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ??
-    //   48 83 BE ?? ?? 00 00 00            CMP qword [RSI+d32],0    (skip flag 2; d32 at +51:
-    //                                        0x288 / 0x280 — always skip1 + 8)
+    //   48 83 BE ?? ?? 00 00 00            CMP qword [RSI+d32],0    (skip flag 2 at +56; d32 at
+    //                                        +59: 0x288 / 0x280 — always skip1 + 8)
     //
     // Both GamePlayActor skip-flag displacements are wildcarded (the actor grew
     // 8 bytes before 20260324); premium_free's diag decodes them from the match
-    // at +13 / +51 instead of hardcoding 0x280/0x288. Unique on 20250805/
+    // at +13 / +59 instead of hardcoding 0x280/0x288. Unique on 20250805/
     // 20260224/20260526/20260721.
     //
     // Detoured post-original by premium_free's ghost cache (snapshot the
@@ -1915,6 +2003,8 @@ impl SignatureStore {
         self.derive_playfield_styling();
         self.derive_game_audio_addresses();
         self.derive_player_option_table();
+        self.derive_gameplay_actor_layout();
+        self.derive_shutter_actor_layout();
         self.derive_strip_hud_anchors();
         self.derive_frame_tick_global();
         self.find_gauge_vtables();
@@ -2884,7 +2974,7 @@ impl SignatureStore {
             .insert("guideline_bulk_emitter".into(), emitter);
         unsafe {
             log_info!(
-                "  [+] guideline_draw (derived) @ +0x{:X}; cull_site @ +0x{:X}; bulk_emitter @ +0x{:X} (1 caller)",
+                "  [+] guideline_draw (derived) @ +0x{:X}; guideline_cull_site @ +0x{:X}; guideline_bulk_emitter @ +0x{:X} (1 caller)",
                 draw.offset_from(self.base) as usize,
                 cull_site.offset_from(self.base) as usize,
                 emitter.offset_from(self.base) as usize
@@ -3155,7 +3245,7 @@ impl SignatureStore {
             let ctor_call = alloc_site.add(22);
             if *ctor_call != 0xE8 {
                 log_warn!(
-                    "  [-] gameplay_obj_ctor -- expected E8 at alloc+20, got 0x{:02X}",
+                    "  [-] gameplay_obj_ctor -- expected E8 at alloc+22, got 0x{:02X}",
                     *ctor_call
                 );
                 return;
@@ -3340,7 +3430,46 @@ impl SignatureStore {
                 }
             }
             record!("step_data_release", release);
+
+            // (5) entry_has_chart_vslot: onUpdate's own `hasChart(mode,
+            //     difficulty)` virtual call on the music-DB entry —
+            //     `MOV R8D,EBX; MOV EDI,[RSP+0x48]; MOV EDX,EDI; MOV RCX,RSI;
+            //     CALL qword [RAX+disp8]`. The slot is `+0x70` on 20260324+
+            //     but `+0x58` on 20250805 / 20260224 (three vtable entries
+            //     were inserted; on the old builds `+0x70` is `isShock`, same
+            //     argument shape — a silent wrong answer, not a crash). The
+            //     replay path must call whatever slot the game itself calls.
+            const HAS_CHART_VCALL: [u8; 13] = [
+                0x44, 0x8B, 0xC3, 0x8B, 0x7C, 0x24, 0x48, 0x8B, 0xD7, 0x48, 0x8B, 0xCE, 0xFF,
+            ];
+            let mut vslot: Option<usize> = None;
+            let mut vslot_hits = 0usize;
+            for i in 0..end.saturating_sub(HAS_CHART_VCALL.len() + 2) {
+                let p = update.add(i);
+                if (0..HAS_CHART_VCALL.len()).all(|j| *p.add(j) == HAS_CHART_VCALL[j])
+                    && *p.add(13) == 0x50
+                {
+                    vslot = Some(*p.add(14) as usize);
+                    vslot_hits += 1;
+                }
+            }
+            match (vslot, vslot_hits) {
+                (Some(slot), 1) if slot % 8 == 0 && slot < 0x200 => {
+                    self.publish_value("entry_has_chart_vslot", slot);
+                }
+                (_, n) => log_warn!(
+                    "  [-] entry_has_chart_vslot -- hasChart vcall not uniquely found in onUpdate ({} hit(s))",
+                    n
+                ),
+            }
         }
+    }
+
+    /// Byte offset of the music-DB entry's `hasChart(mode, difficulty)`
+    /// vtable slot as CheckStepDataActor::onUpdate itself calls it, or
+    /// `None` (fast_bootup's cache replay must then stay off).
+    pub fn entry_has_chart_vslot(&self) -> Option<usize> {
+        self.published_value("entry_has_chart_vslot")
     }
 
     fn find_scene_transition(&mut self) {
@@ -3840,6 +3969,296 @@ impl SignatureStore {
     pub fn player_option_offset(&self) -> Option<usize> {
         self.get_address("player_option_offset")
             .map(|p| (p as usize).wrapping_sub(self.base as usize))
+    }
+
+    /// Read a published pseudo-address (`base + value`) back as the value.
+    fn published_value(&self, name: &str) -> Option<usize> {
+        self.get_address(name)
+            .map(|p| (p as usize).wrapping_sub(self.base as usize))
+    }
+
+    /// Publish a small non-address value under `name` as `base + value` (the
+    /// `player_option_offset` convention) so it rides the ordinary
+    /// `resolved` map and the boot log.
+    fn publish_value(&mut self, name: &str, value: usize) {
+        self.resolved
+            .insert(name.into(), unsafe { self.base.add(value) });
+        log_info!("  [+] {} (derived) = 0x{:X}", name, value);
+    }
+
+    // ── GamePlayActor build-dependent layout ────────────────────────────
+    //
+    // Every GamePlayActor field at or above ~+0x208 sits 8 bytes LOWER on
+    // 20250805 / 20260224 than on 20260324+ (the field cluster ≤ +0x1E9 —
+    // side, judge counts, combo, is_dead — is identical). Three consumers
+    // write into that region (song_rate's Real Speed recompute, the in-place
+    // song reset's gauge-cluster + death-result restore, quick restart's
+    // fallback death simulation), so the offsets are derived from the ctor's
+    // seed block instead of being hardcoded. The ctor tail (byte-identical
+    // apart from the register the actor lives in and the displacements):
+    //
+    //   MOV  dword [A+speed  ], 0x3F800000   ; multiplier current = 1.0
+    //   MOV  qword [A+speed+4], 0x3F800000   ; lerp target = 1.0, +8 = 0
+    //   MOV  dword [A+speed+C], 0x64         ; ×100 int copy = 100
+    //   MOV  qword [A+gauge  ], 0x3F800000   ; gauge min = 1.0, max = 0.0
+    //   MOV  qword [A+gauge+8], REG(0)       ; last / loss
+    //   MOV  dword [A+gauge+10], REG(0)      ; gain
+    //   MOV  RAX,[rip+GameWork]; MOV RCX,[RAX]; CMP qword [RCX+0x70],0; SETNE AL
+    //   MOV  byte  [A+course ], AL           ; <- ANCHOR ends here
+    //   MOV  word  [A+course+1], 0
+    //   MOVZX EAX, byte [RBP+0x97]
+    //   MOV  byte  [A+course+3], AL          ; instant-death gauge gate
+    //   MOV  byte  [A+course+4], 0           ; death-result flag
+    //
+    // 20260721: speed 0x290, gauge 0x2A0, course 0x2B4, gate 0x2B7, result
+    // 0x2B8 (actor in RDI). 20250805: 0x288 / 0x298 / 0x2AC / 0x2AF / 0x2B0
+    // (actor in R12 — SIB-encoded stores). The derivation decodes the five
+    // stores after the anchor generically (any base register), requires the
+    // +1/+3/+4 adjacency, then demands each seed immediate (1.0 / 1.0 / 100 /
+    // 1.0) at the predicted displacement in the 0x80 bytes before the anchor
+    // — exactly once each — so a layout that merely LOOKS similar refuses.
+
+    /// Course-flag seed anchor: `MOV RAX,[rip]; MOV RCX,[RAX]; CMP qword
+    /// [RCX+0x70],0; SETNE AL`. Unique on all four supported builds.
+    const GPA_CTOR_COURSE_SEED: &'static str =
+        "48 8B 05 ?? ?? ?? ?? 48 8B 08 48 83 79 70 00 0F 95 C0";
+    /// `MOVZX EAX, byte [RBP+0x97]` — the ctor's death-gate argument load.
+    const GPA_CTOR_GATE_ARG_LOAD: [u8; 7] = [0x0F, 0xB6, 0x85, 0x97, 0x00, 0x00, 0x00];
+
+    fn derive_gameplay_actor_layout(&mut self) {
+        const LABEL: &str = "gameplay_actor_layout";
+        let hits = scan_pattern_all(self.base, self.size, Self::GPA_CTOR_COURSE_SEED);
+        if hits.len() != 1 {
+            log_warn!(
+                "  [-] {} -- expected 1 ctor course-seed anchor, found {}",
+                LABEL,
+                hits.len()
+            );
+            return;
+        }
+        let anchor = hits[0].address;
+        let mod_hi = self.base as usize + self.size;
+        if (anchor as usize) < self.base as usize + 0x80 || anchor as usize + 0x60 > mod_hi {
+            log_warn!("  [-] {} -- anchor too close to a module edge", LABEL);
+            return;
+        }
+        unsafe {
+            // The anchor is 18 bytes (7 + 3 + 5 + 3).
+            let mut p = anchor.add(18);
+            // 1. MOV byte [A+course], AL
+            let Some((len, course)) = decode_mem_store_disp32(p, 0x88, false) else {
+                log_warn!("  [-] {} -- course-flag store not decodable", LABEL);
+                return;
+            };
+            p = p.add(len);
+            // 2. MOV word [A+course+1], 0
+            let Some((len, word)) = decode_mem_store_disp32(p, 0xC7, true) else {
+                log_warn!("  [-] {} -- word-clear store not decodable", LABEL);
+                return;
+            };
+            p = p.add(len);
+            // 3. MOVZX EAX, byte [RBP+0x97]
+            for (i, b) in Self::GPA_CTOR_GATE_ARG_LOAD.iter().enumerate() {
+                if *p.add(i) != *b {
+                    log_warn!("  [-] {} -- gate-argument load not found", LABEL);
+                    return;
+                }
+            }
+            p = p.add(Self::GPA_CTOR_GATE_ARG_LOAD.len());
+            // 4. MOV byte [A+course+3], AL
+            let Some((len, gate)) = decode_mem_store_disp32(p, 0x88, false) else {
+                log_warn!("  [-] {} -- death-gate store not decodable", LABEL);
+                return;
+            };
+            p = p.add(len);
+            // 5. MOV byte [A+course+4], 0
+            let Some((_, result)) = decode_mem_store_disp32(p, 0xC6, false) else {
+                log_warn!("  [-] {} -- death-result store not decodable", LABEL);
+                return;
+            };
+            if word != course + 1 || gate != course + 3 || result != course + 4 {
+                log_warn!(
+                    "  [-] {} -- store adjacency broken (course 0x{:X} word 0x{:X} gate 0x{:X} result 0x{:X})",
+                    LABEL,
+                    course,
+                    word,
+                    gate,
+                    result
+                );
+                return;
+            }
+            if !(0x200..=0x400).contains(&course) {
+                log_warn!("  [-] {} -- course flag 0x{:X} out of range", LABEL, course);
+                return;
+            }
+            let speed = course - 0x24;
+            let gauge = course - 0x14;
+
+            // Seed validation in the preceding 0x80 bytes: `disp32 imm32`
+            // byte pairs, each exactly once.
+            let window = std::slice::from_raw_parts(anchor.sub(0x80), 0x80);
+            let count = |disp: usize, imm: u32| -> usize {
+                let mut needle = [0u8; 8];
+                needle[..4].copy_from_slice(&(disp as u32).to_le_bytes());
+                needle[4..].copy_from_slice(&imm.to_le_bytes());
+                window.windows(8).filter(|w| *w == needle).count()
+            };
+            const ONE: u32 = 0x3F80_0000;
+            let seeds = [
+                ("speed current = 1.0", count(speed, ONE)),
+                ("speed target = 1.0", count(speed + 4, ONE)),
+                ("speed int = 100", count(speed + 0xC, 100)),
+                ("gauge min = 1.0", count(gauge, ONE)),
+            ];
+            for (what, n) in seeds {
+                if n != 1 {
+                    log_warn!(
+                        "  [-] {} -- ctor seed `{}` found {} time(s) before the anchor (want 1); refusing",
+                        LABEL,
+                        what,
+                        n
+                    );
+                    return;
+                }
+            }
+            self.publish_value("gpa_speed_cluster", speed);
+            self.publish_value("gpa_gauge_cluster", gauge);
+            self.publish_value("gpa_death_gate", gate);
+            log_info!(
+                "  [+] {} (ctor @ +0x{:X}): speed +0x{:X} gauge +0x{:X} course +0x{:X} gate +0x{:X} result +0x{:X}",
+                LABEL,
+                anchor.offset_from(self.base) as usize,
+                speed,
+                gauge,
+                course,
+                gate,
+                result
+            );
+        }
+    }
+
+    /// The build's `GamePlayActor` speed / gauge-tracking / death-flag
+    /// offsets, or `None` when the ctor-seed derivation refused. Consumers
+    /// MUST go inert on `None` — the region shifted by 8 bytes between
+    /// 20260224 and 20260324, so no default is safe.
+    pub fn gameplay_actor_layout(&self) -> Option<GamePlayActorLayout> {
+        let speed = self.published_value("gpa_speed_cluster")?;
+        let gauge = self.published_value("gpa_gauge_cluster")?;
+        let gate = self.published_value("gpa_death_gate")?;
+        Some(GamePlayActorLayout {
+            speed_current: speed,
+            speed_target: speed + 4,
+            speed_int: speed + 0xC,
+            gauge_min: gauge,
+            gauge_max: gauge + 4,
+            gauge_last: gauge + 8,
+            gauge_loss: gauge + 0xC,
+            gauge_gain: gauge + 0x10,
+            death_gate: gate,
+            death_result: gate + 1,
+        })
+    }
+
+    // ── ShutterActor build-dependent layout ─────────────────────────────
+    //
+    // The stage-jacket shutter's kind fields and kind enumeration moved
+    // between 20260224 and 20260324: active kind `+0x2E0` → `+0x310`,
+    // pending kind `+0x2E4` → `+0x314`, 6 → 9 layer slots, and the STAGE
+    // panel is kind 1 → kind 3. quick_restart_or_fail's bannerless dismiss
+    // fast path reads all of those. Anchor = the per-kind layer lookup in
+    // `ShutterActor::onUpdate`, followed within 0x40 bytes by the stage-kind
+    // compare:
+    //
+    //   48 63 8E d32          MOVSXD RCX, [RSI+active_kind]
+    //   48 03 C9              ADD    RCX, RCX
+    //   48 8D 94 CE 88 00 00 00  LEA RDX, [RSI+RCX*8+0x88]   ; layer table, 0x10 stride
+    //   ...
+    //   83 BE d32 imm8        CMP    dword [RSI+active_kind], STAGE_KIND
+    //
+    // Unique on all four supported builds; the compare must reuse the SAME
+    // displacement or the derivation refuses.
+    const SHUTTER_KIND_LAYER_LOOKUP: &'static str =
+        "48 63 8E ?? ?? 00 00 48 03 C9 48 8D 94 CE 88 00 00 00";
+
+    fn derive_shutter_actor_layout(&mut self) {
+        const LABEL: &str = "shutter_actor_layout";
+        let hits = scan_pattern_all(self.base, self.size, Self::SHUTTER_KIND_LAYER_LOOKUP);
+        if hits.len() != 1 {
+            log_warn!(
+                "  [-] {} -- expected 1 kind/layer lookup anchor, found {}",
+                LABEL,
+                hits.len()
+            );
+            return;
+        }
+        let anchor = hits[0].address;
+        if anchor as usize + 0x60 > self.base as usize + self.size {
+            log_warn!("  [-] {} -- anchor too close to the module end", LABEL);
+            return;
+        }
+        unsafe {
+            let active = (anchor.add(3) as *const u32).read_unaligned() as usize;
+            if !(0x100..=0x800).contains(&active) {
+                log_warn!(
+                    "  [-] {} -- active-kind offset 0x{:X} out of range",
+                    LABEL,
+                    active
+                );
+                return;
+            }
+            // The stage-kind compare: `83 BE <active> imm8` within 0x40 bytes.
+            let mut stage_kind: Option<i32> = None;
+            let mut cmp_hits = 0usize;
+            for i in 18..0x40 {
+                let q = anchor.add(i);
+                if *q == 0x83
+                    && *q.add(1) == 0xBE
+                    && (q.add(2) as *const u32).read_unaligned() as usize == active
+                {
+                    stage_kind = Some(*q.add(6) as i8 as i32);
+                    cmp_hits += 1;
+                }
+            }
+            let Some(stage_kind) = stage_kind else {
+                log_warn!(
+                    "  [-] {} -- stage-kind compare not found after the anchor",
+                    LABEL
+                );
+                return;
+            };
+            if cmp_hits != 1 || !(0..=8).contains(&stage_kind) {
+                log_warn!(
+                    "  [-] {} -- stage-kind compare ambiguous ({} hits, kind {})",
+                    LABEL,
+                    cmp_hits,
+                    stage_kind
+                );
+                return;
+            }
+            self.publish_value("shutter_active_kind", active);
+            self.publish_value("shutter_stage_kind", stage_kind as usize);
+            log_info!(
+                "  [+] {} (onUpdate lookup @ +0x{:X}): active kind +0x{:X}, pending +0x{:X}, stage kind {}",
+                LABEL,
+                anchor.offset_from(self.base) as usize,
+                active,
+                active + 4,
+                stage_kind
+            );
+        }
+    }
+
+    /// The build's `ShutterActor` kind-field offsets + stage-kind id, or
+    /// `None` when the derivation refused (consumers must not fall back to
+    /// the 20260324+ constants — the fields moved).
+    pub fn shutter_actor_layout(&self) -> Option<ShutterActorLayout> {
+        let active = self.published_value("shutter_active_kind")?;
+        let stage = self.published_value("shutter_stage_kind")?;
+        Some(ShutterActorLayout {
+            active_kind: active,
+            pending_kind: active + 4,
+            stage_kind: stage as i32,
+        })
     }
 
     /// Derive `file_manager_singleton` from xrefs to `file_manager_load`.
@@ -5260,6 +5679,24 @@ impl SignatureStore {
 /// canonical `afp_layer_set_color` / `afp_layer_set_acolor` addresses.
 /// libafp is a static import of gamemdx, so it is guaranteed loaded (and its
 /// IAT slots patched) by the time `resolve_derived` runs.
+///
+/// Host-side (non-Windows) builds — the offline signature harness
+/// (`scripts/validate_signatures.sh`) — have no loaded libafp. The harness
+/// emulates the loader instead: it patches gamemdx's IAT slots for the libafp
+/// imports it cares about with synthetic pointers and registers them here, so
+/// the twin disambiguation runs the SAME comparison it runs on the cabinet.
+/// Unregistered names return `None` (fail-open like a missing DLL).
+#[cfg(not(windows))]
+pub static HOST_LIBAFP_EXPORTS: std::sync::Mutex<Option<HashMap<String, usize>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(not(windows))]
+fn resolve_libafp_export(name: &str) -> Option<*const u8> {
+    let table = HOST_LIBAFP_EXPORTS.lock().ok()?;
+    table.as_ref()?.get(name).map(|&p| p as *const u8)
+}
+
+#[cfg(windows)]
 fn resolve_libafp_export(name: &str) -> Option<*const u8> {
     use std::ffi::CString;
     use windows::core::PCSTR;

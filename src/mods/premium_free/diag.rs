@@ -55,8 +55,11 @@ const GPA_SIDE: usize = 0x84;
 
 /// Decode the two early-out displacements from the `result_commit` match:
 /// `CMP byte [RCX+d32],0` at +11 (d32 at +13) and `CMP qword [RSI+d32],0` at
-/// +48 (d32 at +51). Validates the opcodes and the `skip2 == skip1 + 8`
-/// adjacency seen on every build; any mismatch leaves the tap disabled.
+/// +56 (d32 at +59 — the `LEA RCX; XOR EDX,EDX; CALL [rip]` between them is
+/// 5+2+6 bytes; the pattern comment's original "+48/+51" was an arithmetic
+/// slip that left this tap disabled on every build until the 2026-09 sweep).
+/// Validates the opcodes and the `skip2 == skip1 + 8` adjacency seen on every
+/// build; any mismatch leaves the tap disabled.
 pub fn decode_commit_skip_offsets(commit: *const u8) {
     unsafe {
         let op1 = [
@@ -64,16 +67,16 @@ pub fn decode_commit_skip_offsets(commit: *const u8) {
             memory::read_u8(commit.add(12)),
         ];
         let op2 = [
-            memory::read_u8(commit.add(48)),
-            memory::read_u8(commit.add(49)),
-            memory::read_u8(commit.add(50)),
+            memory::read_u8(commit.add(56)),
+            memory::read_u8(commit.add(57)),
+            memory::read_u8(commit.add(58)),
         ];
         if op1 != [0x80, 0xB9] || op2 != [0x48, 0x83, 0xBE] {
             log_warn!("PremiumFree[diag]: result_commit skip-flag opcodes unexpected -- early-out tap disabled");
             return;
         }
         let skip1 = memory::read_u32(commit.add(13)) as usize;
-        let skip2 = memory::read_u32(commit.add(51)) as usize;
+        let skip2 = memory::read_u32(commit.add(59)) as usize;
         if !(0x100..=0xFFF).contains(&skip1) || skip2 != skip1 + 8 {
             log_warn!(
                 "PremiumFree[diag]: result_commit skip-flag offsets +0x{:X}/+0x{:X} out of shape -- early-out tap disabled",

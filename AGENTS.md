@@ -38,7 +38,9 @@ docs/                      # RE research notes (addresses are file-relative to 0
 |------|-----------|
 | Add a mod | `src/mods/mod_trait.rs` (trait), then register in `src/lib.rs` |
 | Add a service | `src/services/mod.rs`, init call in `src/lib.rs` |
-| Add a signature | `src/core/signatures.rs` |
+| Add a signature | `src/core/signatures.rs` — then run `./scripts/validate_signatures.sh <dir-of-gamemdx-builds>` (below) before deploying |
+| Cross-build signature sweep (offline, all 4 supported builds) | `scripts/validate_signatures.sh <dir>` mounts the DLL's REAL `scanner.rs` + `signatures.rs` into a host crate and runs `resolve_all` + `resolve_derived` over every `gamemdx*.dll` in `<dir>`, PE-mapped like the loader (sections at VAs, DIR64 relocs applied, libafp IAT slots emulated from ONE `libafp-win64*.dll` in the same dir — gamemdx imports libafp by ORDINAL); `scripts/sig_harness/report.py` joins the per-build `[+]/[-]` lines with the crate's consumer graph (required_signatures / get_address / require_address) → per-mod HARD/soft losses; exit 0 = every miss covered by a version alternate (`_vN` stem or `report.py::ALT_GROUPS`). `scripts/sig_harness/shape_diff.py --json … --dir …` then disassembles a 0x200 window after every match on every build (capstone; RIP/rel32/module-RVA displacements normalized) and reports the first divergence offset + consumers — **an AOB hitting on all builds proves nothing about the bytes a consumer reads at `match+N` or the struct offsets it hardcodes**; review every divergent signature against its consumer's reads. Non-address derivations (offsets, vslots, kind ids) go through `SignatureStore::publish_value`/`published_value` (the `player_option_offset` convention) so they show in the boot log as `name (derived) = 0x…`. Build set: `~/Desktop/ddr_modules` (20250805 / 20260224 / 20260721 / 20260825). Results + findings: `docs/cross_build_signature_sweep.md` |
+| Build-dependent actor layouts (derived, NEVER hardcode) | **GamePlayActor**: every field ≥ ~`+0x208` sits 8 bytes LOWER on 20250805/20260224 than on 20260324+ (≤ `+0x1E9` identical) — `signatures.gameplay_actor_layout()` (from the ctor seed block; speed cluster `0x288/0x290`, gauge cluster `0x298/0x2A0`, death gate/result `0x2AF,0x2B0 / 0x2B7,0x2B8`) feeds `song_rate::real_speed`, `song_reset` (unavailable without it), `quick_restart_or_fail` fallback death. **ShutterActor**: kind fields `+0x2E0/+0x2E4` + 6 kinds + STAGE kind **1** on old builds vs `+0x310/+0x314` + 9 kinds + kind **3** — `signatures.shutter_actor_layout()` (onUpdate kind/layer lookup + stage-kind CMP) gates quick_restart_or_fail's fast path. **music-DB entry `hasChart` vslot** `+0x58` old / `+0x70` new (`+0x70` is `isShock` on old — same arg shape, silently wrong) — `signatures.entry_has_chart_vslot()` gates fast_bootup replay. Already-derived siblings: `PlayerWork` record base `0x570/0x590` (`stage_record_accessor_v1`), `ddr::player::Option` `0xF0/0xE0` (`player_option_offset`), judge foot-panel ptr `0x270/0x278` (`judge_hook` detection) |
 | Understand init order | `src/lib.rs::init()` — sequence is load-bearing |
 | LayeredFS file hooks | `src/services/avs_layeredfs/file_hooks.rs` |
 | Flare-ranking exclusion for custom series (series ≥ 22 → no flare category) | `src/mods/series_expansion.rs` patch 7 — the `flare_skill_classifier` AOB (`signatures.rs`) matches the inlined classification walk in `ddr::player::Record::CalcFlareSkill` (raw series ≥ 18 GOLD / ≥ 14 WHITE / ≥ 1 CLASSIC, GOLD unbounded above). `init_flare_exclusion` copies the stock 3-entry cat/threshold tables into a near-alloc 4-entry block prepending `≥ 22 → category 0` (the game's never-summed bucket); enable rewrites the walk's two **module-base-relative** disp32s (match+20/+28 — `target − module_base`, NOT `rip_disp`) and the loop-bound imm8 (match+41, `F8`→`F4`). Fail-open: missing AOB or table validation ⇒ stock behavior, one WARN. The other 4 classification sites (score-window tab, sort comparator ×2, category label — UI only) are intentionally unpatched pending user testing. RE notes: `docs/flare_ranking_research.md` |
@@ -105,6 +107,7 @@ go. Commit/push only when the maintainer asks.
 ```bash
 cargo check --target x86_64-pc-windows-msvc   # fast type check
 cargo test                                      # host tests (pure layers: song_rate, core/xact, …)
+./scripts/validate_signatures.sh ~/Desktop/ddr_modules   # offline 4-build signature/derivation sweep (see Key Entry Points)
 cargo fmt                                       # auto-format (run before commit)
 ./build.sh                                      # release build (cargo-xwin)
 ./scripts/deploy.sh                             # build + SCP to cabinet
@@ -119,7 +122,10 @@ cabinet deployment + log observation.
 Readiness gates before handing a build to the maintainer (or committing):
 `cargo check` clean → `cargo fmt` (whole crate — never pass file args; a
 targeted `cargo fmt -- <file>` still formats the whole crate and produces
-unrelated churn) → `./build.sh` clean.
+unrelated churn) → `./build.sh` clean → **if `signatures.rs` or any
+consumer-side fixed offset changed: `./scripts/validate_signatures.sh
+~/Desktop/ddr_modules` ALL GREEN** (and `shape_diff.py` for anything that
+reads `match+N`).
 
 ## Code Navigation (LSP)
 

@@ -49,7 +49,7 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 
-use crate::core::signatures::SignatureStore;
+use crate::core::signatures::{GamePlayActorLayout, SignatureStore};
 use crate::core::{memory, module_resolver};
 use crate::services::{bm2d_api, scene_manager, song_rate, widget_renderer};
 use crate::types::scenes::scene;
@@ -117,21 +117,26 @@ const GPA_MISS_STREAK_OFFSET: usize = 0x1E4;
 /// m_isDead / song-finished / risky death-result flags.
 const GPA_IS_DEAD_OFFSET: usize = 0x1E8;
 const GPA_SONG_FINISHED_OFFSET: usize = 0x1E9;
-const GPA_DEATH_RESULT_OFFSET: usize = 0x2B8;
-/// The instant-death gauge gate (`m_canInstantDeath`-equivalent, quick
-/// restart's death-flag anatomy + the 20260721 decompile): `0x103C`'s
-/// STEP_GAME_OVER advance and the DPS finish-poll's death arm are BOTH
-/// conditioned on this byte being 0.
-const GPA_DEATH_GATE_OFFSET: usize = 0x2B7;
-/// Gauge-percent tracking cluster: min (+0x2A0, ctor 1.0), max (+0x2A4,
-/// ctor 0.0), last (+0x2A8, ctor 0.0), accumulated loss/gain
-/// (+0x2AC/+0x2B0, ctor 0). Restored to the ctor values; the gauge's own
-/// post-reset 0x103F broadcast re-seeds them exactly like song start.
-const GPA_GAUGE_MIN_OFFSET: usize = 0x2A0;
-const GPA_GAUGE_MAX_OFFSET: usize = 0x2A4;
-const GPA_GAUGE_LAST_OFFSET: usize = 0x2A8;
-const GPA_GAUGE_LOSS_OFFSET: usize = 0x2AC;
-const GPA_GAUGE_GAIN_OFFSET: usize = 0x2B0;
+// The death-result flag, the instant-death gauge gate
+// (`m_canInstantDeath`-equivalent, quick restart's death-flag anatomy + the
+// 20260721 decompile: `0x103C`'s STEP_GAME_OVER advance and the DPS
+// finish-poll's death arm are BOTH conditioned on this byte being 0), and
+// the gauge-percent tracking cluster (min ctor 1.0, max, last, accumulated
+// loss/gain ctor 0.0 — restored to the ctor values; the gauge's own
+// post-reset 0x103F broadcast re-seeds them exactly like song start) all
+// live in the GamePlayActor region that sits 8 bytes LOWER on 20250805 /
+// 20260224 than on 20260324+ (`+0x2B8/+0x2B7/+0x2A0..` vs
+// `+0x2B0/+0x2AF/+0x298..`). They come from
+// `SignatureStore::gameplay_actor_layout()` (derived from the actor ctor's
+// seed block); the service is unavailable without it.
+static GPA_LAYOUT: std::sync::OnceLock<GamePlayActorLayout> = std::sync::OnceLock::new();
+
+/// The derived GamePlayActor layout. `init` refuses without it, so every
+/// reset path that reaches here has it; the fallback keeps the callers
+/// honest if one ever runs before `init`.
+fn gpa_layout() -> Option<GamePlayActorLayout> {
+    GPA_LAYOUT.get().copied()
+}
 
 // ── Gauge actor fields (run_state_re.md §5) ──────────────────────────
 /// Percent-family (`GaugeActor` base): live value, fixed-point 0..10000.
@@ -605,6 +610,16 @@ pub fn init(signatures: &SignatureStore) -> bool {
         Some(addr) => SCORE_ACTOR_VTABLE.store(addr as *mut u8, Ordering::Release),
         None => missing.push("score_actor_vtable"),
     }
+    // The build's GamePlayActor death-flag / gauge-cluster offsets (the
+    // region shifted by 8 bytes between 20260224 and 20260324). Required:
+    // a reset that restored the cluster at the wrong offsets would corrupt
+    // unrelated actor state on the old builds.
+    match signatures.gameplay_actor_layout() {
+        Some(layout) => {
+            let _ = GPA_LAYOUT.set(layout);
+        }
+        None => missing.push("gameplay_actor_layout"),
+    }
     // Optional (fail-open): identifies the NoteResultActor child so the
     // reset can rewind the pacemaker (dance_score_compare) clip out of
     // its msg-0x103A "out" outro — the one-way latch that otherwise
@@ -884,8 +899,9 @@ pub fn set_chart_end_thresholds_per_side(writes: &[(i32, i32, i32)]) -> bool {
 /// never end the run. The training loop's death-bypass stash source.
 pub fn death_gate() -> Option<bool> {
     let dps = live_dps()?;
+    let gate = gpa_layout()?.death_gate;
     let actor = *gameplay_actors(dps).first()?;
-    Some(unsafe { memory::read_u8(actor.add(GPA_DEATH_GATE_OFFSET)) } != 0)
+    Some(unsafe { memory::read_u8(actor.add(gate)) } != 0)
 }
 
 /// One side's instant-death gauge gate, or `None` when no live run / no
@@ -895,12 +911,13 @@ pub fn death_gate() -> Option<bool> {
 /// first-actor stash restored to both would corrupt the other side).
 pub fn death_gate_for_side(side: i32) -> Option<bool> {
     let dps = live_dps()?;
+    let gate = gpa_layout()?.death_gate;
     for actor in gameplay_actors(dps) {
         let actor_side = unsafe { memory::read_i32(actor.add(GPA_SIDE_OFFSET)) };
         if actor_side != side {
             continue;
         }
-        return Some(unsafe { memory::read_u8(actor.add(GPA_DEATH_GATE_OFFSET)) } != 0);
+        return Some(unsafe { memory::read_u8(actor.add(gate)) } != 0);
     }
     None
 }
@@ -912,13 +929,16 @@ pub fn set_death_gate_for_side(side: i32, on: bool) -> bool {
     let Some(dps) = live_dps() else {
         return false;
     };
+    let Some(gate) = gpa_layout().map(|l| l.death_gate) else {
+        return false;
+    };
     for actor in gameplay_actors(dps) {
         let actor_side = unsafe { memory::read_i32(actor.add(GPA_SIDE_OFFSET)) };
         if actor_side != side {
             continue;
         }
         unsafe {
-            memory::write_u8(actor.add(GPA_DEATH_GATE_OFFSET) as *mut u8, u8::from(on));
+            memory::write_u8(actor.add(gate) as *mut u8, u8::from(on));
         }
         return true;
     }
@@ -933,13 +953,16 @@ pub fn set_death_gate(on: bool) -> bool {
     let Some(dps) = live_dps() else {
         return false;
     };
+    let Some(gate) = gpa_layout().map(|l| l.death_gate) else {
+        return false;
+    };
     let actors = gameplay_actors(dps);
     if actors.is_empty() {
         return false;
     }
     for actor in actors {
         unsafe {
-            memory::write_u8(actor.add(GPA_DEATH_GATE_OFFSET) as *mut u8, u8::from(on));
+            memory::write_u8(actor.add(gate) as *mut u8, u8::from(on));
         }
     }
     true
@@ -2499,14 +2522,18 @@ fn reset_side_state(dps: *mut u8, actors: &[*mut u8], snapshot: &[SideSnapshot])
             }
             memory::write_u8(actor.add(GPA_IS_DEAD_OFFSET) as *mut u8, 0);
             memory::write_u8(actor.add(GPA_SONG_FINISHED_OFFSET) as *mut u8, 0);
-            memory::write_u8(actor.add(GPA_DEATH_RESULT_OFFSET) as *mut u8, 0);
-            // Gauge tracking cluster back to ctor values; the gauge's own
-            // 0x103F below re-seeds it exactly like the first real delta.
-            memory::write_f32(actor.add(GPA_GAUGE_MIN_OFFSET) as *mut u8, 1.0);
-            memory::write_f32(actor.add(GPA_GAUGE_MAX_OFFSET) as *mut u8, 0.0);
-            memory::write_f32(actor.add(GPA_GAUGE_LAST_OFFSET) as *mut u8, 0.0);
-            memory::write_f32(actor.add(GPA_GAUGE_LOSS_OFFSET) as *mut u8, 0.0);
-            memory::write_f32(actor.add(GPA_GAUGE_GAIN_OFFSET) as *mut u8, 0.0);
+            // Death result + gauge tracking cluster back to ctor values (the
+            // gauge's own 0x103F below re-seeds the cluster exactly like the
+            // first real delta). Build-dependent offsets; `init` refused
+            // without the layout, so this is only a belt-and-braces guard.
+            if let Some(layout) = gpa_layout() {
+                memory::write_u8(actor.add(layout.death_result) as *mut u8, 0);
+                memory::write_f32(actor.add(layout.gauge_min) as *mut u8, 1.0);
+                memory::write_f32(actor.add(layout.gauge_max) as *mut u8, 0.0);
+                memory::write_f32(actor.add(layout.gauge_last) as *mut u8, 0.0);
+                memory::write_f32(actor.add(layout.gauge_loss) as *mut u8, 0.0);
+                memory::write_f32(actor.add(layout.gauge_gain) as *mut u8, 0.0);
+            }
 
             // Gauge children: ctor-mirror restore from the snapshot.
             let Some(side_snap) = snapshot.iter().find(|s| s.actor == actor as usize) else {
