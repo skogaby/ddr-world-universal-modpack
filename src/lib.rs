@@ -578,7 +578,7 @@ fn init() {
         widget_renderer::run_on_render_thread(move || {
             // Splash screen display
             if let Some(mut title) = widget_renderer::create_text_widget() {
-                title.set_text("DDR World Universal Modpack v1.1");
+                title.set_text("DDR World Universal Modpack v1.2");
                 title.set_position(10.0, 10.0);
                 title.set_scale(1.1, 1.1);
                 title.set_color(1.0, 1.0, 1.0, 1.0);
