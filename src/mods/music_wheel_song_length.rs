@@ -119,6 +119,9 @@ struct Runtime {
     ctor: SpriteLayerCtorFn,
     set_names: SpriteLayerSetNamesFn,
     model: *const u8,
+    /// Offset of the highlighted-song shared_ptr inside the model object
+    /// (obj at +0, ctrl at +8) — 0x1B0 on 20260324+, 0x190 before; derived.
+    highlight_slot: usize,
     /// gamemdx module bounds — used to sanity-check vtable/getter pointers
     /// before the indirect call in [`read_song_code`].
     module_base: usize,
@@ -205,6 +208,10 @@ impl Mod for MusicWheelSongLengthMod {
             Some(a) => a,
             None => return false,
         };
+        let highlight_slot = match ctx.signatures.selectmusic_highlight_slot() {
+            Some(s) => s,
+            None => return false,
+        };
 
         let cfg = crate::mods::config::get().and_then(|c| c.music_wheel_song_length.clone());
         let cfg = cfg.unwrap_or_default();
@@ -213,6 +220,7 @@ impl Mod for MusicWheelSongLengthMod {
             ctor,
             set_names,
             model,
+            highlight_slot,
             module_base: ctx.game_module.base as usize,
             module_size: ctx.game_module.size,
             sprite: std::ptr::null_mut(),
@@ -413,18 +421,18 @@ fn on_frame() {
         }
 
         // Selection poll: the global holds a POINTER to the select-music
-        // model (the card tick does `MOV R11,[global]` then `[R11+0x1B0]`);
-        // the highlighted-song weak_ptr lives at model+0x1B0 (obj) /
-        // +0x1B8 (ctrl). All mutation happens on this same thread (the
-        // game's card tick polls the identical global), so plain reads
-        // without refcount traffic are safe.
+        // model (the card tick does `MOV R11,[global]` then `[R11+slot]`);
+        // the highlighted-song weak_ptr lives at model+slot (obj) /
+        // +slot+8 (ctrl), slot derived per build. All mutation happens on
+        // this same thread (the game's card tick polls the identical
+        // global), so plain reads without refcount traffic are safe.
         let model_obj = memory::read_ptr(rt.model);
         if model_obj.is_null() {
             diag(rt, "select-music model not constructed");
             return;
         }
-        let obj = memory::read_ptr(model_obj.add(0x1B0)) as *mut u8;
-        let ctrl = memory::read_ptr(model_obj.add(0x1B8));
+        let obj = memory::read_ptr(model_obj.add(rt.highlight_slot)) as *mut u8;
+        let ctrl = memory::read_ptr(model_obj.add(rt.highlight_slot + 8));
         let strong = if ctrl.is_null() {
             0
         } else {

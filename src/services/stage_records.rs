@@ -7,7 +7,7 @@
 //! signature comment in `core/signatures.rs` for the byte map). Nothing is
 //! hardcoded:
 //!
-//! | Constant                              | Source in matched bytes | 2026 builds |
+//! | Constant                              | Source in matched bytes | 20260324+   |
 //! |---------------------------------------|-------------------------|-------------|
 //! | GameWork ptr-ptr global               | +3 RIP disp32           | —           |
 //! | player_work_table                     | +16 RIP disp32          | —           |
@@ -15,6 +15,13 @@
 //! | course record offset (PlayerWork)     | +36 imm32               | 0x2D8       |
 //! | record stride                         | +47 imm32               | 0x2B8       |
 //! | record base offset (PlayerWork)       | +55 imm32               | 0x590       |
+//!
+//! Older builds (20250805, 20260224) compile the same accessor differently
+//! (`stage_record_accessor_v1`): the course record is `ADD imm32` at +36
+//! (0x2B8) and the stage record is `(stage + skew) * stride` — skew imm8 at
+//! +51 (2), stride imm32 at +55 (0x2B8) — so base = skew*stride = 0x570.
+//! PlayerWork grew 0x20 between those builds and 20260324; every consumer
+//! reads the decoded values, never the literals.
 //!
 //! Consumers: `premium_free` (stale-record virginise — save-integrity
 //! load-bearing), the logout-save sanitiser in `custom_options_persistence`
@@ -72,16 +79,49 @@ static FINAL_STAGE_OVERRIDE_OFFSET: AtomicUsize = AtomicUsize::new(0);
 /// The operator's `/gameOptions/max_stage/current` cache global. Normal
 /// stage count = value + 1; the last normal 0-based stage index = value.
 static MAX_STAGE_GLOBAL: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+/// Offset of the inlined `ddr::player::Option` inside `PlayerWork` (0xE0 on
+/// 20260324+, 0xF0 on 20250805 / 20260224) — derived by
+/// `SignatureStore::derive_player_option_table` from the game's own accessor.
+/// 0 = unknown.
+static PLAYER_OPTION_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+/// Offset of `ddr::player::Option` within `PlayerWork`, or `None` when the
+/// accessor derivation failed. Consumers must go inert on `None` — the
+/// offset moved between builds, so no default is safe.
+pub fn player_option_offset() -> Option<usize> {
+    match PLAYER_OPTION_OFFSET.load(Ordering::Acquire) {
+        0 => None,
+        v => Some(v),
+    }
+}
 
 /// Decode + validate the layout. Fail closed: any validation failure leaves
 /// the service unavailable (and its consumers fail closed in turn).
 pub fn init(signatures: &SignatureStore, module: &GameModule) -> bool {
-    let accessor = match signatures.get_address("stage_record_accessor") {
-        Some(a) => a,
-        None => {
-            log_warn!("stage_records: stage_record_accessor signature not resolved");
-            return false;
-        }
+    // Published independently of the record-layout decode below: the Option
+    // offset comes from the `player_option_ctx_load` accessor derivation and
+    // several consumers (assist_tick, per-song offsets, song_reset, real
+    // speed, mine_render) need it even when the record accessor is missing.
+    if let Some(off) = signatures.player_option_offset() {
+        PLAYER_OPTION_OFFSET.store(off, Ordering::Release);
+    }
+    // Two codegen shapes of the same leaf accessor: `stage_record_accessor`
+    // (20260324+: JZ over the course ADD, then IMUL + LEA base) and
+    // `stage_record_accessor_v1` (20250805 / 20260224: course branch first,
+    // then `(stage + skew) * stride` with base = skew*stride). Byte maps in the
+    // signature comments.
+    let (accessor, v1) = match signatures.get_address("stage_record_accessor") {
+        Some(a) => (a, false),
+        None => match signatures.get_address("stage_record_accessor_v1") {
+            Some(a) => {
+                log_info!("stage_records: using pre-20260324 accessor shape (v1)");
+                (a, true)
+            }
+            None => {
+                log_warn!("stage_records: stage_record_accessor signature not resolved");
+                return false;
+            }
+        },
     };
     let pwt = match signatures.get_address("player_work_table") {
         Some(a) => a,
@@ -94,14 +134,27 @@ pub fn init(signatures: &SignatureStore, module: &GameModule) -> bool {
     // Decode from the matched bytes (see the byte map in the module docs /
     // the signature comment in signatures.rs).
     let (game_work_global, table, course_off, course_rec_off, rec_stride, rec_base) = unsafe {
-        (
-            decode_rip_relative(accessor.add(3)),
-            decode_rip_relative(accessor.add(16)),
-            memory::read_u8(accessor.add(23)) as usize,
-            memory::read_u32(accessor.add(36)) as usize,
-            memory::read_u32(accessor.add(47)) as usize,
-            memory::read_u32(accessor.add(55)) as usize,
-        )
+        if v1 {
+            let stride = memory::read_u32(accessor.add(55)) as usize;
+            let skew = memory::read_u8(accessor.add(51)) as usize;
+            (
+                decode_rip_relative(accessor.add(3)),
+                decode_rip_relative(accessor.add(16)),
+                memory::read_u8(accessor.add(23)) as usize,
+                memory::read_u32(accessor.add(36)) as usize,
+                stride,
+                skew.wrapping_mul(stride),
+            )
+        } else {
+            (
+                decode_rip_relative(accessor.add(3)),
+                decode_rip_relative(accessor.add(16)),
+                memory::read_u8(accessor.add(23)) as usize,
+                memory::read_u32(accessor.add(36)) as usize,
+                memory::read_u32(accessor.add(47)) as usize,
+                memory::read_u32(accessor.add(55)) as usize,
+            )
+        }
     };
 
     // Sanity: the wildcarded layout constants must look like the known shape

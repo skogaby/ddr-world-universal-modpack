@@ -30,6 +30,9 @@ const JZ_SIZE: usize = 6;
 
 /// Offset of `MOVZX EDX, byte [RBP+0xBC]` inside the `timer_show_call` match.
 const SHOW_OFFSET: usize = 62;
+/// Same, inside the pre-20260324 `timer_show_call_v1` match (the visible=1
+/// argument is one 3-byte MOV shorter there).
+const SHOW_OFFSET_V1: usize = 58;
 const SHOW_SIZE: usize = 7;
 /// The MOVZX instruction the hide patch replaces (verified at init).
 const SHOW_EXPECTED: [u8; SHOW_SIZE] = [0x0F, 0xB6, 0x95, 0xBC, 0x00, 0x00, 0x00];
@@ -84,9 +87,18 @@ impl Mod for TimerFreezeMod {
         }
 
         // Optional hide patch — degrade to freeze-only if unresolved.
-        match ctx.signatures.get_address("timer_show_call") {
-            Some(show_match) => {
-                let addr = unsafe { show_match.add(SHOW_OFFSET) as *mut u8 };
+        let show_site = ctx
+            .signatures
+            .get_address("timer_show_call")
+            .map(|m| (m, SHOW_OFFSET))
+            .or_else(|| {
+                ctx.signatures
+                    .get_address("timer_show_call_v1")
+                    .map(|m| (m, SHOW_OFFSET_V1))
+            });
+        match show_site {
+            Some((show_match, show_offset)) => {
+                let addr = unsafe { show_match.add(show_offset) as *mut u8 };
                 let bytes_ok = (0..SHOW_SIZE).all(|i| unsafe { *addr.add(i) } == SHOW_EXPECTED[i]);
                 if bytes_ok {
                     self.hide_addr = addr;

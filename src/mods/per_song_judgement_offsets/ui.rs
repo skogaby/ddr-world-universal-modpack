@@ -40,6 +40,8 @@ type MusicCodeGetterFn = unsafe extern "C" fn(this: *mut u8) -> *const u8;
 
 /// Resolved at `init` from the signature store.
 static MODEL_GLOBAL: AtomicUsize = AtomicUsize::new(0);
+/// Highlighted-song shared_ptr slot inside the model (derived; 0 = unknown).
+static MODEL_HIGHLIGHT_SLOT: AtomicUsize = AtomicUsize::new(0);
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 static MODULE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
@@ -72,6 +74,10 @@ static POLL: Mutex<PollState> = Mutex::new(PollState {
 pub fn init(ctx: &ModContext) {
     let model = ctx.signatures.require_address("selectmusic_model");
     MODEL_GLOBAL.store(model as usize, Ordering::Release);
+    MODEL_HIGHLIGHT_SLOT.store(
+        ctx.signatures.selectmusic_highlight_slot().unwrap_or(0),
+        Ordering::Release,
+    );
     MODULE_BASE.store(ctx.game_module.base as usize, Ordering::Release);
     MODULE_SIZE.store(ctx.game_module.size, Ordering::Release);
 }
@@ -188,11 +194,12 @@ unsafe fn read_selection() -> usize {
         return 0;
     }
     let model_obj = memory::read_ptr(global);
-    if model_obj.is_null() {
+    let slot = MODEL_HIGHLIGHT_SLOT.load(Ordering::Acquire);
+    if model_obj.is_null() || slot == 0 {
         return 0;
     }
-    let obj = memory::read_ptr(model_obj.add(0x1B0)) as *mut u8;
-    let ctrl = memory::read_ptr(model_obj.add(0x1B8));
+    let obj = memory::read_ptr(model_obj.add(slot)) as *mut u8;
+    let ctrl = memory::read_ptr(model_obj.add(slot + 8));
     let strong = if ctrl.is_null() {
         0
     } else {

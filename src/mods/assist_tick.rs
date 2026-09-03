@@ -175,10 +175,9 @@ const VOLUME_DEFAULT: i32 = 100;
 /// ear on the cabinet (2026-07-29, 10×-amplified direction test): a positive
 /// `timing_music` moves the judgement moment (and therefore the clap) LATER.
 const JUDGMENT_TIMING_SIGN: i32 = 1;
-/// Offset of the embedded `ddr::player::Option` within a side's context
-/// object (`*(table[side]) + 0xE0` — the game's own accessor shape,
-/// `FUN_1801e7530` on 20260324).
-const CTX_OPTION_OFFSET: usize = 0xE0;
+// The embedded `ddr::player::Option`'s offset within a side's context object
+// is NOT constant across builds (0xE0 on 20260324+, 0xF0 on 20250805 /
+// 20260224) — read it via `stage_records::player_option_offset()`.
 /// Offset of JUDGMENT TIMING (`timing_music`, ±100 ms) within the Option.
 const OPTION_TIMING_MUSIC: usize = 0x24;
 /// Sanity bounds on the value read — the game's UI clamps to ±100 ms;
@@ -211,7 +210,10 @@ fn judgment_timing_ms(side: i32) -> i32 {
         if ctx.is_null() {
             return warn_jt_unreadable("side context is null", side);
         }
-        let value = *(ctx.add(CTX_OPTION_OFFSET + OPTION_TIMING_MUSIC) as *const i32);
+        let Some(option_off) = crate::services::stage_records::player_option_offset() else {
+            return warn_jt_unreadable("Option offset underived", side);
+        };
+        let value = *(ctx.add(option_off + OPTION_TIMING_MUSIC) as *const i32);
         if !(-JUDGMENT_TIMING_LIMIT..=JUDGMENT_TIMING_LIMIT).contains(&value) {
             return warn_jt_unreadable("value outside +/-100 ms", side);
         }

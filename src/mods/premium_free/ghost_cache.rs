@@ -130,6 +130,7 @@ pub fn install(signatures: &SignatureStore) -> bool {
         );
         return false;
     };
+    diag::decode_commit_skip_offsets(commit);
     unsafe {
         let commit_fn: ActorFn = std::mem::transmute(commit);
         let ghost_fn: ActorFn = std::mem::transmute(ghost);

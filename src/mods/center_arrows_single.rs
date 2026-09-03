@@ -8,7 +8,12 @@
 //!
 //! Mechanism (two detours on the gameplay HUD layout builder):
 //!   1. `hud_layout_builder` entry — captures the builder root and computes
-//!      `{single_player, active_side}` from the per-side play-states.
+//!      `{single_player, active_side}` from the per-side play-states. The
+//!      direct prologue AOB bakes in per-build stack-frame constants (it misses
+//!      on 20250805 and 20260224), so the entry falls back to a derivation from
+//!      the build-stable `hud_layout_builder_style_cluster` anchor (unique on
+//!      all six inspected builds, entry = match-0x1DC) via a backward scan for
+//!      the frame-size-agnostic prologue head.
 //!   2. `hud_layout_setter` (`set(parent, name, coord)`) — for the active
 //!      single-player side, rewrites `coord[0]` (X) of the target keys to
 //!      `CENTER_X`. The engine's own renderers read these stored coords and push
@@ -119,6 +124,25 @@ const CARD_BUILDER_PROLOGUE: &[u8] = &[
 /// Maximum backward-scan distance from the style-cluster match to the builder
 /// entry (0x9D on all four builds; generous headroom for code drift).
 const CARD_BUILDER_SCAN_BACK: usize = 0x200;
+
+/// HUD layout builder prologue HEAD, used to derive the builder entry from the
+/// `hud_layout_builder_style_cluster` match when the full `hud_layout_builder`
+/// AOB misses. The full AOB bakes in the stack-frame constants (`LEA RBP,[RAX-
+/// 0x1D8]; SUB RSP,0x2B0; MOV [RBP+0x20],-2`), which drift per build — 20250805
+/// is `-0x1D8/0x2A0/+0x18`, 20260224 `-0x1C8/0x2A0/+0x18` — so only the
+/// frame-size-agnostic head is matched here:
+/// `MOV RAX,RSP; PUSH RBP; PUSH R12; PUSH R13; PUSH R14; PUSH R15; LEA RBP,[RAX+disp32]`.
+/// The `48 8D A8` LEA opcode (RBP ← RAX-relative) is included to reject the
+/// far more common frame-less `MOV RAX,RSP; PUSH...` prologues; its disp32 is
+/// not.
+const HUD_BUILDER_PROLOGUE_HEAD: &[u8] = &[
+    0x48, 0x8B, 0xC4, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8,
+];
+
+/// Style-cluster → builder-entry distance is exactly 0x1DC on all six builds
+/// inspected (20250805/20260224/20260324/20260616/20260721/20260825); allow
+/// generous drift but stay well inside the ~0x1D00-byte function.
+const HUD_BUILDER_SCAN_BACK: usize = 0x400;
 
 /// Lane-relative element keys to recenter (Q1). `score`/`gauge`/`bpm`/`option`
 /// and the lane-name keys are intentionally excluded.
@@ -399,16 +423,60 @@ fn should_force_dark_card(card: *mut u8) -> bool {
 /// `song_info_card_style` cluster match for the builder prologue. Returns
 /// None (feature unavailable, WARN'd by the caller) if not found.
 fn derive_card_builder_entry(cluster: *const u8) -> Option<*const u8> {
+    derive_entry_behind(cluster, CARD_BUILDER_PROLOGUE, CARD_BUILDER_SCAN_BACK)
+}
+
+/// Backward-scan from an in-body anchor for the nearest preceding `prologue`
+/// byte sequence; returns its address (the function entry) or None.
+fn derive_entry_behind(anchor: *const u8, prologue: &[u8], max_back: usize) -> Option<*const u8> {
     unsafe {
-        for back in CARD_BUILDER_PROLOGUE.len()..=CARD_BUILDER_SCAN_BACK {
-            let candidate = cluster.sub(back);
-            let window = std::slice::from_raw_parts(candidate, CARD_BUILDER_PROLOGUE.len());
-            if window == CARD_BUILDER_PROLOGUE {
+        for back in prologue.len()..=max_back {
+            let candidate = anchor.sub(back);
+            let window = std::slice::from_raw_parts(candidate, prologue.len());
+            if window == prologue {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// Resolve the HUD layout builder entry: prefer the direct prologue AOB, else
+/// derive it from the build-stable lane-name style cluster (exactly one match
+/// required — ambiguity means the anchor drifted, so fail rather than guess).
+fn resolve_hud_builder(ctx: &ModContext) -> Option<*const u8> {
+    if let Some(addr) = ctx.signatures.get_address("hud_layout_builder") {
+        return Some(addr);
+    }
+    let clusters = ctx
+        .signatures
+        .get_all_matches("hud_layout_builder_style_cluster");
+    match clusters.as_slice() {
+        [cluster] => {
+            let entry =
+                derive_entry_behind(*cluster, HUD_BUILDER_PROLOGUE_HEAD, HUD_BUILDER_SCAN_BACK);
+            match entry {
+                Some(e) => log_info!(
+                    "CenterArrowsSingle: hud_layout_builder AOB missed; derived entry @ {:p} from style cluster @ {:p} (delta 0x{:X})",
+                    e,
+                    *cluster,
+                    (*cluster as usize).wrapping_sub(e as usize)
+                ),
+                None => log_warn!(
+                    "CenterArrowsSingle: builder prologue head not found behind style cluster @ {:p}",
+                    *cluster
+                ),
+            }
+            entry
+        }
+        other => {
+            log_warn!(
+                "CenterArrowsSingle: hud_layout_builder AOB missed and style cluster resolved {} matches (want 1)",
+                other.len()
+            );
+            None
+        }
+    }
 }
 
 // ── Hook lifecycle ──────────────────────────────────────────────────
@@ -542,7 +610,7 @@ impl Mod for CenterArrowsSingleMod {
     }
 
     fn init(&mut self, ctx: &ModContext) -> bool {
-        self.builder_addr = ctx.signatures.get_address("hud_layout_builder");
+        self.builder_addr = resolve_hud_builder(ctx);
         self.setter_addr = ctx.signatures.get_address("hud_layout_setter");
 
         // Song-info dark-card derivation (best-effort). Require exactly one

@@ -108,7 +108,8 @@ const BLEND_SRC_ONE: u32 = 2;
 
 const ACTOR_PLAY_SIDE: usize = 0x84;
 const WRAPPER_PLAYER_WORK: usize = 0x00;
-const PLAYER_WORK_OPTION: usize = 0xE0;
+// PlayerWork's inlined Option offset is build-dependent (0xE0 / 0xF0) —
+// `stage_records::player_option_offset()`.
 const OPTION_ARROW_SHAPE: usize = 0x60;
 const MAX_ARROW_SHAPE: i32 = 7;
 
@@ -283,7 +284,10 @@ unsafe fn resolve_arrow_shape(actor: *mut u8, ctx: &RenderContext) -> u32 {
         );
         return FALLBACK_ARROW_SHAPE;
     }
-    let option = player_work.add(PLAYER_WORK_OPTION);
+    let Some(option_off) = crate::services::stage_records::player_option_offset() else {
+        return FALLBACK_ARROW_SHAPE;
+    };
+    let option = player_work.add(option_off);
     let shape = memory::read_i32(option.add(OPTION_ARROW_SHAPE));
     if !(0..=MAX_ARROW_SHAPE).contains(&shape) {
         log_warn!(

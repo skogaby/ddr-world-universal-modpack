@@ -301,15 +301,77 @@ const PANEL_BUTTONS: [u32; 4] = [
 type PanelImplFn =
     unsafe extern "C" fn(*mut std::ffi::c_void, i32, *mut u8, *mut u8, *mut u64, *mut u64) -> u64;
 
-/// Byte offsets of the four panel-getter slots in the arkMDXIO vtable,
-/// paired with their injection slots (order: Up, Down, Left, Right —
-/// matching the `arkMDXGetPanel*` export wrappers).
-const PANEL_VTABLE_SLOTS: [(usize, usize); 4] = [
-    (0x310, inject_slot::PANEL_UP),
-    (0x318, inject_slot::PANEL_DOWN),
-    (0x320, inject_slot::PANEL_LEFT),
-    (0x328, inject_slot::PANEL_RIGHT),
-];
+// The four panel-getter detours are installed in `arkMDXGetPanel*` export
+// order (Up, Down, Left, Right). Their VTABLE byte offsets are NOT constant
+// across ark builds — they are derived per boot from the export wrappers
+// (`derive_ark_vtable_slots`): 0x310..0x328 on the 2026 arks but
+// 0x2F0..0x308 on the 20250805 ark, whose vtable has four fewer slots.
+// The 20250805 boot crash (log 2026-09-02) was exactly this: the hardcoded
+// "10-key" slot 0x308 held a 6-argument panel getter there, and calling it
+// through the 4-argument 10-key detour wrote through a garbage stack arg.
+
+/// The arkMDXIO vtable layout the MdxHWIO FIELD MAP below (menu edge/level
+/// bytes, card block, scan gates, override words) was reverse-engineered
+/// against: 10-key impl at +0x308, panel getters at +0x310..+0x328. The
+/// menu/card injection (IO-dispatcher detour) is only installed when the
+/// derived layout matches it — a different vtable shape means a different
+/// ark generation whose field offsets are unverified.
+const ARK_VERIFIED_TENKEY_SLOT: usize = 0x308;
+const ARK_VERIFIED_PANEL_SLOTS: [usize; 4] = [0x310, 0x318, 0x320, 0x328];
+
+/// arkMDXIO vtable slot offsets derived from the export wrappers.
+#[derive(Clone, Copy)]
+struct ArkVtableSlots {
+    tenkey: usize,
+    panels: [usize; 4],
+}
+
+/// Decode the vtable slot an `arkMDXGet*` export wrapper dispatches through.
+/// Every wrapper (verified byte-identical apart from the disp32 on the
+/// 20250805 and 20260721 arks) ends in `JMP qword [R10+disp32]`
+/// (`41 FF A2 d32`) or `CALL qword [R11+disp32]` (`41 FF 91 d32`): scan the
+/// first 0x80 bytes for a REX.B `FF /2` or `FF /4` with mod=10 and a
+/// non-SIB base, and take its disp32. Returns None when the shape is absent.
+unsafe fn derive_vtable_slot_from_export(export: *const u8) -> Option<usize> {
+    let body = std::slice::from_raw_parts(export, 0x80);
+    for i in 0..body.len() - 7 {
+        if body[i] != 0x41 || body[i + 1] != 0xFF {
+            continue;
+        }
+        let modrm = body[i + 2];
+        let is_mod10 = modrm & 0xC0 == 0x80;
+        let reg = modrm & 0x38;
+        let rm = modrm & 0x07;
+        if is_mod10 && (reg == 0x10 || reg == 0x20) && rm != 0x04 {
+            let disp = u32::from_le_bytes([body[i + 3], body[i + 4], body[i + 5], body[i + 6]]);
+            return Some(disp as usize);
+        }
+    }
+    None
+}
+
+/// Derive the 10-key and four panel-getter vtable slots from the ark's own
+/// export wrappers. Validates the shape (panels consecutive 8-byte slots,
+/// everything inside a plausible vtable span, 10-key distinct from the
+/// panels); any miss ⇒ None and the caller installs NO injection detours.
+fn derive_ark_vtable_slots(exports: &ArkExports) -> Option<ArkVtableSlots> {
+    let panel_fns = exports.panel_getters?;
+    unsafe {
+        let tenkey = derive_vtable_slot_from_export(exports.get_10key as *const u8)?;
+        let mut panels = [0usize; 4];
+        for (i, f) in panel_fns.iter().enumerate() {
+            panels[i] = derive_vtable_slot_from_export(*f as *const u8)?;
+        }
+        let plausible = |s: usize| (0x40..=0x1000).contains(&s) && s % 8 == 0;
+        if !plausible(tenkey) || !panels.iter().all(|&s| plausible(s)) {
+            return None;
+        }
+        if panels.windows(2).any(|w| w[1] != w[0] + 8) || panels.contains(&tenkey) {
+            return None;
+        }
+        Some(ArkVtableSlots { tenkey, panels })
+    }
+}
 
 static mut PANEL_IMPL_UP_DETOUR: Option<GenericDetour<PanelImplFn>> = None;
 static mut PANEL_IMPL_DOWN_DETOUR: Option<GenericDetour<PanelImplFn>> = None;
@@ -320,7 +382,7 @@ static mut PANEL_IMPL_RIGHT_DETOUR: Option<GenericDetour<PanelImplFn>> = None;
 static PANEL_IMPL_INSTALL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 /// Per-(player, panel-direction) previous held state for the trigger-edge
-/// synthesis (indices: [player][PANEL_VTABLE_SLOTS position]).
+/// synthesis (indices: [player][export order Up/Down/Left/Right]).
 static PANEL_PREV_HELD: [[AtomicBool; 4]; 2] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const B: AtomicBool = AtomicBool::new(false);
@@ -793,11 +855,20 @@ unsafe extern "C" fn tenkey_impl_detour(
 /// once the ark IO singleton is live and a provider is registered. The
 /// implementation pointers are read from the live object's vtable (no AOB,
 /// build-independent) and sanity-checked against the ark module's range.
-unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
+unsafe fn install_panel_impl_hooks(singleton_obj: usize, slots: ArkVtableSlots) {
     let Some(ark) = crate::core::module_resolver::resolve_ark_module() else {
         log_warn!("InputManager: ark module unresolved -- panel injection unavailable");
         return;
     };
+    let layout_verified =
+        slots.tenkey == ARK_VERIFIED_TENKEY_SLOT && slots.panels == ARK_VERIFIED_PANEL_SLOTS;
+    log_info!(
+        "InputManager: ark vtable slots derived from exports (10-key +{:#x}, panels +{:#x}..+{:#x}, field-map verified={})",
+        slots.tenkey,
+        slots.panels[0],
+        slots.panels[3],
+        layout_verified
+    );
     let ark_lo = ark.base as usize;
     let ark_hi = ark_lo + ark.size;
     let in_ark = |p: usize| p >= ark_lo && p < ark_hi;
@@ -816,7 +887,7 @@ unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
     }
 
     let mut targets = [0usize; 4];
-    for (i, (offset, _)) in PANEL_VTABLE_SLOTS.iter().enumerate() {
+    for (i, offset) in slots.panels.iter().enumerate() {
         let fn_ptr = std::ptr::read_volatile((vtable + offset) as *const usize);
         if !in_ark(fn_ptr) {
             log_warn!(
@@ -833,7 +904,7 @@ unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
     // Resolved alongside the panels from the same live vtable; a miss
     // degrades only the overlay slots (panels install regardless).
     let io_dispatch = std::ptr::read_volatile((vtable + 0x28) as *const usize);
-    let tenkey_impl = std::ptr::read_volatile((vtable + 0x308) as *const usize);
+    let tenkey_impl = std::ptr::read_volatile((vtable + slots.tenkey) as *const usize);
     // The impls are distinct functions on every known build; if a
     // future build merges them, a double detour on one address would fail —
     // bail loudly instead.
@@ -896,7 +967,16 @@ unsafe fn install_panel_impl_hooks(singleton_obj: usize) {
     // Touch-overlay detours (menu bytes + card episodes + pinpad).
     // Best-effort: a miss leaves the panels working and the overlay
     // slots inert with one WARN each.
-    if in_ark(io_dispatch) {
+    if !layout_verified {
+        // The dispatcher detour replicates stepUpdate's MdxHWIO field
+        // writes (menu edge bytes, card block, scan gates) at offsets only
+        // verified for the 2026 ark layout — never install it against an
+        // unknown layout. Panels + pinpad pulses above go through the
+        // derived slots and stay available.
+        log_warn!(
+            "InputManager: ark vtable layout differs from the verified one -- menu/card injection unavailable (panels + pinpad still injected)"
+        );
+    } else if in_ark(io_dispatch) {
         if let Err(e) = crate::core::hooks::install_enabled(
             std::ptr::addr_of_mut!(IO_DISPATCH_DETOUR),
             std::mem::transmute::<usize, IoDispatchFn>(io_dispatch),
@@ -1254,7 +1334,12 @@ pub fn poll() {
                 || AUX_INJECTION_WANTED.load(Ordering::Acquire))
                 && !PANEL_IMPL_INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel)
             {
-                unsafe { install_panel_impl_hooks(singleton_obj) };
+                match mgr.exports.as_ref().and_then(derive_ark_vtable_slots) {
+                    Some(slots) => unsafe { install_panel_impl_hooks(singleton_obj, slots) },
+                    None => log_warn!(
+                        "InputManager: could not derive the arkMDXIO vtable slots from the export wrappers -- injection detours NOT installed"
+                    ),
+                }
             }
         }
     }

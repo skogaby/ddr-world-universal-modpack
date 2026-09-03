@@ -236,11 +236,10 @@ impl Mod for PremiumFreeMod {
         "Freeze the stage counter (unlimited stages)"
     }
     fn required_signatures(&self) -> &[&str] {
-        &[
-            "premium_free_stage_inc",
-            "stage_record_accessor",
-            "player_work_table",
-        ]
+        // The record layout comes from whichever accessor shape resolved
+        // (`stage_record_accessor` / `_v1`); `init` gates on
+        // `stage_records::is_available()` for that, so it is not listed here.
+        &["premium_free_stage_inc", "player_work_table"]
     }
 
     fn init(&mut self, ctx: &ModContext) -> bool {

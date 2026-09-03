@@ -25,6 +25,8 @@
 //! session was 2P, so every dump covers both sides (entered or not — the
 //! song-select commit writes both sides' records regardless).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::core::memory;
 use crate::log_warn;
 use crate::services::{scene_manager, stage_records};
@@ -43,10 +45,47 @@ const DIAG_PW_DIFF: usize = 0x5C;
 const REC_GRADES_VEC: usize = 0xB8;
 const REC_ERRORS_VEC: usize = 0xD8;
 
-/// Result-commit early-out fields (GamePlayActor).
-const GPA_SKIP_BYTE: usize = 0x280;
-const GPA_SKIP_QWORD: usize = 0x288;
+/// Result-commit early-out fields (GamePlayActor), decoded from the
+/// `result_commit` match by `decode_commit_skip_offsets` (0x280/0x288 on
+/// 20260324+, 0x278/0x280 on 20250805/20260224). 0 = undecoded ⇒ the
+/// pre-commit tap stays silent rather than misread the actor.
+static GPA_SKIP_BYTE: AtomicUsize = AtomicUsize::new(0);
+static GPA_SKIP_QWORD: AtomicUsize = AtomicUsize::new(0);
 const GPA_SIDE: usize = 0x84;
+
+/// Decode the two early-out displacements from the `result_commit` match:
+/// `CMP byte [RCX+d32],0` at +11 (d32 at +13) and `CMP qword [RSI+d32],0` at
+/// +48 (d32 at +51). Validates the opcodes and the `skip2 == skip1 + 8`
+/// adjacency seen on every build; any mismatch leaves the tap disabled.
+pub fn decode_commit_skip_offsets(commit: *const u8) {
+    unsafe {
+        let op1 = [
+            memory::read_u8(commit.add(11)),
+            memory::read_u8(commit.add(12)),
+        ];
+        let op2 = [
+            memory::read_u8(commit.add(48)),
+            memory::read_u8(commit.add(49)),
+            memory::read_u8(commit.add(50)),
+        ];
+        if op1 != [0x80, 0xB9] || op2 != [0x48, 0x83, 0xBE] {
+            log_warn!("PremiumFree[diag]: result_commit skip-flag opcodes unexpected -- early-out tap disabled");
+            return;
+        }
+        let skip1 = memory::read_u32(commit.add(13)) as usize;
+        let skip2 = memory::read_u32(commit.add(51)) as usize;
+        if !(0x100..=0xFFF).contains(&skip1) || skip2 != skip1 + 8 {
+            log_warn!(
+                "PremiumFree[diag]: result_commit skip-flag offsets +0x{:X}/+0x{:X} out of shape -- early-out tap disabled",
+                skip1,
+                skip2
+            );
+            return;
+        }
+        GPA_SKIP_BYTE.store(skip1, Ordering::Release);
+        GPA_SKIP_QWORD.store(skip2, Ordering::Release);
+    }
+}
 
 /// Scene-entry tap: called from the mod's scene callback (freeze active).
 pub fn on_scene_enter(_prev: i32, next: i32) {
@@ -110,15 +149,22 @@ pub fn on_result_commit_pre(actor: *const u8) {
     if scene_manager::current_scene() < scene::SONG_SELECT {
         return;
     }
+    let off1 = GPA_SKIP_BYTE.load(Ordering::Acquire);
+    let off2 = GPA_SKIP_QWORD.load(Ordering::Acquire);
+    if off1 == 0 || off2 == 0 {
+        return;
+    }
     unsafe {
         let side = memory::read_i32(actor.add(GPA_SIDE));
-        let skip1 = memory::read_u8(actor.add(GPA_SKIP_BYTE));
-        let skip2 = memory::read_u64(actor.add(GPA_SKIP_QWORD));
+        let skip1 = memory::read_u8(actor.add(off1));
+        let skip2 = memory::read_u64(actor.add(off2));
         if skip1 != 0 || skip2 != 0 {
             log_warn!(
-                "PremiumFree[diag] BUG-1 SIGNATURE: result commit for P{} will be SKIPPED (actor+0x280={}, actor+0x288=0x{:X}) -- record keeps the previous play",
+                "PremiumFree[diag] BUG-1 SIGNATURE: result commit for P{} will be SKIPPED (actor+0x{:X}={}, actor+0x{:X}=0x{:X}) -- record keeps the previous play",
                 side + 1,
+                off1,
                 skip1,
+                off2,
                 skip2
             );
         }

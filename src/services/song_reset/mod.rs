@@ -215,11 +215,21 @@ const FLARE_HISTORY_SLOTS: usize = 8;
 const FLARE_LEVELS_FIRST_OFFSET: usize = 0x10C;
 const FLARE_LEVEL_SLOTS: usize = 11;
 
+// ── FlareGaugeActor pre-20260324 layout (attested by the
+// `flare_gauge_ctor_layout_v1` AOB; 20250805 / 20260224): side +0xE0, the
+// same 8 per-grade history counters at +0xE4..+0x100, and NO streak or
+// per-level array (no course carry on those builds). The FLOATING demote
+// loop is otherwise identical, so the restore only zeroes the counters. ──
+const FLARE_V1_HISTORY_FIRST_OFFSET: usize = 0xE4;
+/// True when the v1 attestation matched (and the 2026 one did not).
+static FLARE_LAYOUT_V1: AtomicBool = AtomicBool::new(false);
+
 // ── ddr::player::Option (flare level home) ──────────────────────────
 /// Each side's Option is `*(player_option_table[side]) + 0xE0` (the
 /// game's own accessor shape — same chain assist_tick uses for
 /// JUDGMENT TIMING).
-const CTX_OPTION_OFFSET: usize = 0xE0;
+// (build-dependent: 0xE0 on 20260324+, 0xF0 on 20250805 / 20260224 —
+// resolved via `stage_records::player_option_offset()`).
 /// The CURRENT flare level (1..=10, 10 = EX) — Option vt+0x1A0 setter /
 /// vt+0x310 getter are plain accessors of this field (Ghidra-verified on
 /// 20260324 and 20260721). GamePlayActor onSetup seeds it from the gauge
@@ -625,11 +635,21 @@ pub fn init(signatures: &SignatureStore) -> bool {
     // Missing pieces leave FLARE_RESTORE_AVAILABLE false — resets refuse
     // whenever a FlareGaugeActor is live (the caller's scene-jump
     // fallback restores flare state correctly), everything else works.
-    let flare_attested = signatures.get_address("flare_gauge_ctor_layout").is_some();
+    let flare_2026 = signatures.get_address("flare_gauge_ctor_layout").is_some();
+    let flare_v1 = signatures
+        .get_address("flare_gauge_ctor_layout_v1")
+        .is_some();
+    let flare_attested = flare_2026 || flare_v1;
     match signatures.get_address("player_option_table") {
         Some(addr) if flare_attested => {
             PLAYER_OPTION_TABLE.store(addr as *mut u8, Ordering::Release);
+            FLARE_LAYOUT_V1.store(!flare_2026 && flare_v1, Ordering::Release);
             FLARE_RESTORE_AVAILABLE.store(true, Ordering::Release);
+            if !flare_2026 {
+                log_info!(
+                    "SongReset: flare restore using the pre-20260324 FlareGaugeActor layout (v1)"
+                );
+            }
         }
         table => {
             log_warn!(
@@ -1239,7 +1259,8 @@ fn player_option_ptr(side: i32) -> Option<*mut u8> {
         if ctx.is_null() {
             return None;
         }
-        Some((ctx as *mut u8).add(CTX_OPTION_OFFSET))
+        let option_off = crate::services::stage_records::player_option_offset()?;
+        Some((ctx as *mut u8).add(option_off))
     }
 }
 
@@ -1424,12 +1445,15 @@ unsafe fn snapshot_flare_state(
         return Err("FLARE level out of range at song start");
     }
     let mut level_gauges = [0i32; FLARE_LEVEL_SLOTS];
-    for (slot, value) in level_gauges.iter_mut().enumerate() {
-        let read = memory::read_i32(gauge.add(FLARE_LEVELS_FIRST_OFFSET + slot * 4));
-        if !(0..=GAUGE_VALUE_MAX).contains(&read) {
-            return Err("FLARE per-level gauge value out of range");
+    // The v1 layout has no per-level array (nothing to snapshot/restore).
+    if !FLARE_LAYOUT_V1.load(Ordering::Acquire) {
+        for (slot, value) in level_gauges.iter_mut().enumerate() {
+            let read = memory::read_i32(gauge.add(FLARE_LEVELS_FIRST_OFFSET + slot * 4));
+            if !(0..=GAUGE_VALUE_MAX).contains(&read) {
+                return Err("FLARE per-level gauge value out of range");
+            }
+            *value = read;
         }
-        *value = read;
     }
     Ok(FlareSnapshot {
         level,
@@ -2531,18 +2555,28 @@ fn reset_side_state(dps: *mut u8, actors: &[*mut u8], snapshot: &[SideSnapshot])
                         //     re-derives from Option+0x7C on the next
                         //     diff-driven update (stale +0x9C, v6 rule).
                         if let Some(flare) = &g.flare {
-                            memory::write_i32(gauge.add(FLARE_STREAK_OFFSET) as *mut u8, 0);
+                            let v1 = FLARE_LAYOUT_V1.load(Ordering::Acquire);
+                            let history_first = if v1 {
+                                FLARE_V1_HISTORY_FIRST_OFFSET
+                            } else {
+                                FLARE_HISTORY_FIRST_OFFSET
+                            };
+                            if !v1 {
+                                memory::write_i32(gauge.add(FLARE_STREAK_OFFSET) as *mut u8, 0);
+                            }
                             for slot in 0..FLARE_HISTORY_SLOTS {
                                 memory::write_i32(
-                                    gauge.add(FLARE_HISTORY_FIRST_OFFSET + slot * 4) as *mut u8,
+                                    gauge.add(history_first + slot * 4) as *mut u8,
                                     0,
                                 );
                             }
-                            for (slot, value) in flare.level_gauges.iter().enumerate() {
-                                memory::write_i32(
-                                    gauge.add(FLARE_LEVELS_FIRST_OFFSET + slot * 4) as *mut u8,
-                                    *value,
-                                );
+                            if !v1 {
+                                for (slot, value) in flare.level_gauges.iter().enumerate() {
+                                    memory::write_i32(
+                                        gauge.add(FLARE_LEVELS_FIRST_OFFSET + slot * 4) as *mut u8,
+                                        *value,
+                                    );
+                                }
                             }
                             if let Some(option) = player_option_ptr(side) {
                                 memory::write_i32(

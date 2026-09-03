@@ -25,9 +25,15 @@ pub struct ResolveResult {
 }
 
 const SONG_RATE_CLOCK_ANCHOR_PATTERN: &str = "48 63 89 84 00 00 00 48 8D 35 ?? ?? ?? ?? 33 D2 48 8B 0C CE E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 92 48 02 00 00 44 8D 34 18 4C 8D 67 58 41 0F B7 54 24 2A";
+// Pre-20260324 codegen (20250805 @ 0x1800598D5, 20260224 @ 0x180058915): the
+// Option accessor takes no second argument, so the `33 D2` XOR EDX,EDX is
+// absent and the redirect window sits at match+0x23 instead of +0x25. The
+// eight redirect bytes and their register semantics are identical.
+const SONG_RATE_CLOCK_ANCHOR_V1_PATTERN: &str = "48 63 89 84 00 00 00 48 8D 35 ?? ?? ?? ?? 48 8B 0C CE E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 92 48 02 00 00 44 8D 34 18 4C 8D 67 58 41 0F B7 54 24 2A";
 const SONG_RATE_WAVEBANK_CREATE_PATTERN: &str = "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 28 FF FF FF 48 81 EC B0 01 00 00 48 C7 45 90 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 A0 00 00 00 48 63 F1 4C 8B 35 ?? ?? ?? ?? 49 8B 56 68 49 8B 46 70";
 const SONG_RATE_WAVEBANK_UNREGISTER_PATTERN: &str = "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 48 8B 35 ?? ?? ?? ?? 48 63 F9 48 8D 14 BF 41 B8 03 00 00 00 48 C1 E2 05 48 03 50 28 0F B6 82 8F 00 00 00 48 8D 4C 10 11 48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 85 C0 75 ??";
 const SONG_RATE_CLOCK_PATCH_OFFSET: usize = 0x25;
+const SONG_RATE_CLOCK_PATCH_OFFSET_V1: usize = 0x23;
 const SONG_RATE_CLOCK_EXPECTED: [u8; 8] = [0x44, 0x8d, 0x34, 0x18, 0x4c, 0x8d, 0x67, 0x58];
 // Audio-manager ctor callback-registration region: `lookAheadTime = 0xFA`
 // immediate followed by three `LEA RAX,[rip+disp32] / MOV [RBP+disp8],RAX`
@@ -97,6 +103,15 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "80 BD BC 00 00 00 00 0F 84 ?? ?? ?? ?? 8B 85 B0 00 00 00 48 8D 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 3B 85 B4 00 00 00 48 0F 4F D1 41 B1 01 45 0F B6 C1 48 8B 8D A8 00 00 00 E8 ?? ?? ?? ?? 0F B6 95 BC 00 00 00",
         description: "TimerActor onUpdate state-1 show site — MOVZX EDX,[actor+0xBC] at +62 feeds the layer set-visible helper; timer-freeze zeroes it to hide the timer display",
     },
+    // Same site, pre-20260324 codegen (20250805 @ 0x18003C3AD, 20260224 @
+    // 0x18003BCCD, unique on both): the `visible=1` argument is materialised
+    // as `41 B0 01` (MOV R8B,1) instead of `41 B1 01 45 0F B6 C1`
+    // (MOV R9B,1; MOVZX R8D,R9B), so the MOVZX patch site is at +58.
+    SignatureDefinition {
+        name: "timer_show_call_v1",
+        pattern: "80 BD BC 00 00 00 00 0F 84 ?? ?? ?? ?? 8B 85 B0 00 00 00 48 8D 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 3B 85 B4 00 00 00 48 0F 4F D1 41 B0 01 48 8B 8D A8 00 00 00 E8 ?? ?? ?? ?? 0F B6 95 BC 00 00 00",
+        description: "TimerActor onUpdate state-1 show site, pre-20260324 codegen — MOVZX EDX,[actor+0xBC] at +58. timer-freeze uses it when `timer_show_call` misses.",
+    },
     SignatureDefinition {
         name: "premium_free_stage_inc",
         pattern: "48 8B 08 FF 41 0C",
@@ -129,6 +144,32 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B 05 ?? ?? ?? ?? 4C 8B 00 48 63 C1 48 8D 0D ?? ?? ?? ?? 49 83 78 ?? 00 48 8B 04 C1 48 8B 00 74 07 48 05 ?? ?? 00 00 C3 48 63 CA 48 69 C9 ?? ?? 00 00 48 8D 84 08 ?? ?? 00 00 C3",
         description: "getStageRecord(side, stage) accessor — sources the game-work ptr global, player-work table, course-mode field offset, per-stage record stride and base. Consumed by the premium-free stale-record fix.",
     },
+    // Same accessor, the OLDER codegen shape seen on 20250805 (0x1800AE7A0) and
+    // 20260224 (0x1800B10E0) — one match each, none on 20260324+. The course
+    // branch is taken FIRST (JZ skips it) and the stage record is computed as
+    // `(stage + skew) * stride + *table[side]` with no separate base:
+    //
+    //   +0   MOV RAX,[rip+d32]        ; d32 at +3  -> game-work ptr global
+    //   +7   MOV R8,[RAX]
+    //   +10  MOVSXD RAX,ECX
+    //   +13  LEA RCX,[rip+d32]        ; d32 at +16 -> player_work_table
+    //   +20  CMP qword [R8+d8],0      ; d8 at +23  -> course-mode field (0x70)
+    //   +25  JZ +14
+    //   +27  MOV RAX,[RCX+RAX*8]
+    //   +31  MOV RAX,[RAX]
+    //   +34  ADD RAX,imm32            ; imm32 at +36 -> course record offset (0x2B8)
+    //   +40  RET
+    //   +41  MOV RCX,[RCX+RAX*8]
+    //   +45  MOVSXD RAX,EDX
+    //   +48  ADD RAX,imm8             ; imm8 at +51  -> stage skew (2)  => base = skew*stride
+    //   +52  IMUL RAX,RAX,imm32       ; imm32 at +55 -> record stride (0x2B8)
+    //   +59  ADD RAX,[RCX]
+    //   +62  RET
+    SignatureDefinition {
+        name: "stage_record_accessor_v1",
+        pattern: "48 8B 05 ?? ?? ?? ?? 4C 8B 00 48 63 C1 48 8D 0D ?? ?? ?? ?? 49 83 78 ?? 00 74 ?? 48 8B 04 C1 48 8B 00 48 05 ?? ?? 00 00 C3 48 8B 0C C1 48 63 C2 48 83 C0 ?? 48 69 C0 ?? ?? 00 00 48 03 01 C3",
+        description: "getStageRecord(side, stage) accessor, pre-20260324 codegen (course record via ADD imm32, stage record via (stage+skew)*stride). stage_records decodes it when `stage_record_accessor` misses.",
+    },
     // ── Premium Free ghost cache (same-credit PB ghost under a frozen stage) ──
     // `sequence::dance::GhostActor` init (20260721 `FUN_180056ad0`; 20260616
     // `0x180056b00`, 20260825 `0x180056a40` — match+0x0D..). Resolves the ghost
@@ -156,14 +197,18 @@ const SIGNATURES: &[SignatureDefinition] = &[
         description: "sequence::dance::GhostActor init — ghost id lookup + local-slot / network ghost resolution. Detoured by the premium-free ghost cache.",
     },
     // The local-slot copy site INSIDE `ghost_actor_init` (match+0x1A1 on
-    // 20260721): `IMUL R8,R8,0x2B8; MOV RCX,[RAX]; LEA RDX,[R8+RCX+0x648];
-    // LEA RCX,[RBX+0x98]; CALL vector<u8>::assign`. 0x648 = 0x590 + 0xB8 (the
-    // record's grade stream). The CALL rel32 at +25 resolves the game's own
-    // `vector<u8>` copy-assign (`ghost_vec_copy`, derived) — the allocator-
-    // correct way to fill `actor+0x98`. Unique on 20260616/0721/0825.
+    // 20260721): `IMUL R8,R8,0x2B8; MOV RCX,[RAX]; LEA RDX,[R8+RCX+d32];
+    // LEA RCX,[RBX+0x98]; CALL vector<u8>::assign`. d32 = record base + 0xB8
+    // (the record's grade stream): 0x648 = 0x590+0xB8 on 20260324+, 0x628 =
+    // 0x570+0xB8 on 20250805/20260224 (PlayerWork grew 0x20 in between) — so
+    // it is wildcarded; the runtime reads the stream through `stage_records`'
+    // decoded layout, never this literal. The CALL rel32 at +25 resolves the
+    // game's own `vector<u8>` copy-assign (`ghost_vec_copy`, derived) — the
+    // allocator-correct way to fill `actor+0x98`. Unique on 20250805/20260224/
+    // 20260616/0721/0825; the derivation pins it inside `ghost_actor_init`.
     SignatureDefinition {
         name: "ghost_local_slot_copy_site",
-        pattern: "4D 69 C0 B8 02 00 00 48 8B 08 49 8D 94 08 48 06 00 00 48 8D 8B 98 00 00 00 E8",
+        pattern: "4D 69 C0 B8 02 00 00 48 8B 08 49 8D 94 08 ?? ?? 00 00 48 8D 8B 98 00 00 00 E8",
         description: "GhostActor init local-slot copy site — CALL at +25 is the game's vector<u8> copy-assign (derived as ghost_vec_copy).",
     },
     // The song-end result commit — GamePlayActor vtable +0x28 (20260721
@@ -173,18 +218,25 @@ const SIGNATURES: &[SignatureDefinition] = &[
     // with REPLACE semantics. Two early-outs skip the whole commit:
     //
     //   40 53 56 57 48 81 EC 80 00 00 00   prologue
-    //   80 B9 80 02 00 00 00               CMP byte [RCX+0x280],0   (skip flag 1)
+    //   80 B9 ?? ?? 00 00 00               CMP byte [RCX+d32],0     (skip flag 1; d32 at +13:
+    //                                        0x280 on 20260324+, 0x278 on 20250805/20260224)
     //   48 8B F1 0F 85 ?? ?? ?? ??         MOV RSI,RCX; JNZ skip
     //   8B 81 94 01 00 00 03 81 9C 01 00 00  taps + shocks judged
     //   75 ??                              JNZ (else "MDX1529" no-judge report)
     //   48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ??
-    //   48 83 BE 88 02 00 00 00            CMP qword [RSI+0x288],0  (skip flag 2)
+    //   48 83 BE ?? ?? 00 00 00            CMP qword [RSI+d32],0    (skip flag 2; d32 at +51:
+    //                                        0x288 / 0x280 — always skip1 + 8)
+    //
+    // Both GamePlayActor skip-flag displacements are wildcarded (the actor grew
+    // 8 bytes before 20260324); premium_free's diag decodes them from the match
+    // at +13 / +51 instead of hardcoding 0x280/0x288. Unique on 20250805/
+    // 20260224/20260526/20260721.
     //
     // Detoured post-original by premium_free's ghost cache (snapshot the
     // committed grade stream) + the bug-1 diagnostic (log the early-outs).
     SignatureDefinition {
         name: "result_commit",
-        pattern: "40 53 56 57 48 81 EC 80 00 00 00 80 B9 80 02 00 00 00 48 8B F1 0F 85 ?? ?? ?? ?? 8B 81 94 01 00 00 03 81 9C 01 00 00 75 ?? 48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ?? 48 83 BE 88 02 00 00 00",
+        pattern: "40 53 56 57 48 81 EC 80 00 00 00 80 B9 ?? ?? 00 00 00 48 8B F1 0F 85 ?? ?? ?? ?? 8B 81 94 01 00 00 03 81 9C 01 00 00 75 ?? 48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ?? 48 83 BE ?? ?? 00 00 00",
         description: "GamePlayActor result commit (vtable +0x28) — writes the per-stage play record at song end. Detoured by the premium-free ghost cache + diagnostic.",
     },
     // The in-song speed-mod adjustment window's kill gate, inside
@@ -230,7 +282,29 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "hud_layout_builder",
         pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 28 FE FF FF 48 81 EC B0 02 00 00 48 C7 45 20 FE FF FF FF",
-        description: "Gameplay HUD/lane layout builder (entry). RCX = builder_root (a LayoutActor). Per-side layout parent at root+0xE0+side*0x48 (the `parent` the layout setter receives). Center-arrows mod hooks this to capture the builder root. Prologue verified identical across both supported builds.",
+        description: "Gameplay HUD/lane layout builder (entry). RCX = builder_root (a LayoutActor). Per-side layout parent at root+0xE0+side*0x48 (the `parent` the layout setter receives). Center-arrows mod hooks this to capture the builder root. NOTE: this prologue bakes in the stack-frame constants (LEA RBP disp / SUB RSP imm / cookie slot), which vary per build — it matches 20260324/0616/0721/0825 but NOT 20250805 (-0x1D8/0x2A0/+0x18) or 20260224 (-0x1C8/0x2A0/+0x18). `hud_layout_builder_style_cluster` is the build-stable fallback anchor.",
+    },
+    // Gameplay HUD/lane layout builder — the lane-name selection cluster 0x1DC
+    // into the function body (byte-identical apart from the string disp32s):
+    //   CMP dword [R13+0x84],1     ; P1 style == double?
+    //   JNZ +9
+    //   LEA RDX,["double_lane_usr"]
+    //   JMP +0x18
+    //   CMP dword [R13+0x88],1     ; P2 style == double?
+    //   LEA RDX,[...]
+    //   JZ +7
+    //   LEA RDX,[...]
+    //   CALL find_child
+    // R13 = builder_root (RCX at entry). Unique single match on 20250805
+    // (0x18006880C), 20260224 (0x18006789C), 20260324 (0x18006C40C), 20260616
+    // (0x18006BD8C), 20260721 (0x18006BF6C), 20260825 (0x18006BF1C); the
+    // function entry is exactly match-0x1DC on every one. The center-arrows mod
+    // derives the entry from this match via a backward scan for the
+    // frame-size-agnostic prologue head `MOV RAX,RSP; PUSH RBP; PUSH R12..R15`.
+    SignatureDefinition {
+        name: "hud_layout_builder_style_cluster",
+        pattern: "41 83 BD 84 00 00 00 01 75 09 48 8D 15 ?? ?? ?? ?? EB 18 41 83 BD 88 00 00 00 01 48 8D 15 ?? ?? ?? ?? 74 07 48 8D 15 ?? ?? ?? ?? E8",
+        description: "HUD layout builder lane-name style cluster (CMP [R13+0x84],1 / CMP [R13+0x88],1 selecting the lane clip name). Build-stable anchor for deriving the `hud_layout_builder` entry (backward prologue scan) when the frame-constant-bearing prologue AOB misses.",
     },
     SignatureDefinition {
         name: "hud_layout_setter",
@@ -393,7 +467,9 @@ const SIGNATURES: &[SignatureDefinition] = &[
     // toward GOLD. Both table operands are module-BASE-relative disp32s
     // (RVAs added to a LEA-materialized base register), not RIP-relative.
     //
-    //   +0   CALL qword [RDX+0xA0]       ; raw <series> u8 -> AL
+    //   +0   CALL qword [RDX+slot]       ; raw <series> u8 -> AL (vtable slot
+    //                                    ;  0xA0 on 20260324+, 0x88 on
+    //                                    ;  20250805/20260224 — wildcarded)
     //   +6   MOVZX R8D,AL
     //   +10  XOR ECX,ECX                 ; walk index = 0
     //   +12  NOP dword [RAX+0]
@@ -405,13 +481,16 @@ const SIGNATURES: &[SignatureDefinition] = &[
     //   +42  JGE loop
     //   +44  XOR EDX,EDX                 ; fallthrough -> category 0
     //
-    // Wildcards cover only the two data-layout-dependent disp32s; register
-    // allocation and branch displacements verified byte-identical on builds
-    // 20260324/20260616/20260721 (unique match on all three). Full RE:
-    // docs/flare_ranking_research.md.
+    // Wildcards cover the two data-layout-dependent disp32s and the raw-series
+    // accessor's vtable slot (the only byte that differs on the pre-20260324
+    // builds); register allocation and branch displacements verified
+    // byte-identical on 20250805/20260224/20260324/20260616/20260721 (unique
+    // match on all five). The stock tables are validated at init (ascending
+    // thresholds, categories 1..=3), so a wrong-site match fails closed. Full
+    // RE: docs/flare_ranking_research.md.
     SignatureDefinition {
         name: "flare_skill_classifier",
-        pattern: "FF 92 A0 00 00 00 44 0F B6 C0 33 C9 0F 1F 40 00 42 8B 94 29 ?? ?? ?? ?? 46 39 84 29 ?? ?? ?? ?? 7E 0C 48 83 E9 04 48 83 F9 F8 7D E4 33 D2",
+        pattern: "FF 92 ?? 00 00 00 44 0F B6 C0 33 C9 0F 1F 40 00 42 8B 94 29 ?? ?? ?? ?? 46 39 84 29 ?? ?? ?? ?? 7E 0C 48 83 E9 04 48 83 F9 F8 7D E4 33 D2",
         description: "CalcFlareSkill series->category walk. Cat-table disp32 at +20, threshold-table disp32 at +28, loop-bound imm8 at +41. series_expansion redirects both disp32s at a 4-entry extended table (adds 'series >= 22 -> category 0') and widens the bound -8 -> -12.",
     },
     // ── Folder Expansion signatures ─────────────────────────────────
@@ -673,6 +752,29 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "33 C0 89 9F E8 00 00 00 48 8B 5C 24 ?? 89 87 E4 00 00 00 48 89 87 EC 00 00 00 48 89 87 F4 00 00 00 48 89 87 FC 00 00 00 48 89 87 04 01 00 00 48 B8 10 27 00 00 10 27 00 00 C6 87 E0 00 00 00 00 4C 8D 1D ?? ?? ?? ?? 4C 89 1F 48 89 87 0C 01 00 00",
         description: "FlareGaugeActor ctor field-init tail — layout attestation for song_reset's floating-flare restore (streak +0xE4, per-grade history counters +0xEC..+0x108, per-level array +0x10C..+0x134, side +0xE8). Presence attests the 2026 flare layout; the address itself is unused.",
     },
+    // The OLDER FlareGaugeActor layout (20250805 @ 0x18007212E, 20260224 @
+    // 0x18007129E — unique on both, absent on 20260324+): no course-carry
+    // fields at all. Ctor tail:
+    //
+    //   48 8D 05 ????????          LEA  RAX,[vftable]
+    //   48 89 07                   MOV  [RDI],RAX
+    //   89 9F E0000000             MOV  [RDI+0xE0],EBX      ; side
+    //   33 C0                      XOR  EAX,EAX
+    //   48 89 87 E4000000          MOV  [RDI+0xE4],RAX      ; per-grade judge
+    //   48 89 87 EC000000          MOV  [RDI+0xEC],RAX      ;   history counters
+    //   48 89 87 F4000000          MOV  [RDI+0xF4],RAX      ;   (8 dwords,
+    //   48 89 87 FC000000          MOV  [RDI+0xFC],RAX      ;   0xE4..0x100)
+    //
+    // calcJudgePoint on these builds bumps `[this+0xE4+grade*4]` and
+    // demotes via Option vt+0x1A0 exactly like the 2026 code, so the
+    // floating-flare restore only needs to zero those 8 counters (no
+    // streak, no per-level array). song_reset selects the layout by which
+    // attestation matched.
+    SignatureDefinition {
+        name: "flare_gauge_ctor_layout_v1",
+        pattern: "48 8D 05 ?? ?? ?? ?? 48 89 07 89 9F E0 00 00 00 33 C0 48 89 87 E4 00 00 00 48 89 87 EC 00 00 00 48 89 87 F4 00 00 00 48 89 87 FC 00 00 00",
+        description: "FlareGaugeActor ctor field-init tail, pre-20260324 layout (side +0xE0, per-grade history counters +0xE4..+0x100, no streak / per-level array). Layout attestation for song_reset's floating-flare restore on 20250805 / 20260224.",
+    },
 
     // GradeGaugeActor ctor field-init tail (`FUN_180075270` on 20260721,
     // option 0xE) — layout attestation for song_reset's grade-watermark
@@ -845,14 +947,36 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 53 55 56 57 41 54 41 55 48 81 EC 98 00 00 00 48 C7 44 24 50 FE FF FF FF 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 80 00 00 00 49 8B D9 49 8B F0 48 8B EA 4C 8B E1 48 89 54 24 48 45 33 ED 44 89 6C 24 20",
         description: "PlaydataTab row-write helper (ctx {wrapper,tab}, out shared_ptr, anchor-name string, text string). Creates a SpriteLayer row widget and pushes it into tab+0x158.",
     },
+    // Same helper, pre-20260324 codegen (20250805 @ 0x1800EBA00, 20260224 @
+    // 0x1800EDC00 — byte-identical prologue, unique on both, absent on
+    // 20260324+): RBP-framed with a 0xD0 frame and RSI/RDI/R14 saves, and
+    // the parent+anchor-name write goes through a small setter
+    // (`sl+0x60 = wrapper; sl+0x68 = name`) instead of inline stores. Same
+    // ABI (RCX=ctx {wrapper,tab}, RDX=out shared_ptr, R8=anchor name,
+    // R9=text), same SpriteLayer field writes (+0x94/+0x9C/+0xA0/+0xD8/
+    // +0xE0), same `tab+0x158..0x168` push — Ghidra-verified on both builds.
+    // `derive_smarvelous_results_fallbacks` publishes it under the primary
+    // name so the results_score consumer stays build-agnostic.
+    SignatureDefinition {
+        name: "playdata_row_write_v1",
+        pattern: "40 55 53 56 57 41 54 41 55 41 56 48 8D 6C 24 D9 48 81 EC D0 00 00 00 48 C7 45 EF FE FF FF FF 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 1F 49 8B D9 49 8B F8 4C 8B E2 48 8B F1 48 89 55 BF 45 33 F6",
+        description: "PlaydataTab row-write helper, pre-20260324 prologue (20250805 / 20260224). Same ABI and layout as playdata_row_write.",
+    },
     // GraphTab per-frame rebuild (s-marvelous judgement graph, vslot 7 —
     // clears + rebuilds all charts/legend texts every frame). Prologue
-    // anchored; the giant 0x12E0 chkstk frame pins uniqueness (verified
-    // exactly-once on 20260721 @0x1800ED610 and 20260616 @0x1800ED1B0).
-    // The chkstk call rel32 is wildcarded.
+    // anchored; the giant 0x12E0 chkstk frame pins uniqueness. The chkstk
+    // call rel32 AND the EH-marker slot displacement are wildcarded (the
+    // slot is [RBP+0x7E8] on 20260324+ but [RBP+0x890] on 20250805 /
+    // 20260224). Verified exactly-once on 20250805 @0x1800E1520, 20260224
+    // @0x1800E32D0, 20260324 @0x1800EE240, 20260616 @0x1800ED1B0, 20260721
+    // @0x1800ED610, 20260825 @0x1800ED9F0; the GraphTab layout the detours
+    // consume (+0x110/+0x120 wrappers, +0x138 page, +0x148/+0x14C side/
+    // stage, +0x1C4 has_data, series vectors +0x538/+0x5D8/+0x5F8, legend
+    // ctx {rect*,cursor*,tab*}, ColorCallable {vft,rgba,..,impl}) is
+    // decompile-identical on the two old builds.
     SignatureDefinition {
         name: "graph_tab_rebuild",
-        pattern: "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 20 EE FF FF B8 E0 12 00 00 E8 ? ? ? ? 48 2B E0 48 C7 85 E8 07 00 00 FE FF FF FF",
+        pattern: "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 20 EE FF FF B8 E0 12 00 00 E8 ? ? ? ? 48 2B E0 48 C7 85 ? ? 00 00 FE FF FF FF",
         description: "sequence::result::GraphTab rebuild (this). Rebuilds charts (tab+0x178) and legend texts (tab+0x1A0) per frame while the tab is visible.",
     },
     // Chart single-color series append (s-marvelous judgement graph):
@@ -888,6 +1012,18 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 E8 F5 FF FF 48 81 EC F0 0A 00 00 48 C7 85 00 02 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20",
         description: "sequence::result results-window builder (this). One-shot scene build: rank/emblem/flare bitmaps + fc_usr loop_<kind> label goto per side.",
     },
+    // Same builder, pre-20260324 frame (20250805 @ 0x1800B0CB0, 20260224 @
+    // 0x1800B35F0 — byte-identical prologue, unique on both, absent on
+    // 20260324+): −0x978 frame displacement + SUB RSP,0xA50 + the 0x1B8 EH
+    // slot. Layout the emblem detour consumes is decompile-identical on
+    // both: `this+0x108` result_root layer (id at +8), `this+0xEC` stage,
+    // record `+0x54` clear kind → suffix table ([10] = "mfc") → `fc_usr`
+    // `0xF09 "loop_<suffix>"`.
+    SignatureDefinition {
+        name: "result_window_build_v1",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 88 F6 FF FF 48 81 EC 50 0A 00 00 48 C7 85 B8 01 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20",
+        description: "sequence::result results-window builder, pre-20260324 prologue (20250805 / 20260224). Same layout as result_window_build.",
+    },
     // Total-results populate (s-marvelous FC emblems, Step 9). Builds the
     // per-stage "total_result" pane layers (actor+0x1B0+pane*8) and loads
     // the clear-kind badge bitmap "scre_total_player_%s" (suffix table
@@ -901,6 +1037,19 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "total_result_populate",
         pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 58 FA FF FF 48 81 EC 80 06 00 00 48 C7 85 40 02 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8",
         description: "sequence::result total-results populate (this). Builds per-stage panes and loads the per-side clear-kind badge into fullcombo_usr.",
+    },
+    // Same populate, pre-20260324 frame (20250805 @ 0x1800C1840, 20260224 @
+    // 0x1800C3FC0 — byte-identical prologue, unique on both, absent on
+    // 20260324+): −0x5D8 frame displacement + SUB RSP,0x6B0 + the 0x230 EH
+    // slot. Layout the emblem detour consumes is decompile-identical on
+    // both: `this+0x9C` primary side, `this+0x1B0 + pane*8` total_result
+    // pane layers (one pane per non-virgin stage, in order), record `+0x54`
+    // clear kind → suffix table ([10] = "fc_mfc") → `fullcombo_usr` under
+    // `total_p%d_top_usr`.
+    SignatureDefinition {
+        name: "total_result_populate_v1",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 28 FA FF FF 48 81 EC B0 06 00 00 48 C7 85 30 02 00 00 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8",
+        description: "sequence::result total-results populate, pre-20260324 prologue (20250805 / 20260224). Same layout as total_result_populate.",
     },
     // CalcCalorieActor per-frame tick (vtable slot 6, shared Single/Double).
     // Reads the current measurement-window index (+0x92) and its closed flag
@@ -1403,8 +1552,8 @@ const SIGNATURES: &[SignatureDefinition] = &[
     },
     SignatureDefinition {
         name: "selectmusic_model_anchor",
-        pattern: "4C 8B 1D ? ? ? ? 48 C7 44 24 38 00 00 00 00 33 F6 48 89 74 24 40 49 8B 93 B8 01 00 00 4D 8B 83 B0 01 00 00",
-        description: "MusicCard per-frame tick (FUN_180160910 on 20260721) reading the select-music model global: MOV R11,[rip+d32] then the highlighted-song shared_ptr loads at [R11+0x1B8]/[R11+0x1B0] (offsets pinned as imm bytes). d32 at match+3 → `selectmusic_model` derived global. Unique single hit on all four builds.",
+        pattern: "4C 8B 1D ? ? ? ? 48 C7 44 24 38 00 00 00 00 33 F6 48 89 74 24 40 49 8B 93 ? ? 00 00 4D 8B 83 ? ? 00 00",
+        description: "MusicCard per-frame tick (FUN_180160910 on 20260721) reading the select-music model global: MOV R11,[rip+d32] then the highlighted-song shared_ptr loads at [R11+slot+8] (ctrl, disp32 at match+26) / [R11+slot] (obj, disp32 at match+33). slot = 0x1B0 on 20260324+, 0x190 on 20250805 / 20260224 — derived as `selectmusic_highlight_slot` (the two disps must be exactly 8 apart). d32 at match+3 → `selectmusic_model` derived global. Unique single hit on all six inspected builds.",
     },
     // ── Overlay Element Styling signatures ──────────────────────────
     // BM2D CMovieClip pool-wrapper methods (see
@@ -1500,6 +1649,11 @@ const SIGNATURES: &[SignatureDefinition] = &[
         description: "Per-frame authoritative music_count calculation. The exact eight-byte `LEA R14D,[RAX+RBX]; LEA R12,[RDI+0x58]` redirect window is at match+0x25 and is derived only after literal-byte validation.",
     },
     SignatureDefinition {
+        name: "song_rate_clock_anchor_v1",
+        pattern: SONG_RATE_CLOCK_ANCHOR_V1_PATTERN,
+        description: "song_rate_clock_anchor without the XOR EDX,EDX (20250805 / 20260224 codegen); redirect window at match+0x23. `derive_song_rate_runtime_sites` publishes whichever shape matched as `song_rate_clock_anchor`.",
+    },
+    SignatureDefinition {
         name: "song_rate_wavebank_create",
         pattern: SONG_RATE_WAVEBANK_CREATE_PATTERN,
         description: "audio wavebank_create(i32 file_id) -> bool entry. Returns true only after native open, XACT streaming-bank acceptance, manager insertion, and DoWork.",
@@ -1583,10 +1737,21 @@ const SIGNATURES: &[SignatureDefinition] = &[
     // (`derive_player_option_table`) validates the LEA target against the
     // module base before trusting the table RVA. Verified to match exactly
     // once on 20260324 / 20260421 / 20260616 / 20260721.
+    //
+    // 20250805 (0x18005B58E) and 20260224 (0x18005A5CE) emit the identical
+    // sequence WITHOUT the `33 D2` XOR EDX,EDX between the SUB and the ADD —
+    // `player_option_ctx_load_v1` below. Same table (it is the
+    // player_work_table — `*(table[side]) + 0xE0` is PlayerWork's inlined
+    // Option), table disp32 at match+44 instead of +46.
     SignatureDefinition {
         name: "player_option_ctx_load",
         pattern: "48 63 8D 84 00 00 00 89 85 68 01 00 00 8B 85 84 01 00 00 4C 8D 25 ?? ?? ?? ?? 2B 85 70 01 00 00 33 D2 03 C6 89 85 7C 01 00 00 49 8B 8C CC ?? ?? ?? ?? E8",
         description: "Per-side context-table load inside the per-frame count computation. Yields the derived player_option_table (base + the MOV's disp32); each side's ddr::player::Option is *(table[side]) + 0xE0, JUDGMENT TIMING (timing_music, ±100 ms) at Option+0x24. RE record: .agents/planning/20260729-assist-tick-premixed-track/research/ra-rb-timing-chain.md.",
+    },
+    SignatureDefinition {
+        name: "player_option_ctx_load_v1",
+        pattern: "48 63 8D 84 00 00 00 89 85 68 01 00 00 8B 85 84 01 00 00 4C 8D 25 ?? ?? ?? ?? 2B 85 70 01 00 00 03 C6 89 85 7C 01 00 00 49 8B 8C CC ?? ?? ?? ?? E8",
+        description: "player_option_ctx_load without the XOR EDX,EDX (20250805 / 20260224 codegen). Table disp32 at match+44. Consumed by derive_player_option_table when the primary anchor misses.",
     },
     // ── Song-select preview restart (preview design §Components 5–6) ──
     // The four addresses the live-edit restart executor is built on: two
@@ -1741,6 +1906,7 @@ impl SignatureStore {
         self.derive_string_assign_via_pair();
         self.derive_event_lambda_vtable_slots();
         self.derive_textlayer_bind();
+        self.derive_smarvelous_results_fallbacks();
         self.derive_customize_offset();
         self.derive_timing_config_setter();
         self.derive_bm2d_package_addresses();
@@ -1849,7 +2015,6 @@ impl SignatureStore {
 
     fn derive_song_rate_runtime_sites(&mut self) {
         for (name, pattern) in [
-            ("song_rate_clock_anchor", SONG_RATE_CLOCK_ANCHOR_PATTERN),
             (
                 "song_rate_wavebank_create",
                 SONG_RATE_WAVEBANK_CREATE_PATTERN,
@@ -1872,12 +2037,33 @@ impl SignatureStore {
             self.resolved.insert(name.into(), matches[0].address);
         }
 
-        let Some(anchor) = self.get_address("song_rate_clock_anchor") else {
-            return;
+        // The clock anchor has two codegen shapes (with / without the
+        // accessor's XOR EDX,EDX); exactly one of them must match exactly
+        // once. The shape decides where the redirect window sits.
+        self.resolved.remove("song_rate_clock_anchor");
+        let primary = scan_pattern_all(self.base, self.size, SONG_RATE_CLOCK_ANCHOR_PATTERN);
+        let v1 = scan_pattern_all(self.base, self.size, SONG_RATE_CLOCK_ANCHOR_V1_PATTERN);
+        let (anchor, patch_offset) = match (primary.as_slice(), v1.as_slice()) {
+            ([m], []) => (m.address, SONG_RATE_CLOCK_PATCH_OFFSET),
+            ([], [m]) => {
+                log_info!("  [+] song_rate_clock_anchor -- pre-20260324 shape (v1)");
+                (m.address, SONG_RATE_CLOCK_PATCH_OFFSET_V1)
+            }
+            _ => {
+                log_warn!(
+                    "  [-] song_rate_clock_anchor -- expected exactly one match, found {} (v1: {})",
+                    primary.len(),
+                    v1.len()
+                );
+                return;
+            }
         };
+        self.resolved
+            .insert("song_rate_clock_anchor".into(), anchor);
+
         let anchor_offset = anchor as usize - self.base as usize;
         let Some(patch_end) = anchor_offset
-            .checked_add(SONG_RATE_CLOCK_PATCH_OFFSET)
+            .checked_add(patch_offset)
             .and_then(|offset| offset.checked_add(SONG_RATE_CLOCK_EXPECTED.len()))
         else {
             self.resolved.remove("song_rate_clock_anchor");
@@ -1889,7 +2075,7 @@ impl SignatureStore {
             log_warn!("  [-] song_rate_clock_patch -- derived range outside module");
             return;
         }
-        let patch = unsafe { anchor.add(SONG_RATE_CLOCK_PATCH_OFFSET) };
+        let patch = unsafe { anchor.add(patch_offset) };
         let actual = unsafe { std::slice::from_raw_parts(patch, SONG_RATE_CLOCK_EXPECTED.len()) };
         if actual != SONG_RATE_CLOCK_EXPECTED {
             self.resolved.remove("song_rate_clock_anchor");
@@ -3535,16 +3721,33 @@ impl SignatureStore {
         /// which is precisely what the out-of-module check below caught on
         /// the first deploy of this derivation.
         const TABLE_DISP: usize = 46;
+        /// Same for the `_v1` shape, which lacks the 2-byte `XOR EDX,EDX`.
+        const TABLE_DISP_V1: usize = 44;
 
-        let anchor = match self.get_address("player_option_ctx_load") {
-            Some(a) => a,
-            None => {
-                log_warn!("  [-] player_option_table -- player_option_ctx_load anchor unresolved");
-                return;
-            }
+        let (anchor, table_disp) = match self.get_address("player_option_ctx_load") {
+            Some(a) => (a, TABLE_DISP),
+            None => match self.get_address("player_option_ctx_load_v1") {
+                Some(a) => (a, TABLE_DISP_V1),
+                None => {
+                    log_warn!(
+                        "  [-] player_option_table -- player_option_ctx_load anchor unresolved"
+                    );
+                    return;
+                }
+            },
         };
         let base = self.base;
         unsafe {
+            // Structural guard: the table load's opcode+ModRM+SIB must sit
+            // right where the chosen shape says it does.
+            let op = std::slice::from_raw_parts(anchor.add(table_disp - 4), 4);
+            if op != [0x49, 0x8B, 0x8C, 0xCC] {
+                log_warn!(
+                    "  [-] player_option_table -- table-load opcode mismatch at match+{}; refusing to derive",
+                    table_disp - 4
+                );
+                return;
+            }
             let lea_target = decode_rip_relative(anchor.add(LEA_DISP));
             if lea_target != base {
                 log_warn!(
@@ -3554,7 +3757,7 @@ impl SignatureStore {
                 );
                 return;
             }
-            let disp = (anchor.add(TABLE_DISP) as *const u32).read_unaligned() as usize;
+            let disp = (anchor.add(table_disp) as *const u32).read_unaligned() as usize;
             if disp >= self.size {
                 log_warn!(
                     "  [-] player_option_table -- table displacement 0x{:X} is outside the module (size 0x{:X})",
@@ -3569,7 +3772,74 @@ impl SignatureStore {
                 "  [+] player_option_table (derived, base-validated LEA + disp32) @ +0x{:X}",
                 disp
             );
+
+            // The Option's offset inside PlayerWork is NOT a stable layout
+            // fact: the accessor the anchor CALLs (`E8` right after the table
+            // disp32) returns `*ctx + OFF`, and OFF is 0xE0 on 20260324+ but
+            // 0xF0 on 20250805 / 20260224. Decode it from the callee's
+            // `MOV RAX,[RCX|R8]; ADD RAX,imm32` return sites (there are one
+            // or two — the direct path and the post-debug-check path — and
+            // they must agree). Stored as a base-relative pseudo address;
+            // read via `player_option_offset()`.
+            let call_insn = anchor.add(table_disp + 4);
+            if *call_insn != 0xE8 {
+                log_warn!("  [-] player_option_offset -- expected CALL after the table load");
+                return;
+            }
+            let callee = decode_call_rel32(call_insn);
+            let callee_off = (callee as usize).wrapping_sub(base as usize);
+            if callee_off >= self.size.saturating_sub(0x400) {
+                log_warn!("  [-] player_option_offset -- accessor callee outside module");
+                return;
+            }
+            let body = std::slice::from_raw_parts(callee, 0x300);
+            let mut found: Option<u32> = None;
+            let mut consistent = true;
+            for i in 0..body.len() - 9 {
+                // 48 8B 01 = MOV RAX,[RCX]; 49 8B 00 = MOV RAX,[R8];
+                // followed by 48 05 imm32 = ADD RAX,imm32.
+                let load_ok = (body[i] == 0x48 && body[i + 1] == 0x8B && body[i + 2] == 0x01)
+                    || (body[i] == 0x49 && body[i + 1] == 0x8B && body[i + 2] == 0x00);
+                if !load_ok || body[i + 3] != 0x48 || body[i + 4] != 0x05 {
+                    continue;
+                }
+                let imm = u32::from_le_bytes([body[i + 5], body[i + 6], body[i + 7], body[i + 8]]);
+                match found {
+                    None => found = Some(imm),
+                    Some(prev) if prev != imm => consistent = false,
+                    _ => {}
+                }
+            }
+            match found {
+                Some(off) if consistent && (0x40..=0x400).contains(&off) => {
+                    self.resolved
+                        .insert("player_option_offset".into(), base.add(off as usize));
+                    log_info!(
+                        "  [+] player_option_offset (derived from accessor @ +0x{:X}) = PlayerWork+0x{:X}",
+                        callee_off,
+                        off
+                    );
+                }
+                Some(off) => log_warn!(
+                    "  [-] player_option_offset -- accessor return sites disagree or out of range (0x{:X}, consistent={})",
+                    off,
+                    consistent
+                ),
+                None => log_warn!(
+                    "  [-] player_option_offset -- no `MOV RAX,[ctx]; ADD RAX,imm32` in accessor @ +0x{:X}",
+                    callee_off
+                ),
+            }
         }
+    }
+
+    /// Offset of `ddr::player::Option` inside `PlayerWork` (the value the
+    /// `player_option_ctx_load` accessor adds to `*ctx`): 0xE0 on 20260324+,
+    /// 0xF0 on 20250805 / 20260224. `None` when the derivation failed — every
+    /// consumer must then stay inert rather than assume a layout.
+    pub fn player_option_offset(&self) -> Option<usize> {
+        self.get_address("player_option_offset")
+            .map(|p| (p as usize).wrapping_sub(self.base as usize))
     }
 
     /// Derive `file_manager_singleton` from xrefs to `file_manager_load`.
@@ -3955,9 +4225,37 @@ impl SignatureStore {
                 );
                 return;
             }
+            // The highlighted-song shared_ptr slot moved between builds
+            // (0x190 pre-20260324, 0x1B0 after): decode it from the two
+            // pinned-shape loads and require the ctrl/obj adjacency.
+            let ctrl_disp = (anchor.add(26) as *const u32).read_unaligned() as usize;
+            let obj_disp = (anchor.add(33) as *const u32).read_unaligned() as usize;
+            if ctrl_disp != obj_disp + 8 || !(0x40..=0x1000).contains(&obj_disp) {
+                log_warn!(
+                    "  [-] selectmusic_model -- highlight slot disps +0x{:X}/+0x{:X} out of shape; refusing to derive",
+                    obj_disp,
+                    ctrl_disp
+                );
+                return;
+            }
             self.resolved.insert("selectmusic_model".into(), global);
-            log_info!("  [+] selectmusic_model (derived) @ +0x{:X}", off);
+            self.resolved
+                .insert("selectmusic_highlight_slot".into(), self.base.add(obj_disp));
+            log_info!(
+                "  [+] selectmusic_model (derived) @ +0x{:X} (highlight slot model+0x{:X})",
+                off,
+                obj_disp
+            );
         }
+    }
+
+    /// Offset of the highlighted-song `shared_ptr` (obj at +0, ctrl at +8)
+    /// inside the select-music model object; `None` when
+    /// `selectmusic_model` did not derive. 0x1B0 on 20260324+, 0x190 on
+    /// 20250805 / 20260224.
+    pub fn selectmusic_highlight_slot(&self) -> Option<usize> {
+        self.get_address("selectmusic_highlight_slot")
+            .map(|p| (p as usize).wrapping_sub(self.base as usize))
     }
 
     /// Derive `frame_tick_global` from `dps_timing_anchor_site`.
@@ -4504,6 +4802,38 @@ impl SignatureStore {
     ///
     /// Preferred: direct prologue match (`textlayer_bind_direct`, 20260526+).
     /// Legacy fallback: anchor at fn+0x33 (`textlayer_bind_anchor`).
+    /// Publish the pre-20260324 (`_v1`) prologue matches of the S-Marvelous
+    /// results-side detour targets under their primary names when the
+    /// primary AOB missed. The function bodies and every object-layout
+    /// offset the detours consume were verified decompile-identical on
+    /// 20250805 and 20260224 (see the `_v1` signature comments), so the
+    /// consumers stay build-agnostic. Exactly one of the pair must match.
+    fn derive_smarvelous_results_fallbacks(&mut self) {
+        for (primary, v1) in [
+            ("playdata_row_write", "playdata_row_write_v1"),
+            ("result_window_build", "result_window_build_v1"),
+            ("total_result_populate", "total_result_populate_v1"),
+        ] {
+            match (self.get_address(primary), self.get_address(v1)) {
+                (Some(_), Some(_)) => {
+                    // Both shapes present would mean one of them drifted
+                    // onto an unrelated function — refuse rather than guess.
+                    self.resolved.remove(primary);
+                    log_warn!(
+                        "  [-] {} -- both the 20260324+ and the v1 prologue matched; refusing to publish",
+                        primary
+                    );
+                }
+                (None, Some(addr)) => {
+                    let off = (addr as usize).wrapping_sub(self.base as usize);
+                    self.resolved.insert(primary.into(), addr);
+                    log_info!("  [+] {} (via v1 prologue) @ +0x{:X}", primary, off);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn derive_textlayer_bind(&mut self) {
         if let Some(entry) = self.get_address("textlayer_bind_direct") {
             self.resolved.insert("textlayer_bind".into(), entry);

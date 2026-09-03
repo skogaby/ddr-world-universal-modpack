@@ -47,9 +47,10 @@ use crate::services::{scene_manager, stage_records};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
 
-/// `ddr::player::Option` is inlined into the side context (PlayerWork) at
-/// this offset; `timing_music` (JUDGEMENT OFFSET) lives at +0x24 inside it.
-const CTX_OPTION_OFFSET: usize = 0xE0;
+// `ddr::player::Option` is inlined into the side context (PlayerWork) at a
+// BUILD-DEPENDENT offset (0xE0 on 20260324+, 0xF0 on 20250805 / 20260224) —
+// `stage_records::player_option_offset()`; `timing_music` (JUDGEMENT OFFSET)
+// lives at +0x24 inside it.
 const OPTION_TIMING_MUSIC: usize = 0x24;
 /// GamePlayActor's play-side field (same read real_speed/judge consumers use).
 const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
@@ -338,7 +339,8 @@ fn timing_field_ptr(side: usize) -> Option<*mut u8> {
         if ctx.is_null() {
             return None;
         }
-        Some(ctx.add(CTX_OPTION_OFFSET + OPTION_TIMING_MUSIC) as *mut u8)
+        let option_off = crate::services::stage_records::player_option_offset()?;
+        Some(ctx.add(option_off + OPTION_TIMING_MUSIC) as *mut u8)
     }
 }
 

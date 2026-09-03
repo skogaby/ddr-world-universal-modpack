@@ -111,9 +111,8 @@ mod glue {
     const ACTOR_SPEED_CURRENT: usize = 0x290;
     const ACTOR_SPEED_TARGET: usize = 0x294;
     const ACTOR_SPEED_INT: usize = 0x29C;
-    /// Offset of the embedded `ddr::player::Option` within a side's context
-    /// object (`*(table[side]) + 0xE0` — the assist-tick chain).
-    const CTX_OPTION_OFFSET: usize = 0xE0;
+    // The embedded `ddr::player::Option` offset within the side context is
+    // build-dependent (0xE0 / 0xF0) — `stage_records::player_option_offset()`.
     /// `ddr::player::Option` fields (verified 20260721; layout stable since
     /// 20250805 per the bulk-hack RE record).
     const OPTION_SPEED_TYPE: usize = 0x8;
@@ -229,7 +228,10 @@ mod glue {
             if ctx.is_null() {
                 return warn_chain_unreadable("side context is null", side);
             }
-            let option = ctx.add(CTX_OPTION_OFFSET);
+            let Some(option_off) = crate::services::stage_records::player_option_offset() else {
+                return warn_chain_unreadable("Option offset underived", side);
+            };
+            let option = ctx.add(option_off);
             let speed_type = *(option.add(OPTION_SPEED_TYPE) as *const i32);
             if speed_type != SPEED_TYPE_REAL {
                 // Fixed-multiplier mode: no BPM derivation exists; req 33
