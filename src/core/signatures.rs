@@ -1890,7 +1890,7 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "selectmusic_view_ctor",
         pattern: "48 89 5C 24 ?? 57 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 33 FF 48 8D 05 ?? ?? ?? ?? 4C 8D 1D ?? ?? ?? ?? 48 8D 8B E8 01 00 00 48 89 43 28 4C 89 1B 48 89 BB C0 00 00 00 48 8D 05 ?? ?? ?? ?? 48 89 83 C8 00 00 00 48 89 BB D0 00 00 00 C6 83 D8 00 00 00 01 48 C7 83 F8 00 00 00 0F 00 00 00",
-        description: "sequence::selectmusic::View ctor head (match = entry). The View vftable is the SECOND LEA (`4C 8D 1D`, R11, disp32 at match+30) stored bare to [RBX] by `4C 89 1B` — the FIRST LEA (disp32 at match+23) is an inner interface vftable stored at +0x28, not the View's own. Literal layout pins: the +0x28 store, the [RBX+0x1E8] member LEA, the +0xC0/+0xD0 pointer clears, the third LEA's store to +0xC8 — the embedded sequence::AudioPlayer, THE load-bearing offset the loader-chain walk (child+0xB8 -> View -> +0xC8+0x08 loader) rests on — plus +0xD8=1 and the +0xF8=0xF string-capacity init. Yields the derived selectmusic_view_vftable (the walk's identity gate).",
+        description: "sequence::selectmusic::View ctor head (match = entry). The View vftable is the SECOND LEA (`4C 8D 1D`, R11, disp32 at match+30) stored bare to [RBX] by `4C 89 1B` — the FIRST LEA (disp32 at match+23) is an inner interface vftable stored at +0x28, not the View's own. Literal layout pins: the +0x28 store, the [RBX+0x1E8] member LEA, the +0xC0/+0xD0 pointer clears, the third LEA's store to +0xC8 — the embedded sequence::AudioPlayer, THE load-bearing offset the loader-chain walk (child+<derived selectmusic_view_child_offset> -> View -> +0xC8+0x08 loader) rests on — plus +0xD8=1 and the +0xF8=0xF string-capacity init. Yields the derived selectmusic_view_vftable (the walk's identity gate) and, via its single CALL site, the derived selectmusic_view_child_offset (the View* field on the SelectMusicSequence: +0x90 through 20260324, +0xB8 from 20260421).",
     },
     SignatureDefinition {
         name: "cue_handle_stop",
@@ -2416,6 +2416,103 @@ impl SignatureStore {
                 );
             }
         }
+
+        self.derive_selectmusic_view_child_offset();
+    }
+
+    /// Derive `selectmusic_view_child_offset` — the byte offset of the
+    /// `sequence::selectmusic::View*` field on the SelectMusicSequence (the
+    /// active scene child at `TS+0x58` during song select). This is the ONE
+    /// parent-struct read in the preview loader-chain walk that no signature
+    /// pins, and it is BUILD-DEPENDENT: `+0x90` on 20250805 / 20260224 /
+    /// 20260324, `+0xB8` on 20260421+ (the whole `+0x88/+0x90/+0x98` sibling
+    /// cluster moved to `+0xB0/+0xB8/+0xC0`). The hardcoded `0xB8` read a
+    /// non-pointer on 20260224 and the walk faulted BEFORE its vftable
+    /// identity gate could compare anything (crash 2026-09-03).
+    ///
+    /// Source: the View ctor's single caller — `SelectMusicSequence`'s
+    /// setup — stores the ctor result immediately after the CALL:
+    ///
+    /// ```text
+    /// E8 rel32              CALL View::ctor
+    /// EB 03                 JMP +3
+    /// 48 8B C6              MOV RAX,RSI          (null-alloc arm)
+    /// 48 89 87 disp32       MOV [RDI+disp32],RAX  <- the field offset
+    /// ```
+    ///
+    /// Same shape on all six builds inspected (20250805 … 20260825).
+    /// Fail-closed: exactly one call site, exactly one `MOV [reg+disp32],RAX`
+    /// in the 16 bytes after it, disp 8-aligned and within a small object
+    /// range — otherwise nothing is published and `preview::init_restart`
+    /// leaves the live-edit restart half disarmed (wheel-settle previews and
+    /// the gameplay rate are unaffected).
+    fn derive_selectmusic_view_child_offset(&mut self) {
+        const NAME: &str = "selectmusic_view_child_offset";
+        /// Bytes after the CALL opcode to search for the store.
+        const STORE_WINDOW: usize = 16;
+        /// Plausible field range on the SelectMusicSequence (the known
+        /// values are 0x90 and 0xB8; the object is a few hundred bytes).
+        const MIN_DISP: u32 = 0x40;
+        const MAX_DISP: u32 = 0x200;
+
+        let Some(ctor) = self.get_address("selectmusic_view_ctor") else {
+            log_warn!("  [-] {} -- selectmusic_view_ctor unresolved", NAME);
+            return;
+        };
+        let sites = self.xrefs_to(ctor);
+        if sites.len() != 1 {
+            log_warn!(
+                "  [-] {} -- expected exactly 1 CALL site for the View ctor, found {}; refusing",
+                NAME,
+                sites.len()
+            );
+            return;
+        }
+        let call = sites[0];
+
+        // `48 89 /r` with mod=10 (disp32) and reg=RAX (000): ModRM 0x80..0x87
+        // minus 0x84 (SIB form). Any base register is accepted — the
+        // sequence pointer's register is a compiler choice.
+        let mut found: Option<u32> = None;
+        let mut hits = 0usize;
+        unsafe {
+            let start = call.add(5);
+            for i in 0..STORE_WINDOW {
+                let p = start.add(i);
+                let modrm = *p.add(2);
+                if *p == 0x48
+                    && *p.add(1) == 0x89
+                    && (0x80..=0x87).contains(&modrm)
+                    && modrm != 0x84
+                {
+                    let disp = (p.add(3) as *const u32).read_unaligned();
+                    found = Some(disp);
+                    hits += 1;
+                }
+            }
+        }
+        match (found, hits) {
+            (Some(disp), 1) if disp % 8 == 0 && (MIN_DISP..MAX_DISP).contains(&disp) => {
+                self.publish_value(NAME, disp as usize);
+            }
+            (Some(disp), 1) => log_warn!(
+                "  [-] {} -- store disp 0x{:X} out of the plausible range; refusing",
+                NAME,
+                disp
+            ),
+            (_, n) => log_warn!(
+                "  [-] {} -- `MOV [reg+disp32],RAX` not uniquely found after the ctor CALL ({} hit(s)); refusing",
+                NAME,
+                n
+            ),
+        }
+    }
+
+    /// Byte offset of the `View*` field on the SelectMusicSequence (see
+    /// `derive_selectmusic_view_child_offset`), or `None` — the preview
+    /// live-edit restart half must then stay disarmed.
+    pub fn selectmusic_view_child_offset(&self) -> Option<usize> {
+        self.published_value("selectmusic_view_child_offset")
     }
 
     /// Derive the BM2D package registry global and name-lookup helper from
@@ -3010,7 +3107,12 @@ impl SignatureStore {
         // Collect (name, address) pairs for the targets we know derivation
         // methods will look up. Listed here once so adding a new derived
         // method that needs xrefs is a one-liner.
-        const XREF_TARGETS: &[&str] = &["folder_register", "file_manager_load", "metadata_insert"];
+        const XREF_TARGETS: &[&str] = &[
+            "folder_register",
+            "file_manager_load",
+            "metadata_insert",
+            "selectmusic_view_ctor",
+        ];
 
         let targets: Vec<*const u8> = XREF_TARGETS
             .iter()

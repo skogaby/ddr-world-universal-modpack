@@ -23,6 +23,7 @@ TransitionSequence (scene_manager)
        ├─ +0xB0  → 0x400-byte object (FUN_1800fcfc0 ctor — wheel/BGM related)
        └─ +0xB8  → sequence::selectmusic::View  (0x4A0 bytes, ctor FUN_18010b090,
        │            vftable 0x18036ef68, RTTI ".?AVView@selectmusic@sequence@@")
+       │            **BUILD-DEPENDENT OFFSET** — see §1.1a
        │    └─ +0xC8  sequence::AudioPlayer   (EMBEDDED member)
        │         ├─ +0x08  unique_ptr<AudioLoader>  ← the ONE live request
        │         ├─ +0x18  std::string (path, dedupe store)
@@ -31,6 +32,38 @@ TransitionSequence (scene_manager)
        └─ (ctor FUN_1800fc100 = SelectMusicSequence virtual; creates the View,
            wires the selectmusic lambdas)
 ```
+
+### 1.1a The `View*` field offset moves between builds (crash 2026-09-03)
+
+The `+0xB0/+0xB8/+0xC0` sibling cluster on the SelectMusicSequence is
+`+0x88/+0x90/+0x98` on older builds — the View pointer sits at **`+0x90`**
+through 20260324 and **`+0xB8`** from 20260421 (the flip is NOT the usual
+20260224/20260324 boundary). Verified in the View ctor's single caller
+(`SelectMusicSequence` setup, `MOV [RDI+disp32],RAX` right after the CALL):
+
+| build | View ctor | store |
+|---|---|---|
+| 20250805 | `0x1800fea90` | `+0x90` |
+| 20260224 | `0x1801013c0` | `+0x90` |
+| 20260324 | `0x18010a700` | `+0x90` |
+| 20260421 | `0x18010afb0` | `+0xB8` |
+| 20260721 | `0x18010b090` | `+0xB8` |
+| 20260825 | `0x18010ab30` | `+0xB8` |
+
+The View's OWN layout (AudioPlayer at `+0xC8`, loader unique_ptr at
+`+0x08`) is literal in the `selectmusic_view_ctor` AOB and identical on
+every build; only the offset INTO THE PARENT moved. A hardcoded `0xB8`
+on 20260224 read a non-pointer (`0x10008522c0ba6d50`) and the walk faulted
+on `cmp [view], view_vft` — the vftable identity gate never ran, because
+the gate needs a dereference to compare and the dereference itself was the
+fault (spice2x reports a non-canonical access as fault address
+`0xffffffffffffffff`). Fix: the offset is DERIVED per build
+(`signatures.rs::derive_selectmusic_view_child_offset` → published
+`selectmusic_view_child_offset`, decoded from the `48 89 /r disp32` store
+within 16 bytes after the ctor's single CALL site; exactly-one/8-aligned/
+range-checked, fail-closed ⇒ restart half disarmed) and every pointer the
+walk reads out of a game object is probed with `memory::is_readable`
+(VirtualQuery) BEFORE it is dereferenced for its vftable.
 
 ### 1.2 Request flow (wheel settles on a song)
 
@@ -109,8 +142,9 @@ Two halves, zero new hooks (`src/services/song_rate/preview.rs`):
    per-frame executor (input-manager frame callback, game thread) fires
    150 ms after the last tick (superseded if a wheel settle re-published
    the selected song meanwhile), re-validates the loader chain
-   (`TS child → View (+0xB8, vftable identity) → AudioPlayer (+0xC8) →
-   loader (+0x08, vftable identity)`; slot 5, mode 1, rows loaded, cue
+   (`TS child → View (+<derived offset>, readable + vftable identity) →
+   AudioPlayer (+0xC8) → loader (+0x08, readable + vftable identity)`;
+   slot 5, mode 1, rows loaded, cue
    `*_s`), then runs the stock sequence: `cue_handle_stop(handle)` →
    `wavebank_unregister(xsb)` → `(xwb)` **through the patched entries**
    (the detour prelude retires the preview binding) →
@@ -153,7 +187,7 @@ header can never serve gameplay through the natural flow. Defense in
 depth: a scene callback force-retires the preview binding on any
 transition leaving scene 25.
 
-## 5. Signatures (validated exactly-once on 20260324/20260421/20260616/20260721)
+## 5. Signatures (validated exactly-once on 20260324/20260421/20260616/20260721; four-build sweep 20250805/20260224/20260721/20260825 incl. the derived child offset 0x90/0x90/0xB8/0xB8)
 
 | Signature | Yields | 20260721 match |
 |---|---|---|
@@ -165,9 +199,15 @@ transition leaving scene 25.
 Byte-level authority (annotated disassembly, per-build match tables,
 wildcard rationale):
 `.agents/planning/2026-08-15-song-preview-rate/research/preview-retrigger-re.md`
-§9. Loader/View struct offsets are compile-time constants gated at
-runtime by the two vftable identities — layout drift on a future build
-fails the walk closed (stock previews) rather than mis-poking.
+§9. Loader/View INTERNAL struct offsets are compile-time constants pinned
+literal by the ctor AOBs and gated at runtime by the two vftable
+identities. The `View*` offset on the PARENT SelectMusicSequence is NOT
+pinned by any AOB and is build-dependent (§1.1a) — it is derived
+(`selectmusic_view_child_offset`, the ctor's single CALL site). Identity
+gates alone do NOT make a walk fail-closed: a wrong offset yields an
+arbitrary qword and `*ptr` faults before the compare. Every game-object
+pointer in the walk is therefore `memory::is_readable`-probed first;
+unreadable ⇒ `ChainDecline::Unreadable` (latched WARN, restart skipped).
 
 ## 6. Function/global inventory (20260721)
 

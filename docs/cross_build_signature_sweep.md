@@ -256,7 +256,16 @@ at +22.
   `NoteResultActor+0xC0` attested on 20250805 too.
 - `song_rate` clock anchor (`_v1` window +0x23, literal 8-byte
   re-execution check), io-callback regsite, preview-restart vftables:
-  byte-identical inputs, fail-closed validations hold.
+  byte-identical inputs, fail-closed validations hold. **BUT** (2026-09-03
+  field crash on 20260224): the preview loader-chain walk's read of the
+  `View*` field on the SelectMusicSequence (`child+0xB8`) was a hardcoded
+  consumer-side offset OUTSIDE any signature's window — the sweep and
+  `shape_diff.py` could not see it, and it is `+0x90` through 20260324 /
+  `+0xB8` from 20260421. Now derived (`selectmusic_view_child_offset`,
+  from the ctor's single CALL site; sweep shows `0x90/0x90/0xB8/0xB8`).
+  Lesson: a walk that reads `*(obj+K)` for a K no AOB pins needs either a
+  derivation or a readability probe before the dereference — a vftable
+  identity gate only protects AFTER a successful read.
 - `fast_bootup`: every music-DB entry field (`+0x94..+0x1B4`) and actor
   accumulator offset the mod hardcodes appears at the same offsets in
   onUpdate on 20250805 and 20260721; `music_db_global` cross-checked

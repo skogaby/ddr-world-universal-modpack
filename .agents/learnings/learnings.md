@@ -953,3 +953,44 @@ Rules:
 - `scripts/setup_split_ssq_test.sh` is the reusable clone-a-song fixture
   (equal-length basename byte-rename of XSB/XWB/jacket-arc + startup.arc
   overlay).
+
+## 2026-09-03 — An identity gate can't protect a dereference it hasn't done yet (song-speed edit crash on 20260224)
+
+A tester on `MDX:J:A:A:2026022400` edited SONG SPEED at song select and the
+game hard-faulted in the DLL (`cmp [rax], rsi` with `rax=0x10008522c0ba6d50`,
+`rsi` = the derived `selectmusic_view_vftable`; Windows reports a non-canonical
+access as fault address `0xffffffffffffffff`). The preview live-edit restart
+walked `TS → *(TS+0x58) → *(child+0xB8)` and compared `*view` against the View
+vftable. `0xB8` was a hardcoded constant; the field is `+0x90` through 20260324
+and `+0xB8` from 20260421 — a DIFFERENT boundary from the GamePlayActor /
+ShutterActor 20260224→20260324 shift. `child+0xB8` on the old layout is some
+unrelated qword, so the "fail-closed" identity gate faulted on the read the
+gate itself needed.
+
+Why the four-build sweep didn't catch it: the read is a consumer-side offset
+into the PARENT object, outside any signature's disassembly window, so neither
+`report.py` nor `shape_diff.py` had anything to compare (the View's INTERNAL
+`+0xC8` IS literal in the ctor AOB and was fine). The research doc's claim
+"layout drift fails the walk closed via the vftable identities" was true only
+for drift that still hands you a valid pointer.
+
+Rules:
+- A vftable identity gate protects the caller only AFTER a successful read.
+  Any pointer read out of a game object at an offset no AOB pins must be
+  probed (`memory::is_readable(ptr, len)` — VirtualQuery, rejects null,
+  non-canonical, uncommitted, PAGE_NOACCESS/GUARD) BEFORE `*ptr`. Surface the
+  probe failure as its own decline class with a latched WARN (it means "wrong
+  struct offset for this build", which is actionable), separate from a clean
+  identity mismatch.
+- Offsets into a PARENT object that the AOB'd ctor only returns INTO are
+  build-dependent candidates by default. Derive them from the ctor's CALL
+  site (`xrefs_to(ctor)` → exactly one site → decode the `MOV [reg+disp32],RAX`
+  store right after it → `publish_value`), the `player_option_offset`
+  convention, so they show in the boot log and the offline sweep
+  (`selectmusic_view_child_offset (derived) = 0x90/0x90/0xB8/0xB8`).
+- When a walk grows a derived offset, make it an all-or-nothing input of the
+  same `init_*` gate as the vftables (`preview::init_restart` is now six
+  inputs) so a miss disarms only the dependent half with one WARN.
+- Audit trigger: grep the crate for `const \w+_OFFSET: usize = 0x` in
+  services/mods whose target object is NOT the AOB'd object itself — each is
+  a candidate for the same class of bug.

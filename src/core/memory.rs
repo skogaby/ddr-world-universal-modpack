@@ -2,12 +2,69 @@
 
 use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
 use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
-    PAGE_PROTECTION_FLAGS,
+    VirtualAlloc, VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RESERVE,
+    PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
 use super::memory_patch::{self, PatchBackend, PatchError, PatchStep};
+
+/// Whether `len` bytes at `addr` are committed, readable, non-guard memory
+/// in this process — a cheap "is this really a pointer" probe for values
+/// read out of game objects whose layout is only PROBABLY what we think.
+///
+/// Rejects null and non-canonical (garbage) addresses up front, then asks
+/// `VirtualQuery` about the containing region. A range that spans a region
+/// boundary is walked region by region. `false` on any query failure.
+///
+/// Intended for walks like the song-select preview loader chain, where a
+/// build-dependent struct offset can hand us an arbitrary qword: an
+/// identity gate (`*view == vftable`) can only protect the caller if the
+/// dereference itself is safe — probe first, then compare.
+pub fn is_readable(addr: *const u8, len: usize) -> bool {
+    if addr.is_null() || len == 0 {
+        return false;
+    }
+    let start = addr as usize;
+    // User-mode canonical range on x64 Windows (48-bit, sign-extended
+    // kernel half excluded). Anything above is not a pointer we can hold.
+    const USER_MAX: usize = 0x0000_7FFF_FFFF_FFFF;
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
+    if end > USER_MAX {
+        return false;
+    }
+    let mut cursor = start;
+    while cursor < end {
+        let mut mbi = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: VirtualQuery only inspects page tables; it never touches
+        // the target bytes, so any address value is safe to pass.
+        let got = unsafe {
+            VirtualQuery(
+                Some(cursor as *const _),
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if got == 0 {
+            return false;
+        }
+        if mbi.State != MEM_COMMIT {
+            return false;
+        }
+        let prot = mbi.Protect;
+        if prot == PAGE_NOACCESS || (prot & PAGE_GUARD) == PAGE_GUARD || prot.0 == 0 {
+            return false;
+        }
+        let region_end = mbi.BaseAddress as usize + mbi.RegionSize;
+        if region_end <= cursor {
+            return false;
+        }
+        cursor = region_end;
+    }
+    true
+}
 
 /// Allocate a zero-filled RWX memory block.
 pub unsafe fn alloc_zeroed(size: usize) -> *mut u8 {

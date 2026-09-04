@@ -21,8 +21,9 @@
 //! preview play watchdog (design amendment 2026-08-16) rides the same
 //! frame callback. This module also carries the executor's address
 //! foundation: the all-or-nothing [`init_restart`] stash (two vftable
-//! identity gates + three stock functions) and [`resolve_loader`], the
-//! validated walk to the live `sequence::AudioLoader`.
+//! identity gates + three stock functions + the build-dependent `View*`
+//! field offset) and [`resolve_loader`], the readability-probed, identity-
+//! gated walk to the live `sequence::AudioLoader`.
 
 #[cfg(windows)]
 use std::sync::atomic::AtomicPtr;
@@ -389,9 +390,10 @@ pub fn loader_sane(snapshot: &LoaderSnapshot) -> bool {
         && snapshot.xsb_id >= 0
 }
 
-/// The five restart-half addresses (design §Components 6), stashed
-/// all-or-nothing by [`init_restart`] at `Mod::init` time. Null = the
-/// restart half is unavailable (Step-3 wheel-settle previews unaffected).
+/// The five restart-half addresses (design §Components 6) plus the
+/// build-dependent `View*` field offset, stashed all-or-nothing by
+/// [`init_restart`] at `Mod::init` time. Null / zero = the restart half is
+/// unavailable (Step-3 wheel-settle previews unaffected).
 #[cfg(windows)]
 static RESTART_VIEW_VFTABLE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 #[cfg(windows)]
@@ -406,35 +408,57 @@ static RESTART_ROUTER_FN: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 /// whose prelude retires the live preview binding (design Flow 2 step 3).
 #[cfg(windows)]
 static RESTART_UNREGISTER_FN: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+/// `sequence::selectmusic::View*` field offset on the SelectMusicSequence
+/// (derived `selectmusic_view_child_offset`; 0 = unresolved). BUILD-
+/// DEPENDENT — `+0x90` through 20260324, `+0xB8` from 20260421 — and the
+/// one parent-struct read in the loader-chain walk no signature pins, so
+/// it is never hardcoded here (the former `0xB8` constant read a
+/// non-pointer on 20260224 and the walk faulted before its identity gate;
+/// crash 2026-09-03).
+#[cfg(windows)]
+static RESTART_CHILD_VIEW_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
-/// Stash the restart half's five addresses. All-or-nothing (design R9):
-/// any missing derivation returns false and leaves every pointer null,
-/// so [`restart_available`] is a single coherent gate — there is no
-/// partially-armed restart. Called from the song-playback-speed mod's
-/// `init` (the `real_speed::init` pattern); availability is reported at
-/// `enable()`.
+/// Stash the restart half's five addresses and the View field offset. All-
+/// or-nothing (design R9): any missing derivation returns false and leaves
+/// every slot null/zero, so [`restart_available`] is a single coherent gate
+/// — there is no partially-armed restart. Called from the
+/// song-playback-speed mod's `init` (the `real_speed::init` pattern);
+/// availability is reported at `enable()`.
 #[cfg(windows)]
 pub fn init_restart(signatures: &crate::core::signatures::SignatureStore) -> bool {
-    let (Some(view_vft), Some(loader_vft), Some(stop_fn), Some(router_fn), Some(unregister_fn)) = (
+    let (
+        Some(view_vft),
+        Some(loader_vft),
+        Some(stop_fn),
+        Some(router_fn),
+        Some(unregister_fn),
+        Some(child_view_offset),
+    ) = (
         signatures.get_address("selectmusic_view_vftable"),
         signatures.get_address("audio_loader_vftable"),
         signatures.get_address("cue_handle_stop"),
         signatures.get_address("sound_bank_create_router"),
         signatures.get_address("song_rate_wavebank_unregister"),
-    ) else {
+        signatures.selectmusic_view_child_offset(),
+    )
+    else {
         return false;
     };
+    if child_view_offset == 0 {
+        return false;
+    }
     RESTART_VIEW_VFTABLE.store(view_vft as *mut u8, Ordering::Release);
     RESTART_LOADER_VFTABLE.store(loader_vft as *mut u8, Ordering::Release);
     RESTART_STOP_FN.store(stop_fn as *mut u8, Ordering::Release);
     RESTART_ROUTER_FN.store(router_fn as *mut u8, Ordering::Release);
     RESTART_UNREGISTER_FN.store(unregister_fn as *mut u8, Ordering::Release);
+    RESTART_CHILD_VIEW_OFFSET.store(child_view_offset, Ordering::Release);
     true
 }
 
 /// Whether the restart half's derivations all resolved ([`init_restart`]
-/// stores all five or none, so one null check would do — checking all
-/// five keeps the invariant observable).
+/// stores all six or none, so one null check would do — checking all
+/// six keeps the invariant observable).
 #[cfg(windows)]
 #[must_use]
 pub fn restart_available() -> bool {
@@ -443,6 +467,7 @@ pub fn restart_available() -> bool {
         && !RESTART_STOP_FN.load(Ordering::Acquire).is_null()
         && !RESTART_ROUTER_FN.load(Ordering::Acquire).is_null()
         && !RESTART_UNREGISTER_FN.load(Ordering::Acquire).is_null()
+        && RESTART_CHILD_VIEW_OFFSET.load(Ordering::Acquire) != 0
 }
 
 /// Offset of the active scene child on the TransitionSequence (the same
@@ -455,9 +480,9 @@ const TS_ACTIVE_CHILD_OFFSET: usize = 0x58;
 const TREE_FLAGS_OFFSET: usize = 0x20;
 #[cfg(windows)]
 const TREE_FLAGS_DEAD_MASK: u32 = 0x24;
-/// `sequence::selectmusic::View*` on the SelectMusicSequence (RE §1.1).
-#[cfg(windows)]
-const CHILD_VIEW_OFFSET: usize = 0xB8;
+// NOTE: the `sequence::selectmusic::View*` offset on the SelectMusicSequence
+// (RE §1.1) is build-dependent and lives in `RESTART_CHILD_VIEW_OFFSET`
+// (derived), not in a constant here.
 /// The embedded `sequence::AudioPlayer` within the View (RE §1.1 — the
 /// signature's load-bearing layout pin) and its loader unique_ptr.
 #[cfg(windows)]
@@ -510,16 +535,27 @@ enum ChainDecline {
     /// object whose first qword is not the derived vftable — layout
     /// drift on this build. Actionable — worth the latched WARN.
     IdentityMismatch,
+    /// A pointer read out of a game object is not readable memory (null
+    /// excluded — that is `Absent`): the field we read is not a pointer at
+    /// all, i.e. a struct offset is wrong for this build. Actionable — the
+    /// identity gate never got to run. Worth the latched WARN.
+    Unreadable,
 }
 
 /// Walk `scene==SONG_SELECT → TS → *(TS+0x58) child (live) → View =
-/// *(child+0xB8) (vftable identity) → loader = *(View+0xC8+0x08)
-/// (vftable identity)` and snapshot the loader's fields (design
-/// §Components 5 step 1). The vftable identity gates are what make the
-/// compile-time offsets fail-closed across builds: a future layout drift
-/// walks to a pointer whose first qword is not the derived vftable and
-/// declines cleanly. GAME THREAD ONLY (the objects die on scene/wheel
-/// transitions that only the game thread serializes against).
+/// *(child+<derived offset>) (readable + vftable identity) → loader =
+/// *(View+0xC8+0x08) (readable + vftable identity)` and snapshot the
+/// loader's fields (design §Components 5 step 1). GAME THREAD ONLY (the
+/// objects die on scene/wheel transitions that only the game thread
+/// serializes against).
+///
+/// Two layers make the walk fail-closed across builds: the `View*` field
+/// offset is DERIVED per build (it moved `+0x90 → +0xB8` at 20260421 — the
+/// 2026-09-03 crash was this constant hardcoded), and every pointer read
+/// out of a game object is probed with [`memory::is_readable`] BEFORE it is
+/// dereferenced for its vftable. The identity gate alone cannot protect the
+/// caller: if the offset is wrong the qword is arbitrary and `*view` faults
+/// before any compare happens.
 ///
 /// Fail-open, no logging (callers latch outcomes). Field SANITY is
 /// deliberately the caller's ([`loader_sane`]): the resolver answers "is
@@ -532,7 +568,8 @@ fn resolve_loader_detail() -> Result<LoaderChain, ChainDecline> {
 
     let view_vft = RESTART_VIEW_VFTABLE.load(Ordering::Acquire) as *const u8;
     let loader_vft = RESTART_LOADER_VFTABLE.load(Ordering::Acquire) as *const u8;
-    if view_vft.is_null() || loader_vft.is_null() {
+    let child_view_offset = RESTART_CHILD_VIEW_OFFSET.load(Ordering::Acquire);
+    if view_vft.is_null() || loader_vft.is_null() || child_view_offset == 0 {
         return Err(ChainDecline::Absent);
     }
     if scene_manager::current_scene() != scene::SONG_SELECT {
@@ -541,20 +578,36 @@ fn resolve_loader_detail() -> Result<LoaderChain, ChainDecline> {
     let Some(ts) = scene_manager::current_transition_sequence() else {
         return Err(ChainDecline::Absent);
     };
-    // SAFETY: every dereference below is null-checked and identity-gated
-    // before use; the objects are game-owned and this function's contract
-    // restricts callers to the game thread (no concurrent teardown).
+    /// Bytes the walk reads from each object: the largest field offset it
+    /// touches plus that field's width.
+    const CHILD_READ_LEN_BASE: usize = 8;
+    const VIEW_READ_LEN: usize = VIEW_AUDIO_PLAYER_OFFSET + AUDIO_PLAYER_LOADER_OFFSET + 8;
+    const LOADER_READ_LEN: usize = LOADER_SLOT_OFFSET + 4;
+    // SAFETY: every dereference below is null-checked, readability-probed
+    // and identity-gated before use; the objects are game-owned and this
+    // function's contract restricts callers to the game thread (no
+    // concurrent teardown).
     unsafe {
+        if !memory::is_readable(ts, TS_ACTIVE_CHILD_OFFSET + 8) {
+            return Err(ChainDecline::Unreadable);
+        }
         let child = memory::read_ptr(ts.add(TS_ACTIVE_CHILD_OFFSET)) as *mut u8;
         if child.is_null() {
             return Err(ChainDecline::Absent);
         }
+        let child_len = TREE_FLAGS_OFFSET.max(child_view_offset) + CHILD_READ_LEN_BASE;
+        if !memory::is_readable(child, child_len) {
+            return Err(ChainDecline::Unreadable);
+        }
         if memory::read_u32(child.add(TREE_FLAGS_OFFSET)) & TREE_FLAGS_DEAD_MASK != 0 {
             return Err(ChainDecline::Absent);
         }
-        let view = memory::read_ptr(child.add(CHILD_VIEW_OFFSET)) as *mut u8;
+        let view = memory::read_ptr(child.add(child_view_offset)) as *mut u8;
         if view.is_null() {
             return Err(ChainDecline::Absent);
+        }
+        if !memory::is_readable(view, VIEW_READ_LEN) {
+            return Err(ChainDecline::Unreadable);
         }
         if memory::read_ptr(view) != view_vft {
             return Err(ChainDecline::IdentityMismatch);
@@ -564,6 +617,9 @@ fn resolve_loader_detail() -> Result<LoaderChain, ChainDecline> {
                 as *mut u8;
         if loader.is_null() {
             return Err(ChainDecline::Absent);
+        }
+        if !memory::is_readable(loader, LOADER_READ_LEN) {
+            return Err(ChainDecline::Unreadable);
         }
         if memory::read_ptr(loader) != loader_vft {
             return Err(ChainDecline::IdentityMismatch);
@@ -964,6 +1020,13 @@ fn execute_restart() {
         Err(ChainDecline::Absent) => return,
         Err(ChainDecline::IdentityMismatch) => {
             warn_once(WARN_CHAIN, "a loader-chain vftable identity gate failed");
+            return;
+        }
+        Err(ChainDecline::Unreadable) => {
+            warn_once(
+                WARN_CHAIN,
+                "a loader-chain pointer is not readable memory (struct offset wrong for this build?) -- restart skipped",
+            );
             return;
         }
     };
