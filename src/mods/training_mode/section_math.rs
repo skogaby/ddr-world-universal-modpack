@@ -361,9 +361,110 @@ pub fn resolve_bounds(
     ResolvedBounds { a_ms, b_ms }
 }
 
+// ── Gesture / HUD gates (2026-09-04 loop-marker revision) ────────────
+
+/// Which training gesture class a pinpad press belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GestureKind {
+    /// Pinpad 4 / 5 / 6 — set A / clear / set B. Loop-only: a section is
+    /// only playable as a loop, so markers are meaningless without one.
+    Marker,
+    /// Pinpad 7 / 9 — RW / FF scrub. A pure timeline adjuster, valid with
+    /// or without a loop.
+    Scrub,
+}
+
+/// The total decision for one training-gesture press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GestureVerdict {
+    /// Dispatch the gesture.
+    Allow,
+    /// The run is not in-song yet (the "READY?" banner window, or the
+    /// song-end tail): the music count is not a position — drop silently.
+    /// Pre-song ALWAYS wins over the loop verdict: a READY-window press is
+    /// never reported as a loop problem.
+    DropPreSong,
+    /// In-song, but LOOP SONG is not latched for this song and the
+    /// gesture is a marker gesture — drop, with a one-per-song hint.
+    DropLoopOff,
+}
+
+/// Gate one gesture press over `{in_song, loop_latched}`:
+///
+/// * `!in_song` ⇒ [`GestureVerdict::DropPreSong`] for EVERY kind — before
+///   the run's clock anchor lands, GamePlayActor `+0x178` holds the raw
+///   frame tick (cabinet finding 2026-08-14), and a B set from it on a
+///   LOOP-OFF song soft-locked the game (the 2026-09-04 revision's
+///   trigger).
+/// * markers additionally require the loop latch; scrubs never do.
+#[must_use]
+pub fn gesture_gate(kind: GestureKind, in_song: bool, loop_latched: bool) -> GestureVerdict {
+    if !in_song {
+        return GestureVerdict::DropPreSong;
+    }
+    match kind {
+        GestureKind::Marker if !loop_latched => GestureVerdict::DropLoopOff,
+        _ => GestureVerdict::Allow,
+    }
+}
+
+/// Whether the timeline HUD draws its SECTION decorations (the blue veil
+/// and the A/B marker lines): only for a song whose loop is latched — the
+/// decorations show the looped region, which does not exist otherwise.
+/// The cursor, readout, and strip are unconditional (a caller concern).
+#[must_use]
+pub fn decorations_visible(loop_latched: bool) -> bool {
+    loop_latched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── gesture_gate / decorations_visible (2026-09-04 revision) ──────
+
+    #[test]
+    fn gesture_gate_pre_song_drops_every_kind_regardless_of_loop() {
+        for kind in [GestureKind::Marker, GestureKind::Scrub] {
+            for loop_latched in [false, true] {
+                assert_eq!(
+                    gesture_gate(kind, false, loop_latched),
+                    GestureVerdict::DropPreSong,
+                    "{kind:?} loop={loop_latched}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gesture_gate_markers_require_the_loop_latch() {
+        assert_eq!(
+            gesture_gate(GestureKind::Marker, true, false),
+            GestureVerdict::DropLoopOff
+        );
+        assert_eq!(
+            gesture_gate(GestureKind::Marker, true, true),
+            GestureVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn gesture_gate_scrub_ignores_the_loop_latch() {
+        assert_eq!(
+            gesture_gate(GestureKind::Scrub, true, false),
+            GestureVerdict::Allow
+        );
+        assert_eq!(
+            gesture_gate(GestureKind::Scrub, true, true),
+            GestureVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn decorations_follow_the_loop_latch() {
+        assert!(!decorations_visible(false));
+        assert!(decorations_visible(true));
+    }
 
     const CHART_END: i32 = 120_000;
     /// The existing 1000 ms end-margin class (`MARKER_END_MARGIN_MS`).

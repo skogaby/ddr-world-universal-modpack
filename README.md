@@ -55,7 +55,7 @@ With the full suite enabled, the cabinet pinpads double as a hotkey panel — no
 Play any song at **25%–175%** speed, with everything in sync — audio (pitch-preserved, or classic vinyl-style if you prefer), arrows, judging, even the background video if you opt in. Song-select previews follow your speed setting too, so you can dial it in by ear. Practice hard charts slow; push past 100% for a challenge. Scores at non-100% speeds are never submitted, so your records stay honest.
 
 ### Training Mode
-Now you can grind and practice songs on a real cabinet, without resorting to StepMania conversions! Set a start and end point, loop the section, and scrub backward/forward mid-song with pinpad gestures — with a chart timeline HUD showing exactly where you are.
+Now you can grind and practice songs on a real cabinet, without resorting to StepMania conversions! Turn on **LOOP SONG**, set a start and end point (the SONG START/END TIME rows appear under it, or press **4**/**6** mid-song), and grind the section; scrub backward/forward any time with **7**/**9** — with a chart timeline HUD showing exactly where you are. Sections only exist as loops: with LOOP SONG off, the 4/5/6 marker keys are inert and the timeline shows just your position. All training hotkeys wait for the READY banner to clear.
 
 ### Timing Offsets + Auto-Calibration
 Adjust the game's global sound/input/render timing live from the mod menu. Better yet, turn on **"Calibrate next song?"**, under the global mod settings, play one song, and the modpack measures your timing and sets the sound offset for you — StepMania AutoSync style.

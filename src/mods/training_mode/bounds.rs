@@ -28,6 +28,18 @@
 //! quick_logout's triple-9 (SONG SELECT, scene 25) — and the scene gate
 //! keeps every training gesture inert outside gameplay regardless.
 //!
+//! 2026-09-04 revision (loop/marker/timeline): EVERY gesture additionally
+//! waits for [`song_reset::run_in_song`] (clock anchor landed + credible
+//! count — the "READY?" banner window is inert; pre-anchor `+0x178` holds
+//! the raw frame tick, and a B set from it soft-locked a LOOP-OFF song),
+//! and the marker gestures 4/5/6 are LOOP-ONLY (gated on
+//! [`loop_latched`], one hint toast per song when refused). SONG START /
+//! END TIME are LOOP SONG's child rows; with LOOP OFF their retained
+//! values are ignored at every reader (GAMEPLAY-entry arm, resolution,
+//! pre-shift), so the v1 "LOOP OFF + section end ⇒ early natural end"
+//! behavior is retired — [`section_math::end_policy`]'s `WriteThresholds`
+//! arm survives only as dead-defensive code.
+//!
 //! Step 7 adds FF/RW scrobbling (the amended R12): SINGLE-press pinpad
 //! **7 = rewind** / **9 = fast-forward** by the configured
 //! `training_mode.{rw,ff}_increment_ms` (default 5000, normalized
@@ -129,6 +141,11 @@ static ROW_LOOP_SONG: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new
 /// `versus_mirror` anyway). The end policy's input and the Step-4 loop
 /// driver's arm gate. Cleared with the session state.
 static LOOP_LATCHED: AtomicBool = AtomicBool::new(false);
+/// One-per-song latch for the LOOP-OFF marker-gesture hint toast
+/// (2026-09-04 revision): the first refused 4/5/6 press on a song whose
+/// loop is not latched flashes "Enable LOOP SONG to set markers"; later
+/// presses drop silently. Cleared with the session state.
+static LOOP_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 // ── LOOP OFF threshold apply state (Step 4, design §4.2/§5) ──────────
 /// Whether this song's CMA end thresholds currently hold OUR values —
@@ -553,6 +570,7 @@ pub(super) fn clear_session_state(reason: &str) {
     END_APPLY_WARNED.store(false, Ordering::Release);
     SCRUB_COOLING.store(false, Ordering::Release);
     SCRUB_WARNED.store(false, Ordering::Release);
+    LOOP_HINT_SHOWN.store(false, Ordering::Release);
 }
 
 /// Whether a training session is active for the current song (design
@@ -614,6 +632,17 @@ pub fn try_resolve_row_bounds() -> bool {
         // back to A (the reset revives).
         arm_death_bypass();
         log_info!("TrainingMode: LOOP SONG latched for this song (side {side})");
+    } else {
+        // LOOP OFF (2026-09-04 revision): SONG START/END TIME are LOOP
+        // SONG's children and their retained values are IGNORED — the
+        // song resolves as defaults (no A/B, no threshold write, whole
+        // song from 0). Normally unreachable (the GAMEPLAY-entry arm
+        // requires the loop row), kept as the resolution's own safety
+        // property against any other caller.
+        CHART_END_MS.store(chart_end, Ordering::Release);
+        RESOLUTION_PENDING.store(false, Ordering::Release);
+        apply_end_policy();
+        return true;
     }
 
     // Song-coherence gate (R2 second amendment): the rows must describe
@@ -942,10 +971,12 @@ fn set_marker(which: char, side: usize) {
                 target,
                 side
             );
-            // The section end changed: re-evaluate the LOOP OFF early
-            // natural end (design §4.2's gesture write point — a B behind
-            // the current position ends the song on the next frame's
-            // 0x1045, the accepted "end here" semantics).
+            // The section end changed: re-evaluate the end policy. The
+            // gate in `on_input_event` guarantees the loop is latched
+            // here, so this is the idempotent `RaiseThresholds` re-apply
+            // (the loop driver re-reads B live for its fire bound). The
+            // v1 LOOP-OFF "early natural end" write is retired
+            // (2026-09-04): a section is only playable as a loop.
             apply_end_policy();
         }
     }
@@ -956,6 +987,19 @@ fn set_marker(which: char, side: usize) {
 /// plus the Step-7 single-press 7/9 FF/RW scrub. One press = one action
 /// throughout (2026-08-18, superseding the triple-press marker
 /// gestures) — no GestureBuffer anywhere on this surface.
+///
+/// 2026-09-04 revision — two gates over every press, decided by the pure
+/// [`section_math::gesture_gate`]:
+///
+/// * **In-song** ([`song_reset::run_in_song`]): the run's clock anchor
+///   has landed and the music count is credible. Before that (the
+///   "READY?" banner window) `+0x178` holds the raw frame tick, and a B
+///   set from it on a LOOP-OFF song soft-locked the game. EVERY gesture
+///   (4/5/6 AND 7/9) drops silently until the arrows are scrolling.
+/// * **Loop latched** ([`loop_latched`]): the marker gestures 4/5/6 are
+///   loop-only — a section is only playable as a loop — and drop with a
+///   one-per-song hint toast otherwise. 7/9 scrub is a plain timeline
+///   adjuster and stays available.
 pub(super) fn on_input_event(event: &InputEvent) {
     if event.event_type != InputEventType::Pressed {
         return;
@@ -963,41 +1007,53 @@ pub(super) fn on_input_event(event: &InputEvent) {
     if !GESTURES_ACTIVE.load(Ordering::Acquire) {
         return;
     }
-    // Scrub arm (Step 7): 7 = rewind, 9 = fast-forward (no conflict with
-    // quick_logout's triple-9, which is song-select-scoped while this
-    // whole surface is GAMEPLAY-only).
-    if event.button == button::NUM_7 || event.button == button::NUM_9 {
-        if crate::services::scene_manager::current_scene() != scene::GAMEPLAY {
-            return;
-        }
-        let side = match event.player {
-            Player::P1 => 0usize,
-            Player::P2 => 1,
-        };
-        let delta = if event.button == button::NUM_9 {
-            FF_INCREMENT_MS.load(Ordering::Acquire)
-        } else {
-            -RW_INCREMENT_MS.load(Ordering::Acquire)
-        };
-        scrub(side, delta);
-        return;
-    }
-    // Marker arm: 4 = set A, 6 = set B, 5 = clear. Gameplay-only, like
-    // the scrub above.
-    if event.button != button::NUM_4
-        && event.button != button::NUM_5
-        && event.button != button::NUM_6
-    {
-        return;
-    }
+    // Classify the press first so every other button returns before any
+    // engine read (this callback runs per frame for every pinpad).
+    let kind = match event.button {
+        button::NUM_4 | button::NUM_5 | button::NUM_6 => section_math::GestureKind::Marker,
+        // No conflict with quick_logout's triple-9, which is
+        // song-select-scoped while this whole surface is GAMEPLAY-only.
+        button::NUM_7 | button::NUM_9 => section_math::GestureKind::Scrub,
+        _ => return,
+    };
     if crate::services::scene_manager::current_scene() != scene::GAMEPLAY {
         return;
+    }
+    match section_math::gesture_gate(kind, song_reset::run_in_song(), loop_latched()) {
+        section_math::GestureVerdict::Allow => {}
+        section_math::GestureVerdict::DropPreSong => {
+            log_debug!(
+                "TrainingMode: pinpad {} dropped -- run not in-song yet (READY window / tail)",
+                event.button_name
+            );
+            return;
+        }
+        section_math::GestureVerdict::DropLoopOff => {
+            if !LOOP_HINT_SHOWN.swap(true, Ordering::AcqRel) {
+                crate::services::toast::flash("Enable LOOP SONG to set markers");
+                log_info!(
+                    "TrainingMode: pinpad {} dropped -- LOOP SONG not latched this song (hint shown once)",
+                    event.button_name
+                );
+            }
+            return;
+        }
     }
     let side = match event.player {
         Player::P1 => 0usize,
         Player::P2 => 1,
     };
     match event.button {
+        // Scrub arm (Step 7): 7 = rewind, 9 = fast-forward.
+        button::NUM_7 | button::NUM_9 => {
+            let delta = if event.button == button::NUM_9 {
+                FF_INCREMENT_MS.load(Ordering::Acquire)
+            } else {
+                -RW_INCREMENT_MS.load(Ordering::Acquire)
+            };
+            scrub(side, delta);
+        }
+        // Marker arm: 4 = set A, 6 = set B, 5 = clear.
         button::NUM_4 => set_marker('A', side),
         button::NUM_6 => set_marker('B', side),
         _ => {
@@ -1005,9 +1061,9 @@ pub(super) fn on_input_event(event: &InputEvent) {
             // whole song (2026-08-14 maintainer decision).
             if clear_live_bounds() {
                 crate::services::toast::flash("Cleared markers");
-                // The section end moved to none: restore the stock end
-                // thresholds (LOOP OFF) / keep the parked cascade with a
-                // whole-song fire bound (LOOP ON).
+                // The section end moved to none: keep the parked cascade
+                // with a whole-song fire bound (the loop is latched here
+                // by construction of the gate above).
                 apply_end_policy();
             }
         }
@@ -1029,18 +1085,14 @@ pub(super) fn on_scene_change(prev: i32, next: i32) {
     if next == scene::GAMEPLAY {
         clear_session_state("song change");
         // Row-derived resolution is pending only while the mod is live AND
-        // some row is off its no-op value — START 0 and END at/above the
-        // highlight-seeded song end (or the abstract cap when never
-        // seeded) alter nothing, so default/seeded rows keep zero
-        // footprint (the driver never arms; gesture-set markers need no
-        // resolution). LOOP SONG ON counts as engaged (Step 4): the
-        // resolution is where the loop latches, and a loop session must
-        // arm the driver even with no bounds set (it loops the whole
-        // song).
-        let seeded_end = SEEDED_END_S.load(Ordering::Acquire);
-        let rows_engaged = (0..2).any(|side| {
-            row_start_time(side) > 0 || row_end_time(side) < seeded_end || row_loop_song(side)
-        });
+        // some side's LOOP SONG row reads ON (2026-09-04 revision): a
+        // section is only playable as a loop, so SONG START/END TIME —
+        // now LOOP SONG's children, RETAINED while hidden — alter nothing
+        // on their own. LOOP OFF ⇒ zero footprint (the driver never arms;
+        // gesture markers are loop-gated too). LOOP ON ⇒ the resolution
+        // is where the loop latches, and a loop session must arm the
+        // driver even with no bounds set (it loops the whole song).
+        let rows_engaged = (0..2).any(row_loop_song);
         if GESTURES_ACTIVE.load(Ordering::Acquire) && rows_engaged {
             RESOLUTION_PENDING.store(true, Ordering::Release);
         }

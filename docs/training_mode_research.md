@@ -590,3 +590,35 @@ scale them.
     in any function decompiled across both passes; if the early-natural-end
     variant (§4.4) ever misbehaves, write the truncated value there too
     (trivially safe — it's a ctor-time copy of the same quantity).
+
+## Addendum 2026-09-04 — loop/marker/timeline revision
+
+Planning: `.agents/planning/2026-09-04-training-loop-revisions/`.
+
+**READY-banner soft-lock (press 6, LOOP OFF).** Root cause chain: the
+marker gestures read GamePlayActor `+0x178` with only a `scene == GAMEPLAY`
+gate. Pre-anchor (DPS init states 0..=6 — the "READY?" window) that field
+holds the raw frame tick (minutes-since-boot scale; the 2026-08-14 driver
+finding), so `set_marker('B')` stored a garbage end and, with LOOP OFF, the
+v1 early-natural-end write pushed it into the ControlMessageActor thresholds
+of a run whose DPS never consults the end event pre-song. Fix: the shared
+`song_reset::run_in_song()` predicate (`first_anchored_frame()` — DPS step 7
++ every GamePlayActor at its in-song step with a nonzero `+0x160` anchor —
+AND `+0x178 < min(chart_end_raw)`), consumed by every training gesture
+(4/5/6/7/9) and by the loop driver's initial bound compute (the same two
+checks it previously carried inline). `first_anchored_frame` is a STATE
+predicate despite the name (true for the whole in-song phase).
+
+**Sections are loop-only.** SONG START/END TIME are `ShowWhen::Equals`
+children of LOOP SONG (LOOP registered first — framework parent-first rule);
+hidden values are retained-but-IGNORED at all three readers (GAMEPLAY-entry
+`rows_engaged` = any side's loop row; `try_resolve_row_bounds` resolves as
+defaults when `!loop_on`; `refresh_pre_shift` requires the governing side's
+loop row and is also refreshed from `on_loop_song_change`). Marker gestures
+4/5/6 gate on the per-song `loop_latched()` (one hint toast per song when
+refused); 7/9 scrub does not. The timeline HUD's veil + A/B lines render
+only while the loop is latched (cursor/readout/strip unconditional). The v1
+§4.4 early-natural-end variant is therefore unreachable from input;
+`section_math::end_policy`'s `WriteThresholds` arm stays as dead-defensive
+code. Pure gate logic: `section_math::gesture_gate` /
+`decorations_visible`, host-tested via `scripts/validate_training_mode.sh`.

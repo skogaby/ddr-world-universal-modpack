@@ -337,31 +337,17 @@ fn loop_step() -> LoopState {
         return LoopState::Idle;
     }
     // The initial bound compute must wait for the run's FIRST anchored
-    // frame: the resolution completes on the actor tree seconds before
-    // DPS state 6 anchors the clock, and until the anchor at `+0x160`
-    // lands the `+0x178` count reads as the raw frame tick
-    // (minutes-since-boot scale — cabinet finding 2026-08-14), which
-    // would trip the degeneracy disarm at song start.
+    // frame with a CREDIBLE count: the resolution completes on the actor
+    // tree seconds before DPS state 6 anchors the clock, and until the
+    // anchor at `+0x160` lands the `+0x178` count reads as the raw frame
+    // tick (minutes-since-boot scale — cabinet finding 2026-08-14; the
+    // per-frame cache can hold it one frame past the anchor too), which
+    // would trip the degeneracy disarm at song start. Both checks are the
+    // shared `song_reset::run_in_song` predicate — the same gate the
+    // training gestures use (2026-09-04 revision).
     let initial = LOOP_BOUND_FROM_B.load(Ordering::Acquire) == -1;
-    if initial {
-        if !song_reset::first_anchored_frame() {
-            return LoopState::AwaitingAnchor;
-        }
-        // Even on the first anchored frame the `+0x178` count is a
-        // per-frame CACHED value and can still hold the stale
-        // pre-anchor tick for one frame. A live pre-cascade run can
-        // never legitimately read at/past the +0x98 song-over
-        // threshold — defer the compute until the count is credible.
-        let credible = matches!(
-            (
-                song_reset::current_raw_music_count(),
-                (0..2).find_map(song_reset::chart_end_raw),
-            ),
-            (Some(count), Some(end)) if count < end
-        );
-        if !credible {
-            return LoopState::AwaitingAnchor;
-        }
+    if initial && !song_reset::run_in_song() {
+        return LoopState::AwaitingAnchor;
     }
     // (Re)compute the fire bound when none exists yet or the live
     // section end moved (a mid-grind B gesture / press-5 clear). A

@@ -69,10 +69,10 @@ use once_cell::sync::Lazy;
 
 use crate::core::memory;
 use crate::core::signatures::SignatureStore;
-use crate::mods::training_mode::bounds;
 use crate::mods::training_mode::strip_synth::{
     self, StripLayout, StripNote, StripPalette, StripScene,
 };
+use crate::mods::training_mode::{bounds, section_math};
 use crate::services::song_reset::seek::{self, NoteView};
 use crate::services::{asset_loader, judge_hook, scene_manager, song_reset, widget_renderer};
 use crate::types::scenes::scene;
@@ -1215,14 +1215,26 @@ fn overlay_update() {
         }
     }
 
-    // Section veil (re-demo amendment 2026-08-15: ALWAYS shade the
-    // active region — no markers means the whole song is active, so
-    // the whole strip shades).
-    let veil_span = strip_synth::section_veil(
-        bounds::active_section_start(),
-        bounds::section_end(),
-        geometry.chart_end_ms,
-    );
+    // Section decorations — veil + A/B lines — render only for a song
+    // whose LOOP is latched (2026-09-04 revision, the pure
+    // `section_math::decorations_visible`): they show the LOOPED region,
+    // which does not exist on a non-loop song. A mid-song driver disarm
+    // drops the latch and the decorations with it (the song then plays
+    // whole — consistent). Cursor, readout, and strip are unconditional.
+    let decorate = section_math::decorations_visible(bounds::loop_latched());
+
+    // Section veil (re-demo amendment 2026-08-15: on a LOOPING song,
+    // ALWAYS shade the active region — no markers means the whole song
+    // loops, so the whole strip shades).
+    let veil_span = if decorate {
+        strip_synth::section_veil(
+            bounds::active_section_start(),
+            bounds::section_end(),
+            geometry.chart_end_ms,
+        )
+    } else {
+        None
+    };
     if let Some(veil) = overlay.veil.as_ref() {
         if let Some((start_ms, end_ms)) = veil_span {
             let y0 = layout.y_for_ms(start_ms);
@@ -1236,11 +1248,12 @@ fn overlay_update() {
         }
     }
 
-    // A/B marker lines (poll — gestures move them mid-song). BOTH lines
-    // always render (re-demo amendment 2026-08-15): A falls back to the
-    // song start and B to the timeline end when unset — the strip's
-    // edges ARE the song bounds. Line tops clamp inside the strip so an
-    // edge line stays fully visible instead of half-hanging past it.
+    // A/B marker lines (poll — gestures move them mid-song). On a
+    // looping song BOTH lines always render (re-demo amendment
+    // 2026-08-15): A falls back to the song start and B to the timeline
+    // end when unset — the strip's edges ARE the song bounds. Line tops
+    // clamp inside the strip so an edge line stays fully visible instead
+    // of half-hanging past it. `None` (non-loop song) hides the line.
     let place_line = |line: Option<&ImageWidget>, at_ms: Option<i32>, overhang: f32, h: f32| {
         let Some(line) = line else { return };
         if let Some(ms) = at_ms {
@@ -1255,13 +1268,13 @@ fn overlay_update() {
     };
     place_line(
         overlay.line_a.as_ref(),
-        Some(bounds::active_section_start().unwrap_or(0)),
+        decorate.then(|| bounds::active_section_start().unwrap_or(0)),
         MARKER_OVERHANG,
         MARKER_H,
     );
     place_line(
         overlay.line_b.as_ref(),
-        Some(bounds::section_end().unwrap_or(geometry.chart_end_ms)),
+        decorate.then(|| bounds::section_end().unwrap_or(geometry.chart_end_ms)),
         MARKER_OVERHANG,
         MARKER_H,
     );

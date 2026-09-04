@@ -44,13 +44,15 @@
 //!
 //! Step 4 adds LOOP SONG (`training_loop_song`, a plain Session bool —
 //! NOT song-scoped; it survives song switches and resets at card-in):
-//! LOOP OFF with a section end writes the ControlMessageActor end
-//! thresholds so the game runs its OWN stock tail early (banner →
-//! results with the partial stats — [`bounds`]'s apply behind
-//! [`section_math::end_policy`]); LOOP ON never writes them — the
-//! [`driver`]'s loop leg fires the shipped in-place reset back to the
-//! section start at a fire bound clamped strictly below BOTH live
-//! thresholds, grinding the section until quick-fail/quick-restart.
+//! LOOP ON parks the end cascade (raised `+0x94`) and the [`driver`]'s
+//! loop leg fires the shipped in-place reset back to the section start
+//! at a fire bound clamped strictly below BOTH live thresholds, grinding
+//! the section until quick-fail/quick-restart. Since the 2026-09-04
+//! revision LOOP SONG is the PARENT of the two bound rows (they show only
+//! while it reads ON, values retained-but-ignored otherwise) and the
+//! 4/5/6 marker gestures are loop-only; the v1 "LOOP OFF + section end
+//! writes the CMA thresholds for an early natural end" behavior is
+//! retired — a section is only playable as a loop.
 //!
 //! Step 5 adds score containment (design §4.7/R5): every point a training
 //! session alters the current song taints the entered/pressing side in
@@ -92,7 +94,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mods::mod_trait::{Mod, ModContext};
-use crate::services::custom_options::{self, EnumValue, PersistMode, RegisterSpec, ScalarFormat};
+use crate::services::custom_options::{
+    self, EnumValue, PersistMode, RegisterSpec, ScalarFormat, ShowWhen,
+};
 use crate::services::{
     input_manager, scene_manager, score_guard, song_rate, song_reset, stage_records, versus_mirror,
 };
@@ -206,11 +210,15 @@ fn on_end_time_change(side: u8, value: i32) {
     versus_mirror::mirror_edit(OPT_END_TIME, side, value);
 }
 
-/// LOOP SONG row change callback: mirror the side's atomic. No nudge, no
-/// pre-shift interaction — the loop consumes the same resolved bounds the
-/// other rows produce, and latches per song at resolution.
+/// LOOP SONG row change callback: mirror the side's atomic, then refresh
+/// the bind-time pre-shift — since the 2026-09-04 revision the pre-shift
+/// is loop-gated (a retained SONG START TIME on a LOOP-OFF song must NOT
+/// shift the bank), so toggling the loop moves the mapping on/off. No
+/// nudge: the loop consumes the same resolved bounds the child rows
+/// produce, and latches per song at resolution.
 fn on_loop_song_change(side: u8, value: i32) {
     bounds::set_row_loop_song(side, value != 0);
+    refresh_pre_shift();
     versus_mirror::mirror_edit(OPT_LOOP_SONG, side, value);
 }
 
@@ -287,24 +295,33 @@ fn pre_shift_side() -> Option<usize> {
 /// committed exact ratio does not exist yet; the driver's adjust
 /// re-derives from the live mapping, so the epsilon never reaches the
 /// clock), with the standard approach lead. Start 0 / no side ⇒ `(0, 0)`
-/// (no mapping — the bind stays stock). Refreshed on start-row edits and
-/// at the scene 25/26 boundaries (the latter also catches SONG SPEED
-/// edits changing the wall conversion).
+/// (no mapping — the bind stays stock). Refreshed on start-row edits,
+/// LOOP SONG edits, and at the scene 25/26 boundaries (the latter also
+/// catches SONG SPEED edits changing the wall conversion).
+///
+/// LOOP-GATED since the 2026-09-04 revision: the governing side's LOOP
+/// SONG row must read ON, or the mapping is cleared — SONG START TIME is
+/// a child of LOOP SONG whose value is RETAINED while hidden, and a
+/// LOOP-OFF song must play whole from 0 regardless of that retained value
+/// (the retained-but-ignored rule; this is the reader that would
+/// otherwise silently start the song mid-way).
 fn refresh_pre_shift() {
     if !ACTIVE.load(Ordering::Acquire) {
         return;
     }
-    let armed = pre_shift_side().map(|side| {
-        let audio_len = song_rate::selected_song::selected_song().map(|info| info.audio_len_ms);
-        let start_s =
-            section_math::effective_bound_seconds(bounds::row_start_time(side), audio_len);
-        let content_ms = u64::from(start_s.max(0) as u32) * 1_000;
-        let percent = song_rate::runtime::desired_percent(side);
-        (
-            section_math::pre_shift_wall_ms(content_ms, percent),
-            TRAINING_LEAD_MS,
-        )
-    });
+    let armed = pre_shift_side()
+        .filter(|&side| bounds::row_loop_song(side))
+        .map(|side| {
+            let audio_len = song_rate::selected_song::selected_song().map(|info| info.audio_len_ms);
+            let start_s =
+                section_math::effective_bound_seconds(bounds::row_start_time(side), audio_len);
+            let content_ms = u64::from(start_s.max(0) as u32) * 1_000;
+            let percent = song_rate::runtime::desired_percent(side);
+            (
+                section_math::pre_shift_wall_ms(content_ms, percent),
+                TRAINING_LEAD_MS,
+            )
+        });
     match armed {
         Some((shift_wall_ms, lead_ms)) if shift_wall_ms > 0 => {
             // Stamped with the rows' song (R2 second amendment): the bind
@@ -332,10 +349,14 @@ pub(crate) fn on_scene_for_pre_shift(next: i32) {
     }
 }
 
-/// Register the two section-bound rows (design §4.1). Best-effort: row
-/// injection being unavailable degrades to the Step-2 gesture-only surface
-/// (one WARN) rather than refusing the whole mod — unlike SONG SPEED, the
-/// mod is useful without its rows. `Duplicate` on re-enable is success.
+/// Register the training rows (design §4.1, as revised 2026-09-04): LOOP
+/// SONG first (it is the PARENT — the framework validates `ShowWhen`
+/// references synchronously, so the parent must exist before its
+/// children), then the two section-bound rows as its `ShowWhen::Equals`
+/// children, then TIMELINE PLACEMENT. Best-effort: row injection being
+/// unavailable degrades to the Step-2 gesture-only surface (one WARN)
+/// rather than refusing the whole mod — unlike SONG SPEED, the mod is
+/// useful without its rows. `Duplicate` on re-enable is success.
 fn register_bound_rows() -> bool {
     if !custom_options::row_injection_available() {
         log_warn!(
@@ -343,11 +364,29 @@ fn register_bound_rows() -> bool {
         );
         return false;
     }
+    // The LOOP SONG toggle (Step 4) — the parent row. A section is only
+    // playable as a loop (2026-09-04 revision), so the bound rows below
+    // are visible only while this reads ON.
+    let loop_spec = RegisterSpec::bool_toggle(OPT_LOOP_SONG)
+        .display_name("Loop Song")
+        .description("Training Mode: loop the selected section until you exit")
+        .default_value(0)
+        .persist_mode(PersistMode::Session)
+        .on_change(on_loop_song_change);
+    match custom_options::register_option(loop_spec) {
+        Ok(_) | Err(custom_options::RegisterError::Duplicate { .. }) => {}
+        Err(error) => {
+            log_warn!(
+                "TrainingMode: {OPT_LOOP_SONG} registration failed ({error:?}) -- bound rows degraded"
+            );
+            return false;
+        }
+    }
     for (id, display, desc, min, max, default, on_change) in [
         (
             OPT_START_TIME,
             "Song Start Time",
-            "Training Mode: where the song starts",
+            "Training Mode: where the loop starts",
             BOUND_ROW_MIN_S,
             // START can never sit closer than MIN_SECTION to the end.
             BOUND_ROW_MAX_S - section_math::MIN_SECTION_S,
@@ -357,7 +396,7 @@ fn register_bound_rows() -> bool {
         (
             OPT_END_TIME,
             "Song End Time",
-            "Training Mode: where the song ends",
+            "Training Mode: where the loop ends",
             // The lowest valid section end (START floor 0 + MIN_SECTION).
             section_math::MIN_SECTION_S,
             BOUND_ROW_MAX_S,
@@ -372,6 +411,16 @@ fn register_bound_rows() -> bool {
                 .step_coarse(BOUND_ROW_COARSE_S)
                 .default_value(default)
                 .persist_mode(PersistMode::Session)
+                // Child of LOOP SONG: hidden (value RETAINED, not reset)
+                // while the side's loop row reads OFF — the framework's
+                // preserve_pitch shape. Every reader of these values
+                // consults the loop row itself (bounds::on_scene_change,
+                // bounds::try_resolve_row_bounds, refresh_pre_shift), so
+                // a hidden value is also an IGNORED value.
+                .show_when(ShowWhen::Equals {
+                    parent_id: OPT_LOOP_SONG.to_string(),
+                    value: 1,
+                })
                 .on_change(on_change);
         match custom_options::register_option(spec) {
             Ok(_) => {}
@@ -382,24 +431,6 @@ fn register_bound_rows() -> bool {
                 );
                 return false;
             }
-        }
-    }
-    // The LOOP SONG toggle (Step 4) — same Session/degradation shape as
-    // the bound rows; registered after them so the MODS tab reads
-    // START / END / LOOP top to bottom.
-    let loop_spec = RegisterSpec::bool_toggle(OPT_LOOP_SONG)
-        .display_name("Loop Song")
-        .description("Training Mode: loop the selected section until you exit")
-        .default_value(0)
-        .persist_mode(PersistMode::Session)
-        .on_change(on_loop_song_change);
-    match custom_options::register_option(loop_spec) {
-        Ok(_) | Err(custom_options::RegisterError::Duplicate { .. }) => {}
-        Err(error) => {
-            log_warn!(
-                "TrainingMode: {OPT_LOOP_SONG} registration failed ({error:?}) -- bound rows degraded"
-            );
-            return false;
         }
     }
     // TIMELINE PLACEMENT (Step 6; round-4 amendment): OFF/LEFT/RIGHT,

@@ -1084,6 +1084,12 @@ pub fn current_raw_music_count() -> Option<i32> {
 /// `0x1044 {now}` from DPS state 6). Requiring the DPS step keeps the
 /// one-shot adjust out of the 6→7 transition frame, where its own gates
 /// would transiently refuse.
+///
+/// Despite the name this is a STATE predicate, not an edge: it stays
+/// true for the whole in-song phase (an in-place reset re-writes the
+/// anchor) and reads false during the pre-song "READY?" init states and
+/// the song-end tail (DPS 8/9). Callers that also need a trustworthy
+/// music count should use [`run_in_song`].
 pub fn first_anchored_frame() -> bool {
     let Some(dps) = live_dps() else {
         return false;
@@ -1101,6 +1107,32 @@ pub fn first_anchored_frame() -> bool {
         read_step(*actor, GPA_STEP_BASE, GPA_STEP_INDEX) == Some(GPA_STEP_IN_SONG)
             && memory::read_u64(actor.add(GPA_ANCHOR_OFFSET)) != 0
     })
+}
+
+/// The run is LIVE and its music count is TRUSTWORTHY: [`first_anchored_frame`]
+/// AND the `+0x178` raw count reads strictly below every live side's raw
+/// chart end. The second half matters because `+0x178` is a per-frame
+/// CACHED value — until the anchor lands it holds the raw frame tick
+/// (minutes-since-boot scale, cabinet finding 2026-08-14) and can still
+/// hold that stale tick for one frame after the anchor. A live
+/// pre-cascade run can never legitimately read at/past its song-over
+/// threshold, so `count < chart_end` is the credibility test.
+///
+/// The ONE definition of "gameplay has actually begun" (READY banner
+/// gone, arrows scrolling) shared by the training gestures and the loop
+/// driver's initial bound compute. Any unreadable input ⇒ `false`
+/// (conservative — callers drop the action; the song is never disturbed).
+pub fn run_in_song() -> bool {
+    if !first_anchored_frame() {
+        return false;
+    }
+    matches!(
+        (
+            current_raw_music_count(),
+            (0..2).filter_map(chart_end_raw).min(),
+        ),
+        (Some(count), Some(end)) if count < end
+    )
 }
 
 /// The Step-3 silent-start adjust (design §4.3): re-run the anchor +

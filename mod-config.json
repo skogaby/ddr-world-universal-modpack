@@ -198,17 +198,17 @@
         "in_game": true
       },
       {
-        "id": "training_progress_pos",
-        "overlay": true,
-        "in_game": true
-      },
-      {
         "id": "training_start_time",
         "overlay": true,
         "in_game": true
       },
       {
         "id": "training_end_time",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "training_progress_pos",
         "overlay": true,
         "in_game": true
       },
