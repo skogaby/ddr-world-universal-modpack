@@ -71,12 +71,14 @@
 //!   push r10
 //!   push r11
 //!   sub  rsp, 0x20      ; shadow space
-//!   mov  ecx, esi       ; arg1 = original ESI
+//!   mov  ecx, [r14+8]   ; arg1 = stock score delta (the 0x1036 payload;
+//!                       ;   ESI is still 0 here — see below)
 //!   mov  edx, [r14]     ; arg2 = player_side
 //!   mov  r8, rdi        ; arg3 = NoteResultActor (RDI at the patch site)
 //!   movabs rax, <fn>
 //!   call rax
 //!   mov  esi, eax       ; capture return value into ESI
+//!   mov  [r14+8], eax   ; write-back so the displaced movsxd reloads it
 //!   add  rsp, 0x20
 //!   pop  r11
 //!   pop  r10
@@ -86,9 +88,19 @@
 //!   pop  rcx
 //!   pop  rax
 //!   pop  rbx            ; restore align-pad register
-//!   mov  rdx, [rdi+0xb0]  ; displaced original instruction
+//!   movsxd rsi, [r14+8]   ; displaced original instruction 1
+//!   mov  rdx, [rdi+0xb0]  ; displaced original instruction 2
 //!   jmp  rel32 <return_addr>  ; trampoline — does NOT touch any register
 //! ```
+//!
+//! BOTH displaced instructions run AFTER the callback — the patch site
+//! is the delta LOAD, so ESI at stub entry is the game's `xor esi,esi`
+//! from the label-frame lookup, never the delta. The stock value must be
+//! read from the payload. (The initial port passed ESI as arg1, so with
+//! the per-player option OFF the callback "preserved" 0 and the stock
+//! pacemaker rendered 0 for every player while the mod was enabled —
+//! tester report 2026-09-07 on 20260224; the site is byte-identical on
+//! all four supported builds, so it affected every build.)
 //!
 //! The `jmp rel32` is always valid because `alloc_near` guarantees the stub
 //! is allocated within ±2 GB of the patch site, and `return_addr` is only
@@ -104,9 +116,10 @@ use crate::{log_info, log_warn};
 use super::data_feed;
 
 /// We patch 11 bytes starting at the MOVSXD RSI,[R14+8] instruction (4 bytes)
-/// followed by MOV RDX,[RDI+0xB0] (7 bytes). The stub executes the first
-/// displaced instruction, overrides ESI with our value, then executes the
-/// second displaced instruction before jumping back.
+/// followed by MOV RDX,[RDI+0xB0] (7 bytes). The stub reads the stock delta
+/// from [R14+8], calls the callback, writes the returned value back to
+/// [R14+8], then executes BOTH displaced instructions (the movsxd reloads
+/// RSI from the written slot) before jumping back.
 const PATCH_SIZE: usize = 11;
 
 // ── NoteResultActor / pacemaker clip layout (0x18007a450 / 0x18007b300
@@ -169,8 +182,10 @@ static ORIGINAL_BYTES: [std::sync::atomic::AtomicU8; PATCH_SIZE] = [
     std::sync::atomic::AtomicU8::new(0),
 ];
 
-/// Rust-side logic called from the stub. Returns the ESI value to use.
-/// If the option is OFF, returns the original score delta unchanged.
+/// Rust-side logic called from the stub. Returns the value the stub
+/// writes to `[r14+8]` (the 0x1036 payload's delta slot) — `original_esi`
+/// is that slot's STOCK value (score − ghost target), read by the stub
+/// before the call. If the option is OFF, returns it unchanged.
 /// If ON, returns the REAL ms-error (never zeroed — the white-zone color
 /// is forced through the redirected color loads instead), and forces the
 /// pacemaker's visibility for sides with no ghost/rival data (see the
@@ -427,11 +442,10 @@ pub fn enable() {
         // The stub will end with a jmp rel32 back to patch_site+PATCH_SIZE.
         // We compute the displacement after we know the stub address, so we
         // write a placeholder here and patch it in after alloc_near succeeds.
-        // Stub size budget: 1+1+1+2+2+2+2+2+2 pushes (total 17 bytes for 8 regs)
-        //   + 4 sub shadow + 2 mov ecx,esi + 3 mov edx,[r14] + 3 mov r8,rdi
-        //   + 10 movabs+call + 2 mov esi,eax + 4 add shadow
-        //   + 2+2+2+2+1+1+1 pops + 1 pop rbx
-        //   + 7 displaced insn + 5 jmp rel32 = ~78 bytes; allocate 96.
+        // Stub size budget: 1+1+1+1+2+2+2+2 pushes (12 bytes for 8 regs)
+        //   + 4 sub shadow + 4 mov ecx,[r14+8] + 3 mov edx,[r14] + 3 mov r8,rdi
+        //   + 12 movabs+call + 2 mov esi,eax + 4 mov [r14+8],eax + 4 add shadow
+        //   + 12 pops + 11 displaced insns + 5 jmp rel32 = 76 bytes; allocate 96.
         let mut stub_bytes: Vec<u8> = Vec::with_capacity(96);
 
         // --- Save caller-saved registers (8 regs = 64 bytes → RSP stays 16-aligned) ---
@@ -449,8 +463,15 @@ pub fn enable() {
         // sub rsp, 0x20  (shadow space)
         stub_bytes.extend_from_slice(&[0x48, 0x83, 0xEC, 0x20]);
 
-        // mov ecx, esi  (arg1 = original ESI value before our override)
-        stub_bytes.extend_from_slice(&[0x89, 0xF1]);
+        // mov ecx, dword [r14+8]  (arg1 = the stock score delta, read from
+        // the 0x1036 payload). NOT `mov ecx, esi`: the game zeroes ESI
+        // (`xor esi,esi`) before the label-frame lookup, and the displaced
+        // `movsxd rsi,[r14+8]` that loads the delta runs AFTER this call —
+        // so ESI is always 0 here. Passing it made the option-OFF path
+        // return 0, which the write-back below stored into [r14+8], and the
+        // stock pacemaker rendered 0 whenever this mod was enabled (field
+        // report 2026-09-07, all builds since the initial port).
+        stub_bytes.extend_from_slice(&[0x41, 0x8B, 0x4E, 0x08]);
 
         // mov edx, [r14]  (arg2 = player_side)
         stub_bytes.extend_from_slice(&[0x41, 0x8B, 0x16]);

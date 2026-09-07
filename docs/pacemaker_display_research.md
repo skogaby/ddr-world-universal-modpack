@@ -251,3 +251,23 @@ Corollary of the mechanism: while the mispatch was live, exact-0 was
 the ONLY affected value (nonzero single digits take the nonzero branch,
 which loads XMM6 = 1.0 before its log10f → `R13D = trunc(log10(v)+1)` =
 correct), which is why `±30`/`-10`/single digits all rendered fine.
+
+## 9. Option-OFF stock pacemaker rendered 0 (2026-09-07)
+
+Tester report (20260224): with `power-user-statistics` enabled but the
+per-player `pacemaker_to_mserror` option OFF, the stock pacemaker delta
+always displayed 0; disabling the mod globally restored it.
+
+Not a build divergence — the whole 0x1036 case is a byte-identical
+normalized stream on 20250805 / 20260224 / 20260721 / 20260825 (patch
+site, color loads, digit path). The bug was in the stub's arg1: it
+passed `ESI` as the "original" delta, but the patch site IS the delta
+load — the game runs `XOR ESI,ESI` (`0x180076c2e` on 20260224) before
+the label-frame lookup and the displaced `MOVSXD RSI,[R14+8]` executes
+AFTER the callback. So the option-OFF path "preserved" 0, the stub wrote
+that 0 back to `[R14+8]`, and the displaced movsxd reloaded it. Option
+ON was unaffected (the callback ignores arg1 there), which is why it
+was never seen in the ms-error testing that drove §§3–8.
+
+Fix: arg1 is now `MOV ECX,[R14+8]` (the payload slot). Affected every
+build since the initial port.
