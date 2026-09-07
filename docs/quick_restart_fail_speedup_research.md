@@ -819,3 +819,87 @@ in silent mode: no per-second sampling; on a 20 s timeout it emits ONE gate
 sample (`diag_sample_loader_exit_gate`, still 20260721-RVA-guarded) + a
 LIMBO WARN, so any future limbo self-diagnoses from a single log. The
 gesture-time diag calls were removed (superseded by the watchdog).
+
+## 15. Stale stage record after a results-skipping fail (2026-09-07 — score-spoofing fix)
+
+**Field report:** start song X on a hard difficulty, press 3 while the
+"READY?" panel is still up, re-pick song X on an easy difficulty, play it —
+the game "thinks it's still on the original difficulty" and the server
+receives the easy chart's score under the hard difficulty. Root-caused and
+fixed the same day; the READY window is incidental (it is just the fastest
+way to run the loop) — every results-skipping quick fail, mid-song
+included, takes the identical path.
+
+### 15.1 Root cause (Ghidra, gamemdx 20260825)
+
+It is the premium_free stale-record bug (`docs/premium_free_stale_record_bug.md`)
+reached through a slot reuse the freeze is not involved in:
+
+1. Both skip-results fail shapes — the fast `finish(DPS, 0x19)` into the
+   select loader (§4b) and the fallback's 29 → 24 redirect (§4c) — skip
+   `ResultSequence` AND the stage bump. The bump is `createNextSequence`
+   **case 0x20** (1-idx; 0-idx 31) — `*(GameWork+0xC) += 1`, the
+   `premium_free_stage_inc` site. Select-loader case 0x19 never touches it,
+   so the next song reuses `record[stage]`, still holding the failed pick's
+   `(mcode X, difficulty D1)`.
+2. Song select's **difficulty cursor** writes the display difficulty
+   `PlayerWork+0x5C` UNCONDITIONALLY: the ↓ handler `FUN_18010f2c0`
+   (`se_select_music_difficulty_select_a`) → `FUN_1800fcc70(seq, cursor−1,
+   side)` (= 0721's `FUN_1800fcf40`; 10 callers on 0825 incl. the versus
+   confirm). So after the re-pick `PW+0x5C = D2`.
+3. The confirm's **commit** `FUN_1800fdc90` (0721 `FUN_1800fdfa0`; called
+   from the solo confirm `FUN_18010d480` right after `FUN_1800fd970`, which
+   writes `PW+0x54` mcode / `+0x50` style / cursors but NOT `+0x5C`) loops
+   both sides: `rec = PW + 0x590 + FUN_1800fcc00()*0x2B8; if (new_mcode !=
+   rec->mcode) { FUN_1801e6010(rec, mcode, diff, style); FUN_1800fcc70(seq,
+   diff, side); }`. Same mcode ⇒ guard closed ⇒ `rec+0x04` keeps D1 and the
+   score wipe is skipped.
+4. The stage loader (case **0x1d**) builds the DPS ctor's per-side 16-byte
+   `{entered, is_main, is_double, pad, i32 difficulty, u64}` with
+   `difficulty = FUN_1801e89b0(wrapper)` = **`PW+0x5C`** (clamped ≥1 when
+   `PW+0x50 == 1`), and `DancePlaySequence::onSetup` (`FUN_1800573d0`)
+   passes that to `build_ssq_path` — the **D2 chart loads**. (The matching
+   DPS, case 0x35, reads `rec+0x04` directly instead — courses/matching
+   are not exposed.)
+5. The result commit writes the D2 play into the D1 record; the per-stage
+   save marshals `rec+0x04 = D1` (the marshal facts in the premium_free
+   doc). The READY panel / STAGE_INDICATOR read `rec+0x04` too, hence the
+   visible "still on the original difficulty".
+
+Not affected: quick RESTART (same song, same `PW+0x5C`, the record header
+is right), SKIP RESULTS = OFF (natural tail runs results → the bump gives
+the next song a virgin slot), courses (refused), the final/extra stage
+(predicate refusal ⇒ natural tail).
+
+### 15.2 Fix (shipped, `mods/quick_restart_or_fail.rs`)
+
+The proven premium_free shape, latched to the fail instead of the freeze:
+
+- `PENDING_RECORD_VIRGINISE` is armed BEFORE every results-skipping exit is
+  attempted (`finish` re-enters the scene hook synchronously, so the latch
+  must already be visible) and disarmed if the exit is refused
+  (`try_fast_finish` false / `fail_song` — now returning `bool` — refused).
+- The mod's scene callback consumes it at the next **SONG_SELECT** entry:
+  `virginize_current_stage_records` writes `mcode = -1` into
+  `record[stage_counter]` of BOTH sides (the commit writes both regardless
+  of who is entered; course mode skipped) via `stage_records`, restoring
+  the vanilla "current stage's record is virgin during song selection"
+  invariant so the game's own commit re-prepares it — fresh difficulty +
+  clean wipe + the `PW+0x5C` refresh. Timed at SONG_SELECT, not at the
+  gesture: the fallback shape runs the natural song-end machinery (result
+  commit + local score-DB update key off the record header) before the
+  redirect lands. GAMEPLAY / EAM_EXIT / ATTRACT entries and `disable()`
+  clear a stale latch.
+- **Gate:** `session_continues_after_results_skip` now also requires
+  `stage_record_reset_available(stage)` (GameWork + both sides' record
+  pointers resolvable) and `scene_manager::is_available()`; otherwise the
+  skip is REFUSED and the natural tail (results + bump) keeps the record
+  honest. This composes with premium_free's own SONG_SELECT virginise (both
+  write −1; the second is a no-op).
+
+Cabinet verification: quick-fail song X at D1 (READY window AND mid-song),
+re-pick X at D2 → expect `reset stage-N record for P1 (was mcode X) after a
+results-skipping quick fail` at song select, the READY panel showing D2,
+and the D2 score saved under D2 (backend + results screen). Also the
+control: re-pick a DIFFERENT song (guard was already open — behavior
+unchanged).

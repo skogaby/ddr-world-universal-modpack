@@ -235,8 +235,7 @@ pub fn register() {
     mod_menu::register_enum_row(mod_menu::EnumRowSpec {
         key: ROW_MSAA.to_string(),
         label: "MSAA".to_string(),
-        hint: "Multisampling on the game's render surfaces. Restart the game to apply."
-            .to_string(),
+        hint: "Multisampling on the game's render surfaces. Restart the game to apply.".to_string(),
         parent_row_key: Some(MOD_ID.to_string()),
         values: (0..MSAA_CHOICES.len() as i32).collect(),
         labels: MSAA_CHOICES.iter().map(|(_, l)| l.to_string()).collect(),

@@ -1021,3 +1021,45 @@ Two unrelated log findings from the Custom Resolution checkpoints, both about
    with `Format::compressed_size`. Rule: grep new logs for `PANIC` first — the
    panic hook's ERROR line is the only trace, and the follow-up WARN reads like
    a benign fallback.
+
+## 2026-09-07 — Anything that skips the stage bump inherits the stale-record bug (quick-fail score spoofing)
+
+Field report: quick-fail song X on a hard difficulty during the READY panel,
+re-pick X on an easy one, play it — the score uploads under the HARD
+difficulty. It was `docs/premium_free_stale_record_bug.md` verbatim, reached
+without the freeze: the skip-results quick fail jumps straight to the select
+loader and skips `createNextSequence` case 0x20 (the stage bump = the
+`premium_free_stage_inc` site), so the next song reuses `record[stage]`. The
+game's commit only re-prepares `(mcode, diff)` behind `new_mcode !=
+rec->mcode`, while the difficulty CURSOR writes the display field `PW+0x5C`
+unconditionally — and `PW+0x5C` is what the stage loader feeds the DPS, i.e.
+the chart that actually LOADS. Two writers, one guard, and every downstream
+consumer (result commit, save marshal, READY panel) trusts the guarded one.
+
+The READY-window detail in the report was a red herring for the mechanism
+(it is just the fastest repro loop); mid-song quick fails take the identical
+path. Verified in Ghidra on 20260825 in ~10 calls: cursor handler
+`FUN_18010f2c0` → `FUN_1800fcc70` (`PW+0x5C`), commit `FUN_1800fdc90`
+(guard), loader case 0x1d → `FUN_1801e89b0` (reads `PW+0x5C`) →
+`DancePlaySequence::onSetup` → `build_ssq_path`.
+
+Rules:
+- **The stage bump is a save-integrity boundary, not a cosmetic counter.**
+  Any exit that lands on song select without passing 0-idx 31 (quick fail
+  skip-results, quick logout's tail does pass 32→35 — fine, premium_free's
+  NOP) MUST virginise `record[stage_counter]` for BOTH sides at the next
+  SONG_SELECT entry (`mcode = -1` — the marshal's skip key and the vanilla
+  "virgin during selection" invariant), and REFUSE the skip when
+  `stage_records` can't resolve the pointers. `premium_free` and
+  `quick_restart_or_fail` now both do this; a third skipper should call the
+  same shape.
+- Time the write at SONG_SELECT entry, never at the gesture: the fallback
+  fail shape still runs the natural song-end machinery (result commit +
+  local score-DB update key off the record header) before the redirect.
+- Arm the latch BEFORE the `finish` call and disarm on refusal — `finish`
+  re-enters the scene hook synchronously, so a latch set after it returns
+  misses the very scene entry it was meant for.
+- When two game writers feed "the same" logical value (display field vs
+  record field) under different guards, list every consumer of each before
+  declaring a mod's exit path safe; the visible symptom ("READY panel shows
+  the old difficulty") was the record's face, not the display field's.

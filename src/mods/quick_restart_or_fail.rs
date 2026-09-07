@@ -113,8 +113,41 @@
 //! watchdog remains permanently: destination scene within 20 s, or ONE
 //! gate sample + LIMBO WARN.
 //!
+//! ## Stale stage record after a results-skipping fail (2026-09-07 fix)
+//!
+//! Both skip-results fail shapes (the fast `finish` into the select loader
+//! and the fallback's 29 → 24 redirect) skip `ResultSequence` AND the
+//! WaitSequence stage bump (0-idx 31 — `createNextSequence` case 0x20 is
+//! where `GameWork+0xC` increments), so the NEXT song reuses the SAME
+//! per-stage play record. The game's song-select commit re-prepares that
+//! record — `(mcode, difficulty, style)` + a full score wipe + the
+//! `PlayerWork+0x5C` display difficulty — only under an
+//! `if (new_mcode != rec->mcode)` guard, while the song-select difficulty
+//! cursor writes `PlayerWork+0x5C` (the field the stage loader reads for
+//! the chart to load — `FUN_1801e89b0` on 20260825) UNCONDITIONALLY. So:
+//! quick-fail song X at difficulty D1 → re-pick song X at D2 → guard
+//! closed → the record keeps D1, gameplay loads the D2 chart, the result
+//! commit writes the D2 score into the D1 record, and the per-stage save
+//! uploads it under D1 (the field report: play an easy chart while the
+//! game thinks it's a harder one — READY-banner exits are just the
+//! quickest way to do it; mid-song fails take the identical path). This is
+//! the `premium_free` stale-record bug (`docs/premium_free_stale_record_bug.md`)
+//! reached through a slot reuse the freeze isn't involved in.
+//!
+//! Fix (the proven premium_free shape): every results-skipping fail
+//! latches `PENDING_RECORD_VIRGINISE`; at the next SONG_SELECT entry the
+//! current stage's record of BOTH sides gets `mcode = -1` (the marshal's
+//! skip key and the vanilla "virgin during song selection" invariant), so
+//! the game's own commit re-prepares it with the fresh difficulty. Timed at
+//! SONG_SELECT entry (not at the gesture) because the fallback shape runs
+//! the natural song-end machinery — the result commit + local score-DB
+//! update read the record's header — before the redirect lands. The skip
+//! itself is refused (natural tail instead) when the reset could not run
+//! (`stage_records` record pointers unavailable).
+//!
 //! See `docs/quick_restart_fail_speedup_research.md` for the full RE record
-//! (§4a the corrected root cause, §4b the fast path) and
+//! (§4a the corrected root cause, §4b the fast path, §15 the stale-record
+//! fix) and
 //! `.agents/planning/20260523-bulk-hack-porting/research/quick-restart-pivot.md`
 //! for the original investigation history.
 
@@ -221,6 +254,89 @@ fn delay_label(ms: i32) -> String {
         "INSTANT".to_string()
     } else {
         format!("{:.1}s", ms as f32 / 1000.0)
+    }
+}
+
+// ── Stale stage record after a results-skipping fail ────────────────
+/// Latched by every quick fail that skips `ResultSequence` (and therefore
+/// the stage bump): the fast `finish` into the select loader and the
+/// natural-death fallback armed with the 29 → 24 redirect. Consumed at the
+/// next SONG_SELECT entry by [`virginize_current_stage_records`]; cleared
+/// defensively at GAMEPLAY / session-end entries so a stale latch can never
+/// fire on a later, unrelated song-select visit.
+static PENDING_RECORD_VIRGINISE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the stale-record reset can run for `stage`: the record layout
+/// decoded, GameWork reachable, and BOTH sides' record pointers resolvable
+/// (the game's commit writes both sides' records regardless of who is
+/// entered, so the reset must too). A results-skipping fail is REFUSED
+/// without this — the slot reuse would otherwise leave the previous
+/// difficulty in the record (score spoofing surface, see the module doc).
+fn stage_record_reset_available(stage: i32) -> bool {
+    let Ok(stage) = usize::try_from(stage) else {
+        return false;
+    };
+    stage_records::game_work().is_some()
+        && stage_records::stage_record(0, stage).is_some()
+        && stage_records::stage_record(1, stage).is_some()
+}
+
+/// Reset the CURRENT stage's play record of both players to "virgin"
+/// (`mcode = -1`) after a results-skipping quick fail, so the next
+/// song-select commit re-initializes it — fresh difficulty + clean score
+/// wipe — instead of being skipped by the game's `new_mcode != rec->mcode`
+/// guard when the player re-picks the same song (the premium_free
+/// stale-record fix, applied to the quick-fail slot reuse). Course mode is
+/// left alone (its record init is unconditional, and quick fail refuses
+/// courses anyway). Runs on the render thread from the scene hook,
+/// panic-isolated by scene_manager; pure range-checked reads + one i32
+/// write per side.
+fn virginize_current_stage_records() {
+    let Some(game_work) = stage_records::game_work() else {
+        log_warn!(
+            "QuickRestartOrFail: GameWork unavailable at song select -- stale-record reset skipped"
+        );
+        return;
+    };
+    unsafe {
+        if memory::read_u64(game_work.add(stage_records::course_field_offset())) != 0 {
+            return;
+        }
+    }
+    let Some(stage) = stage_records::stage_counter() else {
+        log_warn!(
+            "QuickRestartOrFail: stage counter unavailable at song select -- stale-record reset skipped"
+        );
+        return;
+    };
+    if !(0..stage_records::MAX_STAGE_RECORDS as i32).contains(&stage) {
+        log_warn!(
+            "QuickRestartOrFail: stage counter {} out of range at song select -- stale-record reset skipped",
+            stage
+        );
+        return;
+    }
+    for side in 0..2usize {
+        let Some(rec) = stage_records::stage_record(side, stage as usize) else {
+            log_warn!(
+                "QuickRestartOrFail: P{} stage-{} record unavailable -- stale-record reset skipped for that side",
+                side + 1,
+                stage + 1
+            );
+            continue;
+        };
+        unsafe {
+            let mcode = memory::read_i32(rec);
+            if mcode != -1 {
+                memory::write_i32(rec, -1);
+                log_info!(
+                    "QuickRestartOrFail: reset stage-{} record for P{} (was mcode {}) after a results-skipping quick fail so the next pick commits a fresh difficulty",
+                    stage + 1,
+                    side + 1,
+                    mcode
+                );
+            }
+        }
     }
 }
 
@@ -573,14 +689,34 @@ impl Mod for QuickRestartOrFailMod {
 
         // Each fresh gameplay starts a clean song: clear the per-song
         // quick-fail taint so a stale fail from the previous song can't
-        // suppress this song's score submission.
+        // suppress this song's score submission. And the stale-record
+        // reset: a results-skipping fail leaves the current stage's record
+        // holding the failed pick's (mcode, difficulty); virginise it at
+        // the song-select entry that follows so the game's commit
+        // re-prepares it (see the module doc).
         if scene_manager::is_available() {
             let id = scene_manager::on_scene_change(Box::new(|prev, next| {
                 if next == scene::GAMEPLAY && prev != scene::GAMEPLAY {
                     score_guard::reset_song_taint();
                 }
+                if next == scene::SONG_SELECT {
+                    if PENDING_RECORD_VIRGINISE.swap(false, Ordering::AcqRel) {
+                        virginize_current_stage_records();
+                    }
+                } else if next == scene::GAMEPLAY
+                    || next == scene::EAM_EXIT
+                    || next == scene::ATTRACT_DEMO
+                {
+                    // A latch that never met its song select is stale by
+                    // now (a new song started, or the session ended).
+                    PENDING_RECORD_VIRGINISE.store(false, Ordering::Release);
+                }
             }));
             self.scene_cb_id = Some(id);
+        } else {
+            log_warn!(
+                "QuickRestartOrFail: scene_manager unavailable -- stale-record reset cannot arm (results-skipping quick fails will be refused)"
+            );
         }
 
         let fast = if SEQUENCE_FINISH.load(Ordering::Acquire).is_null()
@@ -603,6 +739,9 @@ impl Mod for QuickRestartOrFailMod {
         if let Some(id) = self.scene_cb_id.take() {
             scene_manager::remove_callback(id);
         }
+        // A latch left over from a fail whose song select never arrived
+        // while we were listening must not fire on a later re-enable.
+        PENDING_RECORD_VIRGINISE.store(false, Ordering::Release);
         if self.delay_row_registered {
             mod_menu::remove_rows_for(&[DELAY_ROW_KEY]);
             self.delay_row_registered = false;
@@ -730,7 +869,8 @@ unsafe fn force_game_over(actor: *mut u8) {
 
 /// Shared core of both gestures: optionally arm a one-shot scene redirect,
 /// then force every active GamePlayActor to STEP_GAME_OVER and let the
-/// framework's natural fail flow run.
+/// framework's natural fail flow run. Returns `true` iff the death was
+/// actually forced (the redirect, if any, is armed only in that case).
 ///
 /// REFUSES during the pre-song READY window: forcing STEP_GAME_OVER into
 /// mid-init GamePlayActors while DPS is still in its pre-song states
@@ -738,13 +878,13 @@ unsafe fn force_game_over(actor: *mut u8) {
 /// nothing else drains the parked shutter (cabinet-observed 2026-08-31).
 /// The gesture triggers gate this themselves; this check is the structural
 /// backstop so no future call path can reintroduce the lock.
-fn fail_song(redirect_target: Option<i32>, label: &str) {
+fn fail_song(redirect_target: Option<i32>, label: &str) -> bool {
     if dps_pre_song() {
         log_warn!(
             "QuickRestartOrFail: {} refused -- natural-death fallback is unsafe pre-song (READY window)",
             label
         );
-        return;
+        return false;
     }
     let actors = find_gameplay_actors();
     if actors.is_empty() {
@@ -752,7 +892,7 @@ fn fail_song(redirect_target: Option<i32>, label: &str) {
             "QuickRestartOrFail: no GamePlayActor found -- skipping {}",
             label
         );
-        return;
+        return false;
     }
     if let Some(target) = redirect_target {
         scene_manager::add_redirect_once(scene::STAGE_RESULT, target);
@@ -765,6 +905,7 @@ fn fail_song(redirect_target: Option<i32>, label: &str) {
         label,
         actors.len()
     );
+    true
 }
 
 /// Apply the select-residency patch: rewrite the stage loader's unload
@@ -1375,8 +1516,41 @@ fn session_continues_after_results_skip() -> bool {
             override_stage,
             event
         );
+        return false;
     }
-    continues
+    // Skipping results also skips the stage bump, so the NEXT song reuses
+    // this stage's play record; the skip is only safe if the stale-record
+    // reset at the following song select can run (module doc). Without it
+    // the natural tail (results + bump) keeps the record honest.
+    if !stage_record_reset_available(stage) {
+        log_warn!(
+            "QuickRestartOrFail: stage-{} record pointers unavailable -- results skip refused (stale-record reset impossible), quick-fail taking the full natural tail",
+            stage + 1
+        );
+        return false;
+    }
+    // The reset rides the scene hook registered at enable().
+    if !scene_manager::is_available() {
+        log_warn!(
+            "QuickRestartOrFail: scene_manager unavailable -- results skip refused (stale-record reset cannot arm)"
+        );
+        return false;
+    }
+    true
+}
+
+/// Arm the stale-record reset for a results-skipping fail that is about to
+/// fire (fast `finish` or the redirect-armed fallback). Armed BEFORE the
+/// exit is attempted — `finish` re-enters the scene hook synchronously, so
+/// the latch must already be visible to it — and disarmed by
+/// [`disarm_record_virginise`] if the exit is refused. Consumed at the next
+/// SONG_SELECT entry.
+fn arm_record_virginise() {
+    PENDING_RECORD_VIRGINISE.store(true, Ordering::Release);
+}
+
+fn disarm_record_virginise() {
+    PENDING_RECORD_VIRGINISE.store(false, Ordering::Release);
 }
 
 /// `presser_side` = the side (0/1) whose pinpad pressed 3; their
@@ -1396,10 +1570,16 @@ fn trigger_fail(presser_side: usize) {
     // SKIP RESULTS is moot pre-song (there is no score to show), so the
     // fast exit is taken regardless of the pressing side's preference.
     if dps_pre_song() {
-        let session_continues = !is_course() && session_continues_after_results_skip();
-        if session_continues && try_fast_finish(SELECT_LOADER_1IDX, "quick-fail (pre-song fast)") {
-            score_guard::set_quick_fail();
-            return;
+        if !is_course() && session_continues_after_results_skip() {
+            arm_record_virginise();
+            if try_fast_finish(SELECT_LOADER_1IDX, "quick-fail (pre-song fast)") {
+                score_guard::set_quick_fail();
+                log_info!(
+                    "QuickRestartOrFail: quick-fail (pre-song fast) skips results -- stale-record reset armed for the next song select"
+                );
+                return;
+            }
+            disarm_record_virginise();
         }
         log_info!(
             "QuickRestartOrFail: quick-fail ignored during the pre-song READY window (no safe exit path)"
@@ -1429,31 +1609,44 @@ fn trigger_fail(presser_side: usize) {
     }
 
     // Both fail shapes skip ResultSequence — the game's only session-over
-    // decision — so both require the session-continues predicate. Courses
+    // decision — so both require the session-continues predicate (which
+    // also proves the stale-record reset can run — module doc). Courses
     // and any session that might end after this song keep the full natural
     // tail (the game must run its own game-over/session-end there).
-    let session_continues = !is_course() && session_continues_after_results_skip();
+    if !is_course() && session_continues_after_results_skip() {
+        arm_record_virginise();
 
-    // Fast path: dismiss the parked stage shutter, then finish(DPS, 0x19)
-    // straight into the 0-idx 24 song-select loader. No fade, no FAILED
-    // banner, no results screen; getNextID(0x19) = 0x1A lands on song
-    // select with no redirect needed.
-    if session_continues && try_fast_finish(SELECT_LOADER_1IDX, "quick-fail (fast)") {
-        return;
-    }
+        // Fast path: dismiss the parked stage shutter, then finish(DPS, 0x19)
+        // straight into the 0-idx 24 song-select loader. No fade, no FAILED
+        // banner, no results screen; getNextID(0x19) = 0x1A lands on song
+        // select with no redirect needed.
+        if try_fast_finish(SELECT_LOADER_1IDX, "quick-fail (fast)") {
+            log_info!(
+                "QuickRestartOrFail: quick-fail (fast) skips results -- stale-record reset armed for the next song select"
+            );
+            return;
+        }
 
-    // Fallback: natural fail flow (fade + FAILED banner), with a one-shot
-    // 29 → 24 redirect to still skip the results screen when it's provably
-    // safe AND the m_currentID repair is available (without it the tail
-    // after the redirected scene runs the wrong successor).
-    if session_continues && scene_manager::redirect_repair_available() {
-        fail_song(
-            Some(scene::CAUTION_TO_SONG_INTERSTITIAL),
-            "quick-fail (skip results)",
-        );
-    } else {
-        fail_song(None, "quick-fail (full natural tail)");
+        // Fallback: natural fail flow (fade + FAILED banner), with a one-shot
+        // 29 → 24 redirect to still skip the results screen when it's provably
+        // safe AND the m_currentID repair is available (without it the tail
+        // after the redirected scene runs the wrong successor).
+        if scene_manager::redirect_repair_available() {
+            if fail_song(
+                Some(scene::CAUTION_TO_SONG_INTERSTITIAL),
+                "quick-fail (skip results)",
+            ) {
+                log_info!(
+                    "QuickRestartOrFail: quick-fail (skip results) skips results -- stale-record reset armed for the next song select"
+                );
+            } else {
+                disarm_record_virginise();
+            }
+            return;
+        }
+        disarm_record_virginise();
     }
+    fail_song(None, "quick-fail (full natural tail)");
 }
 
 fn trigger_restart() {
