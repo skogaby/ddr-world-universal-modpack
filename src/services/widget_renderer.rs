@@ -325,7 +325,11 @@ pub fn init(game_module: &GameModule, signatures: &SignatureStore) -> bool {
 }
 
 type GameAllocFn = unsafe extern "C" fn(*const u8, usize, i32) -> *mut u8;
+/// `agcs::BmpString::ctor(this, fontId, const char* initialText)`.
 type WrapperConstructorFn = unsafe extern "C" fn(*mut u8, i32, *const u8) -> *mut u8;
+
+/// NUL-terminated empty initial text for the wrapper constructor.
+static EMPTY_TEXT: [u8; 1] = [0];
 
 /// Create a text widget and register it in the game's native render list.
 pub fn create_text_widget() -> Option<TextWidget> {
@@ -349,7 +353,6 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
         return None;
     }
 
-    let font_ptr = r.font_ptr;
     let ctor_addr = r.wrapper_constructor_addr;
     let alloc_fn_addr = r.game_alloc_fn;
     let alloc_heap_addr = r.game_alloc_heap;
@@ -366,10 +369,14 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
             return None;
         }
 
-        // Call the wrapper_constructor: FUN_180201E90(buffer, group=0, font_ptr)
-        // It allocates child_array, calls widget_factory, patches line_desc callbacks
+        // Call the wrapper_constructor: `agcs::BmpString::ctor(buffer, fontId=0,
+        // const char* initialText)`. It allocates child_array, calls
+        // widget_factory (which resolves the font by ID at every render —
+        // the captured font_ptr is only an availability gate), patches the
+        // line_desc callbacks, then `setText(initialText, UTF8)`. The 3rd
+        // arg is TEXT, not the font: stock callers pass "" / "PAIRING: OK".
         let ctor: WrapperConstructorFn = std::mem::transmute(ctor_addr);
-        let wrapper = ctor(wrapper, 0, font_ptr);
+        let wrapper = ctor(wrapper, 0, EMPTY_TEXT.as_ptr());
         if wrapper.is_null() {
             log_warn!("WidgetRenderer: wrapper constructor returned null");
             return None;
@@ -386,7 +393,10 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
         }
 
         let widget = TextWidget::new(widget_ptr);
-        widget.set_outline(0.0, 0.0, 0.0, 1.0, 1);
+        // Default to the game's own system-text outline (25 % grey, width 1)
+        // so DLL text matches the footer text it sits beside; callers that
+        // want something else call `set_outline` afterwards.
+        widget.set_system_outline();
 
         // Register in the game's render list
         if !register_in_render_list(scene_mgr_global, wrapper) {

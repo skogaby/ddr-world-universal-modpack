@@ -621,7 +621,8 @@ fn init() {
                                 warning.set_alignment(widgets::text_widget::TextAlignment::Center);
                                 warning.set_scale(1.5, 1.5);
                                 warning.set_color(1.0, 0.1, 0.1, 1.0);
-                                warning.set_outline(0.0, 0.0, 0.0, 1.0, 2);
+                                let (r, g, b, a) = widgets::text_widget::SYSTEM_OUTLINE;
+                                warning.set_outline(r, g, b, a, 2);
                                 warning.show();
                                 reboot_warning = Some(warning);
                             }

@@ -39,7 +39,7 @@ fn create_player_widget(x: f32) -> Option<TextWidget> {
     w.set_position(x, BASE_Y);
     w.set_scale(WIDGET_SCALE, WIDGET_SCALE);
     w.set_color(1.0, 1.0, 1.0, 1.0);
-    w.set_outline(0.0, 0.0, 0.0, 1.0, 1);
+    w.set_system_outline();
     w.set_text("EX: -0\nCurrent: +0ms\nMax: 0ms\nAbs(μ): 0.00ms\nμ: +0.00ms\nCal: 0.00");
     w.hide();
     Some(w)

@@ -26,7 +26,7 @@ use std::time::Instant;
 use once_cell::sync::Lazy;
 
 use crate::services::widget_renderer;
-use crate::widgets::text_widget::{TextAlignment, TextWidget};
+use crate::widgets::text_widget::{TextAlignment, TextWidget, SYSTEM_OUTLINE};
 
 use curve::ToastMode;
 
@@ -138,7 +138,9 @@ fn tick(generation: usize) {
         widget.set_alignment(TextAlignment::Center);
         widget.set_scale(TOAST_SCALE, TOAST_SCALE);
         widget.set_position(TOAST_CENTER_X, TOAST_Y);
-        widget.set_outline(0.0, 0.0, 0.0, 0.8, 2);
+        // Game system-text outline colour; width 2 for the large toast face.
+        let (r, g, b, a) = SYSTEM_OUTLINE;
+        widget.set_outline(r, g, b, a, 2);
         widget.hide();
         state.widget = Some(widget);
     }

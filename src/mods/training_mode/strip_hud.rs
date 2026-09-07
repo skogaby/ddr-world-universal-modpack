@@ -1371,7 +1371,7 @@ fn ensure_overlay_widgets(overlay: &mut OverlayWidgets) {
         if let Some(readout) = widget_renderer::create_text_widget() {
             readout.set_scale(READOUT_SCALE, READOUT_SCALE);
             readout.set_color(1.0, 1.0, 1.0, 1.0);
-            readout.set_outline(0.0, 0.0, 0.0, 1.0, 1);
+            readout.set_system_outline();
             readout.set_alignment(TextAlignment::Center);
             overlay.readout = Some(readout);
         }

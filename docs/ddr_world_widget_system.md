@@ -99,7 +99,7 @@ From execution breakpoint analysis of the render function:
 |-------|--------|-------------|----------|
 | 0 | +0x1F4300 | Destructor | Decompiled: calls cleanup, optionally frees memory |
 | 1 | +0x1F46E0 | **Text render/draw** | Decompiled: reads position, iterates lines, decodes UTF-8, renders glyphs |
-| 2 | +0x1F7330 | getText | Rebuild text lines, return string ptr |
+| 2 | +0x1F7330 | **setText(this, const char* text, int mode)** | Mode 1 = UTF-8 raw copy; 2/4/6 = code-page → UTF-8 converts via `me::text::Encoding`; 8 = wide. Resizes the game-heap string vector at desc+0x00..+0x10, memcpy, sets rs+0x68 dirty, re-runs layout. Returns the string ptr. (Earlier revisions of this doc called it `getText`; the footer renderer `FUN_180009630` calls it every frame with `(str, 1)`, and the `agcs::BmpString` ctor calls it with its 3rd arg — the INITIAL TEXT.) 20260825: `FUN_18020f930` → `FUN_180210980` |
 | 3 | +0x1FAB70 | stub | Returns 0 (no-op) |
 | 4 | +0x1F7830 | getFontScaleX | descriptor+0x58 × global_factor |
 | 5 | +0x1F7860 | getFontScaleY | descriptor+0x5C × global_factor |
@@ -111,8 +111,8 @@ From execution breakpoint analysis of the render function:
 | 11 | +0x1F7A20 | getLineText | Copy line N into output buffer |
 | 12 | +0x1F7AF0 | getLineWidth | Pixel width of line N |
 | 13 | +0x1F7B60 | getLineHeight | descriptor+0x5C × line_height_factor |
-| 14 | +0x1F6480 | getRenderStateFlag | render_state[0] |
-| 15 | +0x1F6490 | setRenderStateFlag | render_state[0] = val |
+| 14 | +0x1F6480 | getFontId | render_state+0x00 — `FUN_18020caf0` passes it to the font registry lookup `FUN_18020b0d0(id)` every render |
+| 15 | +0x1F6490 | setFontId | render_state+0x00 = val (the factory's `group`/font-id argument lands here) |
 
 ### Text Line Descriptor (~0xC0 bytes)
 
@@ -143,18 +143,25 @@ The descriptor is NOT a polymorphic class (no RTTI/vtable). It is a plain struct
 | +0x64 | int | line height | ✅ Ghidra |
 | +0x68 | float | clip left | ✅ Ghidra |
 | +0x6C | float | clip right | ✅ Ghidra |
-| +0x78 | dword | value | 15 |
-| +0x7C | dword | value | 1 |
-| +0x80 | float | (secondary color R?) | Ghidra: color processing |
-| +0x84 | float | (secondary color G?) | Ghidra: color processing |
-| +0x88 | float | (secondary color B?) | Ghidra: color processing |
-| +0x8C | float | (secondary color A?) | Ghidra: color processing |
-| +0x94 | float | param | ~0.2 |
-| +0xA4 | float | param | 1.0 |
-| **+0xA8** | **int** | **text direction** | **✅ Ghidra decompile** |
-| **+0xAC** | **int** | **alignment** | **✅ Ghidra decompile** |
+| **+0x70** | **u32** | **outline direction mask** | ✅ ctor default 0 (no outline); every stock system-text site writes 0xF. Bits index the offset table at `0x180388fb8` (20260825): bit0 `(-1,-1)`, bit1 `(+1,-1)`, bit2 `(-1,+1)`, bit3 `(+1,+1)` — the four DIAGONALS; no axis-aligned bits exist |
+| **+0x74** | **i32** | **outline width** (logical 1280×720 units per stamp) | ✅ ctor default 1; stock sites leave it |
+| **+0x78..+0x84** | **float×4** | **outline colour RGBA** | ✅ ctor default (0,0,0,1). Stock system text = `DAT_18047cb28` = **(0.25, 0.25, 0.25, 1.0)** (20260825; `DAT_180443d88` on 20250805, identical bytes). Packed by the render prep as `rgb×255`, `a = text_alpha × outline_alpha` → rs+0x9C |
+| +0x88 | u8 | SDF border mode flag | ctor 0. When set AND the font reports type 1 (distance font), the glyph run binds `scr_distancefont_border` (rs+0xC8) and uploads `+0x90..+0x9C` as shader c0 and `+0x8C` as c1.x; when clear, c0.x = 50.0 hardcoded and `scr_distancefont` (rs+0xC0) / `gs_screencommand_font` (rs+0xB8) is used |
+| +0x8C | float | SDF border param (c1.x) | ctor 0.2 |
+| +0x90..+0x9C | float×4 | SDF border shader c0 | ctor (0,0,0,1.0) |
+| +0xA0 | i32 | blend mode | ctor 0. Render prep: `2 → 0x1220225`, `0x22 → 0x1220265`, else `0x1220625` (standard alpha) |
+| +0xA4 | int | param | 1 |
+| **+0xA8** | **int** | **HORIZONTAL alignment** (0 left / 1 center / 2 right) | **✅ cabinet 2026-08-13** |
+| **+0xAC** | **int** | **vertical block mode** (3 = marquee) | **✅ Ghidra decompile** |
 | +0xB0 | dword | render param | ✅ Ghidra |
-| +0xB4 | int | clipping mode | ✅ Ghidra |
+| +0xB4 | int | clipping mode (1..4 clip to +0x68/+0x6C) | ✅ Ghidra |
+| +0xBC | float | rotation angle (radians) | render prep → rs+0x11C = sin(a+π/2), rs+0x120 = sin(a); rs+0x118 = 1 always |
+
+**Outline rendering (`FUN_18020dbb0`, 20260825):** per glyph, for each set bit of +0x70, stamp a copy at `width × (dx,dy)` with colour rs+0x9C, then the main glyph with rs+0xA0. It is a CPU quad stamp, not a shader border — the offset is in logical units so at 4K output one unit is 3 px for the game's text and ours alike.
+
+**Stock "system text" recipe** (every `agcs::BmpString` setup site — footer `FUN_1800092d0`, "PAIRING: OK" `FUN_1800ad6b0`, …; 29 readers of the colour table): `setColor(1,1,1,1)` via wrapper vtable[3]; `+0x58 = +0x5C = 0.54`; `+0x70 = 0xF`; `+0x78..+0x84 = (0.25,0.25,0.25,1)`. Per-frame footer colours (`FUN_180009630`): credit/PASELI white; network-status line (0.5,0.5,0.5,1); `ONLINE` (0,1,0,1). The DLL mirrors this via `TextWidget::set_system_outline` / `set_system_style`; `widget_renderer::create_text_widget` applies the grey outline by default.
+
+**Deprecated (pre-2026-09 observed table, offset +8 from the truth):** `+0x78 = 15, +0x7C = 1, +0x80..0x8C secondary colour` — those were the mask/width/colour fields read at the wrong base.
 
 ### Field Modification Tests (Visual Confirmation)
 
@@ -174,7 +181,7 @@ Referenced by widget entry +0x10. Contains 3 std::vector-like containers and a f
 
 | Offset | Type | Field |
 |--------|------|-------|
-| +0x00 | dword | (zero) |
+| +0x00 | dword | font id (0 for every system text; re-resolved to the `BmpfontImpl*` at +0x70 each render) |
 | +0x04 | dword | sentinel (0xFFFFFFFF) |
 | +0x08 | ptr | text lines vector begin |
 | +0x10 | ptr | text lines vector end |
@@ -356,22 +363,28 @@ Sets default values for a 0xC0-byte text line descriptor:
 | Offset | Default | Type | Field |
 |--------|---------|------|-------|
 | +0x00-0x10 | 0 | ptr×3 | string begin/end/capacity (empty) |
-| +0x20 | 1.0f | float | scale factor A |
-| +0x24 | 1.0f | float | scale factor B |
-| +0x28 | 1.0f | float | scale factor C |
-| +0x2C | 1.0f | float | scale factor D |
+| +0x20 | 1.0f | float | colour R |
+| +0x24 | 1.0f | float | colour G |
+| +0x28 | 1.0f | float | colour B |
+| +0x2C | 1.0f | float | colour A |
 | +0x48 | 0x0100 | word | flags (byte +0x49 = 1 = visible) |
 | +0x4C | 0.0f | float | X position |
 | +0x50 | 0.0f | float | Y position |
 | +0x58 | 1.0f | float | font scale X |
 | +0x5C | 1.0f | float | font scale Y |
-| +0x74 | 1 | int | flag |
-| +0x84 | 1.0f | float | opacity? |
-| +0x8C | 0.2f | float | default parameter |
-| +0x9C | 1.0f | float | default parameter |
+| +0x70 | 0 | u32 | outline direction mask (NO outline by default) |
+| +0x74 | 1 | int | outline width |
+| +0x78..+0x80 | 0.0f | float×3 | outline colour RGB (black) |
+| +0x84 | 1.0f | float | outline colour A |
+| +0x88 | 0 | u8 | SDF border mode off |
+| +0x8C | 0.2f | float | SDF border param |
+| +0x9C | 1.0f | float | SDF border c0.w |
+| +0xA0 | 0 | int | blend mode (default alpha blend) |
 | +0xA4 | 1 | int | flag |
-| +0xAC | 0 | int | alignment (0=left) |
+| +0xA8 | 0 | int | horizontal alignment (0=left) |
+| +0xAC | 0 | int | vertical block mode |
 | +0xB0 | 1 | int | flag |
+| +0xBC | 0.0f | float | rotation |
 
 ### Render State Initializer: FUN_1801F3EF0 (offset +0x1F3EF0)
 

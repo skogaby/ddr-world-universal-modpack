@@ -146,10 +146,10 @@ This is the exact sequence the game uses to register a wrapper (observed in `FUN
 ### Step 1: Create the Widget
 
 ```
-widget = widget_factory(font_ptr, group=0, count=1)
+widget = widget_factory(initial_text, font_id=0, encoding=1)
 ```
 
-This allocates the `kt::BmpfontSimpleString` (0x18 bytes), its `line_desc` (0xC0 bytes), and its `render_state` (0x128 bytes). The font pointer is stored in `render_state+0x70`.
+**Corrected 2026-09-07 (Ghidra 20260825 `FUN_18020c7b0`):** the first argument is the INITIAL TEXT (a `const char*`), not a font pointer, and the third is the `setText` encoding mode (1 = UTF-8; the factory rejects anything but 1/2/4/6/8). The factory allocates the `kt::BmpfontSimpleString` (0x18 bytes), its `line_desc` (0xC0 bytes, defaults from `FUN_180210770`) and its `render_state` (0x128 bytes), then calls vtable[2] `setText(initial_text, encoding)` and vtable[15] `setFontId(font_id)`. The font is NOT captured at construction: `render_function`'s prologue (`FUN_18020caf0`) re-resolves `render_state+0x70` from the font registry by id (`FUN_18020b0d0(id)`) on EVERY render. The `agcs::BmpString` ctor forwards its own `(fontId, initialText)` args here; stock callers pass `""` (or a literal like `"PAIRING: OK"`). The DLL passes `""`.
 
 ### Step 2: Create the Wrapper
 
