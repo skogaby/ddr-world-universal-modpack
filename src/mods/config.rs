@@ -435,6 +435,30 @@ pub struct SMarvelousConfig {
     pub marvelous_shimmer: Option<bool>,
 }
 
+/// Config for the `power-user-statistics` mod (`power_user_statistics`
+/// section): layout of the realtime gameplay-statistics widgets. Seeded from
+/// here at mod enable; ALSO live-editable from the overlay menu's POWER USER
+/// STATISTICS section (GLOBAL SETTINGS), which persists the whole section
+/// back (`save_json_key`). Cabinet-wide; the offsets are MIRRORED between
+/// P1 and P2 (the horizontal offset is signed relative to each side's own
+/// screen edge, so one value moves both blocks symmetrically).
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct PowerUserStatisticsConfig {
+    /// Widget scale in percent of the stock size. Default 100; clamped
+    /// 50..=150.
+    #[serde(default)]
+    pub widget_scale_percent: Option<i32>,
+    /// Horizontal offset in px from the stock block centre, POSITIVE = inward
+    /// (toward the screen centre), negative = outward (toward that side's
+    /// edge). Default 0; clamped -50..=400.
+    #[serde(default)]
+    pub widget_offset_x: Option<i32>,
+    /// Vertical offset in px from the stock block top, POSITIVE = down.
+    /// Default 0; clamped -400..=200.
+    #[serde(default)]
+    pub widget_offset_y: Option<i32>,
+}
+
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-
 /// edited for the card/gold fields; the overlay opacity/scale and light
 /// toggles are ALSO live-editable from the mod menu's SMX HARDWARE
@@ -568,6 +592,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub s_marvelous: Option<SMarvelousConfig>,
     #[serde(default)]
+    pub power_user_statistics: Option<PowerUserStatisticsConfig>,
+    #[serde(default)]
     pub smx_hardware: Option<SmxHardwareConfig>,
     #[serde(default)]
     pub resolution: Option<ResolutionConfig>,
@@ -607,6 +633,7 @@ pub fn init() {
                     non_native_os_support: None,
                     overlay_menu: None,
                     s_marvelous: None,
+                    power_user_statistics: None,
                     smx_hardware: None,
                     resolution: None,
                 }
@@ -634,6 +661,7 @@ pub fn init() {
                 non_native_os_support: None,
                 overlay_menu: None,
                 s_marvelous: None,
+                power_user_statistics: None,
                 smx_hardware: None,
                 resolution: None,
             }

@@ -69,6 +69,10 @@ pub enum TextAlignment {
 /// Supports multi-line text (use `\n`), color, scale, alignment, and outlines.
 pub struct TextWidget {
     native_ptr: *mut u8,
+    /// The `agcs::BmpString` WRAPPER registered in the render list (the
+    /// render-list node's identity; `native_ptr` is its `child_array[0]`).
+    /// Null for widgets constructed without one.
+    wrapper: *mut u8,
     destroyed: bool,
 }
 
@@ -79,12 +83,33 @@ impl TextWidget {
     pub fn new(native_ptr: *mut u8) -> Self {
         Self {
             native_ptr,
+            wrapper: std::ptr::null_mut(),
+            destroyed: false,
+        }
+    }
+
+    /// Like [`new`](Self::new), recording the render-list wrapper so the
+    /// widget can take part in `widget_renderer::bring_to_front`.
+    pub fn with_wrapper(native_ptr: *mut u8, wrapper: *mut u8) -> Self {
+        Self {
+            native_ptr,
+            wrapper,
             destroyed: false,
         }
     }
 
     pub fn native_ptr(&self) -> *mut u8 {
         self.native_ptr
+    }
+
+    /// The render-list wrapper address (see `widget_renderer::bring_to_front`),
+    /// or 0 when unknown/destroyed.
+    pub fn render_wrapper(&self) -> usize {
+        if self.destroyed {
+            0
+        } else {
+            self.wrapper as usize
+        }
     }
 
     fn line_desc(&self) -> *mut u8 {

@@ -8,7 +8,7 @@
 
 use crate::log_warn;
 use crate::services::widget_renderer;
-use crate::widgets::image_widget::ImageWidgetConfig;
+use crate::widgets::image_widget::{ImageWidget, ImageWidgetConfig};
 use crate::widgets::text_widget::{TextAlignment, TextWidget};
 
 use super::model::{Navigator, Row, RowKind, SelectorState, TabId};
@@ -449,6 +449,50 @@ pub(super) fn destroy_widgets(state: &mut ModMenuState) {
         w.destroy();
     }
     state.widgets_allocated = false;
+}
+
+/// Relink every menu widget to the TAIL of the widget render list so the
+/// menu draws above everything else in the widget layer — including widgets
+/// other mods created AFTER the menu's lazy first-open allocation (the PUS
+/// stats block and the training strip both allocate at gameplay entry and
+/// were painting over the menu). `bring_to_front` preserves the widgets'
+/// relative order, so the anchor → chrome → text z sandwich from
+/// `allocate_widgets` survives intact. Render thread only; called on every
+/// open (O(list) relink, no pool nodes consumed).
+pub(super) fn raise_to_top(state: &ModMenuState) {
+    let mut wrappers: Vec<usize> = Vec::with_capacity(TEXT_WIDGET_COUNT + CHROME_WIDGET_COUNT + 1);
+    let mut text = |w: &Option<TextWidget>| {
+        if let Some(w) = w {
+            wrappers.push(w.render_wrapper());
+        }
+    };
+    text(&state.bg_anchor_widget);
+    text(&state.title_widget);
+    text(&state.title_credit_widget);
+    text(&state.indicator_widget);
+    text(&state.cursor_widget);
+    text(&state.footer_desc_widget);
+    text(&state.footer_hints_widget);
+    text(&state.side_selector_widget);
+    text(&state.banner_widget);
+    let mut image = |w: &Option<ImageWidget>| {
+        if let Some(w) = w {
+            wrappers.push(w.render_wrapper());
+        }
+    };
+    image(&state.panel_widget);
+    image(&state.tab_indicator_widget);
+    image(&state.selection_bar_widget);
+    image(&state.scroll_track_widget);
+    image(&state.scroll_thumb_widget);
+    image(&state.banner_backing_widget);
+    wrappers.extend(state.header_bar_widgets.iter().map(|w| w.render_wrapper()));
+    wrappers.extend(state.tab_widgets.iter().map(|w| w.render_wrapper()));
+    for slot in &state.slots {
+        wrappers.push(slot.label.render_wrapper());
+        wrappers.push(slot.value.render_wrapper());
+    }
+    widget_renderer::bring_to_front(&wrappers);
 }
 
 /// Repaint everything from the active tab's row list + navigation state.

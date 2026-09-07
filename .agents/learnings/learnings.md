@@ -1063,3 +1063,25 @@ Rules:
   record field) under different guards, list every consumer of each before
   declaring a mod's exit path safe; the visible symptom ("READY panel shows
   the old difficulty") was the record's face, not the display field's.
+
+## Widget z = render-list order, and lazy allocation makes it a race (2026-09-07)
+
+The PUS stats block painted OVER the open mod menu, and the training strip
+painted over the stats block. Cause: DLL widgets append to the tail of the
+game's widget render list at creation, nodes are never reclaimed, and every
+mod allocates LAZILY at a different moment (menu on first open, PUS and the
+strip at gameplay entry / texture resolve) — so cross-mod stacking was
+"whoever allocated last is on top". Fix: `widget_renderer::bring_to_front(
+&[wrappers])` relinks existing nodes to the tail in place (order-preserving,
+no pool node consumed, render thread only). Rules:
+
+- The mod menu calls `render::raise_to_top` on EVERY open — it is the one
+  surface that must be above all mod-owned widgets, and re-raising is O(list).
+- A gameplay HUD that must beat another HUD raises itself ONCE per song at
+  its first show (after the other's lazy allocation has had its chance), and
+  NEVER while `mod_menu::is_open()`.
+- `TextWidget::render_wrapper()` (the `agcs::BmpString` wrapper, recorded at
+  creation via `with_wrapper`) / `ImageWidget::render_wrapper()` (the sprite
+  is its own wrapper) are the node identities; `node+0x10` holds the wrapper.
+- Do not "fix" z by destroy+recreate — that burns pool nodes for the same
+  effect.

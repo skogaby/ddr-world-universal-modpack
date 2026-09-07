@@ -392,7 +392,7 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
             return None;
         }
 
-        let widget = TextWidget::new(widget_ptr);
+        let widget = TextWidget::with_wrapper(widget_ptr, wrapper);
         // Default to the game's own system-text outline (25 % grey, width 1)
         // so DLL text matches the footer text it sits beside; callers that
         // want something else call `set_outline` afterwards.
@@ -473,6 +473,82 @@ unsafe fn register_in_render_list(scene_mgr_global: *const u8, wrapper: *mut u8)
     *(render_list_mgr.add(0x30) as *mut *mut u8) = data_area;
 
     true
+}
+
+/// Move the render-list nodes of the given widgets (by render WRAPPER
+/// address — `TextWidget::render_wrapper` / `ImageWidget::render_wrapper`)
+/// to the TAIL of the active list, preserving their relative order. The
+/// walk draws the list front-to-back, so tail = drawn last = topmost.
+///
+/// Z among DLL widgets is otherwise fixed at creation (tail-append, nodes
+/// never reclaimed), which makes cross-mod stacking depend on WHICH mod
+/// happened to create its widgets first. This relinks the existing nodes
+/// in place — no pool node is consumed. Unknown/zero wrappers are ignored.
+///
+/// RENDER THREAD ONLY (`run_on_render_thread`): the walk iterates this list
+/// every frame, and the closures run at frame start before it. O(n) over
+/// the active list.
+pub fn bring_to_front(wrappers: &[usize]) {
+    if wrappers.iter().all(|&w| w == 0) {
+        return;
+    }
+    let scene_mgr_global = match RENDERER.lock() {
+        Ok(g) => g.scene_manager_global,
+        Err(p) => p.into_inner().scene_manager_global,
+    };
+    if scene_mgr_global.is_null() {
+        return;
+    }
+    unsafe {
+        let scene_mgr = *(scene_mgr_global as *const *const u8);
+        if scene_mgr.is_null() {
+            return;
+        }
+        let mgr = *(scene_mgr.add(0xB0) as *const *mut u8);
+        if mgr.is_null() {
+            return;
+        }
+        let head_ptr = mgr.add(0x28) as *mut *mut u8;
+        let tail_ptr = mgr.add(0x30) as *mut *mut u8;
+
+        // Pass 1: unlink every matching node (list order preserved in
+        // `moved`). Bounded walk guards against a corrupted/cyclic list.
+        let mut moved: Vec<*mut u8> = Vec::with_capacity(wrappers.len());
+        let mut prev: *mut u8 = std::ptr::null_mut();
+        let mut node = *head_ptr;
+        let mut guard = 0usize;
+        while !node.is_null() && guard < 4096 {
+            guard += 1;
+            let next = *(node.add(0x08) as *const *mut u8);
+            let wrapper = *(node.add(0x10) as *const *mut u8) as usize;
+            if wrapper != 0 && wrappers.contains(&wrapper) {
+                if prev.is_null() {
+                    *head_ptr = next;
+                } else {
+                    memory::write_ptr(prev.add(0x08), next as *const u8);
+                }
+                if *tail_ptr == node {
+                    *tail_ptr = prev;
+                }
+                memory::write_ptr(node.add(0x08), std::ptr::null());
+                moved.push(node);
+            } else {
+                prev = node;
+            }
+            node = next;
+        }
+
+        // Pass 2: re-append in the original relative order.
+        for node in moved {
+            let tail = *tail_ptr;
+            if tail.is_null() {
+                *head_ptr = node;
+            } else {
+                memory::write_ptr(tail.add(0x08), node as *const u8);
+            }
+            *tail_ptr = node;
+        }
+    }
 }
 
 /// Create a new image widget (agcs::Sprite) and register in the render list.

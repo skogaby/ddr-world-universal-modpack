@@ -240,6 +240,21 @@ Shaped by being an in-process hook DLL where the engine-facing code has no test 
   knob). Parsed-but-ignored — one INFO at enable when present, never reinterpreted, never
   written back. The pre-mixed tick track derives its timing from game state (cabinet
   `sound_offset` + per-side JUDGMENT TIMING); there is no latency knob.
+- `power_user_statistics` (DLL-owned like `s_marvelous`): layout of the realtime
+  gameplay-statistics widgets — `widget_scale_percent` (50..=150, default 100 = the stock
+  0.5 scale), `widget_offset_x` (px, −50..=400, POSITIVE = inward toward screen centre on
+  BOTH sides — one mirrored value), `widget_offset_y` (px, −400..=200, POSITIVE = down).
+  Seeded at mod enable into live atomics in `timing_stats_widget.rs`; the three GLOBAL
+  SETTINGS scalar rows (`pus_widget_scale` / `pus_widget_offset_x` / `pus_widget_offset_y`)
+  write the atomics, persist the WHOLE section via `save_json_key`, and re-lay out any live
+  widgets immediately. The blocks are `TextAlignment::Center` about mirrored anchors
+  (P1 x=80 / P2 x=1200, y=425) — the native renderer centres each `\n` line, so one
+  multi-line widget per side stays centre-aligned (never split into per-line widgets;
+  render-list nodes are never reclaimed). Z-order: the widgets raise themselves to the
+  render-list tail ONCE per song at first show (`raise_above_hud` →
+  `widget_renderer::bring_to_front`, skipped while `mod_menu::is_open()`) so they draw
+  above the training strip; the mod menu re-raises its whole widget set on every open
+  (`render::raise_to_top`) so it stays above every mod-owned widget.
 - `per_song_judgement_offsets`: `mirror_players` (optional `bool`, default `false`) —
   when true, an options-menu offset edit by EITHER side applies to BOTH sides in-sync
   (both session maps, both `judgement_offsets.csv` columns, the other side's rows

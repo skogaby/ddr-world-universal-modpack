@@ -78,7 +78,7 @@ Per-player lane views: stock **OVERHEAD**, StepMania-style **HALLWAY** (true 3D 
 A clap sound at every arrow's exact judgement moment, mixed sample-perfectly through the game's own audio engine — the classic StepMania assist tick, with a volume control. Great for learning rhythms (scores are withheld while it's on, like autoplay).
 
 ### Power User Statistics
-Live per-player stats while you play: millisecond error (current/max/mean), EX loss, calories burned — plus an option to replace the pacemaker with your latest ms-error, and per-song CSV export of your step data.
+Live per-player stats while you play: millisecond error (current/max/mean), EX loss, calories burned — plus an option to replace the pacemaker with your latest ms-error, and per-song CSV export of your step data. The stat blocks are centre-aligned and mirrored for P1/P2; their size (50–150 %) and position (horizontal shift inward/outward, vertical shift) are adjustable from the mod menu's GLOBAL SETTINGS tab, so you decide how much of the play area they occupy.
 
 ### WebUI Options, In-Game
 All the cosmetic customizations normally locked behind Konami's web portal — appeal board, backgrounds, characters, lane skins, lane covers — selectable in-game with **live art previews** (the backgrounds even animate). Plus workout-profile settings (weight / calorie display).

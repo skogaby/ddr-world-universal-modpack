@@ -113,6 +113,16 @@ impl ImageWidget {
         self.native_ptr
     }
 
+    /// The render-list wrapper address (the sprite IS its own wrapper; see
+    /// `widget_renderer::bring_to_front`), or 0 when destroyed.
+    pub fn render_wrapper(&self) -> usize {
+        if self.destroyed {
+            0
+        } else {
+            self.native_ptr as usize
+        }
+    }
+
     pub fn set_position(&self, x: f32, y: f32) {
         if self.destroyed {
             return;

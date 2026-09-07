@@ -344,5 +344,10 @@
     ],
     "sd_present": "crop",
     "msaa": "off"
+  },
+  "power_user_statistics": {
+    "widget_offset_x": -35,
+    "widget_offset_y": 30,
+    "widget_scale_percent": 70
   }
 }

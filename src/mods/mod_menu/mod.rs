@@ -263,6 +263,14 @@ static REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 /// (the emitter's hot path can't take the state mutex).
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
+/// Whether the overlay menu is currently open (lock-free). Mods that raise
+/// their own widgets to the top of the render list (`widget_renderer::
+/// bring_to_front`) check this so they never climb over the open menu; the
+/// menu re-raises itself on every open regardless.
+pub fn is_open() -> bool {
+    MENU_OPEN.load(Ordering::Relaxed)
+}
+
 /// Whether the ACTIVE theme currently has a live shader path — feeds the
 /// ANIMATED BACKGROUND row's greyed state (MINIMAL is Static by design;
 /// otherwise requires the synthesis export).
@@ -415,6 +423,9 @@ fn open() {
         if !state.widgets_allocated {
             render::allocate_widgets(&mut state);
         }
+        // Every open: the menu must sit above ALL mod-owned widgets, incl.
+        // ones created since the last open (render-list z = list order).
+        render::raise_to_top(&state);
         render::refresh_all(&state);
     });
 
