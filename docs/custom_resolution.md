@@ -122,6 +122,34 @@ on the real block. The install REFUSES on any other family shape. This replaced
 two failed attempts (re-canvasing root 7 alone; scaling the DLL's widgets) —
 `progress.md` checkpoint #2 runs 1–4 record why.
 
+## 5a. Debug-UI scale (`debug_ui.rs`) — TEST menu / hardware check / error screens
+
+The ark drives these through gamemdx's draw-callback table (20260825
+`FUN_1800067f0..FUN_180008170`). Positions, lines and fill rects are in screen
+PERCENTAGES (`screen × pct / 100`, physical family in §5 — they follow the
+output for free). Two things are fixed PIXEL sizes and never consult the
+back-buffer: `createFont` (`FUN_1800069c0`) calls the scale chooser
+`FUN_1800066d0(class, &sx, &sy)`, which asks `arkMDXGetMachineType`
+(`DAT_1806f2330` on 20260825; `DAT_1806f2338` is `arkMDXGetPCType`) and picks a
+480-line table (machine 0/1 = SD cabinet: class 0 → 0.95, 1 → 0.8, 2 →
+0.75×0.7) or a 720-line table (1.5 / 1.2 / 1.0; other classes 1.0), stored into
+the agcs text object's `params+0x58/+0x5C`; `createSprite` (`FUN_180007250`)
+stores 0.8 (SD) / 1.0 (HD; `screenCheck` always 1.0) into `sprite+0x08`, and
+`drawSprite` sizes the quad `texture_px × scale`. Hence 1.5× text at 640×480
+and third-size text at 4K.
+
+Fix: post-original detours on both entries (signatures `debug_font_scale`,
+`debug_sprite_create` — entry AOBs, unique on all four builds, byte-identical
+bodies on 20250805) multiply the game's value by `plan::debug_ui_scale` =
+`output_h / ref_h × test_menu_scale`, `ref_h` = 480 when the SAME export
+reports machine 0/1, else 720 (resolved lazily on the first call — the ark is
+the caller, so it is loaded; unresolvable ⇒ 720 + one WARN). Identity at 720p
+⇒ nothing installed. Config `resolution.test_menu_scale` (0.25..=4, default 1)
+is an operator multiplier on top. HD machine at 640×480 lands at 1.0 (Konami's
+SD table was 0.95); an SD machine at 4K at 4.5. Cosmetic — a miss never rolls
+the plan back. Boot line: `debug-UI scale detours installed (output N lines, …)`
+and one `debug font class … scale a×b -> c×d (factor f)` INFO per boot.
+
 ## 6. Letterbox / present policy (`letterbox.rs`)
 
 `letterbox_rect_fn(this, int mode)` (20260825 `FUN_1801f5010`): `screen_w ==
@@ -134,7 +162,8 @@ With render ≠ output the engine's `StretchRect` is the scaler (Phase 1 of D8).
 ## 7. Signatures (all unique + byte-identical bodies on 20250805 / 20260224 / 20260721 / 20260825)
 
 `display_backbuffer_dims`, `window_client_size`, `render_surface_hoist`,
-`list_viewport_table`, `letterbox_rect_fn`, `scissor_handler`; derived
+`list_viewport_table`, `letterbox_rect_fn`, `scissor_handler`,
+`debug_font_scale`, `debug_sprite_create`; derived
 (`derive_custom_resolution`): `aa_config_imm`, `graphics_init`,
 `render_surfaces_global`, `screen_w/h_global` (`C7 05 disp32 imm32`: RIP is
 AFTER the imm — `decode_rip_relative(disp) + 4`), `surface_create`,

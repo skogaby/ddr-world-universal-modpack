@@ -166,7 +166,9 @@ fn default_fps_selected() -> i32 {
 /// `"letterbox"`; `msaa` = `"off"` (default; `"auto"` is its legacy name),
 /// `"2x"`, `"4x"` (MSAA on the render surfaces) or `"stock"` (the game's own
 /// choice — 0, or "direct" mode 3 on pcType 2..4, which is refused when render
-/// != output). All settings apply at the NEXT launch —
+/// != output); `test_menu_scale` = extra multiplier (0.25..=4, default 1.0) on
+/// the TEST-menu / hardware-check text and sprite size, which the mod already
+/// scales with the output height. All settings apply at the NEXT launch —
 /// the D3D device is created once at boot. Semantics live in
 /// `mods::custom_resolution::plan`.
 #[derive(Deserialize, Clone, Debug)]
@@ -181,6 +183,8 @@ pub struct ResolutionConfig {
     pub sd_present: String,
     #[serde(default = "default_res_msaa")]
     pub msaa: String,
+    #[serde(default = "default_res_test_menu_scale")]
+    pub test_menu_scale: f32,
 }
 
 impl Default for ResolutionConfig {
@@ -191,6 +195,7 @@ impl Default for ResolutionConfig {
             presets: default_res_presets(),
             sd_present: default_res_sd_present(),
             msaa: default_res_msaa(),
+            test_menu_scale: default_res_test_menu_scale(),
         }
     }
 }
@@ -212,6 +217,9 @@ fn default_res_sd_present() -> String {
 }
 fn default_res_msaa() -> String {
     "off".to_string()
+}
+fn default_res_test_menu_scale() -> f32 {
+    1.0
 }
 
 fn default_true() -> bool {

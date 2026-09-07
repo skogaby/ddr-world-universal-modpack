@@ -32,6 +32,10 @@
 //!   1280×720 canvas that the walker scales to the physical viewport —
 //!   game text, loading art and the DLL's widgets all land right at any
 //!   output (cabinet-derived 2026-09-05 after two narrower attempts).
+//! - [`debug_ui`] — the ark draw-callback API's font/sprite scale (TEST
+//!   menu, hardware check, error screens): the game picks a fixed pixel
+//!   size per machine type, so two post-original detours multiply it by
+//!   `output_h / ref_h` — readable at 640×480 and at 4K alike.
 //! - [`rows`] — the RESOLUTION / RENDER SCALE overlay rows.
 //! - [`display_modes`] — the fullscreen fail-safe (`EnumDisplaySettingsW`).
 //!
@@ -41,6 +45,7 @@
 //! graphics_init detour → present-mode detour → logical screen. Any failure
 //! before the detours leaves the game byte-identical to stock with one WARN.
 
+pub mod debug_ui;
 pub mod display_modes;
 pub mod letterbox;
 pub mod logical_screen;
@@ -105,6 +110,13 @@ impl CustomResolutionMod {
             sd_present: &cfg.sd_present,
             msaa: &cfg.msaa,
         })
+    }
+
+    /// `resolution.test_menu_scale` (operator multiplier on the debug-UI size).
+    fn test_menu_scale() -> f32 {
+        config::get()
+            .and_then(|c| c.resolution.as_ref().map(|r| r.test_menu_scale))
+            .unwrap_or(1.0)
     }
 
     /// FPS Unlock's selected target when that mod is enabled (feeds the
@@ -266,6 +278,11 @@ impl Mod for CustomResolutionMod {
             ctx.game_module.size,
             plan.render,
         );
+        // TEST-menu / hardware-check text + sprite size. Cosmetic: a miss
+        // never rolls the plan back.
+        if let Err(why) = debug_ui::install(ctx.signatures, plan.output, Self::test_menu_scale()) {
+            log_warn!("CustomResolution: {why} -- TEST-menu text keeps its stock pixel size");
+        }
 
         self.output_set = Some(set);
         self.render_set = Some(render_set);
@@ -289,13 +306,14 @@ impl Mod for CustomResolutionMod {
             // (cabinet 2026-09-07: every line before mid-derivation lost) —
             // this line lands late enough to be recorded.
             Some(plan) => log_info!(
-                "CustomResolution: boot state -- {}; OUTPUT {} write(s), RENDER {} write(s), scissor detour {}, present-mode detour {}, logical screen {}",
+                "CustomResolution: boot state -- {}; OUTPUT {} write(s), RENDER {} write(s), scissor detour {}, present-mode detour {}, logical screen {}, debug-UI scale {}",
                 Self::describe(plan),
                 self.output_set.as_ref().map_or(0, |s| s.len()),
                 self.render_set.as_ref().map_or(0, |s| s.len()),
                 if scissor::installed() { "on" } else { "off" },
                 if letterbox::installed() { "on" } else { "off" },
                 if logical_screen::installed() { "on" } else { "OFF" },
+                if debug_ui::installed() { "on" } else { "off" },
             ),
             None => log_info!("CustomResolution: enabled -- settings apply at the next launch"),
         }

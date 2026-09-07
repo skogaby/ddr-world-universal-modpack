@@ -397,9 +397,83 @@ pub fn scissor_scale(
     )
 }
 
+/// Screen height the ark draw-callback API (TEST menu / hardware check /
+/// error screens) was tuned against: its `createFont` / `createSprite`
+/// pick a fixed pixel scale from the MACHINE TYPE (0/1 = SD cabinets →
+/// the 480-line table, anything else → the 720-line table) and never look
+/// at the actual back-buffer, so the text is a constant pixel size.
+pub const DEBUG_UI_REF_H_SD: u32 = 480;
+pub const DEBUG_UI_REF_H_HD: u32 = 720;
+
+/// Operator multiplier bounds for `resolution.test_menu_scale`.
+pub const TEST_MENU_SCALE_MIN: f32 = 0.25;
+pub const TEST_MENU_SCALE_MAX: f32 = 4.0;
+
+/// Multiplier applied to the debug-UI font/sprite scales the game chose so
+/// they keep the SAME on-screen proportion at every output height:
+/// `output_h / ref_h` where `ref_h` is the height the game's chosen table
+/// was tuned for, times the operator's `test_menu_scale` (clamped; NaN or
+/// non-positive ⇒ 1.0). Returns `None` when the result is the identity
+/// (nothing to install).
+pub fn debug_ui_scale(output_h: u32, machine_is_sd: bool, user_scale: f32) -> Option<f32> {
+    if output_h == 0 {
+        return None;
+    }
+    let ref_h = if machine_is_sd {
+        DEBUG_UI_REF_H_SD
+    } else {
+        DEBUG_UI_REF_H_HD
+    };
+    let user = if user_scale.is_finite() && user_scale > 0.0 {
+        user_scale.clamp(TEST_MENU_SCALE_MIN, TEST_MENU_SCALE_MAX)
+    } else {
+        1.0
+    };
+    let s = output_h as f32 / ref_h as f32 * user;
+    if (s - 1.0).abs() < 1e-4 {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_ui_scale_identity_cases() {
+        assert_eq!(debug_ui_scale(720, false, 1.0), None);
+        assert_eq!(debug_ui_scale(480, true, 1.0), None);
+        assert_eq!(debug_ui_scale(0, false, 1.0), None);
+        // Bad user multipliers degrade to 1.0.
+        assert_eq!(debug_ui_scale(720, false, f32::NAN), None);
+        assert_eq!(debug_ui_scale(720, false, 0.0), None);
+        assert_eq!(debug_ui_scale(720, false, -3.0), None);
+    }
+
+    #[test]
+    fn debug_ui_scale_tracks_output_height() {
+        let close = |a: Option<f32>, b: f32| (a.unwrap() - b).abs() < 1e-5;
+        assert!(close(debug_ui_scale(2160, false, 1.0), 3.0));
+        assert!(close(debug_ui_scale(1080, false, 1.0), 1.5));
+        // HD machine on a 4:3 480-line output: the 720 table shrinks to 2/3.
+        assert!(close(debug_ui_scale(480, false, 1.0), 480.0 / 720.0));
+        // SD machine driven at 4K: its 480 table grows 4.5×.
+        assert!(close(debug_ui_scale(2160, true, 1.0), 4.5));
+    }
+
+    #[test]
+    fn debug_ui_scale_user_multiplier_clamps() {
+        let close = |a: Option<f32>, b: f32| (a.unwrap() - b).abs() < 1e-5;
+        assert!(close(debug_ui_scale(720, false, 1.25), 1.25));
+        assert!(close(
+            debug_ui_scale(720, false, 100.0),
+            TEST_MENU_SCALE_MAX
+        ));
+        assert!(close(debug_ui_scale(720, false, 0.01), TEST_MENU_SCALE_MIN));
+        assert!(close(debug_ui_scale(2160, false, 0.5), 1.5));
+    }
 
     const ALL_ON: Gates = Gates {
         letterbox_policy: true,

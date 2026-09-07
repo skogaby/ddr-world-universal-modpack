@@ -147,6 +147,7 @@ fn persist() {
             "presets": cfg.presets,
             "sd_present": cfg.sd_present,
             "msaa": cfg.msaa,
+            "test_menu_scale": cfg.test_menu_scale,
         }),
     );
 }
