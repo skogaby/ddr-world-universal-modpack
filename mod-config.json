@@ -343,6 +343,6 @@
       "3840x2160"
     ],
     "sd_present": "crop",
-    "msaa": "auto"
+    "msaa": "off"
   }
 }

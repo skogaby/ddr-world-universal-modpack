@@ -54,6 +54,12 @@ use crate::{log_info, log_warn};
 use super::plan::{Dims, STOCK};
 
 static DONE: AtomicBool = AtomicBool::new(false);
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// True once the redirects were written (diagnostic for the boot summary).
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Acquire)
+}
 
 /// `4C 8B 05 disp32` (MOV R8,[RIP+disp]) at this offset inside
 /// `letterbox_rect_fn` loads the info pointer — the derivation source and
@@ -207,7 +213,7 @@ pub fn install(sigs: &SignatureStore, module_base: *const u8, module_size: usize
         render.h,
         n_physical(module_base, module_size, info_global, &loads)
     );
-    let _ = n;
+    INSTALLED.store(n > 0, Ordering::Release);
 }
 
 struct Anchors {

@@ -14,8 +14,11 @@
 //! - [`plan`] — pure config → boot-plan model, present-mode policy, scissor
 //!   scaling (host-tested via `scripts/validate_custom_resolution.sh`).
 //! - [`sites`] — pure immediate-site finders over byte windows (host-tested).
-//! - [`patches`] — the OUTPUT (and, from plan Step 6, RENDER) imm32 sets,
-//!   stock-verified, applied atomically with rollback.
+//! - [`patches`] — the OUTPUT (back-buffer, window client, AA) and RENDER
+//!   (surfaces, list viewports, letterbox src) imm32 sets, stock-verified,
+//!   applied atomically with rollback.
+//! - [`scissor`] — the tag-0x0C walker handler detour: canvas-px scissor
+//!   records → render-target px (the ONE per-frame piece; render ≠ 720p only).
 //! - [`present`] — the `graphics_init` detour: PRESENT rt dims → output,
 //!   window-client fit (spice2x `-w` pins the client size).
 //! - [`letterbox`] — the present-mode policy detour (SD letterbox option,
@@ -34,8 +37,9 @@
 //!
 //! Boot flow (`early_apply`, before `Application::onBoot` reaches display
 //! init): config → `plan::compute` → too-late check (screen globals still 0)
-//! → display-mode validation → OUTPUT set → graphics_init detour. Any
-//! failure leaves the game byte-identical to stock with one WARN.
+//! → display-mode validation → OUTPUT set → RENDER set → scissor detour →
+//! graphics_init detour → present-mode detour → logical screen. Any failure
+//! before the detours leaves the game byte-identical to stock with one WARN.
 
 pub mod display_modes;
 pub mod letterbox;
@@ -44,6 +48,7 @@ pub mod patches;
 pub mod plan;
 pub mod present;
 pub mod rows;
+pub mod scissor;
 pub mod sites;
 
 use crate::core::memory;
@@ -51,7 +56,7 @@ use crate::mods::config;
 use crate::mods::mod_trait::{EarlyContext, Mod, ModContext};
 use crate::{log_info, log_warn};
 
-use plan::{Aspect, Outcome, Plan, PlanInput, PresentPolicy, SdPresent};
+use plan::{AaPolicy, Aspect, Outcome, Plan, PlanInput, PresentPolicy, SdPresent};
 
 /// Registry mod id.
 pub const MOD_ID: &str = "custom-resolution";
@@ -62,6 +67,8 @@ pub struct CustomResolutionMod {
     /// The applied OUTPUT set (kept for a possible rollback on a later
     /// install failure inside `early_apply`; boot-scoped afterwards).
     output_set: Option<patches::PatchSet>,
+    /// The applied RENDER set (empty when the render is stock).
+    render_set: Option<patches::PatchSet>,
     /// True once every piece of the plan landed.
     applied: bool,
     /// True once the overlay rows are registered (so `disable` removes them).
@@ -82,6 +89,7 @@ impl CustomResolutionMod {
         Self {
             plan: None,
             output_set: None,
+            render_set: None,
             applied: false,
             rows_registered: false,
         }
@@ -127,10 +135,11 @@ impl CustomResolutionMod {
             plan.render.w,
             plan.render.h,
             policy,
-            if plan.force_aa_zero {
-                "forced 0"
-            } else {
-                "stock"
+            match plan.aa {
+                AaPolicy::Stock => "stock".to_string(),
+                AaPolicy::Force(plan::AA_2X) => "2x MSAA".to_string(),
+                AaPolicy::Force(plan::AA_4X) => "4x MSAA".to_string(),
+                AaPolicy::Force(v) => format!("forced {v}"),
             }
         )
     }
@@ -201,8 +210,37 @@ impl Mod for CustomResolutionMod {
                 return true;
             }
         };
+        // RENDER set (surfaces + list viewports + letterbox src) + the scissor
+        // detour, before any other detour exists so a failure needs nothing
+        // but the two rollbacks. All-or-nothing across BOTH sets: a non-720p
+        // render without the scissor rescale clips every scissored menu, and
+        // a 720p render with these output patches would need the letterbox
+        // policy the plan did not compute — so the whole boot goes stock.
+        let mut render_set = match patches::apply_render_set(ctx.signatures, &plan) {
+            Ok(s) => s,
+            Err(why) => {
+                log_warn!(
+                    "CustomResolution: RENDER set not applied ({why}) -- rolling back the OUTPUT set, staying at stock"
+                );
+                set.rollback();
+                return true;
+            }
+        };
+        if !plan.render_is_stock() {
+            if let Err(why) = scissor::install(ctx.signatures) {
+                log_warn!(
+                    "CustomResolution: {why} -- rolling back the RENDER + OUTPUT sets, staying at stock"
+                );
+                render_set.rollback();
+                set.rollback();
+                return true;
+            }
+        }
         if let Err(why) = present::install(&anchors, &plan) {
-            log_warn!("CustomResolution: {why} -- rolling back the OUTPUT set, staying at stock");
+            log_warn!(
+                "CustomResolution: {why} -- rolling back the RENDER + OUTPUT sets, staying at stock"
+            );
+            render_set.rollback();
             set.rollback();
             return true;
         }
@@ -212,8 +250,9 @@ impl Mod for CustomResolutionMod {
         if let Err(why) = letterbox::install(ctx.signatures, plan.present_policy) {
             if plan.present_policy == PresentPolicy::ForceLetterbox {
                 log_warn!(
-                    "CustomResolution: {why} -- rolling back the OUTPUT set, staying at stock"
+                    "CustomResolution: {why} -- rolling back the RENDER + OUTPUT sets, staying at stock"
                 );
+                render_set.rollback();
                 set.rollback();
                 return true;
             }
@@ -229,6 +268,7 @@ impl Mod for CustomResolutionMod {
         );
 
         self.output_set = Some(set);
+        self.render_set = Some(render_set);
         self.plan = Some(plan);
         self.applied = true;
         log_info!("CustomResolution: early_apply complete -- effective this boot");
@@ -243,8 +283,21 @@ impl Mod for CustomResolutionMod {
     fn enable(&mut self) {
         rows::register();
         self.rows_registered = true;
-        if !self.applied {
-            log_info!("CustomResolution: enabled -- settings apply at the next launch");
+        match &self.plan {
+            // Re-stated here because `early_apply` runs before spice2x's
+            // debughook attaches its OutputDebugString capture on some boots
+            // (cabinet 2026-09-07: every line before mid-derivation lost) —
+            // this line lands late enough to be recorded.
+            Some(plan) => log_info!(
+                "CustomResolution: boot state -- {}; OUTPUT {} write(s), RENDER {} write(s), scissor detour {}, present-mode detour {}, logical screen {}",
+                Self::describe(plan),
+                self.output_set.as_ref().map_or(0, |s| s.len()),
+                self.render_set.as_ref().map_or(0, |s| s.len()),
+                if scissor::installed() { "on" } else { "off" },
+                if letterbox::installed() { "on" } else { "off" },
+                if logical_screen::installed() { "on" } else { "OFF" },
+            ),
+            None => log_info!("CustomResolution: enabled -- settings apply at the next launch"),
         }
     }
 

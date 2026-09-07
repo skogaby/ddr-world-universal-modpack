@@ -619,6 +619,14 @@ fn cache_texture(png_path: &str, tex: &ImageInfo) -> bool {
     } else {
         img
     };
+    // Dims of the image actually being encoded: after padding these are the
+    // ATLAS dims, not the PNG's. Encoding the padded buffer with the PNG's
+    // dims mis-strided every row and, for a PNG not a multiple of 4 wide,
+    // under-allocated the DXT5 output (texpresso asserts
+    // `output.len() >= compressed_size` — a panic the fs_open hook turned
+    // into "serving original file", silently dropping the injected texture;
+    // cabinet-caught on `scene_result_v3` 2026-09-07).
+    let (width, height) = (img.width(), img.height());
 
     let rgba = img.as_raw();
 
@@ -633,7 +641,8 @@ fn cache_texture(png_path: &str, tex: &ImageInfo) -> bool {
             bgra
         }
         ImgFormat::Dxt5 => {
-            let dxt5_size = width as usize * height as usize; // DXT5 = 1 byte per pixel
+            // 16 bytes per 4×4 block (== 1 byte/pixel for 4-aligned dims).
+            let dxt5_size = texpresso::Format::Bc3.compressed_size(width as usize, height as usize);
             let mut dxt5 = vec![0u8; dxt5_size];
             texpresso::Format::Bc3.compress(
                 rgba,

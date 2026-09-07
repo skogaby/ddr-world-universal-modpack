@@ -12,9 +12,9 @@ Design: `design/detailed-design.md`. Register: `idea-honing.md`. Research: `rese
 - [x] Step 3: Mod skeleton, `early_apply` output path (back-buffer + AA + display-mode fail-safe) and the graphics-init detour with PRESENT fixup — **first cabinet checkpoint (Tier A: 1080p output, 720p render; SD 640×480 crop)**
 - [x] Step 4: Root-7 re-canvas + overlay rows + README — cabinet checkpoint (widgets/menu/toasts at 1080p and SD) — DELIVERED as the `logical_screen` redirect (D5 v3), not a root re-canvas
 - [x] Step 5: Letterbox present policy (SD letterbox option, forced letterbox for 16:9 render ≠ output) — cabinet checkpoint
-- [ ] Step 6: Native render path: surface/viewport/letterbox-src immediates + scissor detour — cabinet checkpoint (1080p/4K native, scissored menus, H3/H5)
-- [ ] Step 7: render < output depth replacement + AFP projection redirect (R12/R13) — cabinet checkpoint (perf mode)
-- [ ] Step 8: Docs, AGENTS.md row, learnings, signature-sweep integration; Phase-2 scaler decision record
+- [x] Step 6: Native render path: surface/viewport/letterbox-src immediates + scissor detour — cabinet checkpoint (1080p/4K native, scissored menus, H3/H5)
+- [x] Step 7: render < output depth replacement (R12) — cabinet checkpoint (perf mode). The AFP projection redirect (R13) was DELIVERED by Step 4's `logical_screen` (the 4 AFP loads read the render block); no `afp_projection.rs`
+- [x] Step 8: Docs, AGENTS.md row, learnings, signature-sweep integration; Phase-2 scaler decision record (deferred — Tier B needs none)
 
 ---
 

@@ -158,7 +158,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `custom_options` | Option persistence gates, preview tuning, menu ordering/placement |
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
 | `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
-| `resolution` | Custom Resolution: `output` (`WxH`; 4:3 sizes = SD-cabinet mode), `render` (`output` / `WxH` / `NN%`), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`), `msaa` (`auto` / `stock`) — `output`/`render` also editable in the mod menu; all apply at the next launch |
+| `resolution` | Custom Resolution: `output` (`WxH`; 4:3 sizes = SD-cabinet mode), `render` (`output` / `WxH` / `NN%`), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`), `msaa` (`off` / `2x` / `4x` / `stock`) — all four editable in the mod menu (RESOLUTION / RENDER SCALE / MSAA / SD PRESENT MODE); all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |

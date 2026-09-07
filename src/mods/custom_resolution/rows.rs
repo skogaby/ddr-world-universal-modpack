@@ -1,6 +1,7 @@
 //! Overlay rows (design §4.4 / R9): RESOLUTION (the output size, from the
-//! operator's `presets`) and RENDER SCALE (`= OUTPUT` / `75%` / `50%` /
-//! `1280x720`). Both persist the WHOLE `resolution` section through
+//! operator's `presets`), RENDER SCALE (`= OUTPUT` / `75%` / `50%` /
+//! `1280x720`), MSAA (OFF / 2X / 4X / STOCK) and SD PRESENT MODE (CROP /
+//! LETTERBOX — 4:3 outputs only). All persist the WHOLE `resolution` section through
 //! `config::save_json_key` (DLL-owned section — every key must round-trip)
 //! and apply at the next launch; the toast/hint says so. The `fps_unlock`
 //! enum-row shape.
@@ -18,6 +19,23 @@ use super::MOD_ID;
 
 pub const ROW_OUTPUT: &str = "custom-resolution-output";
 pub const ROW_RENDER: &str = "custom-resolution-render";
+pub const ROW_MSAA: &str = "custom-resolution-msaa";
+pub const ROW_SD_PRESENT: &str = "custom-resolution-sd-present";
+
+/// The MSAA choices: `(config string, label)`. `"auto"` (the pre-2026-09-07
+/// default) is normalized to `"off"` on load.
+const MSAA_CHOICES: [(&str, &str); 4] = [
+    ("off", "OFF"),
+    ("2x", "2X"),
+    ("4x", "4X"),
+    ("stock", "STOCK (GAME DECIDES)"),
+];
+
+/// The SD present-mode choices: `(config string, label)`.
+const SD_PRESENT_CHOICES: [(&str, &str); 2] = [
+    ("crop", "CROP (960 PX CENTRE)"),
+    ("letterbox", "LETTERBOX (FULL HUD)"),
+];
 
 /// The RENDER SCALE choices: `(config string, label)`.
 const RENDER_CHOICES: [(&str, &str); 4] = [
@@ -77,11 +95,43 @@ fn load() {
     {
         renders.push(cfg.render.trim().to_string());
     }
+    let mut cfg = cfg;
+    if cfg.msaa.trim().eq_ignore_ascii_case("auto") {
+        cfg.msaa = "off".to_string();
+    }
     if let Ok(mut st) = STATE.lock() {
         st.cfg = cfg;
         st.outputs = outputs;
         st.renders = renders;
     }
+}
+
+/// Index of `value` in a `(config, label)` table (case-insensitive), 0 if absent.
+fn choice_index(table: &[(&str, &str)], value: &str) -> i32 {
+    table
+        .iter()
+        .position(|(v, _)| v.eq_ignore_ascii_case(value.trim()))
+        .unwrap_or(0) as i32
+}
+
+fn set_msaa(index: i32) {
+    if let Ok(mut st) = STATE.lock() {
+        if let Some((v, _)) = MSAA_CHOICES.get(index.max(0) as usize) {
+            st.cfg.msaa = v.to_string();
+        }
+    }
+    persist();
+    log_info!("CustomResolution: msaa set via overlay (applies on next launch)");
+}
+
+fn set_sd_present(index: i32) {
+    if let Ok(mut st) = STATE.lock() {
+        if let Some((v, _)) = SD_PRESENT_CHOICES.get(index.max(0) as usize) {
+            st.cfg.sd_present = v.to_string();
+        }
+    }
+    persist();
+    log_info!("CustomResolution: sd_present set via overlay (applies on next launch)");
 }
 
 fn persist() {
@@ -125,12 +175,14 @@ fn set_render(index: i32) {
 /// replaces the rows).
 pub fn register() {
     load();
-    let (outputs, renders, cur_out, cur_render) = match STATE.lock() {
+    let (outputs, renders, cur_out, cur_render, cur_msaa, cur_sd) = match STATE.lock() {
         Ok(st) => (
             st.outputs.clone(),
             st.renders.clone(),
             st.cfg.output.trim().to_string(),
             st.cfg.render.trim().to_string(),
+            st.cfg.msaa.clone(),
+            st.cfg.sd_present.clone(),
         ),
         Err(_) => return,
     };
@@ -179,9 +231,33 @@ pub fn register() {
         initial_value: ren_initial,
         on_change: Arc::new(set_render),
     });
+
+    mod_menu::register_enum_row(mod_menu::EnumRowSpec {
+        key: ROW_MSAA.to_string(),
+        label: "MSAA".to_string(),
+        hint: "Multisampling on the game's render surfaces. Restart the game to apply."
+            .to_string(),
+        parent_row_key: Some(MOD_ID.to_string()),
+        values: (0..MSAA_CHOICES.len() as i32).collect(),
+        labels: MSAA_CHOICES.iter().map(|(_, l)| l.to_string()).collect(),
+        initial_value: choice_index(&MSAA_CHOICES, &cur_msaa),
+        on_change: Arc::new(set_msaa),
+    });
+
+    mod_menu::register_enum_row(mod_menu::EnumRowSpec {
+        key: ROW_SD_PRESENT.to_string(),
+        label: "SD Present Mode".to_string(),
+        hint: "4:3 outputs only: CROP shows the stock SD cabinet's 960-px centre cut of the 1280x720 picture; LETTERBOX fits the whole picture with black bars. Restart the game to apply."
+            .to_string(),
+        parent_row_key: Some(MOD_ID.to_string()),
+        values: (0..SD_PRESENT_CHOICES.len() as i32).collect(),
+        labels: SD_PRESENT_CHOICES.iter().map(|(_, l)| l.to_string()).collect(),
+        initial_value: choice_index(&SD_PRESENT_CHOICES, &cur_sd),
+        on_change: Arc::new(set_sd_present),
+    });
     log_info!("CustomResolution: registered overlay rows");
 }
 
 pub fn unregister() {
-    mod_menu::remove_rows_for(&[ROW_OUTPUT, ROW_RENDER]);
+    mod_menu::remove_rows_for(&[ROW_OUTPUT, ROW_RENDER, ROW_MSAA, ROW_SD_PRESENT]);
 }

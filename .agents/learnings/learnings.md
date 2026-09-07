@@ -994,3 +994,30 @@ Rules:
 - Audit trigger: grep the crate for `const \w+_OFFSET: usize = 0x` in
   services/mods whose target object is NOT the AOB'd object itself — each is
   a candidate for the same class of bug.
+
+## 2026-09-07 — spice2x's `debughook` attaches AFTER our early init on some boots; a caught panic can silently drop an injected texture
+
+Two unrelated log findings from the Custom Resolution checkpoints, both about
+"the log lied by omission":
+
+1. **Early-apply lines can be missing from `log.txt` without any bug.** spice2x
+   installs its `OutputDebugString` capture (`I:debughook: attaching...`) on the
+   loader thread while our DLL's init thread is already running; on three of
+   four 4K boots every `[DDR-Hook]` line up to mid-`resolve_derived` (signature
+   summary, SongLimit/FpsUnlock/CustomResolution `early_apply` INFO+WARN) was
+   never captured. The level tag is irrelevant — `[WARN]` lines from the same
+   boot ARE in the file. Rule: any boot-time patch/detour that a cabinet report
+   needs to confirm must ALSO be re-stated in a late line — `enable()`/`init`
+   run after the attach (custom_resolution's `boot state -- …` summary). Read the
+   `debughook: attached` line number before concluding "X didn't run".
+2. **A `catch_unwind` in a hot hook turns a real bug into a one-line WARN.**
+   `LayeredFS: panic in avs_fs_open hook — serving original file` preceded by a
+   `PANIC at texpresso …/lib.rs:295 assertion failed: output.len() >=
+   compressed_size` = `ifs_textures::cache_texture` encoded the atlas-PADDED
+   buffer with the PNG's PRE-padding dims (row stride wrong; DXT5 output
+   under-allocated for non-4-aligned PNGs). Every padded DXT5 injection had been
+   dropping back to the stock texture (S-Marvelous `scene_result` sheet). Fix:
+   rebind `width/height` from the image actually encoded; size the DXT5 buffer
+   with `Format::compressed_size`. Rule: grep new logs for `PANIC` first — the
+   panic hook's ERROR line is the only trace, and the follow-up WARN reads like
+   a benign fallback.

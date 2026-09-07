@@ -532,6 +532,16 @@ init-time code that Konami has not touched across a year of builds.
 
 ## 10. Open questions / hypotheses (need a live probe)
 
+> **Outcomes (2026-09-07, shipped as `src/mods/custom_resolution/` — see
+> `docs/custom_resolution.md` §8):** H1 REFUTED offline (bm2d VS consumes
+> c50–c53 → the AFP loads read the RENDER dims via `logical_screen`); H2 benign on
+> CrossOver, fixed for real D3D9 by an output-sized PRESENT depth swapped with the
+> engine's own refcount idiom; H3 no read-back consumer hit through results at 4K;
+> H4 spice2x forwards the size but PINS the `-w` window (client resize needed);
+> H5 the live cabinet boots with AA 3 → forced 0; H7 confirmed (Tier A soft, Tier
+> B crisp); H8/H9 hold. §4.3's scissor fix is installed but stock World content
+> never enabled a scissor root in any tested scene.
+
 - **H1 — bm2d VS and c50–c53.** Dump `gs_screencommand_bm2d_default` from
   `shader.arc` and check whether the VS reads c50–c53 for position. Argument
   that it does not: tag-0x05 vertices are CPU-converted to NDC by the walker

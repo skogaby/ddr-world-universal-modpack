@@ -1,11 +1,10 @@
 # Progress — Custom Resolution (arbitrary resolution rendering)
 
-Updated: 2026-09-05
-Status: Step 6 of 8 — not started (Steps 1–5 complete, checkpoints #1 and #2 passed)
-NEXT ACTION: plan Step 6 — native render (Tier B): patch groups 3 (surfaces) / 4 (list viewports) / 5
-(letterbox src) via `sites.rs` as an atomic RENDER set in `patches.rs`, the `scissor_handler` detour
-(`scissor.rs`, design §4.8), flip `plan::GATES.native_render = true` (+ T17), then the fresh checkpoint #3
-(1920×1080 and 3840×2160 with `render = output`).
+Updated: 2026-09-07
+Status: COMPLETE — all 8 steps done, checkpoints #1–#4 passed (uncommitted — maintainer commits manually)
+NEXT ACTION: none for the feature. Maintainer: commit the working tree. Open follow-ups (not blockers): the scissor
+detour has never been exercised by stock content (watch for its `first dispatch` INFO); Phase-2 shader scaler deferred
+(`docs/custom_resolution.md` §9); planning dir can move to `.agents/planning/_archive/`.
 
 Resume protocol: read this file, then `implementation/plan.md` (checklist), then
 `design/detailed-design.md` (§4 components), then `idea-honing.md` (register) and
@@ -18,6 +17,15 @@ Resume protocol: read this file, then `implementation/plan.md` (checklist), then
   spice2x source, four-build AOB sweep), readiness confirmed, design + plan
   approved (maintainer pre-authorized autonomous continuation to the first
   cabinet checkpoint = plan Step 3).
+- Impl Step 8 (2026-09-07): `docs/custom_resolution.md` (implementation record + RE facts + H1–H9 outcomes + Phase-2
+  decision), AGENTS.md Key Entry Points row + `resolution` config entry, research doc §10 outcomes banner, learnings
+  entry (debughook attach race + the caught texpresso panic).
+- Impl Step 7 (checkpoint #4 passed 2026-09-07): `present.rs::replace_depth` — output-sized PRESENT depth via the
+  engine's `surface_create(w,h,0x4b,0,&{0,0})` + release/addref idiom; nulled fallback. Record:
+  `.agents/scratchpad/.../step07-depth-replacement/`.
+- Impl Step 6 (checkpoint #3 passed 2026-09-07, 1080p + 4K native): `patches.rs::apply_render_set` (groups 3/4/5,
+  22 writes, atomic with the OUTPUT set), `scissor.rs` (tag-0x0C record rescale detour), `GATES.native_render = true`,
+  `enable()`-time `boot state` summary line. Record: `.agents/scratchpad/.../step06-native-render/`.
 - Impl Steps 4+5 (checkpoint #2 passed after 5 runs): `letterbox.rs` (present-mode policy detour),
   `rows.rs` (RESOLUTION / RENDER SCALE overlay rows), `logical_screen.rs` (D5 v3 — the app layer's
   per-display-info readers see 1280×720, AFP callbacks see render, renderer/device see output), README;
@@ -33,9 +41,98 @@ Resume protocol: read this file, then `implementation/plan.md` (checklist), then
 
 ## In flight
 
-- Step 6 — not started.
+- Nothing.
 
 ## Deploy & test log
+
+### Post-completion follow-up (2026-09-07) — MSAA + SD PRESENT MODE overlay rows — PENDING cabinet check
+`msaa` gained real values: `off` (default; `auto` = legacy alias) / `2x` / `4x` / `stock`. `off`/`2x`/`4x` are written into
+the display struct `+0x18` by the `graphics_init` detour PRE-original (covers every onBoot branch; the imm patch still
+handles the pcType-2..4 `MOV [RSP+d],3` for `off`); `stock` is REFUSED by `plan::compute` when render ≠ output (mode 3 =
+direct, no present scaler). Two new rows under the mod toggle: MSAA (OFF/2X/4X/STOCK) and SD PRESENT MODE (CROP/LETTERBOX).
+Check: set MSAA 4X at 4K native → log `graphics_init display struct: hd_flag=1 aa_config=2 (onBoot chose 3) fps=120`,
+`plan = … aa 4x MSAA`; verify the game boots and geometry edges (guidelines, 3D background) are smoothed; also `RENDER
+set applied` unchanged. Risk: D3DMetal MSAA surface support / fill rate at 4K — if it fails to boot, `off` is one config
+edit away. Both rows persist the whole `resolution` section (`mod-config.json` default flipped `auto` → `off`).
+
+### Checkpoint #4 (Step 7, perf mode: render < output) — PASSED (2026-09-07, `log_g/h/i.txt`; maintainer visual OK)
+G (4K / 1080p render, through gameplay → STAGE_RESULT → RESULTS_DETAIL): `boot state -- … render 1920x1080, present
+letterbox … RENDER 22 write(s), scissor detour on, present-mode detour on, logical screen on`; `PRESENT rt dims 1920x1080
+-> 3840x2160 (depth replaced: id 0xA02D2 (render-sized) -> 0x160F72 (3840x2160 output-sized))`; `present mode 1 -> 0
+(ForceLetterbox)`; `4 AFP load(s) read 1920x1080 (render)`. H (4K / 75 % = 2880x1620): same shape, depth 0xA02D2 ->
+0x160FA2. I (SD 640x480 regression): unchanged (`OUTPUT 5 write(s), RENDER 0 write(s), scissor detour off … depth stock`).
+Zero CustomResolution WARNs in all three. SIDE FINDING (log_g, results screen): `PANIC at texpresso … output.len() >=
+compressed_size` + `LayeredFS: panic in avs_fs_open hook — serving original file` — a pre-existing `ifs_textures::
+cache_texture` bug (padded DXT5 buffer encoded with the PNG's pre-padding dims), NOT resolution-related; fixed in the
+same tree (rebind dims after padding, `compressed_size` allocation) + learnings entry. Original run script:
+Run G — `"resolution": {"output": "3840x2160", "render": "1920x1080"}` (mod ON, `run_ddr`, exit, read `log.txt`).
+Expected: `boot state -- output 3840x2160 (16:9), render 1920x1080, present letterbox, aa forced 0; OUTPUT 7 write(s),
+RENDER 22 write(s), scissor detour on, present-mode detour on, logical screen on`; `PRESENT rt dims 1920x1080 ->
+3840x2160 (depth replaced: id 0x… (render-sized) -> 0x… (3840x2160 output-sized))`; one `present mode 1 -> 0
+(ForceLetterbox)` INFO; `logical screen installed -- … 4 AFP load(s) read 1920x1080 (render)`. Visual: full-screen
+picture (no crop at scene transitions), 1080p-soft but complete, HUD/AFP aligned, menus/mod menu placed right; NO black
+panel (that was the H2 risk on real D3D9 — a depth smaller than the colour target; CrossOver was tolerant).
+Run H (optional) — `"render": "75%"` at 4K (2880×1620): same shape; `OFFSCREEN1 2880x2880`.
+Run I (regression) — `"output": "640x480"` SD crop: unchanged from checkpoint #2 (`depth stock, render covers output`).
+Failure signatures: `PRESENT depth NULLED … unresolved` WARN (a derivation missed — the picture should STILL render, the
+PRESENT quad needs no Z; report which name); `surface_create(...) returned 0` WARN; a black/missing picture with the
+`replaced` line present ⇒ the swapped depth is rejected by the device — report and we fall back to nulling.
+
+### Checkpoint #3 (Step 6, native render) — PASSED (2026-09-07, `log_4k.txt`; maintainer: "visually everything looked
+good" at 1080p and 4K). Two log findings, both fixed in the follow-up build:
+1. `log_4k.txt` has NO `CustomResolution` early_apply lines — not a mod bug: spice2x's `debughook` ATTACHED (log lines
+   282–283, 00:32:17) after our DLL had already logged through mid-derivation (first captured DDR-Hook line = a
+   `[+] sprite_vtable` derivation). Everything before it (signature-scan summary, SongLimit/FpsUnlock/CustomResolution
+   early_apply) was never captured. Runtime evidence still proved the plan: `graphics_init display struct: … aa_config=0`,
+   `PRESENT rt dims 3840x2160 -> 3840x2160 (depth stock, render covers output)` (the rt struct READ 3840x2160 ⇒ the
+   group-3 hoist + PRESENT stores landed), `screen globals confirm 3840x2160`, window client → 3840x2160, and correct
+   scissoring on screen. NOTE the level tag is irrelevant — `[DDR-Hook][WARN]` lines DO appear in the same log
+   (`present_depth_release`, PremiumFree diag) — the loss is purely attach timing. Fix: `enable()` now logs a late
+   `CustomResolution: boot state -- <plan>; OUTPUT N write(s), RENDER N write(s), scissor detour on/off, present-mode
+   detour on/off, logical screen on/OFF` line (init phase, after the debughook attach).
+2. `[-] present_depth_release / present_depth_addref -- shape not found (from render_surface_hoist)`: the derivation
+   anchored on the STOCK `C7 40 16 D0 02 00 00` PRESENT store, which the RENDER set had already rewritten to the render
+   height. Now matches `C7 40 16 ?? ?? 00 00` (first occurrence — offline-verified to be 0xbdd on all four builds with or
+   without the patch); Step 7 depends on these two.
+Confirmation run (2026-09-07 00:50, `log.txt`, 4K, title/attract only): `boot state -- output 3840x2160 (16:9), render
+3840x2160, present stock (1:1), aa forced 0; OUTPUT 7 write(s), RENDER 22 write(s), scissor detour on, present-mode detour
+off, logical screen on`; `[+] present_depth_release @ +0x250BE0` / `[+] present_depth_addref @ +0x250B30`; PRESENT/screen
+globals/window lines as before; zero CustomResolution WARNs. Debughook again attached mid-early_apply (only the last two
+early lines captured) — the summary line is load-bearing for cabinet triage.
+OPEN OBSERVATION: no `scissor … -> …` rescale INFO in either 4K log, incl. the run that visited SONG_SELECT → GAMEPLAY ⇒
+no scissor-flagged `ScreenRoot` (`+0x60`) rendered there (Ghidra 20260825 `FUN_1802180a0` = ScreenRoot::render: the
+tag-0x0C record is emitted only when the flag is set; the research's "options menu / song wheel" list was inference). The
+detour is live and dormant. Whenever a log first shows the `scissor` INFO, that screen is the one to eyeball for clipping
+(candidate: the song-select OPTIONS modal).
+Run 3 (00:55, `log.txt`): title → attract → song select WITH the options modals opened → gameplay with a background movie —
+all clean visually (movie plane included), zero CustomResolution WARNs, and STILL no `scissor` INFO. Ghidra: the ONLY writer
+of `ScreenRoot+0x60` is vtable slot 9 (`FUN_180217de0`, 20260825; ctor defaults it to 0), and the options modal is AFP
+content (its clipping is AFP-side, not tag 0x0C). Working conclusion: World's stock content never enables a scissor root
+in these scenes; the detour is a safety net for whatever does (the DLL's own overlay scissors were retired earlier).
+Added a one-shot `scissor handler first dispatch (enable=…, viewport WxH)` INFO so a future log can at least say whether
+the handler is ever reached; rebuilt (check/fmt/build clean). NOT a Step-7 blocker.
+`log_1080p.txt` in the install is a STALE Sep-6 SD-crop run from the run-3 build (`widget canvas scale` line) — not the
+1080p checkpoint; the 1080p pass is the maintainer's visual report only.
+Run D — `"resolution": {"output": "1920x1080", "render": "output"}` (mod ON, `run_ddr`, read `log.txt` after exit).
+Expected log: `plan = output 1920x1080 (16:9), render 1920x1080, present stock (1:1), aa forced 0`, `OUTPUT set applied
+(5 write(s))`, `RENDER set applied (22 write(s)) -> surfaces + list viewports + letterbox src 1920x1080 (OFFSCREEN1
+1920x1920)`, `scissor detour installed (canvas -> render-target px)`, `graphics_init detour installed`, NO present-mode
+detour line (policy Stock), `logical screen installed -- 4 app-layer load(s) read 1280x720 (design), 4 AFP load(s)
+read 1920x1080 (render); 30 untouched physical`, `graphics_init display struct: … aa_config=0`, `PRESENT rt dims
+1920x1080 -> 1920x1080 (depth stock, render covers output)`, `screen globals confirm 1920x1080`, window client →
+1920x1080 (spice2x pin + our fit), then up to three `scissor WxH+X+Y (canvas 1280x720) -> … (rt 1920x1080, origin
+0.0,0.0)` INFOs the first time a scissored layer renders (options menu / song wheel), `early_apply complete`.
+Visual: geometry CRISP (arrows, guidelines, AFP shapes — compare with the soft Tier-A picture), options menu lists /
+song wheel / any scrolling list clip at their proper bounds (not the top-left 2/3), results screen + photo path (H3),
+attract loop, TEST menu, mod menu placed as at 720p, `shader_fixes` AA visibly filtering lane art.
+Run E — `"output": "3840x2160"` (render output): same lines with 3840x2160 / OFFSCREEN1 3840x3840; note CrossOver
+frame time.
+Failure signatures: `RENDER set not applied (…)` / `scissor_handler detour install failed` WARN + `rolling back` ⇒
+stock boot, report the line; `PRESENT rt reads WxH, expected render …` ⇒ group 3's PRESENT store was not the first
+`C7 40 16`; a picture that is a 1280×720 top-left CROP of the UI ⇒ the scissor rescale did not fire (report whether the
+`scissor …` INFOs appear); black screen at boot ⇒ report `logical screen installed` counts.
+Optional Run F — `"output": "3840x2160", "render": "75%"` (2880×1620 render, ForceLetterbox, depth still stock =
+Step 7's H2 territory): exercises the RENDER set with render ≠ output.
 
 ### Checkpoint #1 run 1 (Step 3) — SD 640×480, CrossOver window — PARTIAL (2026-09-05)
 Maintainer: back-buffer 640×480 + SD crop rendered correctly, BUT the window stayed 1280×720 and the

@@ -3,9 +3,9 @@
 //! `memory::apply_checked_patch` with the stock bytes as the expected value —
 //! a stock mismatch on any site skips the group (fail-open). Groups are
 //! bundled into two SETS that apply atomically: the OUTPUT set (back-buffer +
-//! AA config) and — from plan Step 6 — the RENDER set (surfaces, list
-//! viewports, letterbox src). A set that fails half-way is rolled back so
-//! the game never boots with, e.g., a bigger back-buffer and stock surfaces.
+//! AA config + window client) and the RENDER set (surfaces, list viewports,
+//! letterbox src). A set that fails half-way is rolled back so the game
+//! never boots with, e.g., a bigger back-buffer and stock surfaces.
 
 use crate::core::memory;
 use crate::core::signatures::{CustomResolutionAnchors, SignatureStore};
@@ -155,7 +155,7 @@ pub fn apply_output_set(
         });
     }
 
-    if plan.force_aa_zero {
+    if plan.force_aa_zero() {
         let imm = anchors.aa_config_imm.ok_or("aa_config_imm unresolved")?;
         let cur = unsafe { memory::read_u32(imm) };
         if cur != 3 {
@@ -175,11 +175,167 @@ pub fn apply_output_set(
         set.len(),
         plan.output.w,
         plan.output.h,
-        if plan.force_aa_zero {
+        if plan.force_aa_zero() {
             ", AA config 0"
         } else {
             ""
         }
+    );
+    Ok(set)
+}
+
+/// Bytes read after the `render_surface_hoist` match: the ctor body carrying
+/// the six RT-struct dimension stores ends well inside this (all four
+/// builds; `shape_diff.py` identical through 0x1200).
+const HOIST_SCAN_LEN: usize = 0x1200;
+/// Bytes read after the `list_viewport_table` match (the eight-entry table
+/// is ~0x120 long on every build).
+const VIEWPORT_SCAN_LEN: usize = 0x140;
+
+/// RENDER set — group 3 (render-surface ctor: the hoisted `R15D`/`ESI`
+/// registers every 1280×720 surface-create reads + the six RT-struct dim
+/// stores), group 4 (the eight-entry list-viewport table: 5 wide pairs + the
+/// square OFFSCREEN1) and group 5 (letterbox source rect x1/y1 — x1 doubles
+/// as the `screen_w == render_w` comparand, so the engine's 1:1 POINT branch
+/// fires exactly when render == output). Every site is content-verified
+/// against its stock value before the first write; any miss rolls the set
+/// back and returns `Err` (nothing left written). An empty set when the plan's
+/// render is stock.
+pub fn apply_render_set(sigs: &SignatureStore, plan: &Plan) -> Result<PatchSet, String> {
+    let mut pending = Vec::new();
+    if plan.render_is_stock() {
+        return apply_all("render", pending);
+    }
+    let (rw, rh) = (plan.render.w, plan.render.h);
+    let packed_wide = sites::pack_dims(rw, rh).ok_or("render dims exceed u16")?;
+    let packed_square = sites::pack_dims(rw, rw).ok_or("render dims exceed u16")?;
+
+    // Group 3 — surfaces.
+    {
+        let m = sigs
+            .get_address("render_surface_hoist")
+            .ok_or("render_surface_hoist unresolved")?;
+        let b =
+            unsafe { window(m, HOIST_SCAN_LEN) }.ok_or("render_surface_hoist window unreadable")?;
+        let (w, h) = sites::hoist_sites(b)
+            .ok_or("render_surface_hoist: hoisted R15D/ESI immediates not where expected")?;
+        pending.push(Pending {
+            addr: unsafe { m.add(w.off) as *mut u8 },
+            stock: w.stock,
+            new: rw,
+            what: "surface_hoist_w",
+        });
+        pending.push(Pending {
+            addr: unsafe { m.add(h.off) as *mut u8 },
+            stock: h.stock,
+            new: rh,
+            what: "surface_hoist_h",
+        });
+        let rt = sites::rt_dim_sites(b);
+        if !rt.is_complete() {
+            return Err(format!(
+                "render_surface_hoist: RT dim stores {}/{}/{} (expected {}/{}/{})",
+                rt.packed_wide.len(),
+                rt.packed_square.len(),
+                rt.height_only.len(),
+                sites::RT_PACKED_WIDE_COUNT,
+                sites::RT_PACKED_SQUARE_COUNT,
+                sites::RT_HEIGHT_ONLY_COUNT
+            ));
+        }
+        for s in &rt.packed_wide {
+            pending.push(Pending {
+                addr: unsafe { m.add(s.off) as *mut u8 },
+                stock: s.stock,
+                new: packed_wide,
+                what: "rt_dims_wide",
+            });
+        }
+        for s in &rt.packed_square {
+            pending.push(Pending {
+                addr: unsafe { m.add(s.off) as *mut u8 },
+                stock: s.stock,
+                new: packed_square,
+                what: "rt_dims_square",
+            });
+        }
+        for s in &rt.height_only {
+            pending.push(Pending {
+                addr: unsafe { m.add(s.off) as *mut u8 },
+                stock: s.stock,
+                new: rh,
+                what: "rt_dims_h",
+            });
+        }
+    }
+
+    // Group 4 — list viewports.
+    {
+        let m = sigs
+            .get_address("list_viewport_table")
+            .ok_or("list_viewport_table unresolved")?;
+        let b = unsafe { window(m, VIEWPORT_SCAN_LEN) }
+            .ok_or("list_viewport_table window unreadable")?;
+        let pairs = sites::viewport_pairs(b);
+        if !sites::viewport_pairs_complete(&pairs) {
+            return Err(format!(
+                "list_viewport_table: {} pair(s) found (expected {} wide + {} square)",
+                pairs.len(),
+                sites::VIEWPORT_WIDE_COUNT,
+                sites::VIEWPORT_SQUARE_COUNT
+            ));
+        }
+        for p in &pairs {
+            let (new_h, what_w, what_h) = match p.kind {
+                sites::ViewportKind::Wide => (rh, "viewport_w", "viewport_h"),
+                sites::ViewportKind::Square => (rw, "viewport_sq_w", "viewport_sq_h"),
+            };
+            pending.push(Pending {
+                addr: unsafe { m.add(p.w.off) as *mut u8 },
+                stock: p.w.stock,
+                new: rw,
+                what: what_w,
+            });
+            pending.push(Pending {
+                addr: unsafe { m.add(p.h.off) as *mut u8 },
+                stock: p.h.stock,
+                new: new_h,
+                what: what_h,
+            });
+        }
+    }
+
+    // Group 5 — letterbox source rect.
+    {
+        let m = sigs
+            .get_address("letterbox_rect_fn")
+            .ok_or("letterbox_rect_fn unresolved")?;
+        let b = unsafe { window(m, sites::LETTERBOX_SCAN_LEN) }
+            .ok_or("letterbox_rect_fn window unreadable")?;
+        let (x1, y1) = sites::letterbox_sites(b)
+            .ok_or("letterbox_rect_fn: source-rect immediates not where expected")?;
+        pending.push(Pending {
+            addr: unsafe { m.add(x1.off) as *mut u8 },
+            stock: x1.stock,
+            new: rw,
+            what: "letterbox_src_x1",
+        });
+        pending.push(Pending {
+            addr: unsafe { m.add(y1.off) as *mut u8 },
+            stock: y1.stock,
+            new: rh,
+            what: "letterbox_src_y1",
+        });
+    }
+
+    let set = apply_all("render", pending)?;
+    log_info!(
+        "CustomResolution: RENDER set applied ({} write(s)) -> surfaces + list viewports + letterbox src {}x{} (OFFSCREEN1 {}x{})",
+        set.len(),
+        rw,
+        rh,
+        rw,
+        rw
     );
     Ok(set)
 }

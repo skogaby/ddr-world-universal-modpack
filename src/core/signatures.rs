@@ -4986,8 +4986,20 @@ impl SignatureStore {
                     a.surface_create = Some(t);
                 }
             }
-            const PRESENT_DIMS: [u8; 7] = [0xC7, 0x40, 0x16, 0xD0, 0x02, 0x00, 0x00];
-            if let Some(p) = body.windows(7).position(|w| w == PRESENT_DIMS) {
+            // `MOV dword [RAX+0x16], h` (height + zeroed msaa/pad). Stock h =
+            // 0x2d0; custom_resolution's RENDER set rewrites it to the render
+            // height BEFORE this derivation runs, so accept any u16 height
+            // with the zero upper half rather than the stock bytes only (the
+            // `aa_config_imm` 3-or-0 precedent).
+            let is_present_dims = |w: &[u8]| {
+                w[0] == 0xC7
+                    && w[1] == 0x40
+                    && w[2] == 0x16
+                    && w[5] == 0
+                    && w[6] == 0
+                    && (w[3] != 0 || w[4] != 0)
+            };
+            if let Some(p) = body.windows(7).position(is_present_dims) {
                 let mut calls = Vec::new();
                 let mut j = p + 7;
                 while j < (p + 7 + 0x60).min(body.len() - 5) && calls.len() < 3 {

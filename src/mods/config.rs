@@ -163,8 +163,10 @@ fn default_fps_selected() -> i32 {
 /// `"NN%"` of the output — ignored for 4:3 outputs, which always render at
 /// 1280×720); `presets` = the RESOLUTION overlay row's choices;
 /// `sd_present` = `"crop"` (stock SD behaviour, 960-px centre crop) or
-/// `"letterbox"`; `msaa` = `"auto"` (AA config forced to 0 whenever the
-/// output is non-stock) or `"stock"`. All settings apply at the NEXT launch —
+/// `"letterbox"`; `msaa` = `"off"` (default; `"auto"` is its legacy name),
+/// `"2x"`, `"4x"` (MSAA on the render surfaces) or `"stock"` (the game's own
+/// choice — 0, or "direct" mode 3 on pcType 2..4, which is refused when render
+/// != output). All settings apply at the NEXT launch —
 /// the D3D device is created once at boot. Semantics live in
 /// `mods::custom_resolution::plan`.
 #[derive(Deserialize, Clone, Debug)]
@@ -209,7 +211,7 @@ fn default_res_sd_present() -> String {
     "crop".to_string()
 }
 fn default_res_msaa() -> String {
-    "auto".to_string()
+    "off".to_string()
 }
 
 fn default_true() -> bool {

@@ -3,15 +3,26 @@
 //! the D3D device, every render surface, the eight list viewports and the
 //! present chain. We wrap it once, at `early_apply` time (before onBoot runs):
 //!
-//! - pre-original: log the display struct's HD flag / AA config / FPS target
-//!   (diagnostics only — the AA immediate is patched by `patches`);
+//! - pre-original: write the plan's AA config into the display struct
+//!   (`+0x18`; covers every onBoot branch — the `aa_config_imm` patch only
+//!   reaches the pcType-2..4 `MOV [RSP+d],3` store, and 2×/4× MSAA need a
+//!   value no imm patch can produce on the other branches) and log the
+//!   struct's HD flag / AA config / FPS target;
 //! - post-original: the PRESENT rt struct (`*(render_surfaces+0x80)`) was
 //!   created with the ctor's 1280×720 immediates but is re-pointed at the
 //!   OUTPUT-sized back-buffer every frame, so its `u16 w/h` become the
 //!   output dims here. Its depth is left stock while the render covers the
 //!   output (a depth surface larger than the colour target is legal — stock
-//!   SD cabinets run exactly that); the output-sized replacement for the
-//!   render < output case lands in plan Step 7.
+//!   SD cabinets run exactly that); when the render is SMALLER than the
+//!   output in either dimension (perf mode: 720p/1080p render on a 4K panel)
+//!   D3D9 requires a depth at least as large as the colour target, so an
+//!   output-sized depth is created and swapped in with the engine's own
+//!   refcount idiom (plan Step 7 / R12): `new = surface_create(out.w, out.h,
+//!   0x4b, 0, &{0,0})`; `old = rt+0x10`; `if old { rt+0x10 = 0; release(old) }`;
+//!   `rt+0x10 = new; addref(new)` — byte-for-byte what the ctor does when it
+//!   binds `render_depth` (20260825 `FUN_1801f10e0` @ +0xD13). A missing
+//!   derivation nulls the depth instead (the PRESENT pass is a textured quad
+//!   and needs no Z) with one WARN.
 //!
 //! Also the window fit: spice2x's `CreateWindowExW` hook (MDX, `-w`) replaces
 //! the game's requested client size with a hard-coded 1280×720 (800×600 with
@@ -37,7 +48,7 @@ use crate::core::memory;
 use crate::core::signatures::CustomResolutionAnchors;
 use crate::{log_info, log_warn};
 
-use super::plan::{Dims, Plan, PresentDepth};
+use super::plan::{AaPolicy, Dims, Plan, PresentDepth};
 
 type GraphicsInitFn = unsafe extern "C" fn(*mut u8);
 
@@ -51,7 +62,13 @@ static OUT_H: AtomicUsize = AtomicUsize::new(0);
 static REN_W: AtomicUsize = AtomicUsize::new(0);
 static REN_H: AtomicUsize = AtomicUsize::new(0);
 static DEPTH_POLICY_CREATE: AtomicBool = AtomicBool::new(false);
+/// AA config to force into the display struct pre-init; `AA_KEEP` = leave it.
+static AA_FORCE: AtomicUsize = AtomicUsize::new(AA_KEEP);
+const AA_KEEP: usize = usize::MAX;
 static SURFACES_GLOBAL: AtomicUsize = AtomicUsize::new(0);
+static SURFACE_CREATE: AtomicUsize = AtomicUsize::new(0);
+static DEPTH_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static DEPTH_ADDREF: AtomicUsize = AtomicUsize::new(0);
 static SCREEN_W_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 static SCREEN_H_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 /// HWND read from the display struct (+0x08) pre-original.
@@ -60,9 +77,22 @@ static GAME_HWND: AtomicUsize = AtomicUsize::new(0);
 /// PRESENT rt struct = `*(surfaces + 0x80)`; struct layout `{+0x08 colour id,
 /// +0x10 depth id, +0x14 u16 w, +0x16 u16 h, +0x18 u8 msaa}` (0x1C bytes).
 const PRESENT_RT_OFF: usize = 0x80;
+const RT_DEPTH_OFF: usize = 0x10;
 const RT_W_OFF: usize = 0x14;
 const RT_H_OFF: usize = 0x16;
 const RT_LEN: usize = 0x1C;
+
+/// The engine's depth-stencil surface format id (`render_depth` /
+/// `depth A/B` in the surface ctor: `surface_create(0x500, 0x2d0, 0x4b)`).
+const DEPTH_FORMAT: u32 = 0x4b;
+
+/// `surface_create(u16 w, u16 h, u32 format, u32 msaa, opts*) -> u32 id`;
+/// `opts` = `{u32, u8}` — the ctor passes a zeroed stack block for every
+/// surface it creates (NULL would substitute a global default block whose
+/// contents are not verified), so we pass the same zeroed block.
+type SurfaceCreateFn = unsafe extern "C" fn(u32, u32, u32, u32, *const u8) -> u32;
+/// `release(u32 id)` / `addref(u32 id)` — the surface refcount pair.
+type SurfaceRefFn = unsafe extern "C" fn(u32);
 
 /// Display-struct fields (0x20 bytes on onBoot's stack).
 const DS_HWND: usize = 0x08;
@@ -89,7 +119,26 @@ pub fn install(anchors: &CustomResolutionAnchors, plan: &Plan) -> Result<(), Str
         plan.present_depth == PresentDepth::CreateOutputSized,
         Ordering::Release,
     );
+    AA_FORCE.store(
+        match plan.aa {
+            AaPolicy::Stock => AA_KEEP,
+            AaPolicy::Force(v) => v as usize,
+        },
+        Ordering::Release,
+    );
     SURFACES_GLOBAL.store(surfaces as usize, Ordering::Release);
+    SURFACE_CREATE.store(
+        anchors.surface_create.map_or(0, |p| p as usize),
+        Ordering::Release,
+    );
+    DEPTH_RELEASE.store(
+        anchors.present_depth_release.map_or(0, |p| p as usize),
+        Ordering::Release,
+    );
+    DEPTH_ADDREF.store(
+        anchors.present_depth_addref.map_or(0, |p| p as usize),
+        Ordering::Release,
+    );
     SCREEN_W_GLOBAL.store(
         anchors.screen_w_global.map_or(0, |p| p as usize),
         Ordering::Release,
@@ -125,10 +174,16 @@ unsafe extern "C" fn graphics_init_detour(display: *mut u8) {
                 memory::read_u64(display.add(DS_HWND)) as usize,
                 Ordering::Release,
             );
+            let aa_before = memory::read_u32(display.add(DS_AA));
+            let force = AA_FORCE.load(Ordering::Acquire);
+            if force != AA_KEEP && aa_before != force as u32 {
+                memory::write_u32(display.add(DS_AA) as *mut u8, force as u32);
+            }
             log_info!(
-                "CustomResolution: graphics_init display struct: hd_flag={} aa_config={} fps={}",
+                "CustomResolution: graphics_init display struct: hd_flag={} aa_config={} (onBoot chose {}) fps={}",
                 memory::read_u8(display.add(DS_HD_FLAG)),
                 memory::read_u32(display.add(DS_AA)),
+                aa_before,
                 memory::read_u32(display.add(DS_FPS))
             );
         }
@@ -229,6 +284,60 @@ unsafe fn fit_window() {
 #[cfg(not(windows))]
 unsafe fn fit_window() {}
 
+/// Swap the PRESENT rt's depth for an output-sized one (render < output).
+/// Returns the text for the fixup INFO. On a missing derivation or a failed
+/// create the depth is NULLED (safe: the PRESENT pass draws a textured quad
+/// with Z disabled) and one WARN names the reason.
+unsafe fn replace_depth(rt10: *mut u8, out: Dims) -> String {
+    let depth_slot = rt10.add(RT_DEPTH_OFF) as *mut u32;
+    let old = *depth_slot;
+    let create = SURFACE_CREATE.load(Ordering::Acquire);
+    let release = DEPTH_RELEASE.load(Ordering::Acquire);
+    let addref = DEPTH_ADDREF.load(Ordering::Acquire);
+    let missing = [
+        (create, "surface_create"),
+        (release, "present_depth_release"),
+        (addref, "present_depth_addref"),
+    ]
+    .iter()
+    .filter(|(p, _)| *p == 0)
+    .map(|(_, n)| *n)
+    .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        *depth_slot = 0;
+        log_warn!(
+            "CustomResolution: PRESENT depth NULLED (was id 0x{old:X}) -- {} unresolved, no output-sized depth",
+            missing.join("/")
+        );
+        return format!("nulled -- {} unresolved", missing.join("/"));
+    }
+    let create: SurfaceCreateFn = std::mem::transmute(create);
+    let release: SurfaceRefFn = std::mem::transmute(release);
+    let addref: SurfaceRefFn = std::mem::transmute(addref);
+
+    let opts = [0u8; 8];
+    let new = create(out.w, out.h, DEPTH_FORMAT, 0, opts.as_ptr());
+    if new == 0 {
+        *depth_slot = 0;
+        log_warn!(
+            "CustomResolution: surface_create({}x{}, depth) returned 0 -- PRESENT depth NULLED (was id 0x{old:X})",
+            out.w,
+            out.h
+        );
+        return "nulled -- output-sized create failed".to_string();
+    }
+    if old != 0 && old != new {
+        *depth_slot = 0;
+        release(old);
+    }
+    *depth_slot = new;
+    addref(new);
+    format!(
+        "replaced: id 0x{old:X} (render-sized) -> 0x{new:X} ({}x{} output-sized)",
+        out.w, out.h
+    )
+}
+
 /// Post-init: PRESENT rt dims → output; screen-global sanity check.
 unsafe fn fixup() {
     if FIXUP_DONE.swap(true, Ordering::AcqRel) {
@@ -263,17 +372,18 @@ unsafe fn fixup() {
                     *(rt10.add(RT_W_OFF) as *mut u16) = out.w as u16;
                     *(rt10.add(RT_H_OFF) as *mut u16) = out.h as u16;
                 }
+                let depth = if DEPTH_POLICY_CREATE.load(Ordering::Acquire) {
+                    replace_depth(rt10, out)
+                } else {
+                    "stock, render covers output".to_string()
+                };
                 log_info!(
                     "CustomResolution: PRESENT rt dims {}x{} -> {}x{} (depth {})",
                     w,
                     h,
                     out.w,
                     out.h,
-                    if DEPTH_POLICY_CREATE.load(Ordering::Acquire) {
-                        "replacement pending (plan Step 7) -- left stock"
-                    } else {
-                        "stock, render covers output"
-                    }
+                    depth
                 );
             } else {
                 log_warn!(

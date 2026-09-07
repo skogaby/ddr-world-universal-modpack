@@ -58,6 +58,11 @@ fn decode(v: u8) -> PresentPolicy {
     }
 }
 
+/// True once the detour is live (diagnostic for the boot summary).
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Acquire)
+}
+
 /// Install for a non-`Stock` policy. `Stock` and `Sd(Crop)` need no detour
 /// (both are the identity mapping) and return `Ok` without installing.
 pub fn install(sigs: &SignatureStore, policy: PresentPolicy) -> Result<(), String> {

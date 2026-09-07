@@ -24,12 +24,13 @@ pub const MAX_SIDE: u32 = 8192;
 /// letterbox math degrades gracefully into).
 pub const MIN_HEIGHT: u32 = 360;
 
-/// Feature gates flipped by later plan steps: until the letterbox present
-/// policy (plan Step 5) ships, a 16:9 output with a smaller render would be
-/// CROPPED by the game's per-scene mode-1 selection; until the native render
-/// set (Step 6) ships, no surface can be created at a non-stock size. The
-/// pure layer refuses those configurations while the gates are off so a
-/// cabinet never sees a half-implemented picture.
+/// Feature gates flipped by the plan's steps: without the letterbox present
+/// policy (plan Step 5) a 16:9 output with a smaller render would be CROPPED
+/// by the game's per-scene mode-1 selection; without the native render set
+/// (Step 6) no surface can be created at a non-stock size. The pure layer
+/// refuses those configurations while a gate is off so a cabinet never sees
+/// a half-implemented picture. Both shipped as of Step 6; the gates stay so
+/// a build can be cut back to a known-good subset by flipping one constant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gates {
     pub letterbox_policy: bool,
@@ -39,7 +40,7 @@ pub struct Gates {
 /// The gates as shipped by the current build.
 pub const GATES: Gates = Gates {
     letterbox_policy: true,
-    native_render: false,
+    native_render: true,
 };
 
 /// Integer pixel dimensions.
@@ -93,6 +94,38 @@ pub enum PresentPolicy {
     Sd(SdPresent),
 }
 
+/// The game's AA config (`display struct +0x18` → `DAT_1806f050c`): 0 none,
+/// 1 = 2× MSAA, 2 = 4× MSAA on the RENDER surfaces, 3 = "direct mode" (no
+/// MSAA; RENDER/PRESENT target the screen-sized display surface and the
+/// COPYVIEWPORT scaler is SKIPPED — only ever selected for `1 < pcType < 5`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AaPolicy {
+    /// Leave whatever onBoot chose (0, or 3 on pcType-2..4 cabinets).
+    Stock,
+    /// Write this value into the display struct before graphics init.
+    Force(u8),
+}
+
+pub const AA_OFF: u8 = 0;
+pub const AA_2X: u8 = 1;
+pub const AA_4X: u8 = 2;
+pub const AA_DIRECT: u8 = 3;
+
+/// Parse the config's `msaa` string. `"auto"` is the pre-2026-09-07 name for
+/// `"off"`; unknown strings fall back to `"off"` (the safe choice).
+pub fn parse_msaa(s: &str) -> AaPolicy {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("stock") {
+        AaPolicy::Stock
+    } else if s.eq_ignore_ascii_case("2x") {
+        AaPolicy::Force(AA_2X)
+    } else if s.eq_ignore_ascii_case("4x") {
+        AaPolicy::Force(AA_4X)
+    } else {
+        AaPolicy::Force(AA_OFF)
+    }
+}
+
 /// What to do with the PRESENT render-target's depth surface (design R12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresentDepth {
@@ -109,7 +142,7 @@ pub struct Plan {
     pub output: Dims,
     pub render: Dims,
     pub aspect: Aspect,
-    pub force_aa_zero: bool,
+    pub aa: AaPolicy,
     pub present_policy: PresentPolicy,
     pub present_depth: PresentDepth,
     pub redirect_afp_projection: bool,
@@ -126,6 +159,12 @@ impl Plan {
     /// `true` when the back-buffer immediates must change.
     pub fn output_is_stock(&self) -> bool {
         self.output == STOCK
+    }
+    /// The onBoot `MOV [RSP+d],3` immediate must become 0 (the imm patch
+    /// covers the pcType-2..4 branch; the graphics-init detour's struct write
+    /// covers every branch).
+    pub fn force_aa_zero(&self) -> bool {
+        self.aa == AaPolicy::Force(AA_OFF)
     }
 }
 
@@ -274,18 +313,24 @@ pub fn compute_gated(input: &PlanInput, gates: Gates) -> Outcome {
         ));
     }
 
+    let aa = parse_msaa(input.msaa);
+    if aa == AaPolicy::Stock && render != output {
+        return Outcome::Rejected(format!(
+            "resolution.msaa \"stock\" with render {}x{} != output {}x{}: a pcType-2..4 cabinet boots in AA \"direct\" mode (3), which skips the present-chain scaler the render/output split needs — use \"off\", \"2x\" or \"4x\"",
+            render.w, render.h, output.w, output.h
+        ));
+    }
+
     let present_depth = if render.covers(output) {
         PresentDepth::Stock
     } else {
         PresentDepth::CreateOutputSized
     };
-    let force_aa_zero = output != STOCK && !input.msaa.trim().eq_ignore_ascii_case("stock");
-
     Outcome::Plan(Plan {
         output,
         render,
         aspect,
-        force_aa_zero,
+        aa,
         present_policy,
         present_depth,
         redirect_afp_projection: render != output,
@@ -445,7 +490,7 @@ mod tests {
         assert_eq!(p.aspect, Aspect::Wide16x9);
         assert_eq!(p.present_policy, PresentPolicy::Stock);
         assert_eq!(p.present_depth, PresentDepth::Stock);
-        assert!(p.force_aa_zero);
+        assert!(p.force_aa_zero());
         assert!(!p.redirect_afp_projection);
         assert!(!p.coerced_render);
         assert!(!p.render_is_stock());
@@ -459,7 +504,7 @@ mod tests {
         assert_eq!(p.present_policy, PresentPolicy::ForceLetterbox);
         assert_eq!(p.present_depth, PresentDepth::CreateOutputSized);
         assert!(p.redirect_afp_projection);
-        assert!(p.force_aa_zero);
+        assert!(p.force_aa_zero());
         assert!(p.render_is_stock());
     }
 
@@ -480,7 +525,7 @@ mod tests {
         assert_eq!(p.present_policy, PresentPolicy::Sd(SdPresent::Crop));
         assert_eq!(p.present_depth, PresentDepth::Stock);
         assert!(p.redirect_afp_projection);
-        assert!(p.force_aa_zero);
+        assert!(p.force_aa_zero());
         // "output" would be 640x480 ≠ 1280x720 → coerced (the operator did not
         // ask for anything, but the resolver still produced a non-stock size).
         assert!(p.coerced_render);
@@ -535,14 +580,57 @@ mod tests {
     }
 
     #[test]
-    fn t16_msaa_stock_keeps_aa() {
-        let i = PlanInput {
+    fn t16_msaa_policies() {
+        let mk = |msaa: &'static str| PlanInput {
             output: "1920x1080",
+            render: "output",
+            sd_present: "crop",
+            msaa,
+        };
+        assert_eq!(
+            plan(compute_gated(&mk("stock"), ALL_ON)).aa,
+            AaPolicy::Stock
+        );
+        assert!(!plan(compute_gated(&mk("stock"), ALL_ON)).force_aa_zero());
+        assert_eq!(
+            plan(compute_gated(&mk("auto"), ALL_ON)).aa,
+            AaPolicy::Force(AA_OFF)
+        );
+        assert_eq!(
+            plan(compute_gated(&mk("off"), ALL_ON)).aa,
+            AaPolicy::Force(AA_OFF)
+        );
+        assert_eq!(
+            plan(compute_gated(&mk("2X"), ALL_ON)).aa,
+            AaPolicy::Force(AA_2X)
+        );
+        assert_eq!(
+            plan(compute_gated(&mk("4x"), ALL_ON)).aa,
+            AaPolicy::Force(AA_4X)
+        );
+        assert_eq!(
+            plan(compute_gated(&mk("banana"), ALL_ON)).aa,
+            AaPolicy::Force(AA_OFF)
+        );
+        // Stock AA can be direct mode (3), which has no scaler: refused when
+        // the render and output differ.
+        let split = PlanInput {
+            output: "3840x2160",
+            render: "1920x1080",
+            sd_present: "crop",
+            msaa: "stock",
+        };
+        assert!(matches!(
+            compute_gated(&split, ALL_ON),
+            Outcome::Rejected(_)
+        ));
+        let sd = PlanInput {
+            output: "640x480",
             render: "output",
             sd_present: "crop",
             msaa: "stock",
         };
-        assert!(!plan(compute_gated(&i, ALL_ON)).force_aa_zero);
+        assert!(matches!(compute_gated(&sd, ALL_ON), Outcome::Rejected(_)));
     }
 
     #[test]
@@ -573,9 +661,9 @@ mod tests {
             compute_gated(&input("640x480", "output"), ALL_OFF),
             Outcome::Plan(_)
         ));
-        // Shipped gates: letterbox policy landed (plan Step 5), native render
-        // still pending (Step 6).
-        assert_eq!(GATES, lb_only);
+        // Shipped gates: letterbox policy (plan Step 5) and native render
+        // (Step 6) both landed.
+        assert_eq!(GATES, ALL_ON);
     }
 
     #[test]
