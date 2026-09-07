@@ -155,6 +155,63 @@ fn default_fps_selected() -> i32 {
     60
 }
 
+/// Config for the `custom-resolution` mod (DLL-owned section — the overlay
+/// rows write the WHOLE section back via `save_json_key`, so every field must
+/// round-trip). `output` = the back-buffer size (`"WxH"`; `"1280x720"` is
+/// stock, any 4:3 size such as `"640x480"` selects the SD-cabinet present
+/// path); `render` = the internal render size (`"output"`, `"WxH"`, or
+/// `"NN%"` of the output — ignored for 4:3 outputs, which always render at
+/// 1280×720); `presets` = the RESOLUTION overlay row's choices;
+/// `sd_present` = `"crop"` (stock SD behaviour, 960-px centre crop) or
+/// `"letterbox"`; `msaa` = `"auto"` (AA config forced to 0 whenever the
+/// output is non-stock) or `"stock"`. All settings apply at the NEXT launch —
+/// the D3D device is created once at boot. Semantics live in
+/// `mods::custom_resolution::plan`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ResolutionConfig {
+    #[serde(default = "default_res_output")]
+    pub output: String,
+    #[serde(default = "default_res_render")]
+    pub render: String,
+    #[serde(default = "default_res_presets")]
+    pub presets: Vec<String>,
+    #[serde(default = "default_res_sd_present")]
+    pub sd_present: String,
+    #[serde(default = "default_res_msaa")]
+    pub msaa: String,
+}
+
+impl Default for ResolutionConfig {
+    fn default() -> Self {
+        Self {
+            output: default_res_output(),
+            render: default_res_render(),
+            presets: default_res_presets(),
+            sd_present: default_res_sd_present(),
+            msaa: default_res_msaa(),
+        }
+    }
+}
+
+fn default_res_output() -> String {
+    "1280x720".to_string()
+}
+fn default_res_render() -> String {
+    "output".to_string()
+}
+fn default_res_presets() -> Vec<String> {
+    ["640x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+fn default_res_sd_present() -> String {
+    "crop".to_string()
+}
+fn default_res_msaa() -> String {
+    "auto".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -502,6 +559,8 @@ pub struct ConfigFile {
     pub s_marvelous: Option<SMarvelousConfig>,
     #[serde(default)]
     pub smx_hardware: Option<SmxHardwareConfig>,
+    #[serde(default)]
+    pub resolution: Option<ResolutionConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -539,6 +598,7 @@ pub fn init() {
                     overlay_menu: None,
                     s_marvelous: None,
                     smx_hardware: None,
+                    resolution: None,
                 }
             }
         },
@@ -565,6 +625,7 @@ pub fn init() {
                 overlay_menu: None,
                 s_marvelous: None,
                 smx_hardware: None,
+                resolution: None,
             }
         }
     };

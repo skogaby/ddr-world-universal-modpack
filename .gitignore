@@ -14,3 +14,4 @@ log.txt
 
 # Shader build intermediates (committed artifacts are the .gsp under data_mods/)
 /shaders/build/
+**/shader_dump/

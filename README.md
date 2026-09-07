@@ -92,6 +92,9 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 
 ![SMX Touch Overlay](screenshots/smx_overlay.png)
 
+### Custom Resolution
+Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or any 16:9 size) and — for the CRT cabinets DDR World officially dropped — the 4:3 SD-cabinet output (640×480 through the game's own crop or letterbox path). Pick RESOLUTION and RENDER SCALE in the mod menu and restart; the D3D device is created once at boot, so changes always apply at the next launch. Off by default. In fullscreen the requested size must be a display mode your panel supports, or the mod logs a warning and stays at 720p; if you ever pick a size your display cannot show, edit `resolution.output` in `mod-config.json` back to `1280x720`. Do not combine with spice2x's `-forceres` / `-windowresize` options — those rewrite the back-buffer size behind the game's back.
+
 ## Full Feature List
 
 | Mod | What it does |
@@ -115,6 +118,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 | **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses). |
 | **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
+| **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
 | **Anytime Speedmod Adjustment** | Change your speed mod at any point during a song, not just the first ~10 seconds. |
@@ -154,6 +158,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `custom_options` | Option persistence gates, preview tuning, menu ordering/placement |
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
 | `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
+| `resolution` | Custom Resolution: `output` (`WxH`; 4:3 sizes = SD-cabinet mode), `render` (`output` / `WxH` / `NN%`), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`), `msaa` (`auto` / `stock`) — `output`/`render` also editable in the mod menu; all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |

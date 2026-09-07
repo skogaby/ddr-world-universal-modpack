@@ -12,6 +12,20 @@ use crate::core::scanner::{
 use crate::{log_info, log_warn};
 use std::collections::HashMap;
 
+/// Addresses the Custom Resolution mod needs before `resolve_derived` runs —
+/// see [`SignatureStore::custom_resolution_anchors`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CustomResolutionAnchors {
+    pub aa_config_imm: Option<*const u8>,
+    pub graphics_init: Option<*const u8>,
+    pub render_surfaces_global: Option<*const u8>,
+    pub screen_w_global: Option<*const u8>,
+    pub screen_h_global: Option<*const u8>,
+    pub surface_create: Option<*const u8>,
+    pub present_depth_release: Option<*const u8>,
+    pub present_depth_addref: Option<*const u8>,
+}
+
 pub struct SignatureDefinition {
     pub name: &'static str,
     pub pattern: &'static str,
@@ -1902,6 +1916,38 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 53 48 83 EC 30 48 C7 44 24 ?? FE FF FF FF 48 63 D9 48 8D 05 ?? ?? ?? ?? 48 89 44 24 ?? 8B 0D ?? ?? ?? ?? 85 C9 7E ?? FF 15 ?? ?? ?? ?? 90 48 8D 0C 9B 48 C1 E1 05 48 8B 05 ?? ?? ?? ?? 48 03 48 28 0F B6 81 8F 00 00 00 48 8D 4C 08 11 41 B8 03 00 00 00 48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B CB 85 C0 75 ?? E8 ?? ?? ?? ?? 0F B6 D8 EB ?? E8 ?? ?? ?? ?? 0F B6 D8",
         description: "sound_bank_create_router(i32 file_id) entry — the FileManager 'sound'-category load-completion callback's bank creator: path extension 'xsb' => sound-bank create, anything else => wavebank_create (the detoured entry — calls into the router land on the patched function, so the restart's re-create re-qualifies through the preview bind branch for free). Distinctive FileManager row walk kept literal: `LEA RCX,[RBX+RBX*4]; SHL RCX,5` (0xA0 row stride), rows base at [mgr+0x28], path length byte at row+0x8F, the extension backset LEA (+0x11), and the strncmp('xsb', 3) setup; both dispatch CALL rel32s and every global disp wildcarded (the post-lock `90` NOP is present on all four builds). Restart executor step 4.",
     },
+    // ── Custom Resolution (mods/custom_resolution; planning
+    //    .agents/planning/2026-09-05-arbitrary-resolution) ──────────────
+    SignatureDefinition {
+        name: "display_backbuffer_dims",
+        pattern: "80 79 12 00 48 8B F1 74 16 C7 05 ?? ?? ?? ?? 00 05 00 00 C7 05 ?? ?? ?? ?? D0 02 00 00 EB 14 C7 05 ?? ?? ?? ?? 80 02 00 00 C7 05 ?? ?? ?? ?? E0 01 00 00",
+        description: "Back-buffer size selector inside the display-init function (FUN_1801ef6d0 on 20260616): `CMP byte [RCX+0x12],0` (the onBoot display struct's HD flag = machineType ∉ {0,1}) then the HD branch `MOV [screen_w],0x500; MOV [screen_h],0x2d0` and the SD else-branch `0x280/0x1e0`. These two globals are the ONLY origin of the physical resolution (D3DPRESENT_PARAMETERS BackBufferWidth/Height, the display surface, the DISPLAY viewport, the SYSTEM/DEBUG_DIALOG lists, the letterbox dst rect). Consumers read: imm32 at match+15/+25 (HD w/h) and +37/+47 (SD w/h) — custom_resolution rewrites all four to the OUTPUT dims so the machine type stops mattering; RIP disp32 at match+11/+21 → derived screen_w_global / screen_h_global. Unique on 20250805/20260224/20260721/20260825 + the live install.",
+    },
+    SignatureDefinition {
+        name: "window_client_size",
+        pattern: "66 C7 45 ?? 01 00 C7 45 ?? 00 05 00 00 C7 45 ?? D0 02 00 00 48 89 7D ?? 48 89 7D ?? C7 45 ?? 00 00 01 00",
+        description: "The application window descriptor init in the game's main (FUN_180003bf0 on 20260825): `MOV word [RBP+d],1` then the CLIENT size `MOV dword [RBP+d],0x500; MOV dword [RBP+d],0x2d0` (imm32 at match+9 / +16), followed by the 0x10000 flags word. The descriptor reaches `AdjustWindowRectEx` + `CreateWindowExW` (FUN_18021e120) BEFORE display init, so it is the one place the window's client size is decided; the fullscreen path later restyles the window to the desktop, but under spice2x `-w` (which swallows every later SetWindowPos for MDX) this IS the presented client size — a non-720p back-buffer gets stretched into it unless custom_resolution rewrites both imms to the OUTPUT dims (its `window_client_sites`). RBP disp8s wildcarded.",
+    },
+    SignatureDefinition {
+        name: "render_surface_hoist",
+        pattern: "45 33 C9 45 8D 41 15 41 BF 00 05 00 00 41 8B D7 41 8B CF E8",
+        description: "Inside the render-surface object ctor (FUN_1801f01a0 on 20260616, the 0x170-byte DAT_1806f1ef0): the compiler hoisted `MOV R15D,0x500` (imm at match+9) and, at match+0x2B, `MOV ESI,0x2d0` (imm +0x2C), then reuses both for EVERY 1280/720 surface-create argument (depth A/B, colour, render_color, render_depth, RENDER msaa pair, resolve, D24R readable depth; OFFSCREEN1 = R15D×R15D). The `E8` at match+0x13 is the first surface create `(R15D, R15D, 0x15)` → derived surface_create(w,h,fmt[,msaa]). The ctor body after the match also carries the RT-struct dim immediates custom_resolution::sites scans for (`C7 41 14 00 05 D0 02` ×3, `C7 41 14 00 05 00 05` ×1, `C7 40 16 D0 02 00 00` ×2 — first = PRESENT rt[0x10]) and, after that first PRESENT store, the CALL triple bind_colour / depth release / depth addref → derived present_depth_release / present_depth_addref. Unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "list_viewport_table",
+        pattern: "44 0F 28 2D ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 85 ?? ?? 00 00 C7 85 ?? ?? 00 00 00 05 00 00 C7 85 ?? ?? 00 00 D0 02 00 00",
+        description: "Start of the eight-entry `{name*, w, h}` stack table in the ScreenCommandList viewport builder (FUN_1801f5d10 on 20260616): the MOVAPS XMM13 constant load that precedes entry 0 (`LEA RAX,[name]; MOV [RBP+d],RAX; MOV dword [RBP+d+8],0x500; MOV dword [RBP+d+0xC],0x2d0`). The MOVAPS prefix is what makes the hit unique — the bare store pair also matches entry 1. custom_resolution::sites::viewport_pairs scans the ≤0x140-byte window after the match for every `C7 85 disp32 imm32` with imm ∈ {0x500,0x2d0} paired by (disp, disp+4): 5 wide pairs (FRONT/MIDDLE/BACK/OFFSCREEN0/RENDER_CAPTURE) + 1 square pair (OFFSCREEN1); SYSTEM and DEBUG_DIALOG take the screen dims from registers and are untouched. Unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "letterbox_rect_fn",
+        pattern: "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 44 8B 0D ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 33 C0 44 8B DA 48 8B D9 44 8B D0 45 85 C9 74 ?? 45 8B 10 41 8B 48 04 BA 00 05 00 00 8B F8 8B F0 44 8B C8 41 B8 01 00 00 00 44 3B D2 74 ?? 45 3B D8 75 ?? B8 A0 00 00 00 BA 60 04 00 00",
+        description: "Entry of the present-chain letterbox/crop rect function `(this, int mode)` (FUN_1801f3f60 on 20260616) — the engine's own SD scaler: `screen_w == 0x500` ⇒ 1:1 POINT copy; mode 1 ⇒ 960-px centre crop (src x 0xA0..0x460, LINEAR); else width-fit letterbox. Called by the present-chain ctor, by the TEST-menu entry with mode 0, and with mode 1 at every scene transition (FUN_18002e7b0 ×13) — so an operator-chosen mode must be re-asserted by a detour on THIS entry, never by a one-shot write. Consumers read: detour target = match; `MOV EDX,0x500` imm at match+0x35 (src x1 AND the equality comparand — patched to the render width so the 1:1 branch fires exactly when render == output); `MOV dword [RBX+0x298],0x2d0` (src y1) at match+0xDD via sites::letterbox_sites. Unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "scissor_handler",
+        pattern: "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 01 33 F6 48 8B FA 48 8B D9 8D 6E 18 48 39 70 30 74 ?? 44 8B 40 24 45 85 C0 74 ?? 48 8B 49 08 8B 50 20 48 81 C1 08 02 00 00 E8",
+        description: "Entry of the ScreenCommandList walker's tag-0x0C (scissor) handler `(walker_ctx**, record*)` (FUN_180269080 on 20260616): emits gd 0x11 (scissor-enable render state) then gd 0x18 with the record's `{u16 x,y,w,h}` (record+6..+0xE) copied VERBATIM — render-target pixels, no canvas scaling — into what becomes `SetScissorRect`. The 2D draw handlers convert canvas→NDC via the walker's context (`*ctx`: +0x00 offset/rt, +0x10 1/canvas) and the segment header's viewport dims (`ctx[1]+0x144/+0x146`), so with a render target ≠ 1280×720 every scissored layer clips wrong; custom_resolution::scissor detours this entry and rescales the record before the original runs. Prologue kept literal incl. the `LEA EBP,[RSI+0x18]` (gd tag 0x18 constant), the +0x30/+0x24 walker checks and the `ADD RCX,0x208` emitter offset. Unique on all four builds.",
+    },
 ];
 
 pub struct SignatureStore {
@@ -2028,6 +2074,7 @@ impl SignatureStore {
         self.derive_shutter_actor_layout();
         self.derive_strip_hud_anchors();
         self.derive_frame_tick_global();
+        self.derive_custom_resolution();
         self.find_gauge_vtables();
         self.derive_judge_rebuild_trio();
         self.derive_song_rate_runtime_sites();
@@ -4847,6 +4894,161 @@ impl SignatureStore {
                 matches.len(),
                 off
             );
+        }
+    }
+
+    /// Custom Resolution anchors (mods/custom_resolution), computed from the
+    /// LINEAR hits only so the mod can use them inside `early_apply` (before
+    /// `resolve_derived`); [`Self::derive_custom_resolution`] publishes the
+    /// same values into the store for the boot log / sweep. Anchors:
+    /// `fps_target_imm32` (onBoot), `display_backbuffer_dims`,
+    /// `render_surface_hoist`. Fields:
+    /// - `aa_config_imm`: onBoot's `MOV dword [RSP+d],3` AA-config store at
+    ///   fps+0x69 (imm at +0x6D) — forced to 0 off-stock.
+    /// - `graphics_init`: the `CALL rel32` right after that store (the
+    ///   display-struct consumer; the mod's post-init fixup detour).
+    /// - `render_surfaces_global`: onBoot's first `MOV RCX,[RIP+d]` after the
+    ///   graphics_init CALL loads the 0x170-byte render-surface object
+    ///   (DAT_1806f1ef0 on 20260616; PRESENT rt struct at +0x80).
+    /// - `screen_w_global` / `screen_h_global`: RIP targets of the HD-branch
+    ///   stores in `display_backbuffer_dims` (match+11 / +21).
+    /// - `surface_create`: CALL target at hoist+0x13 — `(w, h, fmt[, msaa])`.
+    /// - `present_depth_release` / `present_depth_addref`: the 2nd/3rd CALL
+    ///   rel32 after the ctor's first `MOV dword [RAX+0x16],0x2d0` (PRESENT
+    ///   rt dims store): `bind_colour(rt, surf); release(old_depth);
+    ///   addref(new_depth)` — the refcount pair the depth-replacement fixup
+    ///   must mirror.
+    /// Every field is independent (`None` = shape not found).
+    pub fn custom_resolution_anchors(&self) -> CustomResolutionAnchors {
+        let mut a = CustomResolutionAnchors::default();
+        let in_module = |p: *const u8| -> bool {
+            (p as usize) >= (self.base as usize) && (p as usize) < (self.base as usize + self.size)
+        };
+
+        // ── onBoot: AA imm, graphics_init, render_surfaces_global ──
+        if let Some(fps) = self.get_address("fps_target_imm32") {
+            const AA_OFF: usize = 0x69;
+            const SCAN_START: usize = 0x71;
+            const SCAN_LEN: usize = 0x20;
+            let body = unsafe { std::slice::from_raw_parts(fps, 0x100) };
+            // Stock imm is 3; custom_resolution may already have written 0
+            // by the time `resolve_derived` re-derives this (the patch layer
+            // checks the stock value itself before writing).
+            if body[AA_OFF] == 0xC7
+                && body[AA_OFF + 1] == 0x44
+                && body[AA_OFF + 2] == 0x24
+                && (body[AA_OFF + 4..AA_OFF + 8] == [0x03, 0x00, 0x00, 0x00]
+                    || body[AA_OFF + 4..AA_OFF + 8] == [0x00, 0x00, 0x00, 0x00])
+            {
+                a.aa_config_imm = Some(unsafe { fps.add(AA_OFF + 4) });
+            }
+            if let Some(i) = (SCAN_START..SCAN_START + SCAN_LEN).find(|&i| body[i] == 0xE8) {
+                unsafe {
+                    let target = decode_call_rel32(fps.add(i));
+                    if in_module(target) {
+                        a.graphics_init = Some(target);
+                    }
+                    for j in (i + 5)..(i + 5 + 0x60).min(body.len() - 7) {
+                        if body[j] == 0x48 && body[j + 1] == 0x8B && body[j + 2] == 0x0D {
+                            let g = decode_rip_relative(fps.add(j + 3));
+                            if in_module(g) {
+                                a.render_surfaces_global = Some(g);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── screen globals ──
+        if let Some(m) = self.get_address("display_backbuffer_dims") {
+            // `C7 05 <disp32> <imm32>`: RIP is the END of the instruction, i.e.
+            // 4 bytes (the imm32) past what `decode_rip_relative` assumes.
+            let w = unsafe { decode_rip_relative(m.add(11)).add(4) };
+            let h = unsafe { decode_rip_relative(m.add(21)).add(4) };
+            if in_module(w) {
+                a.screen_w_global = Some(w);
+            }
+            if in_module(h) {
+                a.screen_h_global = Some(h);
+            }
+        }
+
+        // ── surface ctor: surface_create + PRESENT depth refcount pair ──
+        if let Some(h) = self.get_address("render_surface_hoist") {
+            const CALL_OFF: usize = 0x13;
+            const WINDOW: usize = 0x1200;
+            let body = unsafe { std::slice::from_raw_parts(h, WINDOW) };
+            if body[CALL_OFF] == 0xE8 {
+                let t = unsafe { decode_call_rel32(h.add(CALL_OFF)) };
+                if in_module(t) {
+                    a.surface_create = Some(t);
+                }
+            }
+            const PRESENT_DIMS: [u8; 7] = [0xC7, 0x40, 0x16, 0xD0, 0x02, 0x00, 0x00];
+            if let Some(p) = body.windows(7).position(|w| w == PRESENT_DIMS) {
+                let mut calls = Vec::new();
+                let mut j = p + 7;
+                while j < (p + 7 + 0x60).min(body.len() - 5) && calls.len() < 3 {
+                    if body[j] == 0xE8 {
+                        calls.push(unsafe { decode_call_rel32(h.add(j)) });
+                        j += 5;
+                    } else {
+                        j += 1;
+                    }
+                }
+                if calls.len() == 3 && in_module(calls[1]) && in_module(calls[2]) {
+                    a.present_depth_release = Some(calls[1]);
+                    a.present_depth_addref = Some(calls[2]);
+                }
+            }
+        }
+        a
+    }
+
+    /// Publish [`Self::custom_resolution_anchors`] into the store (boot log +
+    /// sweep visibility). One `[+]`/`[-]` line per anchor.
+    fn derive_custom_resolution(&mut self) {
+        let a = self.custom_resolution_anchors();
+        for (name, v, from) in [
+            ("aa_config_imm", a.aa_config_imm, "fps_target_imm32"),
+            ("graphics_init", a.graphics_init, "fps_target_imm32"),
+            ("render_surfaces_global", a.render_surfaces_global, "onBoot"),
+            (
+                "screen_w_global",
+                a.screen_w_global,
+                "display_backbuffer_dims",
+            ),
+            (
+                "screen_h_global",
+                a.screen_h_global,
+                "display_backbuffer_dims",
+            ),
+            ("surface_create", a.surface_create, "render_surface_hoist"),
+            (
+                "present_depth_release",
+                a.present_depth_release,
+                "render_surface_hoist",
+            ),
+            (
+                "present_depth_addref",
+                a.present_depth_addref,
+                "render_surface_hoist",
+            ),
+        ] {
+            match v {
+                Some(p) => {
+                    self.resolved.insert(name.into(), p);
+                    log_info!(
+                        "  [+] {} (derived from {}) @ +0x{:X}",
+                        name,
+                        from,
+                        (p as usize).wrapping_sub(self.base as usize)
+                    );
+                }
+                None => log_warn!("  [-] {} -- shape not found (from {})", name, from),
+            }
         }
     }
 

@@ -131,6 +131,7 @@ fn init() {
     let mut mods_to_register: Vec<Box<dyn Mod>> = vec![
         Box::new(mods::song_limit_expansion::SongLimitExpansionMod::new()),
         Box::new(mods::fps_unlock::FpsUnlockMod::new()),
+        Box::new(mods::custom_resolution::CustomResolutionMod::new()),
         Box::new(mods::fast_bootup::FastBootupMod::new()),
         Box::new(mods::skip_intros::SkipIntrosMod::new()),
         Box::new(mods::timer_freeze::TimerFreezeMod::new()),

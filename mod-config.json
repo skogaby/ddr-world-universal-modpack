@@ -29,7 +29,8 @@
     "training-mode": true,
     "decorative-option-headers": true,
     "s-marvelous": true,
-    "split-ssq-auto-discovery": true
+    "split-ssq-auto-discovery": true,
+    "custom-resolution": false
   },
   "diagnostics": {
     "profiling": false
@@ -330,5 +331,18 @@
     "output_lights": true,
     "output_cabinet_lights": true,
     "force_gold_cabinet": true
+  },
+  "resolution": {
+    "output": "1280x720",
+    "render": "output",
+    "presets": [
+      "640x480",
+      "1280x720",
+      "1920x1080",
+      "2560x1440",
+      "3840x2160"
+    ],
+    "sd_present": "crop",
+    "msaa": "auto"
   }
 }

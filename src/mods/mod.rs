@@ -24,6 +24,8 @@
 //!   stock JUDGEMENT OFFSET, keyed by the highlighted song on the wheel.
 //! - **anytime_speedmod** — Removes the ~10 s in-song speed-mod adjustment
 //!   window so the nav buttons work for the whole song (cabinet-wide).
+//! - **custom_resolution** — Native 16:9 rendering at 1080p/1440p/4K and the
+//!   4:3 SD-cabinet output (640×480) through boot-time immediate patches.
 
 pub mod announcer_mute;
 pub mod anytime_speedmod;
@@ -32,6 +34,7 @@ pub mod autoplay;
 pub mod center_arrows_single;
 pub mod classic_difficulty;
 pub mod config;
+pub mod custom_resolution;
 pub mod decorative_option_headers;
 pub mod fast_bootup;
 pub mod folder_expansion;
