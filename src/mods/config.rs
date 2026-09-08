@@ -457,6 +457,12 @@ pub struct PowerUserStatisticsConfig {
     /// Default 0; clamped -400..=200.
     #[serde(default)]
     pub widget_offset_y: Option<i32>,
+    /// Per-line text alignment about each side's anchor x: `"center"`
+    /// (default), `"outer"` (P1 left-aligned / P2 right-aligned — flush
+    /// toward the screen edges) or `"inner"` (P1 right / P2 left — biased
+    /// toward screen centre). Unknown values warn once and use the default.
+    #[serde(default)]
+    pub widget_alignment: Option<String>,
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-

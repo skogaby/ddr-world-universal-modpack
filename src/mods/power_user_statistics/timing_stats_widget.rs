@@ -10,11 +10,11 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::log_info;
 use crate::mods::config;
 use crate::services::{custom_options, widget_renderer};
 use crate::types::scenes::scene;
 use crate::widgets::text_widget::{TextAlignment, TextWidget};
+use crate::{log_info, log_warn};
 
 use super::{calorie_feed, data_feed};
 
@@ -46,6 +46,7 @@ pub const OFFSET_Y_MAX: i32 = 200;
 const SCALE_ROW_KEY: &str = "pus_widget_scale";
 const OFFSET_X_ROW_KEY: &str = "pus_widget_offset_x";
 const OFFSET_Y_ROW_KEY: &str = "pus_widget_offset_y";
+const ALIGN_ROW_KEY: &str = "pus_widget_alignment";
 const OWNING_MOD_ID: &str = "power-user-statistics";
 
 /// Live layout values (already clamped). Written by config seeding and the
@@ -53,6 +54,63 @@ const OWNING_MOD_ID: &str = "power-user-statistics";
 static LIVE_SCALE_PERCENT: AtomicI32 = AtomicI32::new(SCALE_DEFAULT);
 static LIVE_OFFSET_X: AtomicI32 = AtomicI32::new(0);
 static LIVE_OFFSET_Y: AtomicI32 = AtomicI32::new(0);
+/// `BlockAlignment` index (see `BlockAlignment::from_index`).
+static LIVE_ALIGNMENT: AtomicI32 = AtomicI32::new(0);
+
+/// How each side's lines align about its anchor x. The anchor itself
+/// (`P1_CENTER_X` ± offset, mirrored) does NOT move with the alignment —
+/// OUTER/INNER hang the lines off the same x toward the edge / the centre,
+/// and the H-offset row repositions the anchor if wanted. Mirrored per side
+/// so the two blocks always read as the same layout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockAlignment {
+    /// Every line centred about the anchor (both sides).
+    Center = 0,
+    /// Flush toward the screen edges: P1 left-aligned, P2 right-aligned.
+    Outer = 1,
+    /// Biased toward screen centre: P1 right-aligned, P2 left-aligned.
+    Inner = 2,
+}
+
+impl BlockAlignment {
+    fn from_index(i: i32) -> Self {
+        match i {
+            1 => Self::Outer,
+            2 => Self::Inner,
+            _ => Self::Center,
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "center" => Some(Self::Center),
+            "outer" => Some(Self::Outer),
+            "inner" => Some(Self::Inner),
+            _ => None,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Outer => "outer",
+            Self::Inner => "inner",
+        }
+    }
+
+    /// Native per-line alignment for `side` (0 = P1, 1 = P2).
+    fn text_alignment(self, side: usize) -> TextAlignment {
+        match (self, side) {
+            (Self::Center, _) => TextAlignment::Center,
+            (Self::Outer, 0) | (Self::Inner, 1) => TextAlignment::Left,
+            _ => TextAlignment::Right,
+        }
+    }
+}
+
+fn live_alignment() -> BlockAlignment {
+    BlockAlignment::from_index(LIVE_ALIGNMENT.load(Ordering::Relaxed))
+}
 
 struct TimingStatsState {
     p1: Option<TextWidget>,
@@ -94,6 +152,7 @@ fn apply_layout(w: &TextWidget, side: usize) {
     let (x, y, scale) = layout_for_side(side);
     w.set_position(x, y);
     w.set_scale(scale, scale);
+    w.set_alignment(live_alignment().text_alignment(side));
 }
 
 /// Re-apply the live layout to any already-created widgets (render thread).
@@ -113,7 +172,6 @@ fn relayout_widgets() {
 fn create_player_widget(side: usize) -> Option<TextWidget> {
     let w = widget_renderer::create_text_widget()?;
     apply_layout(&w, side);
-    w.set_alignment(TextAlignment::Center);
     w.set_color(1.0, 1.0, 1.0, 1.0);
     w.set_system_outline();
     w.set_text("EX: -0\nCurrent: +0ms\nMax: 0ms\nAbs(μ): 0.00ms\nμ: +0.00ms\nCal: 0.00");
@@ -156,6 +214,7 @@ fn persist_section() {
             "widget_scale_percent": LIVE_SCALE_PERCENT.load(Ordering::Relaxed),
             "widget_offset_x": LIVE_OFFSET_X.load(Ordering::Relaxed),
             "widget_offset_y": LIVE_OFFSET_Y.load(Ordering::Relaxed),
+            "widget_alignment": live_alignment().key(),
         }),
     );
 }
@@ -169,8 +228,26 @@ fn on_layout_row_change(slot: &'static AtomicI32, min: i32, max: i32, what: &str
     log_info!("timing_stats_widget: {} set to {}", what, clamped);
 }
 
+/// Read the operator alignment from `power_user_statistics.widget_alignment`
+/// (unknown keys warn once and fall back to CENTER).
+fn configured_alignment() -> BlockAlignment {
+    let raw = config::get()
+        .and_then(|c| c.power_user_statistics.as_ref())
+        .and_then(|s| s.widget_alignment.clone());
+    match raw {
+        None => BlockAlignment::Center,
+        Some(k) => BlockAlignment::from_key(&k).unwrap_or_else(|| {
+            log_warn!(
+                "timing_stats_widget: unknown widget_alignment {:?} -- using center",
+                k
+            );
+            BlockAlignment::Center
+        }),
+    }
+}
+
 fn register_overlay_rows() {
-    use crate::mods::mod_menu::{self, ScalarRowSpec};
+    use crate::mods::mod_menu::{self, EnumRowSpec, ScalarRowSpec};
     mod_menu::register_scalar_row(ScalarRowSpec {
         key: SCALE_ROW_KEY.to_string(),
         label: "Stats Widget Scale (%)".to_string(),
@@ -215,6 +292,27 @@ fn register_overlay_rows() {
             on_layout_row_change(&LIVE_OFFSET_Y, OFFSET_Y_MIN, OFFSET_Y_MAX, "v-offset px", v)
         }),
     });
+    mod_menu::register_enum_row(EnumRowSpec {
+        key: ALIGN_ROW_KEY.to_string(),
+        label: "Stats Widget Alignment".to_string(),
+        hint: "Line alignment, mirrored: CENTERED, OUTER EDGE (flush to the screen edges) or INNER EDGE (toward centre)."
+            .to_string(),
+        parent_row_key: Some(OWNING_MOD_ID.to_string()),
+        values: vec![0, 1, 2],
+        labels: vec![
+            "CENTERED".to_string(),
+            "OUTER EDGE".to_string(),
+            "INNER EDGE".to_string(),
+        ],
+        initial_value: LIVE_ALIGNMENT.load(Ordering::Relaxed),
+        on_change: Arc::new(|v| {
+            let a = BlockAlignment::from_index(v);
+            LIVE_ALIGNMENT.store(a as i32, Ordering::Relaxed);
+            persist_section();
+            relayout_widgets();
+            log_info!("timing_stats_widget: alignment set to {}", a.key());
+        }),
+    });
 }
 
 pub fn enable() {
@@ -248,12 +346,14 @@ pub fn enable() {
         ),
         Ordering::Relaxed,
     );
+    LIVE_ALIGNMENT.store(configured_alignment() as i32, Ordering::Relaxed);
     register_overlay_rows();
     log_info!(
-        "timing_stats_widget: enabled (scale {}%, offset x {} y {}; widgets created on first gameplay entry)",
+        "timing_stats_widget: enabled (scale {}%, offset x {} y {}, align {}; widgets created on first gameplay entry)",
         LIVE_SCALE_PERCENT.load(Ordering::Relaxed),
         LIVE_OFFSET_X.load(Ordering::Relaxed),
-        LIVE_OFFSET_Y.load(Ordering::Relaxed)
+        LIVE_OFFSET_Y.load(Ordering::Relaxed),
+        live_alignment().key()
     );
 }
 
@@ -270,7 +370,12 @@ fn ensure_widgets_created(s: &mut TimingStatsState) {
 }
 
 pub fn disable() {
-    crate::mods::mod_menu::remove_rows_for(&[SCALE_ROW_KEY, OFFSET_X_ROW_KEY, OFFSET_Y_ROW_KEY]);
+    crate::mods::mod_menu::remove_rows_for(&[
+        SCALE_ROW_KEY,
+        OFFSET_X_ROW_KEY,
+        OFFSET_Y_ROW_KEY,
+        ALIGN_ROW_KEY,
+    ]);
     let st = state().clone();
     widget_renderer::run_on_render_thread(move || {
         let mut s = st.lock().unwrap();

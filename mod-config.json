@@ -346,8 +346,9 @@
     "msaa": "off"
   },
   "power_user_statistics": {
-    "widget_offset_x": -35,
-    "widget_offset_y": 30,
-    "widget_scale_percent": 70
-  }
+    "widget_alignment": "inner",
+    "widget_offset_x": 5,
+    "widget_offset_y": 0,
+    "widget_scale_percent": 80
+  },
 }
