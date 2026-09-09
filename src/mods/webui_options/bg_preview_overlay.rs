@@ -100,7 +100,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
+use crate::core::deferred_work::{Deadline, Wait};
 use crate::services::avs_layeredfs::cache_hasher::CacheHasher;
 use crate::services::avs_layeredfs::mod_paths;
 use crate::services::{bm2d_api, bm2d_package, custom_options, widget_renderer};
@@ -144,15 +146,14 @@ const ATTR_DISPLAY_SETUP: u32 = 0x200;
 /// `bg_root` clip export name (uniform across all 51 background arcs).
 const TEMPLATE: &str = "bg_root";
 
-/// Pump polls (render-hook ticks, NOT frames — ~300–600/s on cabinet) before
-/// a `Loading` package gives up. A background resolves in ~141 polls in
-/// isolation; 3600 (~6–12 s wall) only ever reclaims a genuinely-broken load.
-const LOAD_TIMEOUT_POLLS: u32 = 3600;
+/// Elapsed load budget, preserving the old 3600-poll budget's upper bound
+/// (~6-12 seconds at the former per-wrapper cadence).
+const LOAD_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// A resident background package's load lifecycle.
 enum Phase {
-    /// Package requested; polling `is_ready` (`polls` toward the timeout).
-    Loading { polls: u32 },
+    /// Package requested; polling `is_ready` until the elapsed deadline.
+    Loading { deadline: Deadline },
     /// Package created + ready — a layer can be instantiated from it.
     Ready,
     /// Load timed out / package rejected — chrome only for this value.
@@ -474,7 +475,7 @@ fn on_preview_request(side: u8, option_id: &str) {
         };
         // One pump chain at a time: pump_tick self-reschedules while work
         // remains, so scheduling here while a chain is live would stack
-        // chains (double-polling → double-speed timeouts). `pump_running` is
+        // chains (redundant polling). `pump_running` is
         // only mutated under the lock on the render thread (callbacks + pump
         // are serial there).
         if wants_pump && !state.pump_running {
@@ -599,7 +600,9 @@ fn sync_window(state: &mut BgState, side: usize) -> bool {
                     key,
                     Resident {
                         ticket,
-                        phase: Phase::Loading { polls: 0 },
+                        phase: Phase::Loading {
+                            deadline: Deadline::new(Instant::now(), LOAD_TIMEOUT),
+                        },
                     },
                 );
                 started += 1;
@@ -867,8 +870,8 @@ fn poll_side(state: &mut BgState, side: usize) -> bool {
     let mut any_loading = false;
     let mut timed_out: Vec<u32> = Vec::new();
     for (key, res) in s.resident.iter_mut() {
-        let polls = match res.phase {
-            Phase::Loading { polls } => polls,
+        let deadline = match res.phase {
+            Phase::Loading { deadline } => deadline,
             Phase::Failed => {
                 if bm2d_package::is_ready(&res.ticket) {
                     res.phase = Phase::Ready;
@@ -877,25 +880,27 @@ fn poll_side(state: &mut BgState, side: usize) -> bool {
             }
             Phase::Ready => continue,
         };
-        if bm2d_package::is_ready(&res.ticket) {
-            res.phase = Phase::Ready;
-        } else if polls + 1 >= LOAD_TIMEOUT_POLLS {
-            res.phase = Phase::Failed;
-            let asset_id = categories
-                .get(key.0)
-                .and_then(|c| c.asset_ids.get(key.1).copied())
-                .unwrap_or(0);
-            timed_out.push(asset_id);
-        } else {
-            res.phase = Phase::Loading { polls: polls + 1 };
-            any_loading = true;
+        match deadline.poll(
+            bm2d_package::is_ready(&res.ticket).then_some(()),
+            Instant::now(),
+        ) {
+            Wait::Ready(()) => res.phase = Phase::Ready,
+            Wait::TimedOut => {
+                res.phase = Phase::Failed;
+                let asset_id = categories
+                    .get(key.0)
+                    .and_then(|c| c.asset_ids.get(key.1).copied())
+                    .unwrap_or(0);
+                timed_out.push(asset_id);
+            }
+            Wait::Pending => any_loading = true,
         }
     }
     for asset_id in timed_out {
         if s.warned.insert(asset_id) {
             log_warn!(
-                "bg_preview_overlay: package never ready after {} polls (asset {}, side {}) — chrome only",
-                LOAD_TIMEOUT_POLLS,
+                "bg_preview_overlay: package never ready after {} seconds (asset {}, side {}) -- chrome only",
+                LOAD_TIMEOUT.as_secs(),
                 asset_id,
                 side
             );

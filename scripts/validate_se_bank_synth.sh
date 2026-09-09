@@ -29,6 +29,10 @@
 #      exact-block input, including encoded silence.
 #   6. Determinism: two syntheses of the same input are byte-identical.
 #   7. Clip/drop bookkeeping (content_ms < 0 clips to 0; >= capacity drops).
+#   8. Extent-limited synthesis (mix/encode through the last clap, pad with
+#      the canonical silence block) is byte-identical to a naive
+#      full-capacity mix + encode — the proof behind the ~10× faster
+#      per-song synthesis and the post-onset tick re-lay.
 #
 # Requires: cargo (host toolchain) and a ddr-chart-tools SOURCE checkout
 # (--chart-tools, DDR_CHART_TOOLS, or ../ddr-chart-tools). Nothing else; no
@@ -497,6 +501,94 @@ fn main() {
         "clip/drop bookkeeping at the capacity boundary (mixed=3, clipped=1, dropped=2)",
         s3.mixed == 3 && s3.clipped == 1 && s3.dropped == 2,
         format!("mixed={} clipped={} dropped={}", s3.mixed, s3.clipped, s3.dropped),
+    );
+
+    // ── 9. Sample-exact entry (gameplay-timing-fixes tick alignment) ──
+    // The ms path is a thin conversion over the sample path: identical
+    // bytes for the same pattern; a half-sample fractional shift lands at
+    // the neighbouring sample (decoded onset moves by exactly one frame);
+    // the block helpers are consistent with the shift helper.
+    let samples: Vec<i64> = pattern.iter().map(|&ms| (ms as i64 * 44_100 + 500) / 1000).collect();
+    let s4 = ours::synthesize_track_at_samples(&clap, &samples);
+    ok &= check(
+        "synthesize_track == synthesize_track_at_samples for the same pattern",
+        s4.encoded == s1.encoded && s4.mixed == s1.mixed,
+        String::new(),
+    );
+    // ── 9a. Extent-limited synthesis is byte-identical to a full encode ──
+    // The mixer encodes only through the last clap and pads the segment with
+    // the canonical silence block; MS-ADPCM blocks are self-contained, so
+    // the bytes must equal a naive full-capacity mix + encode — proven here
+    // against an independent reference built the naive way, for a pattern
+    // with a clap straddling a block boundary and one truncated at capacity.
+    {
+        let padded_samples = c.sample_seg_len / 70 * 128;
+        let cap_samples = ours::TICK_CAPACITY_MS as i64 * 44_100 / 1000;
+        let straddle: Vec<i64> = samples
+            .iter()
+            .copied()
+            .chain([128 * 1000 + 77, cap_samples - 1000, cap_samples - 1])
+            .collect();
+        let mut full = vec![0i16; padded_samples];
+        for &pos in &straddle {
+            let pos = pos as usize;
+            let room = full.len().saturating_sub(pos);
+            for (slot, &s) in full[pos..].iter_mut().zip(&clap[..clap.len().min(room)]) {
+                *slot = (*slot as i32 + s as i32).clamp(-32768, 32767) as i16;
+            }
+        }
+        let reference = synth::adpcm::encode_mono(&full);
+        let s4b = ours::synthesize_track_at_samples(&clap, &straddle);
+        ok &= check(
+            "extent-limited synthesis == naive full-capacity encode (byte-identical, incl. capacity-truncated clap)",
+            s4b.encoded == reference && reference.len() == c.sample_seg_len,
+            format!(
+                "first differing byte {:?}; lens {} vs {}",
+                s4b.encoded.iter().zip(&reference).position(|(a, b)| a != b),
+                s4b.encoded.len(),
+                reference.len()
+            ),
+        );
+        let empty = ours::synthesize_track_at_samples(&clap, &[]);
+        let all_silence = synth::adpcm::encode_mono(&vec![0i16; padded_samples]);
+        ok &= check(
+            "no-clap synthesis == all-silence full encode",
+            empty.encoded == all_silence && empty.mixed == 0,
+            String::new(),
+        );
+    }
+    let shifted: Vec<i64> = samples.iter().map(|s| s + 1).collect();
+    let s5 = ours::synthesize_track_at_samples(&clap, &shifted);
+    ok &= check(
+        "one-sample shift changes the track",
+        s5.encoded != s4.encoded && s5.mixed == s4.mixed,
+        String::new(),
+    );
+    let cap_samples = ours::TICK_CAPACITY_MS as i64 * 44_100 / 1000;
+    let s6 = ours::synthesize_track_at_samples(&clap, &[-1, 0, cap_samples - 1, cap_samples]);
+    ok &= check(
+        "sample-path clip/drop bookkeeping (mixed=3, clipped=1, dropped=1)",
+        s6.mixed == 3 && s6.clipped == 1 && s6.dropped == 1,
+        format!("mixed={} clipped={} dropped={}", s6.mixed, s6.clipped, s6.dropped),
+    );
+    ok &= check(
+        "block helpers: offset_for_sample(128*k) == k blocks, ceil rounds up",
+        ours::block_offset_for_sample(128 * 5) == 5 * 70
+            && ours::block_offset_for_sample(128 * 5 + 127) == 5 * 70
+            && ours::block_offset_for_sample(-3) == 0
+            && ours::ceil_block_bytes(1) == 70
+            && ours::ceil_block_bytes(70) == 70
+            && ours::ceil_block_bytes(71) == 140
+            && ours::shift_bytes_for_ms(0) == 0,
+        format!(
+            "{} {} {} {} {} {}",
+            ours::block_offset_for_sample(128 * 5),
+            ours::block_offset_for_sample(128 * 5 + 127),
+            ours::block_offset_for_sample(-3),
+            ours::ceil_block_bytes(1),
+            ours::ceil_block_bytes(70),
+            ours::ceil_block_bytes(71)
+        ),
     );
 
     println!();

@@ -42,8 +42,21 @@ const LATE_BINDING_MODS: &[&str] = &["folder-expansion", "webui-options"];
 
 /// Mods that default OFF when absent from the config `mods` map (every
 /// other mod defaults ON). Reserved for hardware-specific mods that are
-/// meaningless — or actively wrong — on cabinets without that hardware.
-const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware"];
+/// meaningless — or actively wrong — on cabinets without that hardware, and
+/// for engine-level fixes shipping in their first cabinet build
+/// (`gameplay-timing-fixes`, maintainer decision 2026-09-09: default OFF
+/// until the tester run confirms it).
+pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "gameplay-timing-fixes"];
+
+/// Whether a mod is enabled by the config `mods` map (or its default when
+/// the key is absent). The same rule `enable_with_config` applies; exposed so
+/// boot-time services that must install BEFORE the registry exists (the audio
+/// clock's XACT seams land in the pre-Initialize factory window) can honour
+/// the mod toggle.
+pub fn mod_enabled_in_config(config: &HashMap<String, bool>, id: &str) -> bool {
+    let default_on = !DEFAULT_OFF_MODS.contains(&id);
+    config.get(id).copied().unwrap_or(default_on)
+}
 
 /// Context passed to mods during initialization. Provides read-only access
 /// to the game module (base address, size) and resolved function signatures.
@@ -241,9 +254,7 @@ impl ModRegistry {
             if id == "mod-menu" {
                 continue;
             }
-            let default_on = !DEFAULT_OFF_MODS.contains(&id.as_str());
-            let should_enable = config.get(&id).copied().unwrap_or(default_on);
-            if should_enable {
+            if mod_enabled_in_config(config, &id) {
                 self.enable(&id);
             }
         }

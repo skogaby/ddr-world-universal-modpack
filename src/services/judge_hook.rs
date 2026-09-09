@@ -110,41 +110,44 @@ static mut JUDGE_DETOUR: Option<GenericDetour<JudgeNotesFn>> = None;
 /// The detour callback: runs pre-callbacks, calls the original, runs
 /// post-callbacks. `extern "C"` — must not panic or unwind across FFI.
 unsafe extern "C" fn judge_notes_dispatcher(actor: *mut u8, music_count: i32) {
+    use crate::services::audio_sync_diag::{self as diag, spans::Scope};
     // Snapshot the callback lists while holding the lock briefly. Running
     // callbacks outside the lock avoids deadlocks if a callback tries to
     // touch any other Mutex that the detour installer might hold.
-    let (pre, post) = {
-        let inner = match JUDGE_HOOK.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                // Poisoned — fall through to the original judgeNotes so
-                // vanilla play still works.
-                if let Some(ref hook) = JUDGE_DETOUR {
-                    hook.call(actor, music_count);
-                }
-                return;
+    diag::spans::dispatch_judge(
+        diag::trace_sink(),
+        actor as usize,
+        music_count,
+        || {
+            let (pre, post) = match JUDGE_HOOK.lock() {
+                Ok(inner) => (inner.pre.clone(), inner.post.clone()),
+                Err(_) => (Vec::new(), Vec::new()),
+            };
+            for e in pre.iter() {
+                let _callback = diag::span(Scope::JudgePreCallback, e.id as u64);
+                let cb = e.callback;
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cb(actor, music_count);
+                }));
             }
-        };
-        (inner.pre.clone(), inner.post.clone())
-    };
-
-    for e in pre.iter() {
-        let cb = e.callback;
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cb(actor, music_count);
-        }));
-    }
-
-    if let Some(ref hook) = JUDGE_DETOUR {
-        hook.call(actor, music_count);
-    }
-
-    for e in post.iter() {
-        let cb = e.callback;
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cb(actor, music_count);
-        }));
-    }
+            post
+        },
+        || {
+            if let Some(ref hook) = JUDGE_DETOUR {
+                hook.call(actor, music_count);
+            }
+        },
+        |post| {
+            for e in post.iter() {
+                let _callback = diag::span(Scope::JudgePostCallback, e.id as u64);
+                let cb = e.callback;
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cb(actor, music_count);
+                }));
+            }
+        },
+        |entry| diag::judge_tail(actor, music_count, entry),
+    );
 }
 
 /// Initialize the service — installs the single retour detour on `judgeNotes`.

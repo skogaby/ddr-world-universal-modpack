@@ -59,6 +59,12 @@ pub fn timeline() -> Option<&'static BankTimeline> {
 /// ordinary boots where no non-identity generation has armed.
 #[cfg(windows)]
 fn record_bank_event(kind: BankEventKind, file_id: i32, status: u8, path: BankCreatePath) {
+    crate::services::audio_sync_diag::record_bank(
+        matches!(kind, BankEventKind::Create),
+        file_id,
+        status,
+        path as u32,
+    );
     if !super::runtime::rate_recording_active() {
         return;
     }
@@ -607,6 +613,8 @@ unsafe extern "C" fn unregister_hook(file_id: i32) {
     let Some(hook) = (&*addr_of!(UNREGISTER_HOOK)).as_ref() else {
         return;
     };
+    // Invalidate diagnostic cue identities before the engine can destroy/reuse them.
+    crate::services::audio_sync_diag::xact::on_bank_unregister();
     // PRE-ORIGINAL (design req 26): retire the binding before the original
     // destroys the bank and closes the handle; reclamation is the drain's.
     if let (Some(slots), Some(maintenance)) = (SLOTS.get(), MAINTENANCE.get()) {

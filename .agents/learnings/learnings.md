@@ -1085,3 +1085,48 @@ no pool node consumed, render thread only). Rules:
   is its own wrapper) are the node identities; `node+0x10` holds the wrapper.
 - Do not "fix" z by destroy+recreate — that burns pool nodes for the same
   effect.
+
+## 2026-09-09 — `SoundBank::Play` returns BEFORE the voice exists; a "synchronous" identity read is one voice stale
+
+**Context:** the assist-tick alignment in `gameplay_timing_fixes::tick_align`
+read `engine::aux_voice_generation()` right after `assist_tick`'s commit
+(`stop` → `rewrite` → `Play`) to learn which voice generation to wait for. The
+first tick song of a fresh process read **0** ("voice not identified") and
+skipped alignment; the second song happened to read the right value. Same code,
+same call order — a race, not a broken chain.
+
+**Why:** XACT's `SoundBank::Play` enqueues; the engine's in-memory wave
+submission (`0x419DB0`, where `on_voice_start` walks the wave to its cue/bank
+and source node) runs on the notify pump, typically a few ms LATER. Anything
+that "just played a cue" cannot assume the engine has seen it yet. (The
+streaming path `0x25ED0` has the same shape.)
+
+**Rules:**
+
+- Never decide at commit. Arm a waiter with the pre-commit value as a LOWER
+  bound (`generation_floor`) and recognise the onset by invariants that a
+  stale onset cannot satisfy — here `generation ≥ floor`, same frame epoch,
+  and `F0_tick ≥ F0_song` (a tick voice always starts after the song it
+  belongs to; the previous segment's onset has a smaller F0).
+- Make the timeout WARN name every gate it evaluated (clock active, aux gen vs
+  floor, aux/song onset gen/F0/epoch). A field log then pinpoints the miss
+  without a repro round-trip.
+
+**Related, same run:** the alignment measured a **+18.6 ms** correction on the
+first tick song — far outside the ±5 ms pass-phase model. It was REAL, not
+over-correction: the first commit of a process registers the 28.9 MB tick bank
+(`CreateInMemoryWaveBank` + `CreateSoundBank`) and every commit memcpys the
+full segment, so the game thread stalled ~19 ms between the frame's `T` and
+the `Play` the commit math assumes happened "at `T`". The per-frame CSV showed
+13 game ticks over 31.8 ms of wall on that frame. Lesson: when a measured
+correction exceeds the model, cross-check against the frame timeline before
+"fixing" the measurement — a synchronous engine call inside the hot path is a
+timing error the stock game was silently shipping. (Optional polish noted in
+`progress.md`: register the bank at song build, extent-limit the rewrite.)
+
+**Also:** `synthesize_track_at_samples` used to mix + encode the full 1200 s
+capacity (52.9 M samples, ~2.9 s). MS-ADPCM blocks are self-contained, so
+encoding through the last clap and padding with `adpcm::silence_block()` is
+byte-identical (harness-proven) and ~10× faster — and it moved the tick commit
+from ~2.5 s INTO every chart to before chart time 0. If a fixed-capacity buffer
+is mostly silence, encode the extent and pad; never pay for the capacity.

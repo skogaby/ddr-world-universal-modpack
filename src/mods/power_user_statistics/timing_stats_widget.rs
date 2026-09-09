@@ -10,8 +10,9 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::core::deferred_work::PendingPump;
 use crate::mods::config;
-use crate::services::{custom_options, widget_renderer};
+use crate::services::{custom_options, scene_manager, widget_renderer};
 use crate::types::scenes::scene;
 use crate::widgets::text_widget::{TextAlignment, TextWidget};
 use crate::{log_info, log_warn};
@@ -119,6 +120,7 @@ struct TimingStatsState {
     /// Whether the widgets were raised to the top of the widget render
     /// list this song (once, at the first show — see `raise_above_hud`).
     raised: bool,
+    raise_pump: PendingPump,
 }
 
 static STATE: OnceLock<Arc<Mutex<TimingStatsState>>> = OnceLock::new();
@@ -130,6 +132,7 @@ fn state() -> &'static Arc<Mutex<TimingStatsState>> {
             p2: None,
             visible: false,
             raised: false,
+            raise_pump: PendingPump::new(),
         }))
     })
 }
@@ -377,6 +380,10 @@ pub fn disable() {
         ALIGN_ROW_KEY,
     ]);
     let st = state().clone();
+    if let Ok(mut s) = st.lock() {
+        s.raise_pump.cancel();
+        s.visible = false;
+    }
     widget_renderer::run_on_render_thread(move || {
         let mut s = st.lock().unwrap();
         if let Some(mut w) = s.p1.take() {
@@ -395,6 +402,9 @@ pub fn disable() {
 pub fn on_scene_change(_prev: i32, next: i32) {
     let entering_gameplay = next == scene::GAMEPLAY;
     let st = state().clone();
+    if let Ok(mut s) = st.lock() {
+        s.raise_pump.cancel();
+    }
     widget_renderer::run_on_render_thread(move || {
         let mut s = st.lock().unwrap();
 
@@ -429,20 +439,37 @@ pub fn on_scene_change(_prev: i32, next: i32) {
 /// won). Deferred to frame start; the first judgement is comfortably after
 /// the strip's texture resolve. Skipped while the overlay menu is open: the
 /// menu must stay topmost, and it re-raises itself on every open anyway.
-fn raise_above_hud(s: &TimingStatsState) {
-    if s.raised || crate::mods::mod_menu::is_open() {
-        return;
-    }
-    let wrappers = [
-        s.p1.as_ref().map_or(0, |w| w.render_wrapper()),
-        s.p2.as_ref().map_or(0, |w| w.render_wrapper()),
-    ];
+fn raise_above_hud() {
     let st = state().clone();
-    widget_renderer::run_on_render_thread(move || {
-        widget_renderer::bring_to_front(&wrappers);
-        if let Ok(mut s) = st.lock() {
-            s.raised = true;
+    let generation = {
+        // Judge-submit hot path: never block on the state lock (a render-thread
+        // closure may hold it); a contended frame simply retries on the next
+        // judgement — the raise only needs to land once per song.
+        let Ok(mut s) = st.try_lock() else { return };
+        if !s.visible || s.raised || crate::mods::mod_menu::is_open() {
+            return;
         }
+        let Some(generation) = s.raise_pump.request() else {
+            return;
+        };
+        generation
+    };
+    widget_renderer::run_on_render_thread(move || {
+        let Ok(mut s) = st.lock() else { return };
+        if !s.raise_pump.begin(generation)
+            || !s.visible
+            || s.raised
+            || scene_manager::current_scene() != scene::GAMEPLAY
+            || crate::mods::mod_menu::is_open()
+        {
+            return;
+        }
+        let wrappers = [
+            s.p1.as_ref().map_or(0, |w| w.render_wrapper()),
+            s.p2.as_ref().map_or(0, |w| w.render_wrapper()),
+        ];
+        widget_renderer::bring_to_front(&wrappers);
+        s.raised = true;
     });
 }
 
@@ -478,10 +505,11 @@ pub fn update_text(player_side: usize) {
 
     // Make visible on first judgment for this player this song.
     w.show();
-    raise_above_hud(&s);
 
     let bufs = data_feed::buffers();
     let Ok(b) = bufs[player_side].try_lock() else {
+        drop(s);
+        raise_above_hud();
         return;
     };
 
@@ -510,4 +538,7 @@ pub fn update_text(player_side: usize) {
         b.ex_loss, current, max_abs, abs_mean, mean, kcal
     );
     w.set_text(&buf_str);
+    drop(b);
+    drop(s);
+    raise_above_hud();
 }

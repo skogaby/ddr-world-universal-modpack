@@ -30,10 +30,12 @@
     "decorative-option-headers": true,
     "s-marvelous": true,
     "split-ssq-auto-discovery": true,
-    "custom-resolution": false
+    "custom-resolution": false,
+    "gameplay-timing-fixes": false
   },
   "diagnostics": {
-    "profiling": false
+    "profiling": false,
+    "audio_sync": false
   },
   "layeredfs": {
     "verbose": false,
@@ -345,10 +347,18 @@
     "sd_present": "crop",
     "msaa": "off"
   },
+  "gameplay_timing_fixes": {
+    "audio_clock": {
+      "mode": "fit",
+      "window_seconds": 10,
+      "latency_bias_ms": 0.0
+    },
+    "assist_tick_alignment": true
+  },
   "power_user_statistics": {
     "widget_alignment": "inner",
     "widget_offset_x": 5,
     "widget_offset_y": 0,
     "widget_scale_percent": 80
-  },
+  }
 }

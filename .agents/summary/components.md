@@ -55,8 +55,10 @@
 
 | Service | Role |
 |---|---|
-| `game_audio.rs` | Mod-owned XACT bank registration + cue playback through the game's engine (assist-tick track API) |
-| `se_bank_synth/` | Pure-CPU synthesis of the assist-tick containers (ADPCM/XSB/XWB writers, sample-exact mixer) |
+| `game_audio.rs` | Mod-owned XACT bank registration + cue playback through the game's engine (assist-tick track API, incl. the in-place `patch_tick_wave_tail` swap and the lock-free `sound_bank_in_slot` identity read) |
+| `se_bank_synth/` | Pure-CPU synthesis of the assist-tick containers (ADPCM/XSB/XWB writers, sample-exact mixer — extent-limited encode + canonical silence padding, byte-identical to a full encode) |
+| `audio_sync_diag/` | Optional boot-gated timing recorder (v2 CSV: frame/judge scopes, judgements, XACT scheduling/submission, mixed-output cursor, clock `onset` rows) + OWNER of the XACT engine detours (factory-return / pre-Initialize install, AMD64 PE identity + consumed-code fingerprints in `xact_sites.rs`); its hooks are shared dispatchers the audio clock rides |
+| `audio_clock/` | Deterministic DAC-authority music clock for `gameplay-timing-fixes`: pure `fit.rs` (sliding LSQ over the DirectSound play-cursor staircase vs QPC), `onset.rs` (arm/sanity-gate session + `skip*` math), `seqpub.rs`; `engine.rs` render-thread observers (per-pass cursor, first-produce `F0` latch, voice identity); `game.rs` (T,QPC) pairing detour + the `corrected_rbx` call-out the song_rate clock stub makes |
 | `song_rate/` | The streaming rate engine — see below |
 
 ### Gameplay state & policy
@@ -117,7 +119,8 @@ The trait: `src/mods/mod_trait.rs` (`id`/`name`/`description`/`required_signatur
 | `shader-fixes` | Runtime-synthesized shader containers: arrow anti-aliasing + perspective programs |
 | `player-perspective/` | OVERHEAD/HALLWAY/DISTANT lane perspectives (parameterized perspective VS) |
 | `non-native-operating-system-support` | Wine/CrossOver movie handling (suppress/fallback modes) |
-| `assist-tick` | Pre-mixed sample-exact clap track at judgement moments (+ volume child row) |
+| `assist-tick` | Pre-mixed sample-exact clap track at judgement moments (+ volume child row); exposes a track-commit listener for the timing mod's alignment |
+| `gameplay-timing-fixes/` | Deterministic sound-card-locked music clock (no per-play onset jitter, no in-song drift) + post-onset assist-tick re-lay (`tick_align.rs`); DEFAULT OFF, boot-only |
 | `song-playback-speed` | Per-player SONG SPEED 25–175 % (+ preserve-pitch and sync-movie children); owns the song_rate option surface |
 | `training-mode/` | Section practice: start/end bounds, looping, FF/RW scrubs, chart-strip HUD |
 | `decorative-option-headers` | Stateless group-heading rows for the options menu |

@@ -26,6 +26,8 @@
 //!   window so the nav buttons work for the whole song (cabinet-wide).
 //! - **custom_resolution** — Native 16:9 rendering at 1080p/1440p/4K and the
 //!   4:3 SD-cabinet output (640×480) through boot-time immediate patches.
+//! - **gameplay_timing_fixes** — Deterministic DAC-authority music clock (no
+//!   play-to-play onset jitter, no in-song drift) + assist-tick alignment.
 
 pub mod announcer_mute;
 pub mod anytime_speedmod;
@@ -39,6 +41,7 @@ pub mod decorative_option_headers;
 pub mod fast_bootup;
 pub mod folder_expansion;
 pub mod fps_unlock;
+pub mod gameplay_timing_fixes;
 pub mod mod_menu;
 pub mod mod_trait;
 pub mod movie_size_customization;

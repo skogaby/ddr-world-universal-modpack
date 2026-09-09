@@ -470,6 +470,15 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Generation for the snapshot probe AND the reset driver: a scene
 /// change or a newer reset supersedes whatever is in flight.
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
+/// Content origin of the voice the most recent reset/seek/adjust produced,
+/// in WALL ms: the content time the served stream's SAMPLE 0 corresponds
+/// to (`wall(t_q) − lead silence`; 0 for a restart). Published right before
+/// the subscribers are notified so a subscriber can read it inside its
+/// callback. Consumed by the deterministic audio clock
+/// (`services::audio_clock::game`), whose corrected count needs the voice's
+/// true content origin rather than the frame the anchor was rewritten on.
+static VOICE_ORIGIN_WALL_MS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static VOICE_ORIGIN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Whether a reset driver is currently waiting on cue prepare.
 static RESET_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -1212,8 +1221,31 @@ pub fn adjust_run_to(t_q_ms: i32, lead_wall_ms: u64) -> bool {
         lead_wall_ms,
         actors.len()
     );
-    notify_subscribers(t_q_ms);
+    notify_subscribers(
+        t_q_ms,
+        voice_origin_wall_ms(t_q_ms, lead_wall_ms, &plan.rate),
+    );
     true
+}
+
+/// `wall(t_q) − lead` — the wall-domain content time of the served stream's
+/// sample 0 (see [`VOICE_ORIGIN_WALL_MS`]).
+fn voice_origin_wall_ms(
+    t_q_ms: i32,
+    lead_wall_ms: u64,
+    rate: &song_rate::clock_patch::RateSnapshot,
+) -> i32 {
+    let lead = i32::try_from(lead_wall_ms).unwrap_or(i32::MAX);
+    seek::wall_ms(t_q_ms, rate).saturating_sub(lead)
+}
+
+/// The most recent voice content origin (wall ms of sample 0) and its
+/// publication sequence (0 = never published this session).
+pub fn voice_origin() -> (i32, u64) {
+    (
+        VOICE_ORIGIN_WALL_MS.load(Ordering::Acquire),
+        VOICE_ORIGIN_SEQ.load(Ordering::Acquire),
+    )
 }
 
 /// Register a callback fired after every completed in-place reset, with
@@ -1357,8 +1389,8 @@ unsafe fn read_step(object: *mut u8, base: usize, index: usize) -> Option<i32> {
 /// deltas only happen on judge events, and the first judge is minutes of
 /// frames away behind the song-start protocol.
 fn arm_snapshot_probe(generation: usize) {
-    if !widget_renderer::is_available() {
-        log_warn!("SongReset: widget_renderer unavailable -- no gauge snapshot this song");
+    if !widget_renderer::frame_dispatch_available() {
+        log_warn!("SongReset: frame dispatcher unavailable -- no gauge snapshot this song");
         return;
     }
     probe_step(generation, Instant::now());
@@ -1626,7 +1658,7 @@ pub fn request_reset(
         return ResetOutcome::Refused;
     }
     let delay_ms = delay_ms.clamp(0, MAX_DELAY_MS) as u64;
-    if !is_available() || !widget_renderer::is_available() {
+    if !is_available() || !widget_renderer::frame_dispatch_available() {
         return ResetOutcome::Refused;
     }
     if scene_manager::current_scene() != scene::GAMEPLAY {
@@ -1778,7 +1810,7 @@ pub fn request_reset(
             delay_ms,
             actors.len()
         );
-        notify_subscribers(0);
+        notify_subscribers(0, 0);
         countdown_step(
             generation,
             Instant::now(),
@@ -2059,7 +2091,10 @@ fn seek_driver_step(
             plan.t_q,
             started.elapsed().as_secs_f32() * 1000.0
         );
-        notify_subscribers(plan.t_q);
+        notify_subscribers(
+            plan.t_q,
+            voice_origin_wall_ms(plan.t_q, plan.delay_wall_ms, &plan.rate),
+        );
     });
 }
 
@@ -2318,7 +2353,7 @@ fn driver_step(
             started.elapsed().as_secs_f32() * 1000.0
         );
 
-        notify_subscribers(0);
+        notify_subscribers(0, 0);
     });
 }
 
@@ -2473,7 +2508,9 @@ fn broadcast_anchor_now(dps: *mut u8) -> bool {
 /// Notify `on_song_reset` subscribers (outside the registry lock, on the
 /// frame thread, after game state is fully reset) with the content time
 /// the run was reset to — 0 for restarts, T_q for seeks.
-fn notify_subscribers(t_ms: i32) {
+fn notify_subscribers(t_ms: i32, origin_wall_ms: i32) {
+    VOICE_ORIGIN_WALL_MS.store(origin_wall_ms, Ordering::Release);
+    VOICE_ORIGIN_SEQ.fetch_add(1, Ordering::AcqRel);
     let callbacks: Vec<ResetCallback> = SUBSCRIBERS
         .lock()
         .map(|subs| subs.iter().map(|(_, cb)| cb.clone()).collect())

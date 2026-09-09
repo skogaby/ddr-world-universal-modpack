@@ -37,12 +37,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::log_info;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::{custom_options, input_manager, scene_manager, widget_renderer};
 use crate::types::buttons::*;
 use crate::widgets::image_widget::ImageWidget;
 use crate::widgets::text_widget::TextWidget;
+use crate::{log_info, log_warn};
 
 use render::Slot;
 
@@ -262,6 +262,8 @@ static REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 /// Lock-free mirror of `ModMenuState.is_open` for the background feed
 /// (the emitter's hot path can't take the state mutex).
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+/// One-shot latch for the "open refused before the renderer is live" WARN.
+static OPEN_REFUSED_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the overlay menu is currently open (lock-free). Mods that raise
 /// their own widgets to the top of the render list (`widget_renderer::
@@ -368,6 +370,19 @@ fn on_zero_pressed(state: &mut ModMenuState) -> bool {
 }
 
 fn open() {
+    // Availability gate: input polls from the first dispatcher frame (the
+    // once-per-frame pump), so a boot-time 0-0-0 can arrive before the widget
+    // renderer captured its font pointer. Opening then would grab exclusive
+    // input for an invisible menu (no widgets can be allocated) and eat every
+    // press for the session. Refuse until the renderer is live.
+    if !widget_renderer::is_available() {
+        if !OPEN_REFUSED_WARNED.swap(true, Ordering::AcqRel) {
+            log_warn!(
+                "ModMenu: open refused -- widget renderer not available yet (boot); retry later"
+            );
+        }
+        return;
+    }
     let Ok(mut state) = MOD_MENU_STATE.lock() else {
         return;
     };

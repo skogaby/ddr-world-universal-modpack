@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::module_resolver::resolve_ark_module;
 use crate::core::scanner::scan_first_call_rel32;
+use crate::services::audio_sync_diag::{self as diag, spans::Scope};
 use crate::types::buttons::*;
 use crate::{log_info, log_warn};
 
@@ -110,7 +111,7 @@ static IS_INPUT_SUPPRESSED: AtomicBool = AtomicBool::new(false);
 ///
 /// Intentionally a process-global flag, not `thread_local!`: it is correct only
 /// because `poll()` and every game-side ark-getter call run on the **same
-/// (render) thread** (poll is driven from `wrapper_render_hook`, and the game
+/// (render) thread** (poll is driven from the layer dispatcher, and the game
 /// reads these getters from its render/UI path). Set→read→clear all happen
 /// within one `poll_player` call with no intervening await/yield, so a game-side
 /// getter can never observe a stale `true`. If a getter were ever called from
@@ -1296,21 +1297,22 @@ pub fn is_available() -> bool {
 
 /// Poll arcade button state for both players and fire input events.
 /// Safe to call before `init()` (no-ops) or before arkMDXInitialize (no-ops via the singleton gate).
-/// Intended to be called from the render thread (via widget_renderer's wrapper_render hook).
+/// Called once per engine frame before the layer dispatcher's render walk.
 pub fn poll() {
     // Frame callbacks first — snapshotted out of the lock (a callback
     // registering/removing callbacks must not deadlock), each dispatch
     // panic-contained (this is a render-thread hook path; a panic must
     // not unwind into game code). Deliberately BEFORE the ark gate.
-    let frame_callbacks: Vec<FrameCallback> = match INPUT_MANAGER.lock() {
+    let frame_callbacks: Vec<(usize, FrameCallback)> = match INPUT_MANAGER.lock() {
         Ok(mgr) if !mgr.frame_callbacks.is_empty() => mgr
             .frame_callbacks
             .iter()
-            .map(|(_, cb)| cb.clone())
+            .map(|(id, cb)| (*id, cb.clone()))
             .collect(),
         _ => Vec::new(),
     };
-    for cb in frame_callbacks {
+    for (id, cb) in frame_callbacks {
+        let _callback = diag::span(Scope::FrameCallback, id as u64);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
     }
     // Gate: skip poll if ark module isn't initialized or the I/O singleton is still null.
@@ -1470,12 +1472,16 @@ fn poll_player(player: u8) {
         };
         for event in &events {
             if let Some(ref consumer) = exclusive {
-                if consumer(event) {
+                let _callback = diag::span(Scope::InputExclusive, 0);
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consumer(event)))
+                    .unwrap_or(true)
+                {
                     continue;
                 }
             }
-            for (_, cb) in &callbacks {
-                cb(event);
+            for (id, cb) in &callbacks {
+                let _callback = diag::span(Scope::InputCallback, *id as u64);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event)));
             }
         }
     }

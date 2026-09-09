@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use crate::core::deferred_work::PendingPump;
 use crate::core::signatures::SignatureStore;
 use crate::services::{bm2d_api, scene_manager, widget_renderer};
 use crate::{log_info, log_warn};
@@ -35,6 +36,7 @@ struct ScrollState {
     entries: Vec<FilterEntry>,
     scroll_row: usize,
     active: bool,
+    pump: PendingPump,
     scene_callback_id: Option<usize>,
 }
 
@@ -46,6 +48,7 @@ static STATE: Lazy<Mutex<ScrollState>> = Lazy::new(|| {
         entries: Vec::new(),
         scroll_row: 0,
         active: false,
+        pump: PendingPump::new(),
         scene_callback_id: None,
     })
 });
@@ -101,6 +104,7 @@ unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
     let mut tracked = TRACKED_LAYERS.lock().unwrap();
     let fresh_pass = state.entries.len() >= total_expected || tracked.contains(&layer_id);
     if fresh_pass {
+        state.pump.cancel();
         SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
         tracked.clear();
         state.entries.clear();
@@ -122,10 +126,11 @@ unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
     let entry_count = state.entries.len();
 
     if entry_count == total_expected {
+        let generation = state.pump.request();
         drop(state);
-        widget_renderer::run_on_render_thread(|| {
-            activate_scroll();
-        });
+        if let Some(generation) = generation {
+            widget_renderer::run_on_render_thread(move || activate_scroll(generation));
+        }
     }
 }
 
@@ -298,9 +303,13 @@ pub fn is_available() -> bool {
 
 // ── Internal ────────────────────────────────────────────────────────
 
-fn activate_scroll() {
-    let mut state = STATE.lock().unwrap();
-    if state.config.is_none() || state.entries.is_empty() || state.active {
+fn activate_scroll(generation: u64) {
+    let Ok(mut state) = STATE.lock() else { return };
+    if !state.pump.begin(generation)
+        || state.config.is_none()
+        || state.entries.is_empty()
+        || state.active
+    {
         return;
     }
 
@@ -325,7 +334,7 @@ fn activate_scroll() {
     apply_visibility(&state.entries, 0, visible_rows);
     SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
     drop(state);
-    schedule_update();
+    schedule_update(generation);
 }
 
 fn apply_visibility(entries: &[FilterEntry], scroll_row: usize, visible_rows: usize) {
@@ -340,30 +349,41 @@ fn apply_visibility(entries: &[FilterEntry], scroll_row: usize, visible_rows: us
 
 fn deactivate_scroll() {
     let mut state = STATE.lock().unwrap();
+    // Closing before the queued activation runs must also drop captured
+    // pointers. A reopened menu owns a new generation, never the old pump.
+    state.pump.cancel();
+    SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
+    TRACKED_LAYERS.lock().unwrap().clear();
     if state.active {
-        SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
-        TRACKED_LAYERS.lock().unwrap().clear();
         for entry in &state.entries {
             bm2d_api::set_mask(entry.layer_id, -1000, -1000, 3000, 3000);
         }
-        state.active = false;
-        state.entries.clear();
-        state.scroll_row = 0;
         log_info!("SeriesFilterScroll: deactivated");
+    }
+    state.active = false;
+    state.entries.clear();
+    state.scroll_row = 0;
+}
+
+fn schedule_update(generation: u64) {
+    let requested = {
+        let Ok(mut state) = STATE.lock() else { return };
+        state.active && state.pump.is_current(generation) && state.pump.request().is_some()
+    };
+    if requested {
+        widget_renderer::run_on_render_thread(move || {
+            if scroll_update_frame(generation) {
+                schedule_update(generation);
+            }
+        });
     }
 }
 
-fn schedule_update() {
-    widget_renderer::run_on_render_thread(|| {
-        if scroll_update_frame() {
-            schedule_update();
-        }
-    });
-}
-
-fn scroll_update_frame() -> bool {
-    let mut state = STATE.lock().unwrap();
-    if !state.active || state.entries.is_empty() {
+fn scroll_update_frame(generation: u64) -> bool {
+    let Ok(mut state) = STATE.lock() else {
+        return false;
+    };
+    if !state.pump.begin(generation) || !state.active || state.entries.is_empty() {
         return false;
     }
 
@@ -378,6 +398,7 @@ fn scroll_update_frame() -> bool {
         true
     });
     if !found {
+        state.pump.cancel();
         SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
         TRACKED_LAYERS.lock().unwrap().clear();
         state.active = false;

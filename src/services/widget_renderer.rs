@@ -36,8 +36,6 @@ pub(crate) struct RendererInner {
     game_alloc_fn: *const u8,
     game_alloc_heap: *const u8,
     derived_resolved: bool,
-    /// Closures to run on the game/render thread at the start of the next frame.
-    pending_updates: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 unsafe impl Send for RendererInner {}
@@ -57,7 +55,6 @@ pub(crate) static RENDERER: Lazy<Mutex<RendererInner>> = Lazy::new(|| {
         game_alloc_fn: std::ptr::null(),
         game_alloc_heap: std::ptr::null(),
         derived_resolved: false,
-        pending_updates: Vec::new(),
     })
 });
 
@@ -87,6 +84,39 @@ unsafe extern "C" fn render_function_hook(widget: *mut u8) {
 }
 
 static mut WRAPPER_HOOK: Option<GenericDetour<RenderFn>> = None;
+static FRAME_PUMP: crate::core::frame_pump::FramePump = crate::core::frame_pump::FramePump::new();
+static FRAME_PANIC_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Called only by the existing layer-dispatcher detour, once per engine frame.
+/// Original rendering stays inside the guard against synchronous reentry.
+pub fn dispatch_frame(render: impl FnOnce()) {
+    use crate::services::audio_sync_diag::{self as diag, spans::Scope};
+    let frame = diag::span(Scope::Frame, 0);
+    let entry = frame.event();
+    let observer = diag::frame_observer();
+    let stats = FRAME_PUMP.dispatch_observed(
+        crate::services::input_manager::poll,
+        render,
+        observer.as_ref(),
+    );
+    drop(frame);
+    if let Some(stats) = stats {
+        if (stats.poll_panicked || stats.job_panics != 0)
+            && !FRAME_PANIC_WARNED.swap(true, Ordering::Relaxed)
+        {
+            log_warn!("WidgetRenderer: panic in frame work -- contained; remaining jobs and rendering continue");
+        }
+        diag::record_frame(
+            [stats.frame, 1, stats.jobs as u64, stats.queued as u64],
+            entry,
+        );
+    }
+}
+
+/// Scheduling readiness is independent of font/widget readiness.
+pub fn frame_dispatch_available() -> bool {
+    crate::services::overlay_draw::dispatcher_ready()
+}
 
 /// Lock-free mirror of `scene_manager_global` (set once at init) for
 /// hot-path consumers that must not take the RENDERER mutex.
@@ -188,43 +218,14 @@ fn log_free_pool_count_once() {
     }
 }
 
-/// wrapper_render hook — drains pending_updates on the game thread.
+/// Wrapper-local diagnostics and z-ordered emission, never frame scheduling.
 unsafe extern "C" fn wrapper_render_hook(this: *mut u8) {
-    // Poll arcade input every render frame. Runs on the game's render thread
-    // at native refresh rate — more responsive than a fixed-interval background
-    // thread and matches the thread the game itself reads input on.
-    crate::services::input_manager::poll();
-
     // One-shot pool diagnostic (cheap latched atomic after the first frame).
     log_free_pool_count_once();
 
     // Overlay-draw tick: per-scene command-list diagnostics (emission lives
     // in overlay_draw's layer-dispatcher detour). Panic-contained inside.
     crate::services::overlay_draw::on_wrapper_render();
-
-    {
-        // Poison-recover rather than unwrap: this is an extern "C" frame — a
-        // panic here is UB (CLAUDE.md rule 1) — and the queue is plain data
-        // (a poisoning panic mid-drain loses nothing the closures don't
-        // re-establish themselves).
-        let mut r = match RENDERER.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if !r.pending_updates.is_empty() {
-            let updates: Vec<Box<dyn FnOnce() + Send>> = r.pending_updates.drain(..).collect();
-            drop(r);
-            for f in updates {
-                // Contain panics per-closure: consumers (overlay pumps, mod
-                // callbacks) are written panic-free, but this boundary is the
-                // architectural guarantee that a bug in one closure can't
-                // unwind into game code or take down the rest of the batch.
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-                    log_warn!("WidgetRenderer: panic in queued render-thread closure — contained");
-                }
-            }
-        }
-    }
 
     // Overlay-draw anchor: emit the animated background mid-walk when this
     // wrapper IS the menu's anchor (identity-gated, panic-contained inside).
@@ -306,7 +307,7 @@ pub fn init(game_module: &GameModule, signatures: &SignatureStore) -> bool {
         }
     }
 
-    // Hook wrapper_render (for pending_updates drain only)
+    // Wrapper-local overlay anchors retain their native position in the walk.
     if let Some(wrapper_addr) = signatures.get_address("wrapper_render") {
         unsafe {
             let target: RenderFn = std::mem::transmute(wrapper_addr);
@@ -669,16 +670,11 @@ pub fn is_available() -> bool {
     }
 }
 
-/// Queue a closure to run on the game/render thread at the start of the next frame.
+/// Queue for the next layer-dispatcher batch; never executes inline. Input
+/// callbacks run before the batch snapshot, so their work can land this frame.
+/// A batch's self-requeued continuations run no earlier than the next frame.
 pub fn run_on_render_thread(f: impl FnOnce() + Send + 'static) {
-    // Poison-recovered: this is called from render-thread pumps (which
-    // self-reschedule) and hook callbacks — an unwrap here would panic
-    // inside an extern "C" frame if the mutex was ever poisoned.
-    let mut r = match RENDERER.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    r.pending_updates.push(Box::new(f));
+    FRAME_PUMP.enqueue(f);
 }
 
 // ── Dynamic address resolution ──────────────────────────────────

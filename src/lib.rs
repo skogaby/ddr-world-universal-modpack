@@ -72,6 +72,10 @@ fn init() {
         .map(|d| d.profiling)
         .unwrap_or(false);
     profiling::set_enabled(profiling_on);
+    // Latch the deterministic audio clock's config NOW: its XACT engine seams
+    // install in the pre-Initialize factory window (step 1b below) and must
+    // know whether the gameplay-timing-fixes mod is enabled before then.
+    services::audio_clock::configure_from_config();
     profiling::tick("config_store");
 
     // 0b. AVS LayeredFS — file replacement service. RACE-CRITICAL: this
@@ -105,6 +109,17 @@ fn init() {
         game_module.base,
         game_module.size
     );
+
+    // 1b. XACT factory interception must precede the full scan: after XACT
+    // Initialize, its audio threads are already live and cannot be probed
+    // safely by this bootstrap. LayeredFS remains installed ahead of this work.
+    // Runs for the audio diagnostics AND/OR the deterministic audio clock
+    // (gameplay-timing-fixes, which needs the same pre-Initialize window for
+    // its render-thread observers). Cost when enabled (image snapshot + 2 AOB
+    // scans) is measured by the tick below; with both off the call returns
+    // immediately.
+    services::audio_sync_diag::xact::init_factory(&game_module);
+    profiling::tick("audio_sync_factory");
 
     // 2. Signature scan
     let mut signatures = SignatureStore::new(&game_module);
@@ -165,6 +180,9 @@ fn init() {
         Box::new(mods::per_song_judgement_offsets::PerSongJudgementOffsetsMod::new()),
         Box::new(mods::s_marvelous::SMarvelousMod::new()),
         Box::new(mods::smx_hardware::SmxHardwareMod::new()),
+        // After assist_tick: its enable registers the tick-alignment
+        // listener on the assist-tick mod (order matters only for the log).
+        Box::new(mods::gameplay_timing_fixes::GameplayTimingFixesMod::new()),
     ];
     let mod_config = mods::config::get()
         .map(|c| c.mods.clone())
@@ -176,8 +194,7 @@ fn init() {
         };
         for m in &mut mods_to_register {
             let id = m.id().to_string();
-            let should_run = mod_config.get(&id).copied().unwrap_or(true);
-            if !should_run {
+            if !mods::mod_trait::mod_enabled_in_config(&mod_config, &id) {
                 log_info!(
                     "Mod '{}' early_apply skipped (disabled in config)",
                     m.name()
@@ -482,12 +499,29 @@ fn init() {
     }
     profiling::tick("render_notes_hook");
 
+    // 6b3. Deterministic audio clock, game side: the (T,QPC) pairing detour on
+    // the input tick, the song_reset content-origin feed and scene gating.
+    // Needs scene_manager (5), song_reset (6b2) and the derived
+    // `input_tick_function`/`frame_tick_global`. Fail-open; a no-op unless the
+    // gameplay-timing-fixes mod is enabled in config.
+    if services::audio_clock::wants_engine() {
+        if services::audio_clock::game::init(&signatures) {
+            log_info!("AudioClock game side started");
+        } else {
+            log_warn!("AudioClock game side unavailable -- gameplay clock stays stock");
+        }
+    }
+    profiling::tick("audio_clock_game");
+
     // 6c2. Overlay-draw — command-list drawing for the mod-menu overlay
     // (per-scene diagnostics + the dev-gated POC emission; the themed
     // animated backgrounds build on this). Resolves the default-shader
     // global; fail-open.
     overlay_draw::init(&signatures);
     profiling::tick("overlay_draw");
+
+    services::audio_sync_diag::init(&signatures);
+    profiling::tick("audio_sync_diag");
 
     // 6d. Cull-window service — stashes the two derived cull patch sites +
     // module bounds. No code is patched here; the first contributor mod

@@ -36,6 +36,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use crate::core::deferred_work::PendingPump;
 use crate::services::asset_loader::{self, AssetHandle};
 use crate::services::avs_layeredfs::cache_hasher::CacheHasher;
 use crate::services::widget_renderer;
@@ -207,6 +208,7 @@ struct Loading {
 
 static PENDING: Mutex<Vec<PendingFile>> = Mutex::new(Vec::new());
 static LOADING: Mutex<Vec<Loading>> = Mutex::new(Vec::new());
+static PUMP: Mutex<PendingPump> = Mutex::new(PendingPump::new());
 
 /// True while `generation` is the newest panel synthesis — stale panel
 /// work must neither publish nor mark failure (a stale failure would
@@ -364,7 +366,7 @@ fn synthesis_thread(generation: u32, theme_index: usize, opacity: i32, include_s
     }
 
     // Hand off to the game thread: issue loads + poll resolution.
-    widget_renderer::run_on_render_thread(pump);
+    request_pump();
 }
 
 /// Ensure the piece's PNG exists and matches the cache key: sidecar hit ⇒
@@ -424,10 +426,26 @@ fn ensure_piece_file(
 
 // ── Load + resolve pump (game thread) ────────────────────────────────
 
+fn request_pump() {
+    let generation = PUMP.lock().ok().and_then(|mut pump| pump.request());
+    if let Some(generation) = generation {
+        widget_renderer::run_on_render_thread(move || pump(generation));
+    }
+}
+
 /// Drain pending loads, poll in-flight resolutions, publish texture ids.
 /// Self-requeues while any work remains; schedules one repaint per
 /// transition so an idle-open menu picks late chrome up immediately.
-fn pump() {
+fn pump(generation: u64) {
+    // Clear BEFORE draining: a concurrent synthesis completion reserves the
+    // next pass, and this pass's self-requeue coalesces with that reservation.
+    if !PUMP
+        .lock()
+        .map(|mut p| p.begin(generation))
+        .unwrap_or(false)
+    {
+        return;
+    }
     let mut transitioned = false;
 
     // Issue loads for freshly synthesized/cached files.
@@ -527,6 +545,6 @@ fn pump() {
 
     let pending_remains = PENDING.lock().map(|p| !p.is_empty()).unwrap_or(false);
     if still_loading || pending_remains {
-        widget_renderer::run_on_render_thread(pump);
+        request_pump();
     }
 }

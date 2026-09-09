@@ -11,6 +11,8 @@ pub mod afp;
 pub mod ap2;
 pub mod arc;
 pub mod crash_handler;
+pub mod deferred_work;
+pub mod frame_pump;
 pub mod geo;
 pub mod hook_transaction;
 #[cfg(test)]

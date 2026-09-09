@@ -31,10 +31,11 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::{Lazy, OnceCell};
 
+use crate::core::deferred_work::{Deadline, Wait};
 use crate::services::asset_loader;
 use crate::services::input_manager;
 use crate::services::overlay_draw::{
@@ -127,8 +128,9 @@ static ATLAS_HANDLE: Mutex<Option<asset_loader::AssetHandle>> = Mutex::new(None)
 static ATLAS_STARTED: AtomicBool = AtomicBool::new(false);
 static ATLAS_WARNED: AtomicBool = AtomicBool::new(false);
 static ATLAS_LOGGED: AtomicBool = AtomicBool::new(false);
-/// Resolve-poll counter for the self-diagnosing timeout.
-static ATLAS_POLLS: AtomicU32 = AtomicU32::new(0);
+/// Warn once after ten seconds unresolved; keep polling for late readiness.
+const ATLAS_WARN_AFTER: Duration = Duration::from_secs(10);
+static ATLAS_DEADLINE: OnceCell<Deadline> = OnceCell::new();
 /// One-shot INFO on the first topmost emission (cabinet validation aid).
 static FIRST_EMIT_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -285,6 +287,7 @@ pub fn tick() {
         }
         match asset_loader::load(atlas::ATLAS_PATH, atlas::ATLAS_STEM) {
             Some(handle) => {
+                let _ = ATLAS_DEADLINE.set(Deadline::new(Instant::now(), ATLAS_WARN_AFTER));
                 ATLAS_PENDING_HASH.store(handle.name_hash, Ordering::Release);
                 if let Ok(mut slot) = ATLAS_HANDLE.lock() {
                     *slot = Some(handle);
@@ -308,27 +311,28 @@ pub fn tick() {
     if hash == 0 {
         return;
     }
-    if let Some(tex) = asset_loader::resolve_hash(hash) {
-        ATLAS_TEX.store(tex.handle, Ordering::Release);
-        ATLAS_PENDING_HASH.store(0, Ordering::Release);
-        if !ATLAS_LOGGED.swap(true, Ordering::Relaxed) {
-            log_info!("SmxOverlay: atlas texture resolved (id={})", tex.handle);
+    let Some(deadline) = ATLAS_DEADLINE.get() else {
+        return;
+    };
+    match deadline.poll(asset_loader::resolve_hash(hash), Instant::now()) {
+        Wait::Ready(tex) => {
+            ATLAS_TEX.store(tex.handle, Ordering::Release);
+            ATLAS_PENDING_HASH.store(0, Ordering::Release);
+            if !ATLAS_LOGGED.swap(true, Ordering::Relaxed) {
+                log_info!("SmxOverlay: atlas texture resolved (id={})", tex.handle);
+            }
         }
-    } else {
-        // Self-diagnosing timeout: a normal loose-PNG resolve takes
-        // ~43 frames; if it never lands, the registered name doesn't
-        // match what we hash (deploy #19: the engine registers the
-        // PNG's BASENAME — the stem must equal it) or the file is
-        // missing from the game dir.
-        let n = ATLAS_POLLS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n == 600 && !ATLAS_WARNED.swap(true, Ordering::Relaxed) {
-            log_warn!(
-                "SmxOverlay: atlas never resolved after {} polls -- is {} deployed? (stem '{}' must equal the PNG basename)",
-                n,
-                atlas::ATLAS_PATH,
-                atlas::ATLAS_STEM
-            );
+        Wait::TimedOut => {
+            if !ATLAS_WARNED.swap(true, Ordering::Relaxed) {
+                log_warn!(
+                    "SmxOverlay: atlas never resolved after {} seconds -- is {} deployed? (stem '{}' must equal the PNG basename)",
+                    ATLAS_WARN_AFTER.as_secs(),
+                    atlas::ATLAS_PATH,
+                    atlas::ATLAS_STEM
+                );
+            }
         }
+        Wait::Pending => {}
     }
 }
 

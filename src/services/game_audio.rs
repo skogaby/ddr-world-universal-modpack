@@ -271,6 +271,13 @@ impl Inner {
 }
 
 static AUDIO: Lazy<Mutex<Option<Inner>>> = Lazy::new(|| Mutex::new(None));
+/// Lock-free copy of the manager global's ADDRESS (0 until `init`), for the
+/// hot-path-adjacent [`sound_bank_in_slot`] (the audio clock's voice identity
+/// runs inside engine submission hooks and must not take `AUDIO`).
+static MANAGER_GLOBAL_ADDR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The manager slot the game maps every per-song bank into (slot 5 — the
+/// basename→slot mapper's "anything else" bucket; see the module docs).
+pub const SONG_BANK_SLOT: i32 = 5;
 /// Latches the first playback failure so the warning is once per session, not
 /// once per tick.
 static PLAY_FAILURE_WARNED: AtomicBool = AtomicBool::new(false);
@@ -382,6 +389,10 @@ pub fn init(signatures: &SignatureStore) -> bool {
             return false;
         }
     }
+    MANAGER_GLOBAL_ADDR.store(
+        manager_global as usize,
+        std::sync::atomic::Ordering::Release,
+    );
     log_info!(
         "GameAudio: initialized (se_play @ {:p}, audio_manager_global @ {:p})",
         se_play,
@@ -389,6 +400,32 @@ pub fn init(signatures: &SignatureStore) -> bool {
     );
 
     true
+}
+
+/// The `IXACT2SoundBank*` currently in manager slot `slot`, or `None` when the
+/// manager/global is null, the slot is empty, or the service never resolved.
+/// Lock-free (probed reads only) — safe from any thread; the pointer is a
+/// snapshot, never dereferenced here.
+pub fn sound_bank_in_slot(slot: i32) -> Option<usize> {
+    if !(0..MGR_SLOT_COUNT).contains(&slot) {
+        return None;
+    }
+    let global = MANAGER_GLOBAL_ADDR.load(std::sync::atomic::Ordering::Acquire);
+    if global == 0 || !crate::core::memory::is_readable(global as *const u8, 8) {
+        return None;
+    }
+    // SAFETY: probed readable; the global is a game static.
+    let mgr = unsafe { *(global as *const usize) };
+    if mgr == 0 {
+        return None;
+    }
+    let field = mgr.wrapping_add(MGR_SLOT_ARRAY + slot as usize * MGR_SLOT_STRIDE + SLOT_BANK_PTR);
+    if !crate::core::memory::is_readable(field as *const u8, 8) {
+        return None;
+    }
+    // SAFETY: probed readable.
+    let bank = unsafe { *(field as *const usize) };
+    (bank != 0).then_some(bank)
 }
 
 /// Whether every address resolved, i.e. whether the service can be asked to do
@@ -917,6 +954,77 @@ pub fn rewrite_tick_wave(
         }
     }
     true
+}
+
+/// Rewrite ONLY the tail of the tick wave's sample segment, from byte
+/// `from_bytes` (block-aligned) to the end, with the same-coordinate bytes of
+/// `encoded` (an already-laid-out full-segment track: buffer offset b ==
+/// `encoded[b]`). Bytes below `mute_head_bytes` (block-aligned) that fall in
+/// the rewritten range are served as encoded silence instead. **GAME THREAD
+/// ONLY.**
+///
+/// This is the deterministic audio clock's tick-alignment swap (design §10):
+/// the engine decodes the client-owned in-memory bank lazily, so bytes ahead
+/// of the decoder's read pointer take effect when reached — the caller passes
+/// `from_bytes` ≥ the node's consumed bytes plus a safety margin. Nothing
+/// below `from_bytes` is touched.
+pub fn patch_tick_wave_tail(
+    h: &TickBankHandle,
+    encoded: &[u8],
+    from_bytes: usize,
+    mute_head_bytes: usize,
+) -> bool {
+    let silence = crate::services::se_bank_synth::adpcm::silence_block();
+    if encoded.len() != h.sample_len
+        || from_bytes % silence.len() != 0
+        || from_bytes > h.sample_len
+        || mute_head_bytes % silence.len() != 0
+        || mute_head_bytes > h.sample_len
+    {
+        if !TICK_REWRITE_WARNED.swap(true, Ordering::Relaxed) {
+            log_warn!(
+                "GameAudio: patch_tick_wave_tail got {} bytes / from {} / mute {} (segment {}, block {}) -- refusing (warned once)",
+                encoded.len(),
+                from_bytes,
+                mute_head_bytes,
+                h.sample_len,
+                silence.len()
+            );
+        }
+        return false;
+    }
+    unsafe {
+        let seg = h.sample_seg as *mut u8;
+        let mut off = from_bytes;
+        while off < mute_head_bytes {
+            std::ptr::copy_nonoverlapping(silence.as_ptr(), seg.add(off), silence.len());
+            off += silence.len();
+        }
+        if off < h.sample_len {
+            std::ptr::copy_nonoverlapping(
+                encoded.as_ptr().add(off),
+                seg.add(off),
+                h.sample_len - off,
+            );
+        }
+    }
+    true
+}
+
+impl TickBankHandle {
+    /// The `IXACT2SoundBank*` the engine handed back (as an address). The
+    /// deterministic audio clock keys aux-voice identity on it (a cue's
+    /// `+0x240` back-pointer is this object).
+    #[must_use]
+    pub fn sound_bank_address(&self) -> usize {
+        self.sound_bank
+    }
+
+    /// Length of the rewritable sample segment.
+    #[must_use]
+    pub fn sample_segment_len(&self) -> usize {
+        self.sample_len
+    }
 }
 
 /// Start the tick cue from the top of the (already shifted) track. **GAME

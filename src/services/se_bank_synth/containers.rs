@@ -105,25 +105,75 @@ pub fn scale_pcm(pcm: &[i16], percent: i32) -> Vec<i16> {
 /// clap is ~214 ms) sum with i32 headroom and saturate to i16. A clap
 /// running past the capacity is truncated at the buffer end.
 ///
-/// Pure CPU, no allocation surprises beyond the one ~106 MB mix buffer —
-/// sized for a background thread (design NFR-1), not the judge dispatch.
+/// Pure CPU; the mix buffer is sized to the LAST clap (a 2-minute chart is
+/// ~10 MB / ~0.3 s), never to the 1200 s capacity — see
+/// [`synthesize_track_at_samples`]. Still a background-thread job (design
+/// NFR-1), not the judge dispatch.
 pub fn synthesize_track(clap_pcm: &[i16], content_ms: &[i32]) -> SynthResult {
-    let mut buf = vec![0i16; CAPACITY_PADDED_SAMPLES];
+    // round(ms / 1000 × rate); i64 because 300 000 × 44 100 > u32. Negative
+    // and over-capacity inputs are passed through as-is: the sample mixer
+    // classifies them (clipped / dropped) exactly as this function always did.
+    let samples: Vec<i64> = content_ms
+        .iter()
+        .map(|&ms| {
+            if ms < 0 {
+                -1
+            } else {
+                (ms as i64 * TICK_RATE_HZ as i64 + 500) / 1000
+            }
+        })
+        .collect();
+    synthesize_track_at_samples(clap_pcm, &samples)
+}
+
+/// [`synthesize_track`] with SAMPLE-exact clap positions (frames from the
+/// track's sample 0). Negative positions are clipped to 0 (counted), positions
+/// at/after the capacity are dropped (counted). This is the entry the
+/// deterministic audio clock's tick alignment uses: a track re-laid so that
+/// its byte 0 is the tick voice's true DAC onset needs fractional-millisecond
+/// positions, which integer ms cannot carry.
+///
+/// Only the audible extent — through the end of the last in-capacity clap,
+/// rounded up to whole ADPCM blocks — is mixed and encoded; the rest of the
+/// segment is filled with [`adpcm::silence_block`]. MS-ADPCM blocks are
+/// self-contained (per-block predictor + initial delta, no carried state), so
+/// this is byte-identical to encoding the whole zero-padded capacity
+/// (`scripts/validate_se_bank_synth.sh` asserts it) at a tenth of the cost
+/// for a typical chart — which is what lets the post-onset tick re-lay land
+/// within the first second of a seek instead of ~3 s later.
+pub fn synthesize_track_at_samples(clap_pcm: &[i16], positions: &[i64]) -> SynthResult {
     let mut mixed = 0usize;
     let mut clipped = 0usize;
     let mut dropped = 0usize;
+    let capacity_samples = TICK_CAPACITY_MS as i64 * TICK_RATE_HZ as i64 / 1000;
 
-    for &ms in content_ms {
-        let pos = if ms < 0 {
+    // Pass 1: classify every position and find the audible extent.
+    let mut placed: Vec<usize> = Vec::with_capacity(positions.len());
+    let mut end_sample = 0usize;
+    for &sample in positions {
+        let pos = if sample < 0 {
             clipped += 1;
             0usize
-        } else if ms >= TICK_CAPACITY_MS as i32 {
+        } else if sample >= capacity_samples {
             dropped += 1;
             continue;
         } else {
-            // round(ms / 1000 × rate); i64 because 300 000 × 44 100 > u32.
-            ((ms as i64 * TICK_RATE_HZ as i64 + 500) / 1000) as usize
+            sample as usize
         };
+        end_sample = end_sample.max(pos.saturating_add(clap_pcm.len()));
+        placed.push(pos);
+        mixed += 1;
+    }
+    // Whole blocks, never past the padded capacity (which is itself whole
+    // blocks) — so every clap sees exactly the room the full buffer gave it.
+    let mix_samples = end_sample
+        .min(CAPACITY_PADDED_SAMPLES)
+        .div_ceil(adpcm::SAMPLES_PER_BLOCK)
+        * adpcm::SAMPLES_PER_BLOCK;
+
+    // Pass 2: mix into the audible extent only.
+    let mut buf = vec![0i16; mix_samples];
+    for pos in placed {
         let room = buf.len().saturating_sub(pos);
         for (slot, &s) in buf[pos..]
             .iter_mut()
@@ -131,10 +181,15 @@ pub fn synthesize_track(clap_pcm: &[i16], content_ms: &[i32]) -> SynthResult {
         {
             *slot = (*slot as i32 + s as i32).clamp(-32768, 32767) as i16;
         }
-        mixed += 1;
     }
 
-    let encoded = adpcm::encode_mono(&buf);
+    // Encode the extent, then pad with the canonical silence block.
+    let mut encoded = adpcm::encode_mono(&buf);
+    let silence = adpcm::silence_block();
+    encoded.reserve_exact(SAMPLE_SEG_LEN.saturating_sub(encoded.len()));
+    while encoded.len() + adpcm::BLOCK_ALIGN <= SAMPLE_SEG_LEN {
+        encoded.extend_from_slice(silence);
+    }
     debug_assert_eq!(encoded.len(), SAMPLE_SEG_LEN);
     SynthResult {
         encoded,
@@ -142,6 +197,22 @@ pub fn synthesize_track(clap_pcm: &[i16], content_ms: &[i32]) -> SynthResult {
         clipped,
         dropped,
     }
+}
+
+/// Byte offset of the first block containing sample `sample` (block-aligned,
+/// clamped to the segment) — the tick alignment's "serve from here" cursor.
+pub fn block_offset_for_sample(sample: i64) -> usize {
+    if sample <= 0 {
+        return 0;
+    }
+    let blocks = (sample as u64 / adpcm::SAMPLES_PER_BLOCK as u64) as usize;
+    blocks.min(CAPACITY_BLOCKS) * adpcm::BLOCK_ALIGN
+}
+
+/// Round a byte offset UP to the next block boundary (clamped to the segment).
+pub fn ceil_block_bytes(bytes: usize) -> usize {
+    let blocks = bytes.div_ceil(adpcm::BLOCK_ALIGN);
+    blocks.min(CAPACITY_BLOCKS) * adpcm::BLOCK_ALIGN
 }
 
 /// Convert a content shift in milliseconds to a **whole-block** byte offset

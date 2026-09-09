@@ -56,6 +56,6 @@ Consistency/completeness findings from this run: verified cross-checks, observed
 | Game memory / patches | data_models.md (allocators, layouts) → interfaces.md (signature registry) |
 | LayeredFS / assets | components.md (avs_layeredfs) → workflows.md (asset workflows) |
 | Custom options / persistence | interfaces.md (framework API) → data_models.md (wire model) |
-| Audio / song rate | components.md (song_rate, game_audio, se_bank_synth) → workflows.md (rate lifecycle) |
+| Audio / song rate / timing clock | components.md (song_rate, game_audio, se_bank_synth, audio_clock, audio_sync_diag) → workflows.md (rate lifecycle); RE: docs/audio_clock_research.md, docs/xact_audio_research.md |
 | Build/deploy/tests | workflows.md → dependencies.md |
 | One specific shipped feature | AGENTS.md Key Entry Points row → linked docs/ RE note → .agents/planning/ dir |

@@ -240,6 +240,79 @@ fn warn_jt_unreadable(why: &str, side: usize) -> i32 {
 /// and shared with every song's synthesis thread. `None` never occurs after
 /// a successful init — a missing/short asset fails the mod (FR-6).
 static CLAP: Mutex<Option<Arc<Vec<i16>>>> = Mutex::new(None);
+
+// ── Tick-alignment hand-off (gameplay-timing-fixes, design §10) ───────
+//
+// The deterministic audio clock aligns the tick track to the song's actual
+// DAC onset AFTER the commit: it needs every parameter the committed track
+// was authored with, so it can re-lay the same claps with the exact
+// fractional shift and swap the bytes ahead of the decoder's read pointer.
+// assist_tick exposes that through a single listener; with no listener
+// registered (the timing mod off) the commit path is byte-for-byte the
+// shipped behaviour.
+
+/// Everything the committed tick track was authored with.
+#[derive(Clone)]
+pub struct TrackCommit {
+    /// The song generation the track belongs to (stale after a restart).
+    pub generation: u32,
+    /// Sorted, coalesced note timestamps (engine ms) — the tick list.
+    pub times: Arc<Vec<i32>>,
+    /// `JUDGMENT_TIMING_SIGN × judgment_timing` (sign-applied, as the
+    /// positions were computed).
+    pub judgment_timing_signed: i32,
+    pub sound_offset: i32,
+    /// The anchor music count the track's byte 0 was authored against.
+    pub m0: i32,
+    pub rate: RateSnapshot,
+    pub volume_percent: i32,
+    /// The RAW clap asset; the track was mixed from `scale_pcm(clap,
+    /// volume_percent)` when `volume_percent != 100`, else from it verbatim.
+    pub clap: Arc<Vec<i16>>,
+    /// Latest in-place reset's content target (the clap floor), if any.
+    pub reset_floor_ms: Option<i32>,
+    /// The block-quantized skip the commit served from (ms / bytes).
+    pub skip_ms: i32,
+    pub skip_bytes: usize,
+    pub handle: TickBankHandle,
+}
+
+/// Track lifecycle events for the alignment listener.
+#[derive(Clone)]
+pub enum TrackEvent {
+    /// A track was committed (played) with these parameters.
+    Committed(TrackCommit),
+    /// The track was stopped / the song state cleared.
+    Stopped,
+}
+
+type TrackListener = Arc<dyn Fn(TrackEvent) + Send + Sync>;
+static TRACK_LISTENER: Mutex<Option<TrackListener>> = Mutex::new(None);
+
+/// Register the single tick-alignment listener (replaces any previous one).
+pub fn set_track_listener(listener: TrackListener) {
+    if let Ok(mut guard) = TRACK_LISTENER.lock() {
+        *guard = Some(listener);
+    }
+}
+
+pub fn clear_track_listener() {
+    if let Ok(mut guard) = TRACK_LISTENER.lock() {
+        *guard = None;
+    }
+}
+
+fn notify_track_listener(event: TrackEvent) {
+    let listener = TRACK_LISTENER.lock().ok().and_then(|g| g.clone());
+    if let Some(listener) = listener {
+        listener(event);
+    }
+}
+
+/// The registered tick bank (once the first commit registered it).
+pub fn tick_bank_handle() -> Option<TickBankHandle> {
+    TICK_BANK.lock().ok().and_then(|g| *g)
+}
 /// The registered tick bank, stashed at the first successful commit and
 /// consumed by every later one. One per process (NFR-2).
 static TICK_BANK: Mutex<Option<TickBankHandle>> = Mutex::new(None);
@@ -322,6 +395,9 @@ struct SongState {
     /// Sorted, coalesced note timestamps (engine ms), held between the list
     /// build and the anchor latch (then moved into the synthesis thread).
     times: Vec<i32>,
+    /// The same list, retained for the whole song for the tick-alignment
+    /// listener (the alignment re-lays the claps after the commit).
+    times_all: Option<Arc<Vec<i32>>>,
     /// The chosen actor's per-song `SOUND_OFFSET` (read at build).
     sound_offset: i32,
     /// The chosen side's JUDGMENT TIMING (read at build — options are locked
@@ -370,6 +446,7 @@ impl SongState {
             tick_actor: 0,
             generation: 0,
             times: Vec::new(),
+            times_all: None,
             sound_offset: 0,
             judgment_timing: 0,
             volume_percent: VOLUME_DEFAULT,
@@ -444,6 +521,7 @@ fn stop_track_if_any(why: &str) {
         let ok = game_audio::stop_cue(&h, CUE);
         log_debug!("AssistTick: stop_cue ({}) -> {}", why, ok);
     }
+    notify_track_listener(TrackEvent::Stopped);
 }
 
 // ── Judge wiring — the per-song state machine ────────────────────────
@@ -777,6 +855,29 @@ fn commit_track(
             song.phase = Phase::Idle;
             song.encoded = None;
         }
+        return;
+    }
+    // Hand the authoring parameters to the tick-alignment listener (a no-op
+    // without one). Snapshot under the lock, call with it released.
+    let commit = SONG.lock().ok().and_then(|song| {
+        let clap = CLAP.lock().ok().and_then(|g| g.clone())?;
+        Some(TrackCommit {
+            generation: song.generation,
+            times: song.times_all.clone()?,
+            judgment_timing_signed: JUDGMENT_TIMING_SIGN * song.judgment_timing,
+            sound_offset: song.sound_offset,
+            m0: song.m0,
+            rate: song.rate,
+            volume_percent: song.volume_percent,
+            clap,
+            reset_floor_ms: song.reset_floor_ms,
+            skip_ms: elapsed_ms.max(0),
+            skip_bytes,
+            handle: h,
+        })
+    });
+    if let Some(commit) = commit {
+        notify_track_listener(TrackEvent::Committed(commit));
     }
 }
 
@@ -800,6 +901,14 @@ fn ensure_tick_bank_registered() -> Option<TickBankHandle> {
     });
     if let (Some(h), Ok(mut guard)) = (handle, TICK_BANK.lock()) {
         *guard = Some(h);
+    }
+    if let Some(h) = handle {
+        // Let the deterministic audio clock track this bank's voices (their
+        // exact DAC onset drives the tick alignment). Harmless when the clock
+        // is not installed.
+        if crate::services::audio_clock::engine::installed() {
+            crate::services::audio_clock::engine::register_aux_bank(h.sound_bank_address());
+        }
     }
     handle
 }
@@ -1128,6 +1237,7 @@ fn rebuild_for(actor: *mut u8) {
     if let Ok(mut song) = SONG.lock() {
         song.tick_side = side;
         song.tick_actor = chosen.actor;
+        song.times_all = Some(Arc::new(times.clone()));
         song.times = times;
         song.sound_offset = sound_offset;
         song.judgment_timing = judgment_timing;

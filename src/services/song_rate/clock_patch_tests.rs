@@ -6,7 +6,8 @@ use crate::core::memory_patch::{PatchBackend, PatchStep};
 use crate::core::xact::rate::RateRatio;
 
 use super::clock_patch::{
-    build_clock_stub, install_clock_with_backend, scale_music_count_q31, ClockInstallError,
+    build_clock_stub, build_clock_stub_with_callout, install_clock_with_backend,
+    install_clock_with_backend_and_callout, scale_music_count_q31, ClockInstallError,
     RatePublication, ResetOutcome, CLOCK_PATCH_BYTES, IDENTITY_Q31,
 };
 
@@ -142,6 +143,153 @@ fn emitted_stub_replays_instructions_has_aligned_factor_and_returns_exactly() {
         (jump_end as i64 + i64::from(displacement)) as usize,
         PATCH + 8
     );
+}
+
+/// Decode a tiny subset of x86-64 well enough to walk the call-out prologue:
+/// returns (length, mnemonic-ish tag) for the instruction at `at`.
+fn decode(bytes: &[u8], at: usize) -> (usize, &'static str) {
+    match &bytes[at..] {
+        [0x49, 0x89, 0xe4, ..] => (3, "mov r12,rsp"),
+        [0x48, 0x83, 0xe4, 0xf0, ..] => (4, "and rsp,-16"),
+        [0x48, 0x81, 0xec, ..] => (7, "sub rsp,imm32"),
+        [0x0f, 0x11, m, 0x24, _, ..] if m & 0xc7 == 0x44 => (5, "movups [rsp+d8],xmm"),
+        [0x0f, 0x10, m, 0x24, _, ..] if m & 0xc7 == 0x44 => (5, "movups xmm,[rsp+d8]"),
+        [0x48 | 0x4c, 0x89, m, 0x24, ..] if m & 0xc7 == 0x84 => (8, "mov [rsp+d32],r"),
+        [0x48 | 0x4c, 0x8b, m, 0x24, ..] if m & 0xc7 == 0x84 => (8, "mov r,[rsp+d32]"),
+        [0x48, 0x89, 0xf9, ..] => (3, "mov rcx,rdi"),
+        [0x89, 0xda, ..] => (2, "mov edx,ebx"),
+        [0x48, 0xb8, ..] => (10, "mov rax,imm64"),
+        [0xff, 0xd0, ..] => (2, "call rax"),
+        [0x89, 0xc3, ..] => (2, "mov ebx,eax"),
+        [0x4c, 0x89, 0xe4, ..] => (3, "mov rsp,r12"),
+        [0x44, 0x8d, 0x34, 0x18, ..] => (4, "lea r14d,[rax+rbx]"),
+        _ => (0, "?"),
+    }
+}
+
+#[test]
+fn callout_stub_saves_every_volatile_register_and_keeps_the_identity_body_intact() {
+    const CALLOUT: usize = 0x7fff_1234_5678_9abc;
+    let plain = build_clock_stub(STUB, PATCH + 8).unwrap();
+    let with = build_clock_stub_with_callout(STUB, PATCH + 8, Some(CALLOUT)).unwrap();
+    assert_eq!(plain.callout_imm_offset, None);
+    let imm = with.callout_imm_offset.unwrap();
+    assert_eq!(
+        u64::from_le_bytes(with.bytes[imm..imm + 8].try_into().unwrap()),
+        CALLOUT as u64
+    );
+    // Walk the prologue instruction by instruction until the displaced lea.
+    let mut at = 0;
+    let mut tags = Vec::new();
+    loop {
+        let (len, tag) = decode(&with.bytes, at);
+        assert_ne!(
+            len,
+            0,
+            "undecodable byte at {at}: {:02x?}",
+            &with.bytes[at..at + 4]
+        );
+        tags.push(tag);
+        at += len;
+        if tag == "lea r14d,[rax+rbx]" {
+            break;
+        }
+    }
+    let prologue_len = at - 4;
+    // Save set: 6 xmm stores, 7 GPR stores; restore set mirrors them.
+    assert_eq!(
+        tags.iter().filter(|t| **t == "movups [rsp+d8],xmm").count(),
+        6
+    );
+    assert_eq!(tags.iter().filter(|t| **t == "mov [rsp+d32],r").count(), 7);
+    assert_eq!(tags.iter().filter(|t| **t == "mov r,[rsp+d32]").count(), 7);
+    assert_eq!(
+        tags.iter().filter(|t| **t == "movups xmm,[rsp+d8]").count(),
+        6
+    );
+    let order: Vec<&str> = tags
+        .iter()
+        .copied()
+        .filter(|t| {
+            !matches!(
+                *t,
+                "movups [rsp+d8],xmm"
+                    | "mov [rsp+d32],r"
+                    | "mov r,[rsp+d32]"
+                    | "movups xmm,[rsp+d8]"
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "mov r12,rsp",
+            "and rsp,-16",
+            "sub rsp,imm32",
+            "mov rcx,rdi",
+            "mov edx,ebx",
+            "mov rax,imm64",
+            "call rax",
+            "mov ebx,eax",
+            "mov rsp,r12",
+            "lea r14d,[rax+rbx]",
+        ]
+    );
+    // The frame: 0xC0 keeps 16-byte alignment and covers shadow + saves
+    // (`sub rsp` follows the 3-byte `mov r12,rsp` and the 4-byte `and`).
+    assert_eq!(&with.bytes[7..14], &[0x48, 0x81, 0xec, 0xc0, 0, 0, 0]);
+    // The identity body after the prologue starts with the displaced lea and
+    // is the plain stub's body up to its rel32 fields (factor disp + return
+    // jump), which must still resolve correctly from the new position.
+    let body = &with.bytes[prologue_len..];
+    assert_eq!(&body[..4], &plain.bytes[..4]);
+    assert_eq!(&body[4..10], &plain.bytes[4..10]);
+    assert_eq!((STUB + with.factor_offset) % 8, 0);
+    assert_eq!(
+        u64::from_le_bytes(
+            with.bytes[with.factor_offset..with.factor_offset + 8]
+                .try_into()
+                .unwrap()
+        ),
+        IDENTITY_Q31
+    );
+    let jump_end = STUB + with.return_jump_offset + 5;
+    let displacement = i32::from_le_bytes(
+        with.bytes[with.return_jump_offset + 1..with.return_jump_offset + 5]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(
+        (jump_end as i64 + i64::from(displacement)) as usize,
+        PATCH + 8
+    );
+    // imul's rel32 points at the factor slot.
+    let imul = with
+        .bytes
+        .windows(3)
+        .position(|w| w == [0x48, 0xf7, 0x2d])
+        .unwrap();
+    let disp = i32::from_le_bytes(with.bytes[imul + 3..imul + 7].try_into().unwrap());
+    assert_eq!(
+        (STUB + imul + 7) as i64 + i64::from(disp),
+        (STUB + with.factor_offset) as i64
+    );
+    // Fits the allocation with headroom.
+    assert!(with.bytes.len() <= 320);
+    // Installing through the backend with a call-out lands the same bytes.
+    let readiness = AtomicBool::new(false);
+    let mut memory = SparseMemory::new();
+    let installed =
+        install_clock_with_backend_and_callout(&mut memory, PATCH, &readiness, Some(CALLOUT))
+            .unwrap();
+    assert_eq!(installed.stub_address, STUB);
+    assert_eq!(
+        memory
+            .read(STUB, with.bytes.len(), PatchStep::Readback)
+            .unwrap(),
+        with.bytes
+    );
+    assert!(readiness.load(Ordering::Acquire));
 }
 
 #[test]

@@ -230,6 +230,7 @@ pub fn install(signatures: &SignatureStore) -> bool {
     }
 
     log_info!("data_feed: installed judge_submit detour @ {:p}", addr);
+    crate::services::audio_sync_diag::submit_tap_installed();
     true
 }
 
@@ -245,119 +246,135 @@ unsafe extern "C" fn judge_submit_hook(
     judge_code: u32,
     scratch: *mut u8,
 ) {
-    // Only process grade opcodes (0x1028..0x102E for M/P/G/Gd/Boo/Miss/OK).
-    // Skip shock codes (0x1030, 0x1031) and cancel (0x1046).
-    let grade_index = judge_code.wrapping_sub(OPCODE_GRADE_BASE);
-    let is_grade_opcode = grade_index <= 6; // 0..=6 covers M through OK
+    use crate::services::audio_sync_diag::{self as diag, spans::Scope};
+    let submit = diag::span(Scope::Submit, 0);
+    diag::record_hit(actor, result, judge_code, scratch, submit.event());
+    let smarv_side = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _pre = diag::span(Scope::SubmitPre, 0);
+        // Only process grade opcodes (0x1028..0x102E for M/P/G/Gd/Boo/Miss/OK).
+        // Skip shock codes (0x1030, 0x1031) and cancel (0x1046).
+        let grade_index = judge_code.wrapping_sub(OPCODE_GRADE_BASE);
+        let is_grade_opcode = grade_index <= 6; // 0..=6 covers M through OK
 
-    // S-Marvelous flash re-drive, deferred to AFTER the original call at
-    // the bottom: the original's 0x1028 handler plays `in_marvelous` on
-    // the judgement clip — a re-drive issued before it gets clobbered the
-    // same event (deploy #5: green log, stock word on screen). Set by the
-    // classification tap below.
-    let mut smarv_side: Option<usize> = None;
+        // S-Marvelous flash re-drive, deferred to AFTER the original call at
+        // the bottom: the original's 0x1028 handler plays `in_marvelous` on
+        // the judgement clip — a re-drive issued before it gets clobbered the
+        // same event (deploy #5: green log, stock word on screen). Set by the
+        // classification tap below.
+        let mut smarv_side: Option<usize> = None;
 
-    if is_grade_opcode {
-        let player_side = *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) as usize;
+        if is_grade_opcode {
+            let player_side = *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) as usize;
 
-        if player_side <= 1 {
-            // ── S-Marvelous classification tap ──────────────────────
-            // Feeds `s_marvelous::state` (policy lives in that mod). Must
-            // see EVERY grade opcode 0..=6 — the combo-bit machine needs
-            // grades 1..6 too, and O.K. passes `ms: None` — so it sits
-            // before the has_ms_error split. Disarmed cost: one relaxed
-            // load. Armed: two extra aligned reads + a few relaxed
-            // atomics; independent of the try_lock buffer path below so a
-            // contended lock can never drop an S-Marv event.
-            if crate::mods::s_marvelous::state::is_armed(player_side) {
-                let combo = *(actor.add(ACTOR_COMBO_OFFSET) as *const i32);
-                let ms = if judge_code != OPCODE_OK && !scratch.is_null() {
-                    Some(*(scratch.add(4) as *const i32))
-                } else {
-                    None
-                };
-                if crate::mods::s_marvelous::state::on_judge_event(
-                    player_side,
-                    grade_index,
-                    ms,
-                    combo,
-                ) {
-                    // S-Marvelous: re-drive the judgement flash AFTER the
-                    // original below (which plays the stock in_marvelous).
-                    smarv_side = Some(player_side);
-                }
-            }
-
-            let ex_earned = ex_value_for_opcode(judge_code);
-            let ex_loss_this_step = 3 - ex_earned;
-
-            // OK (freeze hold) contributes EX but has no ms-error timing data.
-            let has_ms_error = judge_code != OPCODE_OK && !scratch.is_null();
-
-            if has_ms_error {
-                let ms_error = *(scratch.add(4) as *const i32);
-                LATEST_MS_ERROR[player_side].store(ms_error, Ordering::Release);
-
-                // Auto-calibration tap: grades M/P/G/Gd/Boo (index 0..=4 —
-                // Miss sits at the window edge and is excluded) of the armed
-                // side only. Disarmed cost: one relaxed load + compare.
-                if grade_index <= 4 && player_side as i32 == CALIB_SIDE.load(Ordering::Relaxed) {
-                    CALIB_SUM.fetch_add(ms_error as i64, Ordering::Relaxed);
-                    CALIB_SUM_SQ
-                        .fetch_add((ms_error as i64) * (ms_error as i64), Ordering::Relaxed);
-                    CALIB_COUNT.fetch_add(1, Ordering::Relaxed);
-                }
-
-                let bufs = buffers();
-                if let Ok(mut b) = bufs[player_side].try_lock() {
-                    b.current = ms_error;
-                    let abs_err = ms_error.unsigned_abs() as i32;
-                    if abs_err > b.max_abs {
-                        b.max_abs = abs_err;
-                    }
-                    b.sum_abs += abs_err as i64;
-                    b.sum += ms_error as i64;
-                    b.count += 1;
-                    b.ex_loss += ex_loss_this_step;
-
-                    if let Some(ref mut steps) = b.per_step {
-                        let note_ptr = *(result as *const *const u8);
-                        let expected_ms = if !note_ptr.is_null() {
-                            *(note_ptr.add(0x08) as *const i32)
-                        } else {
-                            0
-                        };
-                        let actual_ms = expected_ms + ms_error;
-                        steps.push(StepRecord {
-                            expected_ms,
-                            actual_ms,
-                            delta_ms: ms_error,
-                        });
+            if player_side <= 1 {
+                // ── S-Marvelous classification tap ──────────────────────
+                // Feeds `s_marvelous::state` (policy lives in that mod). Must
+                // see EVERY grade opcode 0..=6 — the combo-bit machine needs
+                // grades 1..6 too, and O.K. passes `ms: None` — so it sits
+                // before the has_ms_error split. Disarmed cost: one relaxed
+                // load. Armed: two extra aligned reads + a few relaxed
+                // atomics; independent of the try_lock buffer path below so a
+                // contended lock can never drop an S-Marv event.
+                if crate::mods::s_marvelous::state::is_armed(player_side) {
+                    let combo = *(actor.add(ACTOR_COMBO_OFFSET) as *const i32);
+                    let ms = if judge_code != OPCODE_OK && !scratch.is_null() {
+                        Some(*(scratch.add(4) as *const i32))
+                    } else {
+                        None
+                    };
+                    if crate::mods::s_marvelous::state::on_judge_event(
+                        player_side,
+                        grade_index,
+                        ms,
+                        combo,
+                    ) {
+                        // S-Marvelous: re-drive the judgement flash AFTER the
+                        // original below (which plays the stock in_marvelous).
+                        smarv_side = Some(player_side);
                     }
                 }
-            } else if judge_code == OPCODE_OK {
-                // Freeze hold: EX contribution only, no ms-error.
-                let bufs = buffers();
-                if let Ok(mut b) = bufs[player_side].try_lock() {
-                    b.ex_loss += ex_loss_this_step;
-                }
-            }
 
-            csv_export::snapshot_song_identity(actor, player_side);
-            timing_stats_widget::update_text(player_side);
+                let ex_earned = ex_value_for_opcode(judge_code);
+                let ex_loss_this_step = 3 - ex_earned;
+
+                // OK (freeze hold) contributes EX but has no ms-error timing data.
+                let has_ms_error = judge_code != OPCODE_OK && !scratch.is_null();
+
+                if has_ms_error {
+                    let ms_error = *(scratch.add(4) as *const i32);
+                    LATEST_MS_ERROR[player_side].store(ms_error, Ordering::Release);
+
+                    // Auto-calibration tap: grades M/P/G/Gd/Boo (index 0..=4 —
+                    // Miss sits at the window edge and is excluded) of the armed
+                    // side only. Disarmed cost: one relaxed load + compare.
+                    if grade_index <= 4 && player_side as i32 == CALIB_SIDE.load(Ordering::Relaxed)
+                    {
+                        CALIB_SUM.fetch_add(ms_error as i64, Ordering::Relaxed);
+                        CALIB_SUM_SQ
+                            .fetch_add((ms_error as i64) * (ms_error as i64), Ordering::Relaxed);
+                        CALIB_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    let bufs = buffers();
+                    if let Ok(mut b) = bufs[player_side].try_lock() {
+                        b.current = ms_error;
+                        let abs_err = ms_error.unsigned_abs() as i32;
+                        if abs_err > b.max_abs {
+                            b.max_abs = abs_err;
+                        }
+                        b.sum_abs += abs_err as i64;
+                        b.sum += ms_error as i64;
+                        b.count += 1;
+                        b.ex_loss += ex_loss_this_step;
+
+                        if let Some(ref mut steps) = b.per_step {
+                            let note_ptr = *(result as *const *const u8);
+                            let expected_ms = if !note_ptr.is_null() {
+                                *(note_ptr.add(0x08) as *const i32)
+                            } else {
+                                0
+                            };
+                            let actual_ms = expected_ms + ms_error;
+                            steps.push(StepRecord {
+                                expected_ms,
+                                actual_ms,
+                                delta_ms: ms_error,
+                            });
+                        }
+                    }
+                } else if judge_code == OPCODE_OK {
+                    // Freeze hold: EX contribution only, no ms-error.
+                    let bufs = buffers();
+                    if let Ok(mut b) = bufs[player_side].try_lock() {
+                        b.ex_loss += ex_loss_this_step;
+                    }
+                }
+
+                csv_export::snapshot_song_identity(actor, player_side);
+                timing_stats_widget::update_text(player_side);
+            }
         }
-    }
 
-    // Always call the original so score/combo/gauge updates proceed.
-    if let Some(detour) = DETOUR.get() {
-        detour.call(actor, result, judge_code, scratch);
+        smarv_side
+    }))
+    .unwrap_or(None);
+
+    // Original is outside diagnostic/panic containment and is never retried.
+    {
+        let _original = diag::span(Scope::SubmitOriginal, 0);
+        if let Some(detour) = DETOUR.get() {
+            detour.call(actor, result, judge_code, scratch);
+        }
     }
 
     // S-Marvelous flash re-drive — must run after the original's stock
     // `in_marvelous` play so the label jump is the LAST write this event.
     // Passes the dispatch actor: the NoteResultActor (whose stored wrapper
     // the stock handler drives) lives in its subtree.
-    if let Some(side) = smarv_side {
-        crate::mods::s_marvelous::flash::on_smarvelous(side, actor);
-    }
+    let _post = diag::span(Scope::SubmitPost, 0);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(side) = smarv_side {
+            crate::mods::s_marvelous::flash::on_smarvelous(side, actor);
+        }
+    }));
 }

@@ -105,6 +105,8 @@
 pub mod afp_patcher;
 pub mod analyze_hook;
 pub mod asset_loader;
+pub mod audio_clock;
+pub mod audio_sync_diag;
 pub mod avs_layeredfs;
 pub mod bm2d_api;
 pub mod bm2d_package;

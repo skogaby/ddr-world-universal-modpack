@@ -22,8 +22,8 @@
 //!
 //! ## Prefetch window (the resident set)
 //!
-//! To avoid a chrome-only flash on every scroll step (an arc takes ~43 pump
-//! polls to load+register), each side keeps a **resident set** of loaded
+//! To avoid a chrome-only flash on every scroll step while an arc loads and
+//! registers, each side keeps a **resident set** of loaded
 //! assets: the **focused overlay category's** window `[cur-N, cur+N]` around
 //! its current selection (`N` = [`OverlayState::window_n`], clamped to the
 //! discovered asset range). On each focus/value change the set is re-diffed —
@@ -62,10 +62,8 @@
 //! engine hash-tree lookup each). When the focused entry resolves it binds +
 //! shows immediately. The pump runs only while at least one entry is loading
 //! (`pump_running` prevents double-scheduling; all callbacks and the pump run
-//! serially on the render thread). NOTE: pump ticks are render-HOOK
-//! invocations, not rendered frames — the hook fires several times per frame
-//! (multiple passes), ~300–600 ticks/s measured on cabinet, so poll budgets
-//! are calibrated in ticks, not frames.
+//! serially on the render thread). Continuations run once per engine frame;
+//! load timeouts use elapsed time, independent of frame rate or wrapper count.
 //!
 //! ## Lifetime (visibility is the modal, not the scene)
 //!
@@ -134,8 +132,10 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::core::arc::ArcArchive;
+use crate::core::deferred_work::{Deadline, Wait};
 use crate::services::asset_loader::{self, AssetHandle};
 use crate::services::avs_layeredfs::cache_hasher::CacheHasher;
 use crate::services::avs_layeredfs::mod_paths;
@@ -227,15 +227,11 @@ impl ScreenRect {
     }
 }
 
-/// Pump polls (render-hook ticks, NOT rendered frames — the hook fires
-/// several times per frame; ~300–600 ticks/s measured on cabinet 2026-07-08)
-/// before a `Loading` entry gives up. One arc resolves in ~43 polls in
-/// isolation; under song-select's own FileManager streaming a small window
-/// burst (≤14 loads) clears in well under a second, so 3600 (~6–12 s wall)
-/// only ever reclaims genuinely-broken loads (missing/corrupt arc). Timeout ⇒
+/// Elapsed load budget, preserving the old 3600-poll budget's upper bound
+/// (~6-12 seconds at the former per-wrapper cadence). Timeout =>
 /// the layer latches `Failed` (chrome only until the entry leaves the window
 /// / the modal reopens); never blocks the thread.
-const LOAD_TIMEOUT_POLLS: u32 = 3600;
+const LOAD_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// One overlay layer's load lifecycle within a resident entry.
 struct LayerLoad {
@@ -249,9 +245,8 @@ struct LayerLoad {
 }
 
 enum Phase {
-    /// Pump is polling `resolve_hash` for this layer. `polls` counts ticks
-    /// toward [`LOAD_TIMEOUT_POLLS`].
-    Loading { polls: u32 },
+    /// Pump is polling `resolve_hash` until ready or the elapsed deadline.
+    Loading { deadline: Deadline },
     /// Registered — `tex` is the bindable texture handle (`TextureData+0x04`).
     Resolved { tex: u32 },
     /// Load error or resolve timeout. Handle already released; chrome only.
@@ -846,7 +841,9 @@ fn build_entry(
                 Some(handle) => LayerLoad {
                     handle: Some(handle),
                     tex_name: stem,
-                    phase: Phase::Loading { polls: 0 },
+                    phase: Phase::Loading {
+                        deadline: Deadline::new(Instant::now(), LOAD_TIMEOUT),
+                    },
                 },
                 None => {
                     // load() already logged the failure detail; warn once per
@@ -1023,7 +1020,7 @@ fn pump_tick() {
                     } = overlays;
                     for (key, entry) in resident.iter_mut() {
                         for layer in entry.layers.iter_mut() {
-                            let Phase::Loading { polls } = layer.phase else {
+                            let Phase::Loading { deadline } = layer.phase else {
                                 continue;
                             };
                             // resolve_hash takes the loader's own leaf lock;
@@ -1032,8 +1029,8 @@ fn pump_tick() {
                                 .handle
                                 .as_ref()
                                 .and_then(|h| asset_loader::resolve_hash(h.name_hash));
-                            match resolved {
-                                Some(tex) => {
+                            match deadline.poll(resolved, Instant::now()) {
+                                Wait::Ready(tex) => {
                                     layer.phase = Phase::Resolved { tex: tex.handle };
                                     if focused == Some(*key) {
                                         focused_gained_art = true;
@@ -1045,22 +1042,21 @@ fn pump_tick() {
                                         );
                                     }
                                 }
-                                None if polls + 1 >= LOAD_TIMEOUT_POLLS => {
+                                Wait::TimedOut => {
                                     if let Some(handle) = layer.handle.take() {
                                         asset_loader::release(handle);
                                     }
                                     layer.phase = Phase::Failed;
                                     if warned_stems.insert(layer.tex_name.clone()) {
                                         log_warn!(
-                                            "preview_overlay: '{}' never resolved after {} polls (side {}) — chrome only for this value",
+                                            "preview_overlay: '{}' never resolved after {} seconds (side {}) -- chrome only for this value",
                                             layer.tex_name,
-                                            LOAD_TIMEOUT_POLLS,
+                                            LOAD_TIMEOUT.as_secs(),
                                             side
                                         );
                                     }
                                 }
-                                None => {
-                                    layer.phase = Phase::Loading { polls: polls + 1 };
+                                Wait::Pending => {
                                     any_loading = true;
                                 }
                             }

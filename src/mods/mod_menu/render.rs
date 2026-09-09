@@ -383,7 +383,26 @@ pub(super) fn allocate_widgets(state: &mut ModMenuState) {
     }
 
     hide_all_widgets(state);
-    state.widgets_allocated = true;
+    // Latch "allocated" ONLY when the menu is actually usable: the row slots
+    // and the cursor are what makes it navigable/visible. Input now polls from
+    // the first dispatcher frame, so a 0-0-0 during boot can reach here before
+    // the renderer's font pointer is captured — every `create_text_widget()`
+    // then returns None, and a latched-but-empty menu would be an invisible
+    // exclusive input consumer for the rest of the session. Release whatever
+    // was created so the next open retries the allocation from scratch.
+    let usable =
+        !state.slots.is_empty() && state.cursor_widget.is_some() && state.title_widget.is_some();
+    if usable {
+        state.widgets_allocated = true;
+    } else {
+        log_warn!(
+            "ModMenu: widget allocation incomplete (slots={}, cursor={}, title={}) -- releasing; will retry on the next open",
+            state.slots.len(),
+            state.cursor_widget.is_some(),
+            state.title_widget.is_some()
+        );
+        destroy_widgets(state);
+    }
 }
 
 pub(super) fn destroy_widgets(state: &mut ModMenuState) {

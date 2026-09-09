@@ -19,24 +19,17 @@
 //!
 //! Emission detours the game's per-frame LAYER DISPATCHER (`layer_dispatcher`
 //! signature; called once per frame unconditionally from the render
-//! orchestrator in EVERY scene). PRE-original, the detour replicates the
-//! dispatcher's own per-entry walk conditions over the 11-entry layer table
-//! (`layer_table` derived global; entries `{override_ptr, layer_object,
-//! list_index}` stride 0x18; walked iff `byte[layer+0x10]==0 &&
-//! byte[layer+0x12]!=0`, non-override) and appends the background block to
-//! the WIDGET layer's list (identified by pointer identity with the render
-//! list manager the DLL's widgets register into; fallback: the LAST walked
-//! entry — the topmost-composed layer). The layer's own walk then records
-//! its content AFTER our quad, so the quad sits beneath the menu's widgets
-//! and above every lower layer — in every scene, once per frame, on the
-//! dispatcher's own thread at the dispatcher's own moment (no torn-list
-//! risk; the earlier wrapper-render spray and dirty-anchor mechanisms are
-//! retired — see docs/overlay_draw_research.md for the full trail).
+//! orchestrator in EVERY scene). PRE-original, dispatch one batch of mod
+//! frame work. The original walks the layers, including wrapper-local menu
+//! anchor emission at its native z-position. POST-original, the SMX emitter
+//! appends its topmost records before the consumer kick. Never move the
+//! menu background to segment start: loading art would cover it. See
+//! docs/overlay_draw_research.md for the full trail.
 //!
 //! Fail-open: every gate failure skips the frame and latches one WARN per
 //! failure class; ≥ [`FAILURE_LATCH_THRESHOLD`] consecutive failures while
 //! active latch the emitter off for the session (design §6). Inactive cost:
-//! one relaxed atomic read per frame in the detour (plus the original call).
+//! emitter gates are cheap; frame work is independent of background activity.
 //!
 pub mod encode;
 
@@ -146,6 +139,10 @@ pub fn is_background_active() -> bool {
 /// Whether the animated-background emitter is installed (dispatcher detour
 /// live + layer table derived). The menu's availability gate reads this.
 pub fn emitter_ready() -> bool {
+    dispatcher_ready() && !LAYER_TABLE_GLOBAL.load(Ordering::Acquire).is_null()
+}
+
+pub fn dispatcher_ready() -> bool {
     DISPATCHER_HOOKED.load(Ordering::Acquire)
 }
 
@@ -308,10 +305,12 @@ pub fn clear_topmost_emitter() {
     TOPMOST_EMITTER.store(0, Ordering::Release);
 }
 
-/// Whether topmost emission is available (dispatcher detour installed —
-/// the same availability as the animated backgrounds).
+/// Whether topmost emission is available: the dispatcher detour AND the
+/// derived layer table (the topmost append resolves the widget layer's
+/// private CommandList through it — without the table every emission is a
+/// silent no-op). Same conjunction as the animated backgrounds.
 pub fn topmost_ready() -> bool {
-    DISPATCHER_HOOKED.load(Ordering::Acquire)
+    emitter_ready()
 }
 
 /// Resolve the widget layer's private CommandList from the layer table:
@@ -506,11 +505,14 @@ pub fn init(signatures: &SignatureStore) {
         ),
     }
 
-    let table = signatures.get_address("layer_table");
+    if let Some(table) = signatures.get_address("layer_table") {
+        LAYER_TABLE_GLOBAL.store(table as *mut u8, Ordering::Release);
+    } else {
+        log_warn!("overlay_draw: layer_table unresolved -- topmost emission unavailable");
+    }
     let dispatcher = signatures.get_address("layer_dispatcher");
-    match (table, dispatcher) {
-        (Some(t), Some(d)) => {
-            LAYER_TABLE_GLOBAL.store(t as *mut u8, Ordering::Release);
+    match dispatcher {
+        Some(d) => {
             unsafe {
                 let target: DispatcherFn = std::mem::transmute(d);
                 match crate::core::hooks::install_enabled(
@@ -520,22 +522,22 @@ pub fn init(signatures: &SignatureStore) {
                 ) {
                     Ok(()) => {
                         DISPATCHER_HOOKED.store(true, Ordering::Release);
-                        log_info!("overlay_draw: layer-dispatcher detour installed");
+                        log_info!("overlay_draw: layer-dispatcher detour installed -- mod work runs once per engine frame");
                     }
                     Err(e) => log_warn!(
-                        "overlay_draw: layer-dispatcher hook failed ({}) -- animated backgrounds unavailable",
+                        "overlay_draw: layer-dispatcher hook failed ({}) -- mod frame callbacks and deferred work unavailable",
                         e
                     ),
                 }
             }
         }
-        _ => log_warn!(
-            "overlay_draw: layer_dispatcher/layer_table unresolved -- animated backgrounds unavailable"
+        None => log_warn!(
+            "overlay_draw: layer_dispatcher unresolved -- mod frame callbacks and deferred work unavailable"
         ),
     }
 }
 
-/// The layer-dispatcher detour: forward first, then run the registered
+/// The layer-dispatcher detour: run one mod-work batch, forward, then run the
 /// topmost emitter (SMX overlay) against the widget layer's private
 /// list — records appended after the dispatcher's own recording draw
 /// LAST (topmost), and the orchestrator's consumer kick hasn't run yet
@@ -543,10 +545,15 @@ pub fn init(signatures: &SignatureStore) {
 /// Installing this detour also proves the layer machinery resolved on
 /// this build (`emitter_ready` / `topmost_ready`).
 extern "C" fn dispatcher_hook() {
-    unsafe {
-        if let Some(ref hook) = *std::ptr::addr_of!(DISPATCHER_HOOK) {
-            hook.call();
+    use crate::services::audio_sync_diag::{self as diag, spans::Scope};
+    crate::services::widget_renderer::dispatch_frame(|| unsafe {
+        {
+            let _original = diag::span(Scope::LayerOriginal, 0);
+            if let Some(ref hook) = *std::ptr::addr_of!(DISPATCHER_HOOK) {
+                hook.call();
+            }
         }
+        let _topmost = diag::span(Scope::Topmost, 0);
         let emitter = TOPMOST_EMITTER.load(Ordering::Acquire);
         if emitter != 0 {
             TOPMOST_LIST.store(resolve_widget_layer_list(), Ordering::Release);
@@ -555,7 +562,7 @@ extern "C" fn dispatcher_hook() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             TOPMOST_LIST.store(std::ptr::null_mut(), Ordering::Release);
         }
-    }
+    });
 }
 
 /// Per-wrapper-render tick — per-scene diagnostics only (emission moved to

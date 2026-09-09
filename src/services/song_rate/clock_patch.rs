@@ -18,13 +18,23 @@ use std::sync::atomic::AtomicPtr;
 
 pub const IDENTITY_Q31: u64 = 1 << 31;
 pub const CLOCK_PATCH_BYTES: [u8; 8] = [0x44, 0x8d, 0x34, 0x18, 0x4c, 0x8d, 0x67, 0x58];
-const STUB_ALLOCATION_SIZE: usize = 128;
+/// Room for the identity body (~70 bytes) plus the optional audio-clock
+/// call-out prologue (~180 bytes) plus the 8-aligned factor slot.
+const STUB_ALLOCATION_SIZE: usize = 320;
+
+/// The audio-clock call-out the stub can be built with: Win64 `extern "C"`
+/// `fn(actor: *mut u8 /* rcx = rdi */, rbx: i32 /* edx = ebx */) -> i32`
+/// returning the `rbx` the stub continues with (identity ⇒ unchanged).
+pub type ClockCallout = extern "C" fn(*mut u8, i32) -> i32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockStubLayout {
     pub bytes: Vec<u8>,
     pub factor_offset: usize,
     pub return_jump_offset: usize,
+    /// Byte offset of the `mov rax, imm64` call-out address inside the stub
+    /// (`None` when built without a call-out).
+    pub callout_imm_offset: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +65,94 @@ pub fn build_clock_stub(
     stub_address: usize,
     return_address: usize,
 ) -> Result<ClockStubLayout, PatchError> {
+    build_clock_stub_with_callout(stub_address, return_address, None)
+}
+
+/// Build the stub, optionally prefixed by the audio-clock call-out.
+///
+/// The call-out prologue runs BEFORE the displaced `lea r14d,[rax+rbx]`
+/// (rax = the option vcall's `J`, rbx = `T − S − A`, rdi = the GamePlayActor)
+/// and replaces `rbx` with the call-out's return. Register/ABI contract at
+/// the site (verified on all four supported builds — `rbx` is DEAD after the
+/// `lea`, `r12`/`r14` are written by the displaced instructions, flags are
+/// already clobbered by the identity body's `cmp`s):
+///
+/// ```text
+/// mov r12, rsp ; and rsp,-16 ; sub rsp,0xC0      ; r12 = saved rsp (dead reg), 16-aligned frame:
+///                                                 ;   [0x00..0x20) shadow, [0x20..0x80) xmm0-5,
+///                                                 ;   [0x80..0xB8) rax rcx rdx r8 r9 r10 r11
+/// movups [rsp+0x20..0x70], xmm0..xmm5 ; mov [rsp+0x80..0xB0], rax rcx rdx r8 r9 r10 r11
+/// mov rcx, rdi ; mov edx, ebx ; mov rax, imm64 ; call rax ; mov ebx, eax
+/// restore r11..r8 rdx rcx rax ; restore xmm5..xmm0 ; mov rsp, r12
+/// ```
+///
+/// `mov ebx,eax` zero-extends exactly like the original 32-bit `sub ebx`s did.
+/// The call-out is a plain Rust `extern "C"` fn — it preserves every
+/// callee-saved register (rbx rbp rsi rdi r12-r15, xmm6-15) itself.
+pub fn build_clock_stub_with_callout(
+    stub_address: usize,
+    return_address: usize,
+    callout: Option<usize>,
+) -> Result<ClockStubLayout, PatchError> {
     let mut bytes = Vec::with_capacity(STUB_ALLOCATION_SIZE);
+    let mut callout_imm_offset = None;
+    if let Some(target) = callout {
+        bytes.extend_from_slice(&[0x49, 0x89, 0xe4]); // mov r12,rsp
+        bytes.extend_from_slice(&[0x48, 0x83, 0xe4, 0xf0]); // and rsp,-16
+        bytes.extend_from_slice(&[0x48, 0x81, 0xec, 0xc0, 0x00, 0x00, 0x00]); // sub rsp,0xC0
+                                                                              // movups [rsp+disp8], xmm0..xmm5
+        for (index, disp) in [0x20u8, 0x30, 0x40, 0x50, 0x60, 0x70]
+            .into_iter()
+            .enumerate()
+        {
+            bytes.extend_from_slice(&[0x0f, 0x11, 0x44 | ((index as u8) << 3), 0x24, disp]);
+        }
+        // mov [rsp+disp32], rax/rcx/rdx (REX.W) then r8..r11 (REX.WR)
+        for (rex, reg, disp) in [
+            (0x48u8, 0u8, 0x80u32),
+            (0x48, 1, 0x88),
+            (0x48, 2, 0x90),
+            (0x4c, 0, 0x98),
+            (0x4c, 1, 0xa0),
+            (0x4c, 2, 0xa8),
+            (0x4c, 3, 0xb0),
+        ] {
+            bytes.extend_from_slice(&[rex, 0x89, 0x84 | (reg << 3), 0x24]);
+            bytes.extend_from_slice(&disp.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0x48, 0x89, 0xf9]); // mov rcx,rdi
+        bytes.extend_from_slice(&[0x89, 0xda]); // mov edx,ebx
+        bytes.extend_from_slice(&[0x48, 0xb8]); // mov rax,imm64
+        callout_imm_offset = Some(bytes.len());
+        bytes.extend_from_slice(&(target as u64).to_le_bytes());
+        bytes.extend_from_slice(&[0xff, 0xd0]); // call rax
+        bytes.extend_from_slice(&[0x89, 0xc3]); // mov ebx,eax
+                                                // restore r11..r8, rdx, rcx, rax
+        for (rex, reg, disp) in [
+            (0x4cu8, 3u8, 0xb0u32),
+            (0x4c, 2, 0xa8),
+            (0x4c, 1, 0xa0),
+            (0x4c, 0, 0x98),
+            (0x48, 2, 0x90),
+            (0x48, 1, 0x88),
+            (0x48, 0, 0x80),
+        ] {
+            bytes.extend_from_slice(&[rex, 0x8b, 0x84 | (reg << 3), 0x24]);
+            bytes.extend_from_slice(&disp.to_le_bytes());
+        }
+        // movups xmm5..xmm0, [rsp+disp8]
+        for (index, disp) in [
+            (5u8, 0x70u8),
+            (4, 0x60),
+            (3, 0x50),
+            (2, 0x40),
+            (1, 0x30),
+            (0, 0x20),
+        ] {
+            bytes.extend_from_slice(&[0x0f, 0x10, 0x44 | (index << 3), 0x24, disp]);
+        }
+        bytes.extend_from_slice(&[0x4c, 0x89, 0xe4]); // mov rsp,r12
+    }
     bytes.extend_from_slice(&[0x44, 0x8d, 0x34, 0x18]); // lea r14d,[rax+rbx]
     bytes.extend_from_slice(&[0x50, 0x51, 0x52]); // preserve rax, rcx, rdx
     bytes.extend_from_slice(&[0x49, 0x63, 0xc6]); // movsxd rax,r14d
@@ -110,10 +207,14 @@ pub fn build_clock_stub(
     let return_disp = rel32_displacement(return_end, return_address)?.to_le_bytes();
     bytes[return_jump_offset + 1..return_jump_offset + 5].copy_from_slice(&return_disp);
 
+    if bytes.len() > STUB_ALLOCATION_SIZE {
+        return Err(PatchError::Rel32OutOfRange);
+    }
     Ok(ClockStubLayout {
         bytes,
         factor_offset,
         return_jump_offset,
+        callout_imm_offset,
     })
 }
 
@@ -139,11 +240,24 @@ pub fn install_clock_with_backend<B: PatchBackend>(
     patch_address: usize,
     readiness: &AtomicBool,
 ) -> Result<InstalledClock, ClockInstallError> {
+    install_clock_with_backend_and_callout(backend, patch_address, readiness, None)
+}
+
+pub fn install_clock_with_backend_and_callout<B: PatchBackend>(
+    backend: &mut B,
+    patch_address: usize,
+    readiness: &AtomicBool,
+    callout: Option<usize>,
+) -> Result<InstalledClock, ClockInstallError> {
     readiness.store(false, Ordering::Release);
     let stub_address = allocate_rel32_block(backend, patch_address, STUB_ALLOCATION_SIZE)
         .map_err(|_| ClockInstallError::Allocate)?;
-    let layout = build_clock_stub(stub_address, patch_address + CLOCK_PATCH_BYTES.len())
-        .map_err(ClockInstallError::Build)?;
+    let layout = build_clock_stub_with_callout(
+        stub_address,
+        patch_address + CLOCK_PATCH_BYTES.len(),
+        callout,
+    )
+    .map_err(ClockInstallError::Build)?;
     let expected_stub = vec![0; layout.bytes.len()];
     apply_checked_patch(backend, stub_address, &expected_stub, &layout.bytes)
         .map_err(ClockInstallError::Stub)?;
@@ -440,6 +554,18 @@ static STUB_ADDRESS: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static FACTOR_ADDRESS: AtomicPtr<AtomicU64> = AtomicPtr::new(std::ptr::null_mut());
 #[cfg(windows)]
 static PUBLICATION: OnceCell<RatePublication> = OnceCell::new();
+/// The call-out address the installed stub was built with (0 = none) — the
+/// diagnostics' stub verification rebuilds the layout with the same value.
+#[cfg(windows)]
+static CALLOUT_ADDRESS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The call-out the installed stub carries, if any.
+#[cfg(windows)]
+#[must_use]
+pub fn installed_callout() -> Option<usize> {
+    let address = CALLOUT_ADDRESS.load(Ordering::Acquire);
+    (address != 0).then_some(address)
+}
 
 #[cfg(windows)]
 pub fn init(signatures: &SignatureStore) -> bool {
@@ -450,11 +576,17 @@ pub fn init(signatures: &SignatureStore) -> bool {
         log_warn!("song_rate: clock patch signature unavailable");
         return false;
     };
+    // The audio clock's call-out is compiled into the stub ONLY when the
+    // gameplay-timing-fixes mod is enabled in config (design §0: no footprint
+    // otherwise). The call-out itself passes `rbx` through until armed.
+    let callout = crate::services::audio_clock::wants_engine()
+        .then(|| crate::services::audio_clock::game::corrected_rbx as ClockCallout as usize);
     let transaction_ready = AtomicBool::new(false);
-    let installed = install_clock_with_backend(
+    let installed = install_clock_with_backend_and_callout(
         &mut memory::ProcessPatchBackend,
         patch as usize,
         &transaction_ready,
+        callout,
     );
     let installed = match installed {
         Ok(installed) => installed,
@@ -474,10 +606,16 @@ pub fn init(signatures: &SignatureStore) -> bool {
         return false;
     }
     let _ = PUBLICATION.set(RatePublication::new(factor));
+    CALLOUT_ADDRESS.store(callout.unwrap_or(0), Ordering::Release);
     INSTALLED.store(true, Ordering::Release);
     log_info!(
-        "song_rate: permanent identity clock installed (stub @ {:p})",
-        installed.stub_address as *const u8
+        "song_rate: permanent identity clock installed (stub @ {:p}{})",
+        installed.stub_address as *const u8,
+        if callout.is_some() {
+            ", with the audio-clock call-out"
+        } else {
+            ""
+        }
     );
     true
 }

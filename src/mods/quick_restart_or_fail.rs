@@ -964,7 +964,7 @@ fn apply_select_residency_patch() {
 /// validated; stops at step ≥ 7, on timeout, or when a newer restart's
 /// driver supersedes this one.
 fn start_restart_init_sampler() {
-    if !widget_renderer::is_available() {
+    if !widget_renderer::frame_dispatch_available() {
         return;
     }
     let gen = SAMPLER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1332,7 +1332,7 @@ fn try_fast_finish(target_1idx: i32, label: &str) -> bool {
 static WATCHDOG_GEN: AtomicUsize = AtomicUsize::new(0);
 
 fn start_finish_watchdog(target_1idx: i32) {
-    if !widget_renderer::is_available() {
+    if !widget_renderer::frame_dispatch_available() {
         return;
     }
     let gen = WATCHDOG_GEN.fetch_add(1, Ordering::AcqRel) + 1;

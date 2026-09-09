@@ -143,7 +143,7 @@ pub(super) fn loop_reset_in_flight() -> bool {
 /// one song's bounds into another.
 pub(super) fn on_select_entry() {
     let generation = SELECT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    if !widget_renderer::is_available() {
+    if !widget_renderer::frame_dispatch_available() {
         return;
     }
     select_step(generation);
@@ -242,7 +242,7 @@ pub(super) fn on_gameplay_entry() {
     if shift_ms == 0 && !resolution_pending {
         return;
     }
-    if !widget_renderer::is_available() {
+    if !widget_renderer::frame_dispatch_available() {
         log_warn!("TrainingMode: widget renderer unavailable -- driver cannot arm");
         return;
     }

@@ -22,6 +22,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{GetLastError, BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -39,6 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, IsWindowVisible, SetWindowLongPtrW, GWLP_WNDPROC, GW_OWNER,
 };
 
+use crate::core::deferred_work::Deadline;
 use crate::{log_info, log_warn};
 
 use super::{input_inject, overlay, overlay_model};
@@ -64,8 +66,9 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Enable gate for the message handlers (disable() clears it even though
 /// the subclass may stay while restore fails).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Install attempt pacing (attempt every N frames until success).
-static FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
+/// Immediate first search, then elapsed-time pacing until installed.
+const SEARCH_INTERVAL: Duration = Duration::from_secs(2);
+static NEXT_SEARCH: Mutex<Option<Deadline>> = Mutex::new(None);
 static SEARCH_WARNED: AtomicBool = AtomicBool::new(false);
 static TOUCH_REG_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -117,9 +120,16 @@ pub fn tick() {
     if INSTALLED.load(Ordering::Acquire) {
         return;
     }
-    // One attempt every ~2 s at 60 fps (EnumWindows isn't free).
-    if FRAME_COUNTER.fetch_add(1, Ordering::Relaxed) % 120 != 0 {
-        return;
+    // EnumWindows is not free; cadence must not depend on FPS/widget count.
+    {
+        let Ok(mut next) = NEXT_SEARCH.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        if next.is_some_and(|deadline| !deadline.is_due(now)) {
+            return;
+        }
+        *next = Some(Deadline::new(now, SEARCH_INTERVAL));
     }
     try_install();
 }
@@ -128,6 +138,9 @@ pub fn tick() {
 /// [`tick`] once the game window exists.
 pub fn activate(debounce_ms: u32) {
     DEBOUNCE_MS.store(debounce_ms, Ordering::Relaxed);
+    if let Ok(mut next) = NEXT_SEARCH.lock() {
+        *next = None;
+    }
     ACTIVE.store(true, Ordering::Release);
 }
 

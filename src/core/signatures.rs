@@ -762,6 +762,29 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 53 48 83 EC 20 8B D9 8B 0D ?? ?? ?? ?? 85 C9 7E 0C FF 15 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B D3 48 C1 E2 05 0F B6 9C 02 B0 00 00 00",
         description: "Song prepared probe: (i32 cue handle) -> bool. DPS state 5 gates song start on it. Consumed by song_reset Phase 2 (poll before re-anchoring).",
     },
+    // Optional audio diagnostics. Static 20260825 RE: start manager entry
+    // RVA 0x1AB1C0 (wrapper 0x1AA120, called by DPS on 0x1044). This is a
+    // REQUEST, not the XACT wave start or audible presentation boundary.
+    SignatureDefinition {
+        name: "audio_start_prepared",
+        pattern: "83 FA FF 74 ?? 53 48 83 EC 20 8B D2 48 8B D9 48 8D 42 05 48 C1 E0 05 48 03 C1 74 ?? 48 C1 E2 05 80 BC 0A B0 00 00 00 00 75 ?? C6 40 11 01 48 8B 09 48 8B 01",
+        description: "Optional start-prepared manager entry: void(manager*, i32 handle). Pending-start flag when unprepared, otherwise cue Play then engine DoWork; audio_sync_diag observes only.",
+    },
+    SignatureDefinition {
+        name: "audio_sync_offset_layout",
+        pattern: "48 8D 97 6C 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 97 70 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 97 84 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 97 88 01 00 00 48 8D 0D ?? ?? ?? ?? E8",
+        description: "Optional GPA timing-field attestation: ctor subscribes SOUND/INPUT/RENDER/BOMB fields at +16C/+170/+184/+188 (20260825 RVA 5B756). Diagnostic validates the four key strings before reading fields.",
+    },
+    SignatureDefinition {
+        name: "audio_sync_raw_count_store",
+        pattern: "FF 87 58 01 00 00 44 89 B7 78 01 00 00",
+        description: "Optional GPA onUpdate tail: frame counter increment then stored raw count +178 (20260825 RVA 5D8B8). AFTER judgeNotes, hence sampled separately from its current argument.",
+    },
+    SignatureDefinition {
+        name: "audio_sync_offset_layout_v1",
+        pattern: "49 8D 94 24 6C 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8D 94 24 70 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8D 94 24 84 01 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8D 94 24 88 01 00 00 48 8D 0D ?? ?? ?? ?? E8",
+        description: "20250805 GPA timing-field attestation, same offsets/keys as audio_sync_offset_layout but R12 base (RVA 583BF); 20-byte cells rather than 19.",
+    },
     // Recursive actor-subtree message broadcast (FUN_18022eaa0 on
     // 20260721): broadcast(actor, msg, param, depth) — checks the
     // dispatch-suppressed flag (+0x20 & 0x20), calls the actor's
@@ -791,6 +814,27 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "dps_timing_anchor_site",
         pattern: "48 8B 05 ?? ?? ?? ?? 48 8B 88 68 12 00 00 48 89 4C 24 58 F6 46 20 20 75 ?? 48 8B 06 4C 8D 44 24 58 BA 44 10 00 00",
         description: "DPS state-6 timing-anchor read+broadcast site. RIP disp32 at +3 yields frame_tick_global (current tick at +0x1268 — the exact clock the 0x1044 anchor must carry). Consumed via derive_frame_tick_global by song_reset.",
+    },
+
+    // The input-manager's per-frame tick function (`FUN_1800231F0` on
+    // 20260825; the LAST call of the per-frame input poll). Its final two
+    // instructions are `CALL [rip+Ordinal_45]` (libavs `XCnbrep700002c`,
+    // the game tick) and `MOV [RBP+0x1268],RAX` — the ONE place the frame
+    // tick `T` every gameplay clock reads is stored. Matched by its
+    // prologue + the `MOV RBP,[rip+d32]` load of the input-state global
+    // (d32 at +0x16 — `derive_input_tick_function` REQUIRES it to decode
+    // to `frame_tick_global`) and the first two field stores; the tail
+    // store is verified by the derivation as well. Consumed by
+    // services/audio_clock (post-original detour pairing `T` with QPC).
+    SignatureDefinition {
+        name: "input_tick_function",
+        pattern: "48 8B C4 53 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 28 48 8B 2D ?? ?? ?? ?? 48 8D 50 08 48 8D 48 18 33 FF C7 40 08 01 00 00 00 89 78 18 FF 15",
+        description: "Input-manager per-frame tick function (20260224+): prologue + `MOV RBP,[rip+frame_tick_global]` (d32 at +0x16); ends `CALL [Ordinal_45]; MOV [RBP+0x1268],RAX; RET`. derive_input_tick_function verifies both and publishes `input_tick_store` (the tail store site). Consumed by services/audio_clock (T,QPC pairing).",
+    },
+    SignatureDefinition {
+        name: "input_tick_function_v1",
+        pattern: "40 53 55 56 57 41 54 41 55 41 56 48 83 EC 20 4C 8B 25 ?? ?? ?? ?? 48 8D 54 24 60 48 8D 4C 24 70 33 FF C7 44 24 60 01 00 00 00 89 7C 24 70 FF 15",
+        description: "20250805 shape of input_tick_function: `MOV R12,[rip+frame_tick_global]` (d32 at +0x12); tail `CALL [Ordinal_45]; MOV [R12+0x1268],RAX; ADD RSP,0x20; POP R14`. derive_input_tick_function publishes whichever shape matched as `input_tick_function`.",
     },
 
     // GamePlayActor's msg-0x1044 rewind worker (`FUN_18005bac0` on
@@ -2084,6 +2128,7 @@ impl SignatureStore {
         self.derive_shutter_actor_layout();
         self.derive_strip_hud_anchors();
         self.derive_frame_tick_global();
+        self.derive_input_tick_function();
         self.derive_custom_resolution();
         self.find_gauge_vtables();
         self.derive_judge_rebuild_trio();
@@ -4903,6 +4948,87 @@ impl SignatureStore {
                 "  [+] frame_tick_global (derived from {} anchor site(s)) @ +0x{:X}",
                 matches.len(),
                 off
+            );
+        }
+    }
+
+    /// Verify `input_tick_function` (the input manager's per-frame tick
+    /// function) against `frame_tick_global` and publish `input_tick_store`
+    /// = the address of its tail `MOV [RBP+0x1268],RAX`.
+    ///
+    /// Two checks, both required (a hit on all four builds proves nothing
+    /// about what the consumer reads): the `MOV RBP,[rip+d32]` at match+0x13
+    /// must decode to the derived `frame_tick_global` (the same global every
+    /// other clock consumer dereferences), and the function tail — found by
+    /// scanning ≤ 0x400 bytes for `FF 15 ?? ?? ?? ?? 48 89 85 68 12 00 00
+    /// 48 83 C4 28 41 5F` — must exist exactly once. The audio clock detours
+    /// the function ENTRY (post-original: read `*(global)+0x1268` and QPC),
+    /// so the store site is published for the boot log / sweep only.
+    fn derive_input_tick_function(&mut self) {
+        // (global-load disp offset, tail pattern) per shape.
+        const V2: (usize, &str) = (
+            0x16,
+            "FF 15 ?? ?? ?? ?? 48 89 85 68 12 00 00 48 83 C4 28 41 5F",
+        );
+        const V1: (usize, &str) = (
+            0x12,
+            "FF 15 ?? ?? ?? ?? 49 89 84 24 68 12 00 00 48 83 C4 20 41 5E",
+        );
+        let primary = self.get_all_matches("input_tick_function");
+        let v1 = self.get_all_matches("input_tick_function_v1");
+        self.resolved.remove("input_tick_function");
+        self.resolved.remove("input_tick_function_v1");
+        let (entry, shape, label) = match (primary.as_slice(), v1.as_slice()) {
+            ([entry], []) => (*entry, V2, "20260224+"),
+            ([], [entry]) => (*entry, V1, "v1 (20250805)"),
+            ([], []) => {
+                log_warn!("  [-] input_tick_function -- no shape matched");
+                return;
+            }
+            _ => {
+                log_warn!(
+                    "  [-] input_tick_function -- expected exactly one match, found {} (v1: {}); refusing",
+                    primary.len(),
+                    v1.len()
+                );
+                return;
+            }
+        };
+        let Some(global) = self.get_address("frame_tick_global") else {
+            log_warn!("  [-] input_tick_function -- frame_tick_global unresolved; refusing");
+            return;
+        };
+        unsafe {
+            let loaded = decode_rip_relative(entry.add(shape.0));
+            if loaded != global {
+                log_warn!(
+                    "  [-] input_tick_function -- input-state global {:p} != frame_tick_global {:p}; refusing",
+                    loaded,
+                    global
+                );
+                return;
+            }
+            let end = (self.base as usize + self.size).min(entry as usize + 0x400);
+            let len = end.saturating_sub(entry as usize);
+            let tails = scan_pattern_all(entry, len, shape.1);
+            let [tail] = tails.as_slice() else {
+                log_warn!(
+                    "  [-] input_tick_function -- tail store `MOV [reg+0x1268],RAX` found {} times; refusing",
+                    tails.len()
+                );
+                return;
+            };
+            let store = entry.add(tail.offset + 6);
+            self.resolved.insert("input_tick_function".into(), entry);
+            self.resolved.insert("input_tick_store".into(), store);
+            log_info!(
+                "  [+] input_tick_function -- {} shape @ +0x{:X}",
+                label,
+                entry.offset_from(self.base)
+            );
+            log_info!(
+                "  [+] input_tick_store (derived, input_tick_function tail) @ +0x{:X}",
+                store.offset_from(self.base)
             );
         }
     }

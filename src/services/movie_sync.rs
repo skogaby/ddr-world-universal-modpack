@@ -88,8 +88,11 @@
 //! Probe v2 (deploy #2, CrossOver) validated the production shape:
 //! **running-state seeks work on Wine** (visible content jump, playback
 //! continues; genuine clock positions read back correctly on an untouched
-//! graph). It also proved the `on_frame` dispatch is NOT per rendered
-//! frame (~2 kHz observed), so all timing here is wall-clock based.
+//! graph). At the time it also showed the old wrapper-driven `on_frame`
+//! dispatch running at ~2 kHz rather than per rendered frame; that path has
+//! since been replaced by the dispatcher-owned once-per-frame pump
+//! (`core/frame_pump.rs`), but all timing here stays wall-clock based —
+//! it never needed a frame count.
 //!
 //! ## Diagnostic probe (`DDR_MOVIE_SYNC_PROBE`, dev only)
 //!
@@ -519,9 +522,9 @@ static PROBE_FIRED: AtomicU32 = AtomicU32::new(0);
 const PROBE_STAGE_IDLE: u32 = 0;
 const PROBE_STAGE_WAIT_RUN: u32 = 1;
 const PROBE_STAGE_RUNNING: u32 = 2;
-/// Wall-clock delays after the game's Run for the probe actions. Probe v2
-/// proved the frame dispatch is ~2 kHz, so frame counting is meaningless —
-/// these are real seconds of visible playback.
+/// Wall-clock delays after the game's Run for the probe actions. Real seconds
+/// of visible playback, deliberately independent of the frame dispatch (which
+/// is now once per rendered frame; the pre-frame-pump wrapper path was ~2 kHz).
 const PROBE_RATE_AT_MS: u64 = 5_000;
 const PROBE_SEEK_AT_MS: u64 = 12_000;
 
@@ -1571,8 +1574,8 @@ mod rate_clock {
     }
 }
 
-/// Wall-clock ms (probe timing only — the frame dispatch rate is not
-/// tied to rendered frames; ~2 kHz observed on CrossOver).
+/// Wall-clock ms for legacy movie probes. Timing remains elapsed-based after
+/// the frame-dispatch fix (the old wrapper-driven path ran at ~2 kHz).
 #[cfg(windows)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()

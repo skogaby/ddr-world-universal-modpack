@@ -81,6 +81,9 @@ pub struct OptionMenuSettingConfig {
 pub struct DiagnosticsConfig {
     #[serde(default)]
     pub profiling: bool,
+    /// Boot-only, bounded audio/game-clock observation. Does not change timing.
+    #[serde(default)]
+    pub audio_sync: bool,
 }
 
 /// Global timing-offset values for the `timing-offsets` mod. These are
@@ -555,6 +558,67 @@ pub struct OverlayMenuConfig {
 
 const CONFIG_FILENAME: &str = "mod-config.json";
 
+/// Config for the `gameplay-timing-fixes` mod (design
+/// `.agents/scratchpad/2026-09-08-frame-timing/clock-rate-correction/design.md`
+/// §6). Boot-only: the engine seams install in the XACT pre-Initialize
+/// window, so every key here applies at the NEXT launch. Operator-authored;
+/// the DLL never writes it.
+#[derive(Deserialize, Clone, Debug)]
+pub struct GameplayTimingFixesConfig {
+    #[serde(default)]
+    pub audio_clock: AudioClockConfig,
+    /// Assist-tick alignment (design §10). Ignored when the assist-tick mod
+    /// is off. Default true.
+    #[serde(default = "default_true")]
+    pub assist_tick_alignment: bool,
+}
+
+// Hand-written so an ABSENT section gets the same defaults as an empty one
+// (a derived `Default` would yield `assist_tick_alignment: false` — which is
+// exactly what silently disabled the alignment on the 2026-09-09 CrossOver
+// run, whose mod-config.json has no `gameplay_timing_fixes` section).
+impl Default for GameplayTimingFixesConfig {
+    fn default() -> Self {
+        Self {
+            audio_clock: AudioClockConfig::default(),
+            assist_tick_alignment: default_true(),
+        }
+    }
+}
+
+/// `gameplay_timing_fixes.audio_clock`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct AudioClockConfig {
+    /// `"fit"` (default — sliding LSQ over the DirectSound play-cursor
+    /// staircase) or `"raw"` (single newest cursor read; for platforms whose
+    /// cursor is smooth). Unknown ⇒ one WARN + `"fit"`.
+    #[serde(default = "default_audio_clock_mode")]
+    pub mode: String,
+    /// Fit history in seconds (clamped 2..=60).
+    #[serde(default = "default_audio_clock_window")]
+    pub window_seconds: u32,
+    /// Operator tweak added to the mean-preserving latency constant `C` (ms).
+    #[serde(default)]
+    pub latency_bias_ms: f32,
+}
+
+impl Default for AudioClockConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_audio_clock_mode(),
+            window_seconds: default_audio_clock_window(),
+            latency_bias_ms: 0.0,
+        }
+    }
+}
+
+fn default_audio_clock_mode() -> String {
+    "fit".to_string()
+}
+fn default_audio_clock_window() -> u32 {
+    10
+}
+
 static CONFIG: OnceCell<ConfigFile> = OnceCell::new();
 
 #[derive(Deserialize)]
@@ -603,6 +667,8 @@ pub struct ConfigFile {
     pub smx_hardware: Option<SmxHardwareConfig>,
     #[serde(default)]
     pub resolution: Option<ResolutionConfig>,
+    #[serde(default)]
+    pub gameplay_timing_fixes: Option<GameplayTimingFixesConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -642,6 +708,7 @@ pub fn init() {
                     power_user_statistics: None,
                     smx_hardware: None,
                     resolution: None,
+                    gameplay_timing_fixes: None,
                 }
             }
         },
@@ -670,6 +737,7 @@ pub fn init() {
                 power_user_statistics: None,
                 smx_hardware: None,
                 resolution: None,
+                gameplay_timing_fixes: None,
             }
         }
     };

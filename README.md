@@ -1,6 +1,6 @@
 # DDR World Universal Modpack
 
-A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, practice tools, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
+A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, practice tools, a deterministic sound-card-locked music clock that removes the game's play-to-play timing jitter, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
 
 Everything ships as a single hook DLL loaded by [spice2x](https://spice2x.github.io/). Install it, press **0** three times on a pinpad, and start toggling.
 
@@ -24,7 +24,7 @@ This modpack is also **datecode-agnostic**! Through memory scanning and pattern 
    - the `data_mods/` folder (textures and assets many mods need)
    - `mod-config.json` (a ready-to-go default configuration)
    - `judgement_offsets.csv` (optional but recommended — a community-sourced sync list for ~1,440 songs)
-3. Add the hook to your spice2x launch options: `-K ddr_world_hook.dll` (in `gamestart.bat` as a new parameter to `spice2x.exe`).
+3. Add the hook to your spice2x launch options: `-z ddr_world_hook.dll` (in `gamestart.bat` as a new parameter to `spice2x.exe`).
 4. Launch the game. You'll see a splash message in the top-left confirming the modpack loaded.
 5. **First boot only:** if a red warning appears telling you to reboot, restart the game once — the modpack builds its menu textures on first launch.
 
@@ -57,6 +57,13 @@ Play any song at **25%–175%** speed, with everything in sync — audio (pitch-
 ### Training Mode
 Now you can grind and practice songs on a real cabinet, without resorting to StepMania conversions! Turn on **LOOP SONG**, set a start and end point (the SONG START/END TIME rows appear under it, or press **4**/**6** mid-song), and grind the section; scrub backward/forward any time with **7**/**9** — with a chart timeline HUD showing exactly where you are. Sections only exist as loops: with LOOP SONG off, the 4/5/6 marker keys are inert and the timeline shows just your position. All training hotkeys wait for the READY banner to clear.
 
+### Gameplay Timing Fixes
+Ever felt the same song judge a few milliseconds early one credit and late the next — arrows and audio moving together, so no offset setting ever quite sticks? That is the stock game, not you. It anchors its music clock the instant it *asks* the audio engine to start the song, but the engine only begins mixing at its next 10 ms tick, so every play lands somewhere random inside a ±10 ms window (we measured −10 to +4 ms across plays on the same cabinet).
+
+This mod replaces the music clock with one driven by the sound card's **actual playback position**, latched to the exact sample the song started on: every play starts at the same offset and never drifts, including after quick restarts and Training Mode scrubs.
+
+Nothing about judgement windows or scores changes, and existing `SOUND OFFSET` calibrations stay valid.
+
 ### Timing Offsets + Auto-Calibration
 Adjust the game's global sound/input/render timing live from the mod menu. Better yet, turn on **"Calibrate next song?"**, under the global mod settings, play one song, and the modpack measures your timing and sets the sound offset for you — StepMania AutoSync style.
 
@@ -75,7 +82,7 @@ Press **1** mid-song to instantly restart it (optionally with a countdown), **3*
 Per-player lane views: stock **OVERHEAD**, StepMania-style **HALLWAY** (true 3D perspective), or **DISTANT**. Independently scale and fade the arrows, receptors, lane dressing, combo/judgement text, and pacemaker — per player, persisted to your profile.
 ![Perspective](screenshots/perspective.png)
 ### Assist Tick
-A clap sound at every arrow's exact judgement moment, mixed sample-perfectly through the game's own audio engine — the classic StepMania assist tick, with a volume control. Great for learning rhythms (scores are withheld while it's on, like autoplay).
+A clap sound at every arrow's exact judgement moment, mixed sample-perfectly through the game's own audio engine — the classic StepMania assist tick, with a volume control. The track is built in about a third of a second, so ticks are there from the very first note (earlier releases could miss the first couple of seconds of a chart). Great for learning rhythms (scores are withheld while it's on, like autoplay). Pair it with Gameplay Timing Fixes for ticks locked to the music at sample precision.
 
 ### Power User Statistics
 Live per-player stats while you play: millisecond error (current/max/mean), EX loss, calories burned — plus an option to replace the pacemaker with your latest ms-error, and per-song CSV export of your step data. The stat blocks are centre-aligned and mirrored for P1/P2; their size (50–150 %) and position (horizontal shift inward/outward, vertical shift) are adjustable from the mod menu's GLOBAL SETTINGS tab, so you decide how much of the play area they occupy.
@@ -119,6 +126,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
+| **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. Off by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
 | **Anytime Speedmod Adjustment** | Change your speed mod at any point during a song, not just the first ~10 seconds. |
@@ -158,6 +166,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `custom_options` | Option persistence gates, preview tuning, menu ordering/placement |
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
 | `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
+| `gameplay_timing_fixes` | Gameplay Timing Fixes: `audio_clock.mode` (`fit` default — averages a coarse DirectSound cursor; `raw` for platforms whose cursor is already smooth), `audio_clock.window_seconds` (2–60, default 10), `audio_clock.latency_bias_ms` (added to the mean-preserving latency constant; normally 0 — auto-calibration absorbs any residual), `assist_tick_alignment` (default `true`) — all boot-only (next launch) |
 | `resolution` | Custom Resolution: `output` (`WxH`; 4:3 sizes = SD-cabinet mode), `render` (`output` / `WxH` / `NN%`), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`), `msaa` (`off` / `2x` / `4x` / `stock`) — all four editable in the mod menu (RESOLUTION / RENDER SCALE / MSAA / SD PRESENT MODE); all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |
 | `training_mode` | Scrub step sizes |
@@ -213,6 +222,7 @@ The modpack is developed and tested under CrossOver, and includes dedicated supp
 - **Something's broken?** Open an issue and **attach `log.txt`** (spice2x's log from the game folder). If the game crashed hard, also attach `ddr_hook_crash.log` if present, and the mini-dump file if that's also present.
 - **Menu labels missing / blank textures?** Reboot the game once — first-boot texture generation requires it.
 - **Weird boot behavior after a game update?** Delete `data_mods/_cache/` — all caches rebuild automatically.
+- **Investigating timing swings?** The optional `diagnostics.audio_sync` recorder captures per-hit errors, frame/judge work durations, gameplay clocks and verified internal audio-start/output-cursor observations without changing timing — and, with Gameplay Timing Fixes on, one `onset` row per song recording that play's stock onset error (`delta_vs_stock`). See [capture instructions and limitations](docs/audio_sync_diagnostics_v2.md); `python3 scripts/analyze_audio_sync.py <csv>` summarises a capture. Leave it off outside diagnostic runs. When reporting a timing issue, attach both `log.txt` and `audio-sync-diagnostics-v2.csv` (the CSV is replaced on every launch, so copy it before relaunching).
 - A mod that can't find what it needs in your game build disables just itself and logs a warning; the rest keeps working.
 
 ## For Developers

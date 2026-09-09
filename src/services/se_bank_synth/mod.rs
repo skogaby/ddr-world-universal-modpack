@@ -43,8 +43,9 @@ pub mod xwb;
 // on in the plan's later steps. cdylib: re-exports alone don't count as use.
 #[allow(unused_imports)]
 pub use containers::{
-    build_tick_containers, scale_pcm, shift_bytes_for_ms, synthesize_track, SynthResult,
-    TickContainers, BANK_NAME, TICK_CAPACITY_MS, TICK_RATE_HZ,
+    block_offset_for_sample, build_tick_containers, ceil_block_bytes, scale_pcm,
+    shift_bytes_for_ms, synthesize_track, synthesize_track_at_samples, SynthResult, TickContainers,
+    BANK_NAME, TICK_CAPACITY_MS, TICK_RATE_HZ,
 };
 
 use crate::services::avs_layeredfs::mod_paths;
