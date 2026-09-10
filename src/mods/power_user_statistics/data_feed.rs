@@ -18,13 +18,48 @@ use crate::{log_info, log_warn};
 use super::{csv_export, timing_stats_widget};
 
 /// Normal grade judgment opcodes: 0x1028 + grade (0..7).
-/// Grades 0..5 (M/P/G/Gd/Boo/Miss) carry meaningful ms-error.
+/// Grades 0..4 (M/P/G/Gd/Boo) carry a meaningful ms-error.
+/// Grade 5 (Miss) is a timeout — the payload delta is 0, NOT a measurement
+/// (a Miss counted as a perfect 0 ms step; tester report 2026-09) — so it
+/// contributes EX loss only, like OK.
 /// Grade 6 (OK = freeze hold) carries EX but no ms-error.
 const OPCODE_GRADE_BASE: u32 = 0x1028;
 const OPCODE_MARVELOUS: u32 = 0x1028;
 const OPCODE_PERFECT: u32 = 0x1029;
 const OPCODE_GREAT: u32 = 0x102A;
 const OPCODE_OK: u32 = 0x102E;
+/// Highest grade index whose payload delta is a real timing measurement
+/// (0 = Marvelous .. 4 = Boo). Miss (5) and OK (6) are excluded.
+const MAX_TIMED_GRADE_INDEX: u32 = 4;
+
+/// Sign convention of the CAPTURED ms error vs the DISPLAYED one.
+///
+/// `judge_submit`'s payload delta is `actual − expected` (Ghidra
+/// `FUN_18005fcc0` on 20260825: `result+8 − note+8`; `< 0` bumps the FAST
+/// counter `+0x1C4`), i.e. NEGATIVE = FAST (early). That is the value the
+/// feed stores (`MsErrorAccum`, `latest_ms_error`, the CSV `Delta` column
+/// — kept raw so `Actual = Expected + Delta` holds, and the calibration /
+/// diagnostics taps, whose sign models were cabinet-verified on it).
+///
+/// Every ON-SCREEN readout (pacemaker → ms-error digits + color, the
+/// widget's Current / μ) shows the OPPOSITE sign: POSITIVE = FAST, NEGATIVE
+/// = SLOW. That is the game's own results convention — the stage record's
+/// per-note ms stream (`rec+0xD8`, written by `FUN_1801e6ca0` as
+/// `expected − actual`) drives the results graph with FAST on the positive
+/// axis — and what testers expected (2026-09: "slow is negative, fast is
+/// positive"). Apply at the display boundary only.
+#[inline]
+pub fn display_ms(captured_ms: i32) -> i32 {
+    captured_ms.wrapping_neg()
+}
+
+/// `display_ms` for the accumulated (f64) mean. `0.0 - x` rather than `-x`
+/// so an exact-zero mean stays +0.0 (`{:+.2}` would otherwise print
+/// "-0.00").
+#[inline]
+pub fn display_ms_f64(captured_mean: f64) -> f64 {
+    0.0 - captured_mean
+}
 
 /// Player side offset on GamePlayActor.
 const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
@@ -297,18 +332,22 @@ unsafe extern "C" fn judge_submit_hook(
                 let ex_earned = ex_value_for_opcode(judge_code);
                 let ex_loss_this_step = 3 - ex_earned;
 
-                // OK (freeze hold) contributes EX but has no ms-error timing data.
-                let has_ms_error = judge_code != OPCODE_OK && !scratch.is_null();
+                // Only M/P/G/Gd/Boo carry a real timing measurement. Miss
+                // (grade 5) is a timeout whose payload delta reads 0, and OK
+                // (freeze hold) has no delta at all — both contribute EX
+                // loss only, and neither touches `LATEST_MS_ERROR`, so the
+                // pacemaker → ms-error readout keeps showing the last REAL
+                // step's error across a miss.
+                let has_ms_error = grade_index <= MAX_TIMED_GRADE_INDEX && !scratch.is_null();
 
                 if has_ms_error {
                     let ms_error = *(scratch.add(4) as *const i32);
                     LATEST_MS_ERROR[player_side].store(ms_error, Ordering::Release);
 
-                    // Auto-calibration tap: grades M/P/G/Gd/Boo (index 0..=4 —
-                    // Miss sits at the window edge and is excluded) of the armed
-                    // side only. Disarmed cost: one relaxed load + compare.
-                    if grade_index <= 4 && player_side as i32 == CALIB_SIDE.load(Ordering::Relaxed)
-                    {
+                    // Auto-calibration tap: grades M/P/G/Gd/Boo of the armed
+                    // side only (Miss is already excluded above). Disarmed
+                    // cost: one relaxed load + compare.
+                    if player_side as i32 == CALIB_SIDE.load(Ordering::Relaxed) {
                         CALIB_SUM.fetch_add(ms_error as i64, Ordering::Relaxed);
                         CALIB_SUM_SQ
                             .fetch_add((ms_error as i64) * (ms_error as i64), Ordering::Relaxed);
@@ -342,8 +381,10 @@ unsafe extern "C" fn judge_submit_hook(
                             });
                         }
                     }
-                } else if judge_code == OPCODE_OK {
-                    // Freeze hold: EX contribution only, no ms-error.
+                } else {
+                    // Miss / freeze OK (or a timed grade with a null payload,
+                    // which should not happen): EX contribution only, no
+                    // ms-error sample, no CSV row.
                     let bufs = buffers();
                     if let Ok(mut b) = bufs[player_side].try_lock() {
                         b.ex_loss += ex_loss_this_step;

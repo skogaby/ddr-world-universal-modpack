@@ -2,6 +2,13 @@
 //! the pacemaker score-delta readout with the most recent ms-error, and
 //! forces the white color when |error| < threshold.
 //!
+//! Displayed sign: POSITIVE = FAST (early), NEGATIVE = SLOW (late) —
+//! `data_feed::display_ms` negates the captured `actual − expected` delta
+//! (see its docs for the two in-game sign conventions). The stock pacemaker
+//! colors ride the sign (ESI > 0 vs < 0), so FAST and SLOW take the colors
+//! the positive/negative score delta would have. A Miss leaves the readout
+//! on the last real step's error (the feed does not sample misses).
+//!
 //! Patches the 7-byte `MOV RDX, [RDI+0xB0]` instruction inside the
 //! pacemaker render case (opcode 0x1036) of the score-render function.
 //! A JMP to a hand-assembled stub overrides ESI (the formatter input)
@@ -242,7 +249,13 @@ fn pacemaker_swap_inner(original_esi: i32, player_side: i32, actor: *mut u8) -> 
 
     force_pacemaker_visible(actor);
 
-    let ms_error = data_feed::latest_ms_error(side as usize);
+    // Display sign: POSITIVE = FAST (early), NEGATIVE = SLOW (late) — the
+    // game's own results-graph convention; the captured delta is the
+    // inverse (`actual − expected`). Testers read the raw value as
+    // "backwards" (2026-09). The stock colored paths follow the sign (ESI
+    // > 0 / < 0), so negating the value also swaps the colors. A Miss does
+    // not update `latest_ms_error`, so the readout holds the last real step.
+    let ms_error = data_feed::display_ms(data_feed::latest_ms_error(side as usize));
 
     let threshold = custom_options::get_value(side as u8, "pacemaker_threshold")
         .unwrap_or(10)

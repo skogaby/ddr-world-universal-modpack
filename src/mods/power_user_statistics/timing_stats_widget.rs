@@ -1,5 +1,15 @@
 //! Timing Stats Widget — per-player text widget during gameplay showing
 //! EX loss, Current, Max, Abs Mean, Mean ms-error values and live calories.
+//! The blocks stay on screen through the stage results (0-idx 29 → 30) so
+//! the breakdown can be read without gameplay pressure; they hide on any
+//! other scene.
+//!
+//! Sign convention for the signed readouts (Current, μ): POSITIVE = FAST
+//! (early), NEGATIVE = SLOW (late) — the game's own results-graph
+//! convention (its record stream stores `expected − actual`; FAST is the
+//! positive axis). The live judge delta the feed captures is the inverse
+//! (`actual − expected`, negative = fast), so the display negates; see
+//! `data_feed::display_ms`.
 //!
 //! Layout (scale + a mirrored horizontal/vertical offset) is cabinet-wide:
 //! seeded from the `power_user_statistics` config section at enable and
@@ -34,13 +44,24 @@ const BASE_Y: f32 = 425.0;
 // px on the 1280x720 logical canvas. Horizontal: POSITIVE = inward (toward
 // the screen centre) on BOTH sides — the one mirrored value moves the two
 // blocks symmetrically. Vertical: POSITIVE = down (screen y grows downward).
+//
+// The ranges let the anchors reach the whole canvas (tester request
+// 2026-09): x = P1_CENTER_X + dx spans 0 ..= 680 (P2 mirrored: 1280 ..= 600 —
+// the two blocks cross at the centre past +560, which is the user's call),
+// y = BASE_Y + dy spans 0 ..= 720. Partially off-screen placements are
+// allowed rather than second-guessing the block's rendered height, which
+// depends on the scale row.
 pub const SCALE_MIN: i32 = 50;
 pub const SCALE_MAX: i32 = 150;
 pub const SCALE_DEFAULT: i32 = 100;
-pub const OFFSET_X_MIN: i32 = -50;
-pub const OFFSET_X_MAX: i32 = 400;
-pub const OFFSET_Y_MIN: i32 = -400;
-pub const OFFSET_Y_MAX: i32 = 200;
+pub const OFFSET_X_MIN: i32 = -(P1_CENTER_X as i32);
+pub const OFFSET_X_MAX: i32 = 600;
+pub const OFFSET_Y_MIN: i32 = -(BASE_Y as i32);
+pub const OFFSET_Y_MAX: i32 = 720 - BASE_Y as i32;
+/// Offset rows: fine step 5 px, coarse step 50 px (the ranges are ~700 px
+/// wide — 25 px coarse steps took too long to traverse).
+const OFFSET_STEP_FINE: i32 = 5;
+const OFFSET_STEP_COARSE: i32 = 50;
 
 /// Overlay row keys (GLOBAL SETTINGS, grouped under this mod's header;
 /// registration order = display order).
@@ -274,8 +295,8 @@ fn register_overlay_rows() {
         parent_row_key: Some(OWNING_MOD_ID.to_string()),
         min: OFFSET_X_MIN,
         max: OFFSET_X_MAX,
-        step_fine: 5,
-        step_coarse: 25,
+        step_fine: OFFSET_STEP_FINE,
+        step_coarse: OFFSET_STEP_COARSE,
         initial: LIVE_OFFSET_X.load(Ordering::Relaxed),
         on_change: Arc::new(|v| {
             on_layout_row_change(&LIVE_OFFSET_X, OFFSET_X_MIN, OFFSET_X_MAX, "h-offset px", v)
@@ -288,8 +309,8 @@ fn register_overlay_rows() {
         parent_row_key: Some(OWNING_MOD_ID.to_string()),
         min: OFFSET_Y_MIN,
         max: OFFSET_Y_MAX,
-        step_fine: 5,
-        step_coarse: 25,
+        step_fine: OFFSET_STEP_FINE,
+        step_coarse: OFFSET_STEP_COARSE,
         initial: LIVE_OFFSET_Y.load(Ordering::Relaxed),
         on_change: Arc::new(|v| {
             on_layout_row_change(&LIVE_OFFSET_Y, OFFSET_Y_MIN, OFFSET_Y_MAX, "v-offset px", v)
@@ -398,9 +419,23 @@ pub fn disable() {
     log_info!("timing_stats_widget: disabled");
 }
 
+/// Whether a GAMEPLAY → `next` transition keeps the stat blocks on screen.
+/// The song's readout stays up through the post-song loader (0-idx 29) and
+/// the stage results screen (0-idx 30) so the player can read the detailed
+/// breakdown without gameplay pressure (tester feedback 2026-09). Any other
+/// destination — song select (quick fail's skip-results redirect 29 → 24),
+/// a quick restart (29 → 28, which re-arms via the GAMEPLAY branch), the
+/// results → next-stage hop, final results — hides them.
+fn carries_over_from_gameplay(prev: i32, next: i32) -> bool {
+    let from_play = prev == scene::GAMEPLAY || prev == scene::STAGE_RESULT;
+    let to_results = next == scene::STAGE_RESULT || next == scene::RESULTS_DETAIL;
+    from_play && to_results
+}
+
 /// Called from scene_manager callback to show/hide based on gameplay state.
-pub fn on_scene_change(_prev: i32, next: i32) {
+pub fn on_scene_change(prev: i32, next: i32) {
     let entering_gameplay = next == scene::GAMEPLAY;
+    let keep_shown = carries_over_from_gameplay(prev, next);
     let st = state().clone();
     if let Ok(mut s) = st.lock() {
         s.raise_pump.cancel();
@@ -420,6 +455,11 @@ pub fn on_scene_change(_prev: i32, next: i32) {
             if let Some(ref w) = s.p2 {
                 w.hide();
             }
+        } else if keep_shown {
+            // Results carry-over: leave the blocks exactly as the song left
+            // them (shown for sides that judged at least one step, hidden
+            // otherwise). `visible` stays true so a stray late judgement
+            // can't re-show a block we already hid elsewhere.
         } else if s.visible {
             s.visible = false;
             if let Some(ref w) = s.p1 {
@@ -513,12 +553,14 @@ pub fn update_text(player_side: usize) {
         return;
     };
 
-    let current = b.current as f64;
+    // Signed readouts go through the display convention (positive = FAST);
+    // the magnitudes (Max, Abs(μ)) are sign-free.
+    let current = data_feed::display_ms(b.current) as f64;
     let max_abs = b.max_abs as f64;
     let (abs_mean, mean) = if b.count > 0 {
         (
             b.sum_abs as f64 / b.count as f64,
-            b.sum as f64 / b.count as f64,
+            data_feed::display_ms_f64(b.sum as f64 / b.count as f64),
         )
     } else {
         (0.0, 0.0)

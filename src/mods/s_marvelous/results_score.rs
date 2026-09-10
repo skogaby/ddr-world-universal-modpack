@@ -36,10 +36,13 @@
 //!    `slow_usr/num_usr` widgets show `record+0x6C/+0x70`, which
 //!    `judge_submit` only accumulates for grades 1..=4; the same glyph
 //!    rewrite adds the LOOSE-Marvelous share (grade-0 slots OUTSIDE the
-//!    S-Marv window, `ms<0`/`ms>0`) recomputed from the record streams. The
-//!    highest tier is exempt from FAST/SLOW — stock Marvelous, now
-//!    S-Marvelous — matching the gameplay indicator (`fast_slow.rs`). The
-//!    record's own counters — and therefore the score save — are untouched.
+//!    S-Marv window) recomputed from the record streams. NOTE the stream
+//!    sign is `expected − actual` (`ms>0` = FAST) — the inverse of the live
+//!    delta the stock counters use; `records::count_marv_fast_slow` owns
+//!    that rule (swapped widgets until 2026-09). The highest tier is exempt
+//!    from FAST/SLOW — stock Marvelous, now S-Marvelous — matching the
+//!    gameplay indicator (`fast_slow.rs`). The record's own counters — and
+//!    therefore the score save — are untouched.
 //!
 //! Counts are recomputed from the stage record's per-note grade/ms streams
 //! ([`super::records`]) with the window the side was last armed with —

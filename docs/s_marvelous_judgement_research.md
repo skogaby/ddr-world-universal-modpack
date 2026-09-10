@@ -732,10 +732,24 @@ Stock excludes Marvelous from FAST/SLOW in two independent places:
    rewrites the two widgets' glyphs to `stock + LOOSE-marvelous share`, the
    share recomputed from the record's grade/ms streams
    (`records::count_marv_fast_slow(grades, ms, window)`: grade-0 slots with
-   `|ms| > window` — S-Marvelous is the exempt top tier — `ms<0` fast /
-   `ms>0` slow, the stock counters' own sign rule), judged-slots-only like
-   every other recompute, fail-open per widget. Invariant (host-tested):
+   `|ms| > window` — S-Marvelous is the exempt top tier), judged-slots-only
+   like every other recompute, fail-open per widget. Invariant (host-tested):
    `smarv + marv_fast + marv_slow == marvelous total`.
+
+   **Stream sign (fixed 2026-09 — testers reported the two widgets swapped):**
+   the record's per-note ms stream is NOT the live delta. The result commit
+   (`FUN_18005d900` → `FUN_1801e6410` → `FUN_1801e6ca0` on 20260825) fills
+   `rec+0xD8` with `*(note+8) − result[+8]` = **`expected − actual`**
+   (grade 6 → 0, grade 7 → clamped ±0xA0), so in the stream `ms > 0` = FAST.
+   The game's own GraphTab ingest (`FUN_1800ebd60`) confirms it: for grades
+   1..4 `stream > 0` files the note into series index 1..4 (appended to the
+   positive-axis chart with the FAST cyan `0x39E3D3FF`, legend "■FAST MISS"
+   … "■PERFECT"), `≤ 0` into 6..9 (SLOW pink `0xE85EA3FF`); the per-beat
+   box likewise maps `stream > 0` → column 1 = "fast". The live `judge_submit`
+   delta (`result[+8] − *(note+8)` = `actual − expected`, `< 0` → FAST
+   counter, `< 0` → `in_fast` on the gameplay indicator) is the INVERSE. The
+   first port assumed the stream shared the live sign (`ms<0` fast);
+   `count_marv_fast_slow` now reads `ms > 0` as fast.
 
 Not changed: the graph tab's per-beat-division FAST / MARVELOUS / SLOW
 statistics box (`GraphTab+0x4B8`, ingest `FUN_1800EB9C0`) — the game files

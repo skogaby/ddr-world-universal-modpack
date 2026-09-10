@@ -271,3 +271,34 @@ was never seen in the ms-error testing that drove §§3–8.
 
 Fix: arg1 is now `MOV ECX,[R14+8]` (the payload slot). Affected every
 build since the initial port.
+
+## 10. Display sign + Miss handling (2026-09 tester feedback)
+
+Two reports against the ms-error readout, both fixed in the feed /
+callback rather than at the patch site.
+
+**"FAST/SLOW colors are backwards — slow should be negative, fast
+positive."** The value the swap displayed was the raw `judge_submit`
+payload delta (`scratch+4` = `result[+8] − *(note+8)` = `actual −
+expected`, `FUN_18005fcc0`): NEGATIVE = early = FAST. The stock colored
+paths follow ESI's sign (`> 0` → `(1, .5, .5, 1)`, `< 0` → `(1, 1, .5,
+.5)`), so an early step drew as a negative number in the "negative"
+color. The game's own results screen uses the OPPOSITE convention — the
+stage record's per-note stream is `expected − actual` (`FUN_1801e6ca0`)
+and the GraphTab draws FAST on the positive axis — and that is what the
+testers expected. Fix: `data_feed::display_ms` negates at the display
+boundary; the pacemaker digits/sign/color and the widget's signed
+readouts (Current, μ) show POSITIVE = FAST, NEGATIVE = SLOW. The captured
+value is unchanged everywhere else (CSV `Delta` keeps `Actual = Expected
++ Delta`; the calibration and diagnostics taps keep their cabinet-verified
+sign models). The white zone is `|v| < threshold` — sign-free.
+
+**"A Miss counts as a perfect 0 ms step."** Miss (grade 5, 0x102D) is a
+timeout: the payload delta at `+4` reads 0, not a measurement. The feed
+sampled every non-OK grade, so each miss pushed a 0 into Current / Max /
+means / CSV and the pacemaker readout snapped to `±0`. Fix: only grades
+0..=4 (M/P/G/Gd/Boo) are timing samples; Miss joins OK as EX-loss-only
+(`MAX_TIMED_GRADE_INDEX`). `LATEST_MS_ERROR` is untouched by a miss, so
+the pacemaker keeps showing the last real step's error — the 0x1036 case
+still fires per miss (the game re-renders its delta), and the callback
+simply returns the held value.

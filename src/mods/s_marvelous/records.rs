@@ -12,7 +12,7 @@
 //! |---|---|
 //! | +0x28 | per-grade counts `[i32; 8]`, Marvelous first |
 //! | +0xB8..0xC0 | `vector<u8>` grade class per judged note (0=M, 1=P, 2=Gr, 3=Gd, 6=OK) |
-//! | +0xD8..0xE0 | `vector<i16>` signed ms error per judged note |
+//! | +0xD8..0xE0 | `vector<i16>` signed ms error per judged note — `expected − actual`, so `> 0` = FAST/early (the INVERSE of the live judge delta; see [`count_marv_fast_slow`]) |
 //!
 //! Everything is FAIL-CLOSED: any structural surprise (length mismatch,
 //! implausible sizes, null/misaligned pointers, stream-vs-counter
@@ -79,9 +79,19 @@ pub fn count_grade(grades: &[u8], grade: u8) -> u32 {
 /// This is the share the stock FAST/SLOW counters leave out
 /// (`judge_submit` only counts grades 1..=4; research §2 step 2) that the
 /// mod adds back: the highest tier is exempt from FAST/SLOW, and with the
-/// mod on that tier is S-Marvelous, not Marvelous. Sign convention matches
-/// the stock counters and the gameplay indicator: `ms < 0` fast,
-/// `ms > 0` slow (an S-Marv window ≥ 1 already covers `ms == 0`).
+/// mod on that tier is S-Marvelous, not Marvelous.
+///
+/// SIGN CONVENTION — the record stream is NOT the live judge delta. The
+/// result commit writes `rec+0xD8` as `note.expected − result.actual`
+/// (`FUN_1801e6ca0`, 20260825: `*(note+8) − result[+8]`, grade 6 → 0,
+/// grade 7 → ±0xA0), so in the STREAM `ms > 0` = FAST (early) and `ms < 0`
+/// = SLOW (late). The game's own graph ingest reads it that way (FAST is
+/// the positive axis; `stream > 0` → the cyan FAST series). The live
+/// `judge_submit` delta the stock `+0x1C4/+0x1C8` counters and the gameplay
+/// indicator use is the INVERSE (`actual − expected`, `< 0` = fast); the
+/// first port assumed the stream shared that sign and swapped the two
+/// results widgets (tester report 2026-09). An S-Marv window ≥ 1 already
+/// covers `ms == 0`.
 ///
 /// `None` on a stream length mismatch or a non-positive window (fail
 /// closed, like [`count_smarv`]).
@@ -99,8 +109,8 @@ pub fn count_marv_fast_slow(
         if g != GRADE_MARVELOUS || (ms as i32).abs() <= window_ms {
             continue; // not Marvelous, or S-Marvelous (top tier: exempt)
         }
-        if ms < 0 {
-            fast += 1;
+        if ms > 0 {
+            fast += 1; // stream sign: expected − actual > 0 ⇒ early
         } else {
             slow += 1;
         }
@@ -400,12 +410,19 @@ mod tests {
     }
 
     #[test]
-    fn marv_fast_slow_excludes_smarvelous_and_keeps_sign_convention() {
+    fn marv_fast_slow_excludes_smarvelous_and_uses_stream_sign() {
         // Window 12: |ms| ≤ 12 is S-Marvelous (top tier, exempt); only the
-        // loose Marvelous count — negative = fast, positive = slow.
+        // loose Marvelous count. STREAM sign (`expected − actual`):
+        // positive = fast, negative = slow — the inverse of the live delta.
         let grades = [0u8, 0, 0, 0, 0, 0, 0];
         let errors = [-1i16, -12, 0, 3, 12, -13, 16];
+        // -13 → slow, 16 → fast.
         assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((1, 1)));
+        let errors = [-13i16, -20, 16];
+        assert_eq!(
+            count_marv_fast_slow(&grades[..3], &errors, 12),
+            Some((1, 2))
+        );
     }
 
     #[test]
@@ -426,6 +443,7 @@ mod tests {
         let errors = [-20i16, -12, -3, 0, 5, 15, 40, 0];
         let smarv = count_smarv(&grades, &errors, 12).unwrap();
         let (fast, slow) = count_marv_fast_slow(&grades, &errors, 12).unwrap();
+        // -20 → slow (late), 15 → fast (early).
         assert_eq!((smarv, fast, slow), (4, 1, 1));
         assert_eq!(smarv + fast + slow, count_grade(&grades, GRADE_MARVELOUS));
     }
@@ -433,10 +451,10 @@ mod tests {
     #[test]
     fn marv_fast_slow_ignores_other_grades() {
         // Lower grades are already in the stock counters; OK carries no
-        // delta. Only loose grade-0 slots contribute.
+        // delta. Only loose grade-0 slots contribute (-14 → slow).
         let grades = [1u8, 2, 3, 4, 6, 0];
         let errors = [-30i16, 40, -60, 90, 0, -14];
-        assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((1, 0)));
+        assert_eq!(count_marv_fast_slow(&grades, &errors, 12), Some((0, 1)));
     }
 
     #[test]
