@@ -166,7 +166,7 @@ const VIOLET_RGBA: u32 = 0xB05C_E0FF;
 /// toward white). Stock's shimmer puts its lighter colour (cyan) at the
 /// BOTTOM of the bar and the darker (pink) at the top; we mirror that:
 /// violet top → light violet bottom. Tunable.
-const VIOLET_LIGHT_RGBA: u32 = 0xD4A5_EEFF;
+const VIOLET_LIGHT_RGBA: u32 = 0xB3EC_FFFF;
 /// Timing-page Marvelous bands (maintainer choice 2026-09-10): light
 /// green for FAST (early), goldenrod for SLOW (late). Applied through the
 /// identity (shift-0) GREAT lambda, so these render as-is.
