@@ -78,6 +78,10 @@ A brand-new judgement tier above Marvelous: steps landed within **±12 ms** earn
 ### Quick Restart, Quick Fail, Quick Logout
 Press **1** mid-song to instantly restart it (optionally with a countdown), **3** to bail out to song select, and triple-press **9** at song select to end your session on the spot. Combined with **Premium Free** (unlimited stages per credit), your cabinet becomes a practice machine.
 
+### 2-Player BPL Mode
+Playing head-to-head with a friend? Turn on **2-Player BPL Mode** and every local 2-player versus song gets the in-shop battle HUD that's normally locked behind two LAN-linked cabinets and a matching session: a score board per player, side-by-side score-ratio gauges, live **1st / 2nd** rank badges that swap the moment the lead changes, and the running point margin between you. Spectators can read who's winning at a glance without squinting at two separate scores. It's the game's own battle UI — same art, same animations — running on ordinary versus play, so it shows whichever score type your cabinet uses (money or EX) and never touches scoring or saves. Solo, doubles and course play are unaffected.
+
+![Single Cabinet BPL](screenshots/single_cabinet_bpl.png)
 ### Player Perspective + Playfield Styling
 Per-player lane views: stock **OVERHEAD**, StepMania-style **HALLWAY** (true 3D perspective), or **DISTANT**. Independently scale and fade the arrows, receptors, lane dressing, combo/judgement text, and pacemaker — per player, persisted to your profile.
 ![Perspective](screenshots/perspective.png)
@@ -113,6 +117,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Per-Song Judgement Offsets** | Per-song, per-player judgement offsets that follow the song wheel; community pre-seed included. |
 | **Quick Restart / Fail** | Pinpad 1 = instant in-place restart (optional countdown); 3 = instant fail to song select. |
 | **Quick Logout** | Triple-9 at song select ends the session through the game's normal logout flow. |
+| **2-Player BPL Mode** | The in-shop battle HUD (per-player score boards, score-ratio gauges, live 1st/2nd rank badges, point margin) in ordinary local 2-player versus play. Display-only. |
 | **Classic Difficulty Adjustment** | Double-tap pad UP/DOWN at song select to raise/lower difficulty, like every DDR before World. |
 | **Premium Free** | Unlimited stages per credit (per-player toggle). |
 | **Autoplay** | Perfect auto-play with an on-screen watermark; scores never submitted. |

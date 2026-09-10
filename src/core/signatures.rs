@@ -2015,6 +2015,27 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "4C 8B DC 55 56 57 48 83 EC 70 48 C7 44 24 38 FE FF FF FF 49 89 5B 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 68 48 8B F2 48 8B E9 49 C7 43 D0 0F 00 00 00 33 DB 49 89 5B C8 88 5C 24 40 33 C0 48 83 C9 FF 48 8B FD F2 AE 48 F7 D1 4C 8D 41 FF 48 8B D5 49 8D 4B B8 E8 ?? ?? ?? ?? 90 4C 8D 44 24 40 48 8D 54 24 28 48 8B 0D ?? ?? ?? ?? E8",
         description: "Entry of the ark draw-callback API's createSprite `(const char* name, sprite** out)` (FUN_180007250 on 20260825): std::string(name) → equal_range in the debug-texture map (global disp wildcarded) → 0x10 sprite `{texture*, float scale}`; the scale at +0x08 is 1.0 (720-line table) or 0.8 when arkMDXGetMachineType ∈ {0,1} (SD table) — unless the name is `screenCheck`, always 1.0. drawSprite sizes the quad `texture_px × scale` in PHYSICAL pixels, so like the fonts it never tracks the back-buffer; custom_resolution::debug_ui detours the entry and multiplies `(*out)->scale` post-original. `*out` is NULL for an unknown name (the detour checks). Prologue + inline strlen (`REPNE SCASB`) + the two CALL rel32s kept with wildcards; unique on all four builds.",
     },
+    // ── 2-Player BPL Mode (two_player_bpl_mode) ─────────────────────────
+    SignatureDefinition {
+        name: "battle_frame_ctor",
+        pattern: "48 89 4C 24 08 56 57 41 54 41 55 41 56 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 78 48 89 AC 24 80 00 00 00 45 0F B6 D1 49 8B D8 4C 8B DA 4C 8B F1 33 ED 48 89 69 08 48 89 69 10 48 89 69 18 48 89 69 20 89 69 28 40 88 69 2C",
+        description: "Entry of `sequence::dance::MatchingBattleFrameActor::MatchingBattleFrameActor(this, layoutDesc, GamePlayActor** actors, u8 isEx /*R9B*/, i32 isDouble, i32 mcode, i32 diff)` (FUN_180071740 on 20260825, FUN_18006df80 on 20250805 — byte-identical): the relocation-free prologue through the agcs::Actor base zeroing (`MOVZX R10D,R9B` = isEx, `MOV RBX,R8` = actors, `MOV R11,RDX` = layoutDesc). Consumers (two_player_bpl_mode) call the match as the ctor; derive_two_player_bpl reads the SECOND `48 8D 05 disp32` in the body (the class vftable store, match+0x78) as an identity cross-check against the RTTI-resolved `battle_frame_actor_vtable`, and the first `48 63 05 disp32` (`MOVSXD RAX,[rip]` = CNetworkManager's local cabinet index, match+0x228) → `matching_local_cabinet_idx`. Stock's only caller is MatchingDancePlaySequence::onUpdate state 2; the mod calls it from the NORMAL DancePlaySequence with a mod-owned vtable clone installed afterwards. Unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "actor_add_child",
+        pattern: "48 3B CA 74 63 48 85 D2 74 5E 48 83 7A 08 00 75 57 48 83 7A 10 00 75 50 48 8B 41 18 45 33 C0 48 85 C0 74 16 44 8B 4A 28 44 39 48 24 76 0C 4C 8B C0 48 8B 40 10 48 85 C0 75 EE",
+        description: "Entry of `agcs::Actor::addChild(parent RCX, child RDX)` (FUN_18021f230 on 20260825): refuses as a silent no-op when child == parent, child NULL, child already has a parent (+0x08) or a next sibling (+0x10); otherwise walks the parent's child list (+0x18 first / +0x10 next) comparing the sibling's effective priority (+0x24) against the child's requested priority (+0x28) and splices the child BEFORE the first sibling whose priority is ≤ its own (newest-first among equals), then sets child+0x08 = parent and child+0x24 = child+0x28. Consumers (two_player_bpl_mode) call the match to attach the re-hosted MatchingBattleFrameActor to the live DancePlaySequence — the same call the matching sequence makes — and verify child+0x08 == parent afterwards because the refusals are silent. Whole body up to the splice kept literal; unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "dance_matching_slot_probe",
+        pattern: "48 8B 05 ?? ?? ?? ?? 48 8B 08 4C 8B A9 ?? ?? ?? ?? 48 8B 05",
+        description: "Inside `MatchingBattleFrameActor::onInitialize` (FUN_180071ce0 on 20260825, match at +0x8E): the package-map-miss default `MOV RAX,[rip+scene_resource_manager]; MOV RCX,[RAX]; MOV R13,[RCX+slot_off]` that fetches the resident `dance_matching` package pointer (scene-resource slot 31, `slot_off` = 0x7F0 on 20260825), immediately followed by the GameWork load `MOV RAX,[rip+…]`. derive_two_player_bpl requires the match inside `[vtable[4], +0x200)` of the RTTI-resolved frame vtable, RIP-decodes match+3 → `scene_resource_manager` (global holding the manager object pointer; the manager's FIRST field is the slot array) and publishes the imm32 at match+13 as `dance_matching_slot_off`. Consumers pre-check `*(**scene_resource_manager + slot_off) != 0` — THREE loads, exactly the stock chain (the first cabinet build missed the middle hop and read past the 0x28-byte manager object, 2026-09-10) before letting the stock onInitialize run — a NULL package makes stock NULL-deref on the failed `main_single` clip create. Unique on all four builds.",
+    },
+    SignatureDefinition {
+        name: "gpa_score_select",
+        pattern: "80 B8 ?? ?? 00 00 00 74 08 48 05 ?? ?? 00 00 EB 06 48 05 ?? ?? 00 00 8B 00",
+        description: "The per-frame score read in `MatchingDancePlaySequence::onUpdate` state 0xB (FUN_180061cc0+0xC28 on 20260825): `CMP byte [GamePlayActor+isEx],0; JZ; ADD RAX,exScore; JMP; ADD RAX,moneyScore; MOV EAX,[RAX]` — the game's own \"which score counter does this side display\" selector. derive_two_player_bpl publishes the three imm32s as `gpa_is_ex_off` (match+2, 0x1D0 = the cached use-EX-score byte), `gpa_ex_score_off` (match+11, 0x1D8) and `gpa_money_score_off` (match+19, 0x1D4) so two_player_bpl_mode's onUpdate replacement reads exactly what stock BPL reads, with the offsets attested per build instead of hardcoded (all three sit below the +0x208 GamePlayActor layout fork and match song_reset's GPA_SCORE_OFFSET/GPA_EX_SCORE_OFFSET). Unique on all four builds.",
+    },
 ];
 
 pub struct SignatureStore {
@@ -2152,6 +2173,7 @@ impl SignatureStore {
         self.derive_preview_restart();
         self.derive_smarv_results_course_gate();
         self.derive_ghost_vec_copy();
+        self.derive_two_player_bpl();
     }
 
     /// Derive `results_course_gate_global` — the global the PlaydataTab
@@ -2237,6 +2259,226 @@ impl SignatureStore {
             self.resolved.insert("ghost_vec_copy".into(), target);
             log_info!("  [+] ghost_vec_copy (derived) @ +0x{:X}", off);
         }
+    }
+
+    /// Derive everything the 2-Player BPL Mode re-host needs beyond its
+    /// four AOBs (`battle_frame_ctor`, `actor_add_child`,
+    /// `dance_matching_slot_probe`, `gpa_score_select`):
+    ///
+    /// * `battle_frame_actor_vtable` / `layout_actor_vtable` — RTTI walks
+    ///   (`.?AVMatchingBattleFrameActor@dance@sequence@@`,
+    ///   `.?AVLayoutActor@dance@sequence@@`). The frame vtable has 9 slots;
+    ///   slot 4 = onInitialize, 6 = onUpdate (the two the mod clones over).
+    /// * ctor identity cross-check — the ctor's SECOND `LEA RAX,[rip+disp32]`
+    ///   (`48 8D 05`) within its first 0x100 bytes must decode to the RTTI
+    ///   vtable (the first is the agcs::Actor base vftable). Refuses the whole
+    ///   set otherwise: a ctor that constructs a different class would be
+    ///   handed a mismatched vtable clone.
+    /// * `battle_frame_rank_fn` — stock onUpdate (vtable[6]) tail-jumps to the
+    ///   rank/diff function: the FIRST `5E E9 rel32` (`POP RSI; JMP rel32`)
+    ///   inside `[vtable[6], +0x200)`, target inside the module.
+    /// * `matching_local_cabinet_idx` — the first `48 63 05 disp32`
+    ///   (`MOVSXD RAX,[rip]`) inside `[ctor, +0x300)`: CNetworkManager's
+    ///   local cabinet index (`DAT_1806f391c` on 20260825), −1 while no
+    ///   matching session exists. The stock ctor indexes the cabinet-block
+    ///   array with it WITHOUT a null check, so the mod gates on −1.
+    /// * `scene_resource_manager` (RIP at probe+3) and the published
+    ///   `dance_matching_slot_off` (imm32 at probe+13) — the probe must sit
+    ///   inside `[vtable[4], +0x200)`.
+    /// * published `gpa_is_ex_off` / `gpa_ex_score_off` / `gpa_money_score_off`
+    ///   from `gpa_score_select` (+2 / +11 / +19), each required < 0x400.
+    ///
+    /// All-or-nothing: any check failing leaves EVERY derived key of this
+    /// group unresolved (the mod's `required_signatures` then skips it).
+    fn derive_two_player_bpl(&mut self) {
+        const TAG: &str = "two_player_bpl";
+        let (Some(ctor), Some(probe), Some(select)) = (
+            self.get_address("battle_frame_ctor"),
+            self.get_address("dance_matching_slot_probe"),
+            self.get_address("gpa_score_select"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- ctor / slot probe / score select unresolved",
+                TAG
+            );
+            return;
+        };
+        let Some(frame_vt) = self.find_vtable_by_rtti(
+            ".?AVMatchingBattleFrameActor@dance@sequence@@",
+            "battle_frame_actor_vtable",
+        ) else {
+            return;
+        };
+        let Some(layout_vt) =
+            self.find_vtable_by_rtti(".?AVLayoutActor@dance@sequence@@", "layout_actor_vtable")
+        else {
+            return;
+        };
+        let base = self.base as usize;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < self.size;
+
+        unsafe {
+            // Ctor identity: second `48 8D 05 disp32` decodes to the frame vtable.
+            let mut leas = Vec::new();
+            let mut i = 0usize;
+            while i + 7 <= 0x100 && leas.len() < 2 {
+                let p = ctor.add(i);
+                if *p == 0x48 && *p.add(1) == 0x8D && *p.add(2) == 0x05 {
+                    leas.push(decode_rip_relative(p.add(3)));
+                    i += 7;
+                } else {
+                    i += 1;
+                }
+            }
+            if leas.len() != 2 || leas[1] != frame_vt {
+                log_warn!(
+                    "  [-] {} -- ctor's class vftable LEA does not match RTTI vtable ({} LEAs)",
+                    TAG,
+                    leas.len()
+                );
+                return;
+            }
+
+            // vtable slots must be readable, inside the module.
+            let slot = |n: usize| *(frame_vt as *const *const u8).add(n);
+            let on_init = slot(4);
+            let on_update = slot(6);
+            if !inside(on_init) || !inside(on_update) {
+                log_warn!("  [-] {} -- frame vtable slots 4/6 outside module", TAG);
+                return;
+            }
+
+            // Rank fn: first `5E E9 rel32` in onUpdate's window.
+            let mut rank_fn: Option<*const u8> = None;
+            for off in 0..0x200usize {
+                let p = on_update.add(off);
+                if *p == 0x5E && *p.add(1) == 0xE9 {
+                    let t = decode_call_rel32(p.add(1));
+                    if inside(t) {
+                        rank_fn = Some(t);
+                    }
+                    break;
+                }
+            }
+            let Some(rank_fn) = rank_fn else {
+                log_warn!(
+                    "  [-] {} -- no `POP RSI; JMP rel32` tail in stock onUpdate",
+                    TAG
+                );
+                return;
+            };
+
+            // Slot probe must lie inside onInitialize.
+            let probe_rel = (probe as usize).wrapping_sub(on_init as usize);
+            if probe_rel >= 0x200 {
+                log_warn!("  [-] {} -- slot probe not inside stock onInitialize", TAG);
+                return;
+            }
+            let scene_res_mgr = decode_rip_relative(probe.add(3));
+            if !inside(scene_res_mgr) {
+                log_warn!(
+                    "  [-] {} -- scene resource manager global outside module",
+                    TAG
+                );
+                return;
+            }
+            let slot_off = std::ptr::read_unaligned(probe.add(13) as *const u32) as usize;
+            if slot_off == 0 || slot_off > 0x2000 || slot_off % 8 != 0 {
+                log_warn!(
+                    "  [-] {} -- implausible dance_matching slot offset 0x{:X}",
+                    TAG,
+                    slot_off
+                );
+                return;
+            }
+
+            // Local cabinet index: first `48 63 05 disp32` in the ctor body.
+            let mut cab_idx: Option<*const u8> = None;
+            for off in 0..0x300usize {
+                let p = ctor.add(off);
+                if *p == 0x48 && *p.add(1) == 0x63 && *p.add(2) == 0x05 {
+                    let g = decode_rip_relative(p.add(3));
+                    if inside(g) {
+                        cab_idx = Some(g);
+                    }
+                    break;
+                }
+            }
+            let Some(cab_idx) = cab_idx else {
+                log_warn!(
+                    "  [-] {} -- no `MOVSXD RAX,[rip]` (local cabinet idx) in ctor",
+                    TAG
+                );
+                return;
+            };
+
+            // GamePlayActor score-select offsets.
+            let rd = |o: usize| std::ptr::read_unaligned(select.add(o) as *const u32) as usize;
+            let (is_ex, ex_score, money) = (rd(2), rd(11), rd(19));
+            if [is_ex, ex_score, money]
+                .iter()
+                .any(|&v| v == 0 || v >= 0x400)
+                || ex_score == money
+            {
+                log_warn!(
+                    "  [-] {} -- implausible GamePlayActor score offsets (0x{:X}/0x{:X}/0x{:X})",
+                    TAG,
+                    is_ex,
+                    ex_score,
+                    money
+                );
+                return;
+            }
+
+            // Everything validated — publish the group.
+            let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+            self.resolved
+                .insert("battle_frame_actor_vtable".into(), frame_vt);
+            log_info!(
+                "  [+] battle_frame_actor_vtable (RTTI) @ +0x{:X}",
+                rel(frame_vt)
+            );
+            self.resolved
+                .insert("layout_actor_vtable".into(), layout_vt);
+            log_info!("  [+] layout_actor_vtable (RTTI) @ +0x{:X}", rel(layout_vt));
+            self.resolved.insert("battle_frame_rank_fn".into(), rank_fn);
+            log_info!(
+                "  [+] battle_frame_rank_fn (derived) @ +0x{:X}",
+                rel(rank_fn)
+            );
+            self.resolved
+                .insert("matching_local_cabinet_idx".into(), cab_idx);
+            log_info!(
+                "  [+] matching_local_cabinet_idx (derived) @ +0x{:X}",
+                rel(cab_idx)
+            );
+            self.resolved
+                .insert("scene_resource_manager".into(), scene_res_mgr);
+            log_info!(
+                "  [+] scene_resource_manager (derived) @ +0x{:X}",
+                rel(scene_res_mgr)
+            );
+            self.publish_value("dance_matching_slot_off", slot_off);
+            self.publish_value("gpa_is_ex_off", is_ex);
+            self.publish_value("gpa_ex_score_off", ex_score);
+            self.publish_value("gpa_money_score_off", money);
+        }
+    }
+
+    /// Published `dance_matching` scene-resource slot offset (see
+    /// `derive_two_player_bpl`), or `None`.
+    pub fn dance_matching_slot_off(&self) -> Option<usize> {
+        self.published_value("dance_matching_slot_off")
+    }
+
+    /// Published GamePlayActor score-select offsets `(is_ex, ex_score,
+    /// money_score)` (see `derive_two_player_bpl`), or `None`.
+    pub fn gpa_score_offsets(&self) -> Option<(usize, usize, usize)> {
+        Some((
+            self.published_value("gpa_is_ex_off")?,
+            self.published_value("gpa_ex_score_off")?,
+            self.published_value("gpa_money_score_off")?,
+        ))
     }
 
     fn derive_song_rate_runtime_sites(&mut self) {

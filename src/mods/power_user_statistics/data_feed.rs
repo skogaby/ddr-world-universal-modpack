@@ -284,19 +284,21 @@ unsafe extern "C" fn judge_submit_hook(
     use crate::services::audio_sync_diag::{self as diag, spans::Scope};
     let submit = diag::span(Scope::Submit, 0);
     diag::record_hit(actor, result, judge_code, scratch, submit.event());
-    let smarv_side = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let armed_event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _pre = diag::span(Scope::SubmitPre, 0);
         // Only process grade opcodes (0x1028..0x102E for M/P/G/Gd/Boo/Miss/OK).
         // Skip shock codes (0x1030, 0x1031) and cancel (0x1046).
         let grade_index = judge_code.wrapping_sub(OPCODE_GRADE_BASE);
         let is_grade_opcode = grade_index <= 6; // 0..=6 covers M through OK
 
-        // S-Marvelous flash re-drive, deferred to AFTER the original call at
+        // S-Marvelous display fan-out, deferred to AFTER the original call at
         // the bottom: the original's 0x1028 handler plays `in_marvelous` on
         // the judgement clip — a re-drive issued before it gets clobbered the
         // same event (deploy #5: green log, stock word on screen). Set by the
-        // classification tap below.
-        let mut smarv_side: Option<usize> = None;
+        // classification tap below for EVERY grade event of an armed side:
+        // `(side, classified_smarv)` — the receptor-flash tint must also see
+        // the non-S-Marv events to re-assert the stock colour.
+        let mut armed_event: Option<(usize, bool)> = None;
 
         if is_grade_opcode {
             let player_side = *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) as usize;
@@ -317,16 +319,13 @@ unsafe extern "C" fn judge_submit_hook(
                     } else {
                         None
                     };
-                    if crate::mods::s_marvelous::state::on_judge_event(
+                    let is_smarv = crate::mods::s_marvelous::state::on_judge_event(
                         player_side,
                         grade_index,
                         ms,
                         combo,
-                    ) {
-                        // S-Marvelous: re-drive the judgement flash AFTER the
-                        // original below (which plays the stock in_marvelous).
-                        smarv_side = Some(player_side);
-                    }
+                    );
+                    armed_event = Some((player_side, is_smarv));
                 }
 
                 let ex_earned = ex_value_for_opcode(judge_code);
@@ -396,7 +395,7 @@ unsafe extern "C" fn judge_submit_hook(
             }
         }
 
-        smarv_side
+        armed_event
     }))
     .unwrap_or(None);
 
@@ -408,14 +407,15 @@ unsafe extern "C" fn judge_submit_hook(
         }
     }
 
-    // S-Marvelous flash re-drive — must run after the original's stock
-    // `in_marvelous` play so the label jump is the LAST write this event.
-    // Passes the dispatch actor: the NoteResultActor (whose stored wrapper
-    // the stock handler drives) lives in its subtree.
+    // S-Marvelous display fan-out — must run after the original's stock
+    // `in_marvelous` play so the label jump / receptor tint are the LAST
+    // writes this event. Passes the dispatch actor (the NoteResultActor
+    // whose clips the stock handler drives lives in its subtree) and the
+    // info struct (lane bitset at +0x08 — which panels flashed).
     let _post = diag::span(Scope::SubmitPost, 0);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Some(side) = smarv_side {
-            crate::mods::s_marvelous::flash::on_smarvelous(side, actor);
+        if let Some((side, is_smarv)) = armed_event {
+            crate::mods::s_marvelous::flash::on_judge_event(side, actor, scratch, is_smarv);
         }
     }));
 }

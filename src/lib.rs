@@ -179,6 +179,7 @@ fn init() {
         Box::new(mods::music_wheel_song_length::MusicWheelSongLengthMod::new()),
         Box::new(mods::per_song_judgement_offsets::PerSongJudgementOffsetsMod::new()),
         Box::new(mods::s_marvelous::SMarvelousMod::new()),
+        Box::new(mods::two_player_bpl_mode::TwoPlayerBplMod::new()),
         Box::new(mods::smx_hardware::SmxHardwareMod::new()),
         // After assist_tick: its enable registers the tick-alignment
         // listener on the assist-tick mod (order matters only for the log).

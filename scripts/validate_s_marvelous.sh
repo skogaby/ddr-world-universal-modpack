@@ -171,6 +171,13 @@ fn main() {
         }
         std::process::exit(smarv_rows(&args[1], &args[2], &args[3], &args[4], &args[5]));
     }
+    if mode == "smarv-receptor" {
+        if args.len() != 5 {
+            eprintln!("usage: ap2check smarv-receptor <afp> <bsi> <edits lbl:inst:f0:f1:t0:t1:n,..> <out_afp>");
+            std::process::exit(2);
+        }
+        std::process::exit(smarv_receptor(&args[1], &args[2], &args[3], &args[4]));
+    }
     if mode == "geo-rewrite" {
         if args.len() != 5 {
             eprintln!("usage: ap2check geo-rewrite <geo_in> <old_label> <new_label> <geo_out>");
@@ -461,6 +468,154 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
         return 1;
     }
     println!("smarv-patch OK: wrote {out_afp} ({} bytes)", out.len());
+    0
+}
+
+/// Receptor-flash retier (Leg H): the REAL dance_effect transform — the
+/// same core/ap2 recipe (Ap2Doc::clone_segment_and_rescale) the DLL's
+/// receptor_patch module calls, with the edit table extracted from
+/// receptor_patch.rs by the script (one source of truth). Edits arrive as
+/// "label:instance:from0:from1:to0:to1:expected,...". Verifies the clone
+/// carries the STOCK ramp, the edited ramps hit their endpoints in every
+/// section, and writes the re-scrambled file for the bemaniutils leg.
+fn smarv_receptor(afp: &str, bsi: &str, edits: &str, out_afp: &str) -> i32 {
+    let Some(data) = descramble(afp, bsi) else {
+        println!("FAIL smarv-receptor: descramble");
+        return 1;
+    };
+    let Some(mut doc) = ap2::Ap2Doc::parse(&data) else {
+        println!("FAIL smarv-receptor: parse");
+        return 1;
+    };
+    struct E {
+        label: String,
+        instance: String,
+        from: (f32, f32),
+        to: (f32, f32),
+        expected: usize,
+    }
+    let mut table: Vec<E> = Vec::new();
+    for entry in edits.split(',') {
+        let p: Vec<&str> = entry.split(':').collect();
+        let f = |i: usize| p.get(i).and_then(|s| s.parse::<f32>().ok());
+        let (Some(label), Some(inst), Some(f0), Some(f1), Some(t0), Some(t1), Some(n)) = (
+            p.first(),
+            p.get(1),
+            f(2),
+            f(3),
+            f(4),
+            f(5),
+            p.get(6).and_then(|s| s.parse::<usize>().ok()),
+        ) else {
+            println!("FAIL smarv-receptor: bad edit entry '{entry}'");
+            return 1;
+        };
+        table.push(E {
+            label: label.to_string(),
+            instance: inst.to_string(),
+            from: (f0, f1),
+            to: (t0, t1),
+            expected: n,
+        });
+    }
+    let edits_vec: Vec<ap2::SegmentScaleEdit<'_>> = table
+        .iter()
+        .map(|e| ap2::SegmentScaleEdit {
+            label: &e.label,
+            instance: &e.instance,
+            remap: ap2::ScaleRemap::from_f32(e.from, e.to),
+            expected_records: e.expected,
+        })
+        .collect();
+    let sections = doc.sections_with_label("in_marvelous").len();
+    let Some(n) = doc.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &edits_vec) else {
+        println!("FAIL smarv-receptor: clone_segment_and_rescale refused");
+        return 1;
+    };
+    println!("sections={sections} rescaled_records={n}");
+    let Some(mut out) = doc.serialize() else {
+        println!("FAIL smarv-receptor: serialize");
+        return 1;
+    };
+    let Some(re) = ap2::Ap2Doc::parse(&out) else {
+        println!("FAIL smarv-receptor: re-parse");
+        return 1;
+    };
+    // Per section: the named instance's (min, max) scale over a segment.
+    fn ramp(doc: &ap2::Ap2Doc, sec: &ap2::TagSection, label: &str, inst: &str) -> Option<(f32, f32, usize)> {
+        let start = sec.label_frame(label)? as usize;
+        let end = sec
+            .labels
+            .iter()
+            .map(|l| l.frame as usize)
+            .filter(|&f| f > start)
+            .min()
+            .unwrap_or(sec.frames.len());
+        let mut keys = Vec::new();
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        let mut count = 0usize;
+        for f in &sec.frames[start..end] {
+            let s = f.start_tag as usize;
+            for t in &sec.tags[s..s + f.tag_count as usize] {
+                let ap2::Tag::PlaceObject(p) = t else { continue };
+                let v = p.view()?;
+                if v.flags & 1 == 0 && v.movie_name_offset.and_then(|o| doc.strings.get(o)) == Some(inst) {
+                    keys.push((v.object_id, v.depth));
+                }
+                if keys.contains(&(v.object_id, v.depth)) {
+                    let (a, _) = p.scale_q15()?;
+                    let a = a as f32 / 32768.0;
+                    lo = lo.min(a);
+                    hi = hi.max(a);
+                    count += 1;
+                }
+            }
+        }
+        Some((lo, hi, count))
+    }
+    let paths = re.sections_with_label("in_smarvelous");
+    if paths.len() != sections || sections == 0 {
+        println!("FAIL smarv-receptor: in_smarvelous present in {} sections (want {sections})", paths.len());
+        return 1;
+    }
+    let near = |a: f32, b: f32| (a - b).abs() < 0.003;
+    for path in &paths {
+        let sec = re.section(path).unwrap();
+        let which = if path.tag_indices.is_empty() { "root".to_string() } else { format!("{:?}", path.tag_indices) };
+        // The clone must carry the FIRST edit's stock ramp (its source label).
+        let src = &table[0];
+        let Some((lo, hi, cnt)) = ramp(&re, sec, "in_smarvelous", &src.instance) else {
+            println!("FAIL smarv-receptor: [{which}] in_smarvelous ramp unreadable");
+            return 1;
+        };
+        if !near(lo, src.from.0) || !near(hi, src.from.1) || cnt != src.expected {
+            println!("FAIL smarv-receptor: [{which}] in_smarvelous ramp {lo:.3}..{hi:.3} x{cnt} (want stock {:.2}..{:.2} x{})", src.from.0, src.from.1, src.expected);
+            return 1;
+        }
+        println!("[{which}] in_smarvelous @ f{}: {lo:.3}..{hi:.3} ({cnt} records, stock ramp)", sec.label_frame("in_smarvelous").unwrap());
+        for e in &table {
+            let Some((lo, hi, cnt)) = ramp(&re, sec, &e.label, &e.instance) else {
+                println!("FAIL smarv-receptor: [{which}] {} ramp unreadable", e.label);
+                return 1;
+            };
+            if !near(lo, e.to.0) || !near(hi, e.to.1) || cnt != e.expected {
+                println!("FAIL smarv-receptor: [{which}] {} ramp {lo:.3}..{hi:.3} x{cnt} (want {:.2}..{:.2} x{})", e.label, e.to.0, e.to.1, e.expected);
+                return 1;
+            }
+            println!("[{which}] {}: {lo:.3}..{hi:.3} ({cnt} records)", e.label);
+        }
+    }
+    // Re-scramble the string table for bemaniutils consumption.
+    let st_off = u32::from_le_bytes(out[48..52].try_into().unwrap()) as usize;
+    let st_size = u32::from_le_bytes(out[52..56].try_into().unwrap()) as usize;
+    let scrambled = ap2::encode_string_table(&out[st_off..st_off + st_size]);
+    out[st_off..st_off + st_size].copy_from_slice(&scrambled);
+    if std::fs::write(out_afp, &out).is_err() {
+        println!("FAIL smarv-receptor: write {out_afp}");
+        return 1;
+    }
+    println!("smarv-receptor OK: wrote {out_afp} ({} bytes)", out.len());
     0
 }
 
@@ -1046,7 +1201,7 @@ AP2CHECK="$TMP/target/debug/ap2check"
 # The feature's patch targets: gameplay flash, FC splash, results scene.
 # The LIVE default packages (cabinet-observed: the game loads the
 # UNSUFFIXED _v3 arcs; NNNN_vN arcs are skin/revision variants).
-DEV_ARCS=(dance_judge_v3 dance_fullcombo_v3 scene_result_v3)
+DEV_ARCS=(dance_judge_v3 dance_fullcombo_v3 scene_result_v3 dance_effect_v3)
 
 extract_arc() { # <arc basename> -> echoes the extracted afp/ dir
   local arc="$1" out="$TMP/dev/$1"
@@ -1469,4 +1624,78 @@ for sid, smfc, mfc in found:
     print(f"    [G] sprite {sid}: loop_smfc @ {smfc} (stock loop_mfc @ {mfc})")
 PYEOF
 note "Leg G OK"
+
+# ── Leg H: receptor-flash size tiers on the REAL dance_effect template ──
+# Runs the DLL's actual transform (Ap2Doc::clone_segment_and_rescale with
+# the ramp table extracted from receptor_patch.rs — one source of truth):
+# clone in_marvelous -> in_smarvelous in every section, shrink Marvelous to
+# Perfect's old ramp, halve Perfect. Then cross-checks the ramps and the
+# grown identity record with bemaniutils.
+note "Leg H: dance_effect receptor-flash size tiers"
+DE_AFP_DIR="$TMP/dev/dance_effect_v3/x/afp" # extracted by Leg A
+RP_SRC="$REPO_ROOT/src/mods/s_marvelous/receptor_patch.rs"
+rp_const() { grep -oE "const $1: \(f32, f32\) = \(?[A-Z_0-9.]+(, [0-9.]+)?\)?;" "$RP_SRC" | sed -E 's/.*= \(?//; s/\)?;$//'; }
+rp_usize() { grep -oE "const $1: usize = [0-9]+" "$RP_SRC" | grep -oE '[0-9]+$'; }
+resolve_pair() { # resolve a "(a, b)" or an alias like STOCK_PERFECT
+  local v="$1"
+  if [[ "$v" =~ ^[A-Z_]+$ ]]; then v=$(rp_const "$v"); fi
+  echo "$v" | tr -d '() ' | tr ',' ':'
+}
+SM=$(resolve_pair "$(rp_const STOCK_MARVELOUS)"); SP=$(resolve_pair "$(rp_const STOCK_PERFECT)")
+NM=$(resolve_pair "$(rp_const NEW_MARVELOUS)");   NP=$(resolve_pair "$(rp_const NEW_PERFECT)")
+MR=$(rp_usize MARVELOUS_RECORDS); PR=$(rp_usize PERFECT_RECORDS)
+[[ -n "$SM" && -n "$SP" && -n "$NM" && -n "$NP" && -n "$MR" && -n "$PR" ]] \
+  || die "Leg H: could not extract the ramp table from receptor_patch.rs"
+EDITS="in_marvelous:ef_bomb:$SM:$NM:$MR,in_perfect:ef_bomb:$SP:$NP:$PR"
+note "Leg H edits: $EDITS"
+DE_OUT="$TMP/dev/smarv_receptor"
+mkdir -p "$DE_OUT"
+OUT=$("$AP2CHECK" smarv-receptor "$DE_AFP_DIR/dance_effect" "$DE_AFP_DIR/bsi/dance_effect" \
+  "$EDITS" "$DE_OUT/dance_effect")
+echo "$OUT" | sed 's/^/    /'
+echo "$OUT" | grep -q "smarv-receptor OK" || die "Leg H: transform failed"
+: >"$DE_OUT/empty_bsi"
+(cd "$BEMANIUTILS_DIR" && ./afputils parseafp "$DE_OUT/dance_effect" "$DE_OUT/empty_bsi") \
+  >"$DE_OUT/patched.json" 2>/dev/null || die "Leg H: afputils parseafp rejected the patched file"
+python3 - "$DE_OUT/patched.json" "$NM" "$NP" "$SM" <<'PYEOF' || die "Leg H: ramps wrong in bemaniutils view"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+nm = [float(x) for x in sys.argv[2].split(":")]
+np_ = [float(x) for x in sys.argv[3].split(":")]
+sm = [float(x) for x in sys.argv[4].split(":")]
+def ramp(node, label, inst):
+    labels = node["labels"]; frames = node["frames"]; tags = node["tags"]
+    start = labels[label]
+    later = [f for f in labels.values() if f > start]
+    end = min(later) if later else len(frames)
+    keys, vals = set(), []
+    for fi in range(start, end):
+        f = frames[fi]
+        for t in tags[f["start_tag_offset"]:f["start_tag_offset"] + f["num_tags"]]:
+            if t.get("type") != "AP2PlaceObjectTag":
+                continue
+            k = (t["object_id"], t["depth"])
+            if not t.get("update") and t.get("movie_name") == inst:
+                keys.add(k)
+            if k in keys:
+                vals.append(t["transform"]["a"])
+    return vals
+ok = True
+def check(where, node):
+    global ok
+    for label, want in (("in_smarvelous", sm), ("in_marvelous", nm), ("in_perfect", np_)):
+        v = ramp(node, label, "ef_bomb")
+        lo, hi = min(v), max(v)
+        good = abs(lo - want[0]) < 0.003 and abs(hi - want[1]) < 0.003
+        # monotone non-decreasing ramp (the grown identity frame must sit in line)
+        mono = all(b >= a - 1e-6 for a, b in zip(v, v[1:]))
+        print(f"    [H] {where} {label}: {lo:.3f}..{hi:.3f} over {len(v)} records{'' if good and mono else '  <-- MISMATCH'}")
+        ok = ok and good and mono
+check("root", doc)
+for t in doc["tags"]:
+    if t.get("type") == "AP2DefineSpriteTag" and "in_smarvelous" in (t.get("labels") or {}):
+        check(f"sprite{t['id']}", t)
+sys.exit(0 if ok else 1)
+PYEOF
+note "Leg H OK"
 note "OK"

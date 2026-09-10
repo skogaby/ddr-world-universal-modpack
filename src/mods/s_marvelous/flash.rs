@@ -4,6 +4,10 @@
 //! — to the mod-synthesized `in_smarvelous` label, one event later in the
 //! same frame (before anything renders). Design §4.4.
 //!
+//! Also the post-original fan-out point for the OTHER judge-event display
+//! surfaces that need the side's NoteResultActor (`on_judge_event`): the
+//! FAST/SLOW re-hide and the violet receptor hit-flash tint (`receptor`).
+//!
 //! No play/visibility calls: the stock handler already set them for this
 //! judgement. Calibration hide and per-player judgement styling apply
 //! automatically (same clip, opacity/scale operate at the layer level).
@@ -93,13 +97,29 @@ unsafe fn find_note_result_actor(actor: *mut u8, depth: u8) -> Option<*mut u8> {
 /// case drives exactly this one).
 const NOTE_RESULT_JUDGE_WRAPPER_OFFSET: usize = 0xA0;
 
-/// Re-drive the side's judgement clip to `in_smarvelous`. Called from the
-/// judge tap when an event classified S-Marvelous (armed sides only — the
-/// caller's classification return gates this). `judge_actor` = the
-/// judge_submit dispatch actor (the NoteResultActor lives in its subtree).
-pub fn on_smarvelous(side: usize, judge_actor: *mut u8) {
+/// Post-original entry for EVERY grade event (0..=6) of an ARMED side —
+/// called from the judge tap after the stock dispatch ran. Resolves the
+/// side's NoteResultActor once (it lives in `judge_actor`'s subtree) and
+/// fans out to the display surfaces that ride the judge event:
+///
+/// * receptor hit-flash tint (`receptor`) — every event, because it must
+///   re-assert identity on the lanes a non-S-Marv event touched;
+/// * the word re-drive + FAST/SLOW hide — S-Marvelous events only.
+///
+/// `info` = the judge_submit info struct (lane bitset at +0x08).
+pub fn on_judge_event(side: usize, judge_actor: *mut u8, info: *const u8, smarv: bool) {
     let nra = unsafe { find_note_result_actor(judge_actor, 0) };
+    super::receptor::on_judge_event(side, nra, info, smarv);
+    if smarv {
+        on_smarvelous(side, nra);
+    }
+}
 
+/// Re-drive the side's judgement clip to `in_smarvelous`. Called when an
+/// event classified S-Marvelous (armed sides only — the caller's
+/// classification return gates this). `nra` = the side's NoteResultActor
+/// as resolved by [`on_judge_event`] (None ⇒ captured-clip fallback).
+fn on_smarvelous(side: usize, nra: Option<*mut u8>) {
     // S-Marvelous is the highest tier ⇒ exempt from FAST/SLOW: re-hide the
     // indicator the patched gate just showed for this grade-0 event.
     // Independent of the word re-drive below (which needs the patched

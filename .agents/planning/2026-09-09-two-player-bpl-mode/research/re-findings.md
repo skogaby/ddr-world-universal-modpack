@@ -133,15 +133,16 @@ UNSET otherwise — the mod writes 2 explicitly (already in the plan).
 `onInitialize` @ `0x180071d6e`:
 
 ```
-48 8B 05 <disp32>        MOV RAX,[rip+DAT_1806f2d70]   ; scene-resource-manager global (ptr to ptr)
-48 8B 08                 MOV RCX,[RAX]
-4C 8B A9 F0 07 00 00     MOV R13,[RCX+0x7F0]           ; slot-31 package pointer (dance_matching)
+48 8B 05 <disp32>        MOV RAX,[rip+DAT_1806f2d70]   ; global → RAX = the 0x28-byte manager object (FUN_1801ac530 news it)
+48 8B 08                 MOV RCX,[RAX]                 ; RCX = manager->slots (field 0; 0x24×2 × 0x40 entries)
+4C 8B A9 F0 07 00 00     MOV R13,[RCX+0x7F0]           ; slot-31 package pointer (dance_matching) — THREE loads
 48 8B 05 <disp32>        MOV RAX,[rip+DAT_1806f14f8]   ; GameWork (the R1 read)
 ```
 
 One AOB `48 8B 05 ?? ?? ?? ?? 48 8B 08 4C 8B A9 ?? ?? ?? ?? 48 8B 05` yields BOTH the
 manager global (rip disp at match+3) and the slot offset (imm32 at match+13 — derived,
-never hardcode `0x7F0`). Pre-check: `*(*mgr + slot_off) != 0`. Without it a missing
+never hardcode `0x7F0`). Pre-check: `*(*(*global) + slot_off) != 0` — three loads; the
+first cabinet build did two and read heap garbage past the manager object (2026-09-10). Without it a missing
 `dance_matching.arc` NULL-derefs inside stock `onInitialize`
 (`(**(code**)(*layer+0xE8))(layer,1)` right after the failed `main_single` create).
 
@@ -164,7 +165,7 @@ EB 06                    JMP +6
 ```
 
 AOB `80 B8 ?? ?? 00 00 00 74 08 48 05 ?? ?? 00 00 EB 06 48 05 ?? ?? 00 00 8B 00` → the
-three offsets are read from the match (match+2 / +11 / +18) instead of hardcoded, and
+three offsets are read from the match (match+2 / +11 / +19) instead of hardcoded, and
 the signature IS the cross-build attestation the doc asked `shape_diff.py` for.
 `+0x1D4/+0x1D8` agree with `song_reset`'s `GPA_SCORE_OFFSET`/`GPA_EX_SCORE_OFFSET`.
 

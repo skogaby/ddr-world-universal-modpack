@@ -845,3 +845,111 @@ loose Marvelous IS a timing error and belongs on the graph.
   WARN). `INJECTING` flag makes our own re-entrant legend calls pass
   through. Applied on every armed tab regardless of content, so the
   layout never jumps between songs.
+
+---
+
+## Addendum 2026-09-10 — Violet receptor hit flash
+
+The receptor flash a judgement paints on the arrow receptor IS colour-coded
+per grade, and S-Marvelous inherited Marvelous's white. Two separate systems
+produce it (20260825 addresses; 20250805 byte-identical at the cited sites):
+
+### RE
+
+- **`screen::JudgeEffectRenderer`** (the sprite burst; `GamePlayActor+0x150`,
+  draw = `judge_effect_render` signature `FUN_180028030`, colour/quad emit
+  `FUN_180028d20`). A record is `{t0, lane_bitset, type}` (0xC stride,
+  vector @ `+0xA0/+0xA8`); its colour is computed PER TYPE at draw time from
+  the fade `f = (1 − age/lifetime)·255`: type 0 → `(2f,2f,2f)` white,
+  **1 → `(f, f, f/4)` yellow**, **2 → `(f/4, f, f/4)` green**, **3 →
+  `(f/4, f, 3f/4)` blue**, 4 → yellow (200 ms, the freeze-hold glow), 5/6 →
+  bright yellow/cyan (150 ms); the PS multiplies the arrow-sheet cell by that
+  vertex colour on all channels. **Pushers**: `judgeNotes` @ `0x18005F560`
+  pushes ONLY for grade 1/2/3 (`dec ecx; jz` ladder → `mov r8d,1/2/3`;
+  Marvelous = grade 0 falls through — NO record), and the freeze-hold path
+  `FUN_18005f720` pushes type 4 per held frame. Types 0/5/6 have no pusher
+  on any supported build (DDR A-era leftovers).
+- **BM2D `dance_effect` clips** (one per panel, `NoteResultActor+0xE8..+0xF0`,
+  layer id at wrapper `+0x08`, MC id at `+0x110`): the 0x1028..0x102D case
+  of `FUN_18007B710` (the NoteResultActor msg handler) does, for every lane
+  bit set in `info+0x08` (`param_3[2]`): `afp_layer_play(1.0)` +
+  `set_attribute(visible)` + `afp_mc_get_param(mc, 0x1012, label)` +
+  `CMovieClip::SetFrame(label_frame + info+0x18)`. Template (live probe of
+  `dance_effect_v3.arc`): `in_marvelous` @ f0 = `ef_bomb` → texture
+  `dance_effect_bomb` (pure GREYSCALE, mean RGB 114.8/114.8/114.8),
+  **additive blend 8**, mult `(1,1,1,0.796)`, scale 0.80→1.15 over 8 frames,
+  removed @ f8, `aeplib.stop()` @ f10; `in_perfect` @ f24 = the SAME white
+  bomb at 0.40→0.80 (Perfect's flash differs by SIZE, not hue);
+  `in_marvelous_freeze` (msg 0x1032, hold completion) / `in_ok` = `ef_freeze`
+  → `dance_effect_bomb_freeze` (YELLOW art); great/good/boo/miss/ng = an
+  alpha-0 placeholder only. Dual timeline (root + exported sprite 32 carry
+  the label set).
+
+So on screen: Marvelous = white bomb only; Perfect = small white bomb +
+yellow sprite burst; Great/Good = sprite burst only. **The white Marvelous
+receptor flash is entirely the greyscale additive `dance_effect` bomb.**
+
+**Scale encoding (matters for the retier patch below):** one segment uses
+THREE encodings for the placement matrix scale — values `< 1` use the
+compact flag-`0x40000` `<hh>` pair (/32768; bemaniutils swf.py ~1633
+"alternative method"), values `≥ 1` the classic flag-`0x100` `<ii>` pair
+(/1024), and EXACTLY 1.0 carries no field at all (the Marvelous ramp's
+frame 4 — `0.80,0.85,0.90,0.95,[none],1.05,1.10,1.15` is a perfect line,
+which pins the update-record semantics: the matrix is fully specified per
+update, absent components = identity; colours by contrast persist when
+absent). Object ids ARE the death frames (o8 removed @f8, o32 @f32 — the
+executor's catch-up rule, learnings).
+
+### Mod (`s_marvelous/receptor.rs`, 2026-09-10)
+
+Zero new detours, zero art, zero AP2: a multiplicative CXFORM on the hit
+panel's clip LAYER (`bm2d_api::layer_set_color_raw` → `afp_layer_set_color`,
+libafp Ordinal 49; composed down the display hierarchy) turns the greyscale
+additive bomb into a single-hue violet glow. Hue = `0xA030FF` (saturated
+electric violet), NOT the pastel art-language `0xB05CE0`: under additive
+blend the flash ADDS `texture × mult` onto the background, and the pastel's
+green channel (92/255) washed the glow to white on bright lanes (first
+cabinet deploy). Saturation — green ≈ 0, blue = 1.0 — is the lever;
+darkening only makes it fainter. Driven from the shared `judge_submit` tap post-original
+(`flash::on_judge_event(side, actor, info, smarv)` — now called for EVERY
+grade event 0..=6 of an armed side, not just S-Marv): resolve the
+NoteResultActor once, walk `+0xE8..+0xF0` (same validation as
+`lane_hook`), and for each lane bit in `info+0x08` write violet iff THIS
+event is S-Marvelous, else identity `(1,1,1,1)`. The identity re-assert is
+load-bearing: the layer colour block persists and the same clip plays
+Perfect's white bomb and the yellow `in_marvelous_freeze` bomb — the latter
+is dispatched (0x1032) in the same `judgeNotes` call BEFORE the grade-6
+O.K. submit for the same lanes, so the O.K. event's identity write lands
+before the frame renders. Per-(side, lane) tracker (`0 unknown / 1 identity
+/ 2 violet`) elides matching writes and is forgotten at play-scene arm
+(fresh clips per song). Fail-open: `afp_layer_set_color` unresolved / no
+NRA / bad vector ⇒ stock white flash, one WARN per class; first violet
+write logs one INFO. Not done (deliberately): pushing a violet
+`JudgeEffectRenderer` burst — Marvelous has no burst, and S-Marv mirrors
+Marvelous in violet.
+
+**Size tiers (`receptor_patch.rs`, same day):** with a tier above
+Marvelous the flash sizes move down one (maintainer directive). An
+`afp_patcher` patch on `dance_effect` runs `core/ap2`'s new atomic
+`Ap2Doc::clone_segment_and_rescale`: placements-only clone of
+`in_marvelous` → `in_smarvelous` into BOTH sections (root + exported
+sprite 32; ids rebased 8→308 = death frame by the existing clone
+primitive), then affine remaps of the named `ef_bomb` instance's ramp per
+segment (`ScaleRemap::from_f32`): `in_marvelous` 0.80→1.15 ⇒ **0.40→0.80**
+(Perfect's old sizes), `in_perfect` 0.40→0.80 ⇒ **0.20→0.40**; the clone
+keeps the stock 0.80→1.15 for S-Marv. The edit keeps each record's own
+encoding (`ScaleField::{Wide,Short,Identity}` — an identity record GROWS
+one appended `<hh>` field + flag `0x40000` when nothing follows it; the
+serializer recomputes tag size/pad). Self-validating gate instead of the
+dance_judge byte-identity gate (nothing external is staged): label set,
+exact record counts (8/5 per section), and every stock value inside the
+declared `from` range ± 0.002 — a different skin refuses wholesale, stock
+streams, one WARN. Runtime: an S-Marv event, after the tint, re-seeks each
+hit lane's clip with the stock handler's own shape — `mc_frame_by_label
+(mc@+0x110, "in_smarvelous")` + `mc_op(0xF08, frame + info+0x18)` (the
+per-event frame offset `param_3[6]` the stock adds) — as the last write of
+the event; loose Marvelous / Perfect need no runtime work (their segments
+were resized in the template). Host proof: `scripts/validate_s_marvelous.sh`
+Leg H (real template → real recipe → bemaniutils cross-check incl. the
+grown identity record), `dance_effect_v3` added to the Leg A round-trip
+set, 7 new synthetic `core/ap2` tests.

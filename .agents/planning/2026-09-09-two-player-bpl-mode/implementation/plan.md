@@ -7,11 +7,11 @@ Project rules that apply to every step: no `git commit` unless the maintainer as
 readiness gates before any deploy = `cargo check` → `cargo fmt` (whole crate) →
 `./build.sh` → `validate_signatures.sh` green when `signatures.rs` changed.
 
-- [ ] Step 1: Signatures, derivations, service promotion — offline four-build sweep green
-- [ ] Step 2: Pure logic module + host validation harness
-- [ ] Step 3: Mod skeleton with gating, tree walk and DRY-RUN placement log (cabinet checkpoint)
-- [ ] Step 4: Vtable clone, slot wrappers, real frame creation (cabinet: HUD visible)
-- [ ] Step 5: Cabinet validation matrix, docs (AGENTS.md row, RE doc addendum, README)
+- [x] Step 1: Signatures, derivations, service promotion — offline four-build sweep green
+- [x] Step 2: Pure logic module + host validation harness
+- [x] Step 3: Mod skeleton with gating, tree walk and DRY-RUN placement log (cabinet checkpoint)
+- [x] Step 4: Vtable clone, slot wrappers, real frame creation (cabinet: HUD visible)
+- [x] Step 5: Cabinet validation matrix, docs (AGENTS.md row, RE doc addendum, README) — docs done; core matrix (2P versus HUD, fresh-DPS recreation, quick-fail teardown) cabinet-validated 2026-09-10; EX-scoring / in-place-restart / overlap checks remain optional follow-ups
 
 ---
 
@@ -42,7 +42,7 @@ design, so it goes first.
 hit exactly once per build, both RTTI vtables resolve, every `(derived)` line present,
 exit 0. `scripts/sig_harness/shape_diff.py --json … --dir …` reports no divergence within
 the read windows of `battle_frame_ctor` (+0x78 LEA), `dance_matching_slot_probe` (+13),
-`gpa_score_select` (+2/+11/+18) and the `vtable[6]` tail. `cargo check` clean.
+`gpa_score_select` (+2/+11/+19) and the `vtable[6]` tail. `cargo check` clean.
 
 **Integration.** Additive to the store; nothing consumes the new keys yet (the harness
 attributes them once Step 3's `required_signatures` literal exists — run the sweep again

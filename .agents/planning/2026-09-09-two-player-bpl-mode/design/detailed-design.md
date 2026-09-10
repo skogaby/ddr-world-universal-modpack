@@ -143,7 +143,7 @@ skips the mod cleanly on any miss). Names below are the store keys.
 | `matching_local_cabinet_idx` | derived | First `48 63 05 disp32` (`MOVSXD RAX,[rip+disp32]`) within `[battle_frame_ctor, +0x300)`; RIP-decode → the `i32` global. |
 | `actor_add_child` | AOB | `agcs::Actor::addChild(parent, child)` (Appendix B). |
 | `dance_matching_slot_probe` | AOB + 2 published values | Inside stock `onInitialize`; RIP at match+3 → `scene_resource_manager` (pointer-to-pointer global), imm32 at match+13 → `dance_matching_slot_off` via `publish_value`. Init cross-check: match address must lie inside `[vtable[4], vtable[4]+0x200)`. |
-| `gpa_score_select` | AOB + 3 published values | The matching sequence's per-frame score read; imm32 at match+2 → `gpa_is_ex_off` (byte flag), match+11 → `gpa_ex_score_off`, match+18 → `gpa_money_score_off`. |
+| `gpa_score_select` | AOB + 3 published values | The matching sequence's per-frame score read; imm32 at match+2 → `gpa_is_ex_off` (byte flag), match+11 → `gpa_ex_score_off`, match+19 → `gpa_money_score_off`. |
 | existing | — | `agcs_heap_malloc`, `app_heap_handle`, `gameplay_actor_vtable`. |
 
 ### Service change (`src/services/song_reset/mod.rs`)
@@ -208,7 +208,7 @@ and logs its latched WARN (gate-false is INFO-level, it's the normal solo/double
    (The normal DPS creates the GamePlayActors only after the LayoutActor reached state 1,
    so two GPAs ⇒ the `dance_matching` anchor is registered.)
 3. **Network idle**: `*local_cab_idx == -1` else `Refused(NetworkNotIdle)`.
-4. **Package**: `pkg = **scene_res_mgr + slot_off` readable and `*pkg != 0` else
+4. **Package**: `slots = **scene_res_mgr` (global → manager object → its first field = the slot array), `*(slots + slot_off) != 0` else
    `Refused(PackageMissing)`. (Checked here AND in the slot-4 wrapper: the wrapper is the
    safety net, this is the early exit.)
 5. **Inputs**: `stage = stage_counter()`; `rec = stage_record(0, stage)` (mcode `+0`,
@@ -363,7 +363,7 @@ Default ON (not in `DEFAULT_OFF_MODS`).
 | `GamePlayActor` | `+0x84` side; `+is_ex_off` (u8), `+ex_off`, `+money_off` (i32) — offsets DERIVED from `gpa_score_select` | actor ordering; per-frame score |
 | `LayoutActor` | `+0x98` layout descriptor | ctor arg |
 | `CNetworkManager` local cabinet index (derived global, i32) | must be −1 | network-idle gate |
-| scene resource manager (derived pointer-to-pointer) | `*(*mgr + slot_off)` = `dance_matching` package ptr | residency gate |
+| scene resource manager (derived global → manager object; `manager+0` = slot array) | `*(*(*global) + slot_off)` = `dance_matching` package ptr — three loads, the stock chain | residency gate |
 
 ### Signature byte shapes (20260825; verify on all four builds)
 
@@ -465,8 +465,8 @@ priority, spliced BEFORE equal-priority siblings.
 `dance_matching_slot_probe` @ `+0x71D6E` (inside `onInitialize`):
 
 ```
-48 8B 05 ?? ?? ?? ??   MOV RAX,[rip+scene_res_mgr]     ; match+3 → global (ptr to ptr)
-48 8B 08               MOV RCX,[RAX]
+48 8B 05 ?? ?? ?? ??   MOV RAX,[rip+scene_res_mgr]     ; match+3 → global; RAX = manager object
+48 8B 08               MOV RCX,[RAX]                    ; RCX = manager->slots (field 0)
 4C 8B A9 ?? ?? ?? ??   MOV R13,[RCX+slot_off]          ; match+13 → imm32 (0x7F0 on 20260825)
 48 8B 05               (start of the GameWork load)
 ```
@@ -478,7 +478,7 @@ priority, spliced BEFORE equal-priority siblings.
 74 08                  JZ
 48 05 ?? ?? 00 00      ADD RAX,ex_off                  ; match+11 (0x1D8)
 EB 06                  JMP
-48 05 ?? ?? 00 00      ADD RAX,money_off               ; match+18 (0x1D4)
+48 05 ?? ?? 00 00      ADD RAX,money_off               ; match+19 (0x1D4)
 8B 00                  MOV EAX,[RAX]
 ```
 

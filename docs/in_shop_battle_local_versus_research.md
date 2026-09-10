@@ -1,4 +1,4 @@
-# In-Shop Battle UX for Local Versus — Feasibility Research
+# In-Shop Battle UX for Local Versus — Research + Implementation Record
 
 RE record for bringing the "in-shop battle mode" gameplay HUD — the per-player score
 boards, the score-ratio bars, the live 1st/2nd rank badges and the score-margin
@@ -11,7 +11,9 @@ build: **20260825**; the class layout and constructor were cross-checked
 byte-for-byte on **20250805** (the oldest supported build). Research only — no code
 this session. Companion doc: `docs/bpl_battle_mode_research.md` (the matching
 NETWORK stack: hardware gate, LibComm, ESS broker protocol). This document covers
-the DISPLAY side and the local re-hosting plan.
+the DISPLAY side and the local re-hosting plan. **Implemented 2026-09-09 as
+`src/mods/two_player_bpl_mode/` (Approach A) — see the addendum at the end for what
+the implementation pinned down and the one correction to §3.**
 
 ## TL;DR
 
@@ -440,3 +442,87 @@ changes score semantics. Not worth it for the display.
 | UDP score sync | `ReceiveScoreReport` `FUN_1801c3470`, `ReceiveScoreNotice` `FUN_1801c3520`, `ReceiveMusicStartSyncReport` `FUN_1801c3370` |
 | matching session actor (state 4 = connected) | `DAT_1806f2d48` |
 | art tables | `dama_score_base_*` `0x180465aa0`, team `0x180465a60`; `dama_gauge_*` `0x1804659e0`, team `0x1804658e0`; `dama_score_1st..` `0x1804658c0` |
+
+## 8. Implementation addendum (2026-09-09)
+
+Approach A shipped as `src/mods/two_player_bpl_mode/` (id `two-player-bpl-mode`,
+default ON, Mods-tab toggle only; pure `logic.rs` host-tested via
+`scripts/validate_two_player_bpl.sh`). Planning record:
+`.agents/planning/2026-09-09-two-player-bpl-mode/` (design + the Ghidra pass
+`research/re-findings.md`, R1–R7). What the implementation pass verified, corrected or
+added relative to §1–§7:
+
+### 8.1 CORRECTION to §3 — "null blocks are harmless" is wrong as stated
+
+The ctor (`FUN_180071740`) dereferences `(&DAT_1806f3ac8)[DAT_1806f391c]` — the LOCAL
+cabinet block — with NO null check (`MOV R8,[R13+RAX*8+0x1d8]; CMP dword [RAX+R8+0xc],0`).
+It is safe in local play only because of static initialisation: `CNetworkManager`'s
+constructor `FUN_1801bbbe0` runs from the CRT initializer table (`FUN_1802ce4d0`,
+`.CRT$XCU` entry `0x1802d94e8`, `atexit(FUN_1802d6780)` pairs the dtor) and sets
+`DAT_1806f3918/391c = -1,-1` (role / local idx), `DAT_1806f3ac8/3ad0 = 0` (cabinet
+blocks) and `DAT_1806f3ac0 = new(0x178)` (initialised by `FUN_1801bb970`: two 0x1C
+records with `player_index = ddrcode = -1`). Array index **−1** of the block array is
+`+0x1D0` = `DAT_1806f3ac0`, i.e. a valid placeholder block whose records are all
+invalid (`+0xC < 0`) ⇒ no position matches. In the versus (`GameWork+0 == 1`) branch
+every unmatched player then goes to positions 2/3 via `GetPlayerInfo`
+(`FUN_1801bccb0`), which iterates the two NULL blocks (skipped) and resets the record.
+Net effect: `BATTLE_INFO[0..1].+0x38 = -1`, `[2..3].+0x38 = 2,3`, four
+`set player info : position=…` log lines — all overwritten by the mod.
+
+The mod therefore gates on **`*matching_local_cabinet_idx == −1`** (derived from the
+first `48 63 05 disp32` in the ctor body) so the dependency is checked, not assumed.
+
+### 8.2 Verified (open questions §6)
+
+- **§6.2 `GameWork+0` flip safety:** `onInitialize` reads `DAT_1806f14f8` at exactly three
+  sites (`0x180071d7f` layout name, `0x180071fc8` 3P/4P hide, `0x180072316` gauge art
+  row). Its callee closure to depth 3 (45 internal functions; the two unexpanded leaves
+  `FUN_18010f960` = shared_ptr move-assign and `FUN_1801b76f0` = music-DB lower_bound
+  were read directly) contains **zero** other readers; every `Ordinal_*` callee is a
+  libafp/libavs export. The flip changes only the three intended branches.
+- **§6.3 guest names:** `PlayerWork+0x0C` is an inline `char[]` (NOT an MSVC
+  `std::string`). Stock getName `FUN_1801e88a0`: `entered (+0x4) && name[0] == 0` ⇒
+  `PLAYER1`/`PLAYER2` (side `+0x0` < 2) else `"PLAYER"`; otherwise the inline bytes. The
+  network record builder (`FUN_1800a7410` case 1) copies 9 bytes (8 + NUL). Reproduced
+  in `logic::player_name` — no new signature. `team_id` in stock comes from a virtual
+  getter on `*(PW+0x1790)`, not a plain field (irrelevant: the mod writes 0).
+- **§6.4 sidedness:** in the stock 1v1 branch the local player's `player_index` is
+  written to `position[GameWork+0x8]` (its own side) — position 0 IS the P1 side. The
+  mod maps `position i ← side i`, `player_index = i`, `+0x38 = i` (stock-identical).
+- **`addChild` semantics (`FUN_18021f230`):** refuses as a silent no-op when child ==
+  parent, child NULL, child already has a parent (+0x08) or a next (+0x10); sorted
+  insert by DESCENDING `+0x24` priority, spliced BEFORE equal-priority siblings. The
+  ctor zeroes `+0x28`, so the frame lands ahead of the GamePlayActors (same as stock)
+  ⇒ its onUpdate sees the previous frame's score (1-frame latency, hidden by the
+  smoothing). Because refusals are silent the mod verifies `frame+0x08 == dps` and
+  LEAKS the constructed object on mismatch (never frees a live actor).
+- **Dispatcher (`FUN_18021d7d0`) flags at `+0x50`:** bit0 update, bit1 draw, bit2
+  skip-one-update, bit8 initialised; ctor sets 3; `0x102` on an un-initialised actor
+  first self-broadcasts `0x101` (→ slot 4) then calls slot 6; `0x103` needs bit8;
+  `0x104` → slot 5 + clears bit8. The slot-4 wrapper's package-missing path clears
+  bits 0–1 so slots 6/7 never run against a NULL layer; `onFinalize` null-checks the
+  layer itself.
+- **`+0x34` gauge fraction is an f32** (`MOVSS` store) — Ghidra mistypes it as int.
+
+### 8.3 Final signature / derivation set (all unique on 20250805 / 20260224 / 20260721 / 20260825)
+
+| Key | Kind | Notes |
+|---|---|---|
+| `battle_frame_ctor` | AOB | prologue; init cross-check: 2nd `48 8D 05 disp32` in the body == RTTI vtable |
+| `actor_add_child` | AOB | 48 bytes, relocation-free |
+| `dance_matching_slot_probe` | AOB | inside onInitialize; RIP+3 → `scene_resource_manager`, imm32+13 → published `dance_matching_slot_off` (0x7F0 all builds). Residency = `*(*(*global) + slot_off)` — THREE loads (global → 0x28-byte manager object → its field-0 slot array → slot); the first cabinet build did two and read past the manager (2026-09-10) |
+| `gpa_score_select` | AOB | matching-DPS case 0xB; imm32 +2/+11/**+19** → published `gpa_is_ex_off`/`gpa_ex_score_off`/`gpa_money_score_off` (0x1D0/0x1D8/0x1D4 all builds — the cross-build attestation §5 asked for) |
+| `battle_frame_actor_vtable`, `layout_actor_vtable` | RTTI | 9 slots; slot 4 / 6 cloned over |
+| `battle_frame_rank_fn` | derived | first `5E E9 rel32` (`POP RSI; JMP`) in stock `vtable[6]` |
+| `matching_local_cabinet_idx` | derived | first `48 63 05 disp32` in the ctor |
+
+All are in the mod's `required_signatures` and resolved all-or-nothing by
+`SignatureStore::derive_two_player_bpl`. The mod allocates **0x290** (actor + the
+`GamePlayActor*[2]` array the ctor's `actors` argument points at, so the array's
+lifetime equals the actor's and the deleting dtor frees the whole block).
+
+### 8.4 Not done (phase 2, each `GameWork+0xD0`-gated and needing its own re-host)
+
+Results `battle_rank_usr` badge (`FUN_1800cb570`, reads `rec+0x5E0/+0x5E4` which the
+matching DPS fills from the network stage-result record), total-results BPL header,
+`bgm_bpl`, `vo_battle_style_*` announcer lines.

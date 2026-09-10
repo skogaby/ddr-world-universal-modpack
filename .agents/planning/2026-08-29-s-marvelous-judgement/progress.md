@@ -58,17 +58,20 @@ Resume protocol: read `implementation/plan.md` (checklist = step status),
   (136 lib + 91 bin tests, Legs A–G), `validate_signatures.sh` ALL GREEN,
   `shape_diff.py --names graph_timing_axis_max` identical on all builds,
   `./build.sh` clean. AGENTS.md row + research addendum updated.
-- CABINET DEMO PENDING. Checklist: (1) Play Graph → switch to the Timing
-  graph page: two legend lines (FAST line above with ■MARVELOUS in light
-  green after ■PERFECT; NOTES/SEC line with goldenrod ■MARVELOUS first),
-  no overlap with the "Timing average / Variation" row — if the lines sit
-  too tight/loose tune `LEGEND_LINE_HEIGHT`; (2) light-green / goldenrod
-  bands hug the axis between the two PERFECT bands; (3) tallest stacks stay
-  inside the chart box (axis detour); (4) a Marvelous-heavy full-combo
-  song shows bands ONLY for loose Marvelous (S-Marv seconds are empty);
-  (5) judge page + TREND/NORMAL display mode unchanged; (6) log has
-  `timing-graph axis detour installed` + `timing-graph Marvelous series
-  prepared`, no `timing legend sequence unexpected` WARN.
+- **CABINET-VERIFIED 2026-09-10 (deploy #1, PASS — maintainer: "looks
+  pretty great, can't notice any issues").** Blinding Lights Expert 12,
+  1P: two legend lines rendered as designed (FAST line lifted, light-green
+  ■MARVELOUS after ■PERFECT; NOTES/SEC line leading with goldenrod
+  ■MARVELOUS), clear of the Timing average / Variation row —
+  `LEGEND_LINE_HEIGHT = 11` needs no tuning; light-green / goldenrod bands
+  sit at the axis inside the two PERFECT bands; ±4 axis range contained the
+  tallest (SLOW) stack. log.txt: `judgement-graph detours installed` →
+  `timing-graph axis detour installed` at boot, `graph series prepared
+  (side 0, 118 buckets)` + `timing-graph Marvelous series prepared (side
+  0)` at results, ZERO SMarvelous WARN lines (no legend-sequence / axis
+  fallback taken). Not exercised this deploy: 2P/versus tab, course record,
+  NORMAL display mode on the timing page — all share the judge page's
+  already-verified gates, low risk.
 
 ## Post-completion tweak — "Marvelous Shimmer" row (2026-09-03, uncommitted)
 

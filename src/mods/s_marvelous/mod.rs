@@ -18,6 +18,8 @@ pub mod assets;
 pub mod combo;
 pub mod fast_slow;
 pub mod flash;
+pub mod receptor;
+pub mod receptor_patch;
 pub mod records;
 pub mod results_emblem;
 pub mod results_graph;
@@ -287,6 +289,10 @@ fn arm_for_play_scene() {
     state::arm(1, window);
     flash::reset_latches();
     splash::reset_latches();
+    // The receptor flash clips are rebuilt per song (fresh layers at
+    // identity colour) — forget the tracked tints so the first S-Marv
+    // write is never elided.
+    receptor::reset_for_song();
 }
 
 impl Mod for SMarvelousMod {
@@ -411,6 +417,12 @@ impl Mod for SMarvelousMod {
         // logging above keep working regardless.
         afp_patches::activate(color);
 
+        // Receptor flash size tiers (2026-09-10): register the dance_effect
+        // patch (clone in_marvelous -> in_smarvelous, shrink Marvelous to
+        // Perfect's old ramp, halve Perfect). Pure transform, nothing to
+        // stage; a template of unknown shape streams stock with one WARN.
+        receptor_patch::activate();
+
         // Combo digit textures (Step 5): FRESH atlas entries + per-image
         // PNGs. Best-effort — failure leaves the combo override dormant
         // (stock digits/tint).
@@ -463,6 +475,7 @@ impl Mod for SMarvelousMod {
         ACTIVE.store(false, Ordering::Release);
         crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY, SHIMMER_ROW_KEY]);
         afp_patches::deactivate();
+        receptor_patch::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();
         results_score::deactivate();

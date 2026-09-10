@@ -28,8 +28,8 @@ use std::collections::HashMap;
 
 use super::align4;
 use super::model::{
-    read_u16, read_u32, Ap2Doc, FrameSpan, Label, PlaceObject, PlaceObjectParams, PlaceObjectView,
-    Shape, SpritePath, Tag, TagSection, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_FONT,
+    read_i32, read_u16, read_u32, Ap2Doc, FrameSpan, Label, PlaceObject, PlaceObjectParams,
+    PlaceObjectView, Shape, SpritePath, Tag, TagSection, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_FONT,
     TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_SPRITE, TAG_DEFINE_TEXT, TAG_DO_ACTION, TAG_IMAGE,
     TAG_SHAPE,
 };
@@ -955,6 +955,153 @@ impl Ap2Doc {
         }
         Some(())
     }
+
+    /// Every section (root = the empty path, plus nested DefineSprites)
+    /// carrying a label named `label`, in file order. The "clone into every
+    /// section carrying the label" rule (dual-timeline templates: the live
+    /// `dance_judge` / `dance_effect` templates carry the full label set on
+    /// the root AND on the exported sprite — learnings §5).
+    pub fn sections_with_label(&self, label: &str) -> Vec<SpritePath> {
+        let mut out = Vec::new();
+        collect_sections_with_label(&self.root, label, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Remap the matrix scale of the named instance's records inside ONE
+    /// labeled segment of the section at `path` (see [`SegmentScaleEdit`];
+    /// segment bounds per [`segment_end`]). Membership: the segment's CREATE
+    /// records (update flag clear) whose `movie_name` is `edit.instance`
+    /// define `(object_id, depth)` keys; every PlaceObject in the segment
+    /// with a matching key — create or update — is edited. Returns the
+    /// number of records edited.
+    ///
+    /// Validate-then-mutate: the whole segment is edited on a scratch copy
+    /// first; ANY refusal (unknown label, undecodable record, a scale
+    /// outside the remap's `from` range, a value the record's encoding
+    /// cannot hold, or a count ≠ `expected_records`) returns `None` with the
+    /// document untouched.
+    pub fn rescale_segment_instance(
+        &mut self,
+        path: &SpritePath,
+        edit: &SegmentScaleEdit<'_>,
+    ) -> Option<usize> {
+        // Phase 1 — on a copy of the section.
+        let edited = {
+            let sec = self.section(path)?;
+            let mut copy = sec.clone();
+            rescale_instance_in_section(&mut copy, &self.strings, edit)?
+        };
+        if edited != edit.expected_records {
+            return None;
+        }
+        // Phase 2 — the identical walk on the live section (proven above).
+        let strings = self.strings.clone();
+        let sec = self.section_mut(path)?;
+        rescale_instance_in_section(sec, &strings, edit)
+    }
+
+    /// Recipe: in EVERY section carrying `clone.0`, placements-only-clone
+    /// that labeled segment as `clone.1` (empty id remap — the copy keeps
+    /// the stock art), THEN apply each [`SegmentScaleEdit`] to its segment
+    /// in that section (clone first, so the copy carries the UNEDITED
+    /// ramp). The receptor-flash retier's shape: a new top-tier label that
+    /// looks like the old top tier, with the old tiers shrunk underneath it.
+    ///
+    /// ATOMIC across the whole recipe (unlike the word-clone recipe): a
+    /// scratch clone of the document runs every step first; any refusal
+    /// returns `None` with `self` untouched. Returns the total number of
+    /// records rescaled across all sections. Refuses when no section
+    /// carries `clone.0`.
+    pub fn clone_segment_and_rescale(
+        &mut self,
+        clone: (&str, &str),
+        edits: &[SegmentScaleEdit<'_>],
+    ) -> Option<usize> {
+        fn run(
+            doc: &mut Ap2Doc,
+            clone: (&str, &str),
+            edits: &[SegmentScaleEdit<'_>],
+        ) -> Option<usize> {
+            let paths = doc.sections_with_label(clone.0);
+            if paths.is_empty() {
+                return None;
+            }
+            let mut total = 0usize;
+            for p in &paths {
+                doc.clone_labeled_segment_placements_only(p, clone.0, clone.1, &TagRemap::new())?;
+                for e in edits {
+                    total += doc.rescale_segment_instance(p, e)?;
+                }
+            }
+            Some(total)
+        }
+        let mut scratch = self.clone();
+        let expected = run(&mut scratch, clone, edits)?;
+        let got = run(self, clone, edits)?;
+        if got != expected {
+            return None; // unreachable in practice: same inputs, same walk
+        }
+        Some(got)
+    }
+}
+
+/// Segment-scoped scale remap on one section (the worker behind
+/// [`Ap2Doc::rescale_segment_instance`]). Two passes over the segment's
+/// tag range: collect the named instance's `(object_id, depth)` keys from
+/// its CREATE records, then edit every record carrying a key. Fails closed
+/// on any undecodable PlaceObject in the segment.
+fn rescale_instance_in_section(
+    sec: &mut TagSection,
+    strings: &super::model::StringTable,
+    edit: &SegmentScaleEdit<'_>,
+) -> Option<usize> {
+    let start = sec.label_frame(edit.label)? as usize;
+    if start >= sec.frames.len() {
+        return None;
+    }
+    let end = segment_end(sec, start);
+    // Covered tag indices, frame order (spans are consecutive + disjoint
+    // under the module contract, so this is also file order).
+    let mut indices: Vec<usize> = Vec::new();
+    for f in &sec.frames[start..end] {
+        let s = f.start_tag as usize;
+        let e = s.checked_add(f.tag_count as usize)?;
+        if e > sec.tags.len() {
+            return None;
+        }
+        indices.extend(s..e);
+    }
+    let mut keys: Vec<(u16, u16)> = Vec::new();
+    for &i in &indices {
+        if let Tag::PlaceObject(p) = &sec.tags[i] {
+            let v = p.view()?;
+            if v.flags & 0x1 != 0 {
+                continue; // update — keyed off its create below
+            }
+            let Some(off) = v.movie_name_offset else {
+                continue;
+            };
+            if strings.get(off) == Some(edit.instance) {
+                keys.push((v.object_id, v.depth));
+            }
+        }
+    }
+    let mut edited = 0usize;
+    for &i in &indices {
+        let Tag::PlaceObject(p) = &mut sec.tags[i] else {
+            continue;
+        };
+        let v = p.view()?;
+        if !keys.contains(&(v.object_id, v.depth)) {
+            continue;
+        }
+        let (a, d) = p.scale_q15()?;
+        let na = edit.remap.apply(a)?;
+        let nd = edit.remap.apply(d)?;
+        p.set_scale_q15(na, nd)?;
+        edited += 1;
+    }
+    Some(edited)
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,6 +1509,286 @@ fn place_field_offsets(d: &[u8]) -> Option<PlaceFieldOffsets> {
         source_tag_id,
         translate,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Matrix-scale field access (three encodings) — the receptor-flash retier's
+// substrate, generic over any PlaceObject.
+// ---------------------------------------------------------------------------
+
+/// Where a PlaceObject encodes its matrix scale (a/d). The AP2 writer picks
+/// the encoding per record (live `dance_effect_v3`, one segment, three
+/// forms): values `|v| ≥ 1` use the classic flag-`0x100` i32 pair (/1024);
+/// values `|v| < 1` use the compact flag-`0x40000` i16 pair (/32768,
+/// bemaniutils swf.py ~1633 "alternative method for populating transform
+/// scaling"); EXACTLY 1.0 carries no field at all — an update record's
+/// matrix is fully specified per record with absent components = identity
+/// (the stock Marvelous bomb's 0.80→1.15 ramp reads 0.80,0.85,0.90,0.95,
+/// [none],1.05,1.10,1.15 — the [none] frame is 1.00, a perfect line).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleField {
+    /// Flag `0x100`: `<ii>` a/d at `at`, fixed-point /1024.
+    Wide { at: usize },
+    /// Flag `0x40000`: `<hh>` a/d at `at`, fixed-point /32768.
+    Short { at: usize },
+    /// No scale field — identity (1.0, 1.0). `append_at` = where a `Short`
+    /// field could be APPENDED (the walked payload end, which must equal
+    /// the payload length) when no field ordered after `0x40000` is present;
+    /// `None` when a later field exists (a mid-payload insert would be
+    /// needed — not supported, fail closed).
+    Identity { append_at: Option<usize> },
+}
+
+/// Flags whose data follows the `0x40000` field in the bemaniutils read
+/// order (swf.py ~1659..1841): short-rotate, unk4, tz, 3×3 grid, HSL,
+/// the two TODO/variable blobs, and the two "unknown new data" records.
+const FLAGS_AFTER_SHORT_SCALE: u64 = 0x80000
+    | 0x100000
+    | 0x8000000
+    | 0x10000000
+    | 0x20000000
+    | 0x400000000
+    | 0x800000000
+    | 0x1000000000
+    | 0x2000000000
+    | 0x4000000000;
+
+/// Locate a PlaceObject's scale field, walking the FULL bemaniutils field
+/// order (swf.py `__parse_tag` PlaceObject branch ~1281–1850 — every
+/// sized field up to and including the `0x40000` short-scale pair, plus a
+/// presence scan of everything after it). `None` when the payload is too
+/// short for its flags, or carries a field this walker cannot size (the
+/// `0x10000` filter block whose length rule is unknown, the `0x400000000`
+/// / `0x4000000000` TODO blobs) — fail closed rather than mis-locate.
+pub fn scale_field(d: &[u8]) -> Option<ScaleField> {
+    let flags32 = read_u32(d, 0)?;
+    read_u16(d, 4)?;
+    read_u16(d, 6)?;
+    let mut p = 8usize;
+    let mut flags = flags32 as u64;
+    if flags32 & 0x8000_0000 != 0 {
+        let more = read_u32(d, p)?;
+        p += 4;
+        flags |= (more as u64) << 32;
+    }
+    for bit in [0x2u64, 0x10, 0x20, 0x40] {
+        if flags & bit != 0 {
+            read_u16(d, p)?;
+            p += 2;
+        }
+    }
+    if flags & 0x20000 != 0 {
+        d.get(p)?;
+        p += 1;
+    }
+    p = align4(p);
+    let mut wide = None;
+    if flags & 0x100 != 0 {
+        read_u32(d, p)?;
+        read_u32(d, p + 4)?;
+        wide = Some(p);
+        p += 8;
+    }
+    for bit in [0x200u64, 0x400, 0x800, 0x1000] {
+        if flags & bit != 0 {
+            read_u32(d, p)?;
+            read_u32(d, p + 4)?;
+            p += 8;
+        }
+    }
+    for bit in [0x2000u64, 0x4000] {
+        if flags & bit != 0 {
+            read_u32(d, p)?;
+            p += 4;
+        }
+    }
+    if flags & 0x80 != 0 {
+        // Event triggers: `<II>` event_flags/event_size; the size covers
+        // the whole block including this header (swf.py ~1483, ~1562).
+        let size = read_u32(d, p + 4)? as usize;
+        if size < 8 {
+            return None;
+        }
+        p = p.checked_add(size)?;
+        if p > d.len() {
+            return None;
+        }
+    }
+    if flags & 0x10000 != 0 {
+        return None; // filter block: length rule unknown (swf.py ~1564)
+    }
+    if flags & 0x1000000 != 0 {
+        read_u32(d, p)?;
+        read_u32(d, p + 4)?;
+        p += 8;
+    }
+    if flags & 0x200000000 != 0 {
+        read_u32(d, p)?;
+        p += 4;
+    }
+    // 0x2000000 (zero rotation origin) carries no data.
+    if let Some(at) = wide {
+        return Some(ScaleField::Wide { at });
+    }
+    if flags & 0x40000 != 0 {
+        read_u32(d, p)?;
+        return Some(ScaleField::Short { at: p });
+    }
+    let append_at = if flags & FLAGS_AFTER_SHORT_SCALE == 0 && p == d.len() {
+        Some(p)
+    } else {
+        None
+    };
+    Some(ScaleField::Identity { append_at })
+}
+
+/// Q15 (`/32768`) is the common unit for scale edits: the short form is
+/// Q15 natively and the wide form's Q10 converts exactly (`×32`).
+const Q15_ONE: i32 = 32768;
+
+/// Round-half-away-from-zero integer division.
+fn div_round(n: i64, d: i64) -> i64 {
+    if d == 0 {
+        return 0;
+    }
+    let q = n / d;
+    let r = n % d;
+    if r.abs() * 2 >= d.abs() {
+        q + if (n < 0) != (d < 0) { -1 } else { 1 }
+    } else {
+        q
+    }
+}
+
+impl PlaceObject {
+    /// The record's effective matrix scale `(a, d)` in Q15 (`/32768`),
+    /// whichever of the three encodings it uses ([`ScaleField`]); identity
+    /// reads `(32768, 32768)`. `None` when the payload cannot be walked.
+    pub fn scale_q15(&self) -> Option<(i32, i32)> {
+        match scale_field(&self.data)? {
+            ScaleField::Wide { at } => {
+                let a = read_i32(&self.data, at)?.checked_mul(32)?;
+                let d = read_i32(&self.data, at + 4)?.checked_mul(32)?;
+                Some((a, d))
+            }
+            ScaleField::Short { at } => {
+                let a = read_u16(&self.data, at)? as i16 as i32;
+                let d = read_u16(&self.data, at + 2)? as i16 as i32;
+                Some((a, d))
+            }
+            ScaleField::Identity { .. } => Some((Q15_ONE, Q15_ONE)),
+        }
+    }
+
+    /// Overwrite the record's matrix scale with `(a, d)` in Q15, keeping its
+    /// existing encoding: the wide form takes any value (rounded to /1024);
+    /// the short form takes `|v| < 1` only; an identity record GROWS by one
+    /// appended short field (flag `0x40000` set) when nothing follows it and
+    /// `|v| < 1` — a new identity value on an identity record is a no-op.
+    /// Every other byte is preserved. `None` (record untouched) when the
+    /// value does not fit the encoding or the field cannot be placed.
+    pub fn set_scale_q15(&mut self, a: i32, d: i32) -> Option<()> {
+        let fits_short = |v: i32| (i16::MIN as i32..=i16::MAX as i32).contains(&v);
+        match scale_field(&self.data)? {
+            ScaleField::Wide { at } => {
+                let aw = i32::try_from(div_round(a as i64, 32)).ok()?;
+                let dw = i32::try_from(div_round(d as i64, 32)).ok()?;
+                let mut data = self.data.clone();
+                data.get_mut(at..at + 4)?.copy_from_slice(&aw.to_le_bytes());
+                data.get_mut(at + 4..at + 8)?
+                    .copy_from_slice(&dw.to_le_bytes());
+                self.data = data;
+                Some(())
+            }
+            ScaleField::Short { at } => {
+                if !fits_short(a) || !fits_short(d) {
+                    return None;
+                }
+                let mut data = self.data.clone();
+                data.get_mut(at..at + 2)?
+                    .copy_from_slice(&(a as i16).to_le_bytes());
+                data.get_mut(at + 2..at + 4)?
+                    .copy_from_slice(&(d as i16).to_le_bytes());
+                self.data = data;
+                Some(())
+            }
+            ScaleField::Identity { append_at } => {
+                if a == Q15_ONE && d == Q15_ONE {
+                    return Some(());
+                }
+                let at = append_at?;
+                if at != self.data.len() || !fits_short(a) || !fits_short(d) {
+                    return None;
+                }
+                let flags = read_u32(&self.data, 0)? | 0x40000;
+                let mut data = self.data.clone();
+                data.get_mut(0..4)?.copy_from_slice(&flags.to_le_bytes());
+                data.extend_from_slice(&(a as i16).to_le_bytes());
+                data.extend_from_slice(&(d as i16).to_le_bytes());
+                self.data = data;
+                Some(())
+            }
+        }
+    }
+}
+
+/// Affine remap of a scale ramp, Q15 in / Q15 out: `[from.0, from.1]` maps
+/// linearly onto `[to.0, to.1]`. Every component the edit touches must lie
+/// within the `from` range (± [`ScaleRemap::TOLERANCE_Q15`]) — a ramp
+/// outside the declared range is an unknown template variant and the edit
+/// refuses (fail closed) rather than extrapolate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScaleRemap {
+    pub from: (i32, i32),
+    pub to: (i32, i32),
+}
+
+impl ScaleRemap {
+    /// Range slack for the `from` check: ~0.002 — covers the /1024 vs
+    /// /32768 quantisation of the stock encodings.
+    pub const TOLERANCE_Q15: i32 = 64;
+
+    /// Build from float scales (e.g. `0.80, 1.15 → 0.40, 0.80`).
+    pub fn from_f32(from: (f32, f32), to: (f32, f32)) -> ScaleRemap {
+        let q = |v: f32| (v * Q15_ONE as f32).round() as i32;
+        ScaleRemap {
+            from: (q(from.0), q(from.1)),
+            to: (q(to.0), q(to.1)),
+        }
+    }
+
+    /// Map one Q15 component. `None` when the remap is degenerate
+    /// (`from.0 == from.1`) or `v` lies outside the declared range.
+    pub fn apply(&self, v: i32) -> Option<i32> {
+        let (f0, f1) = (self.from.0 as i64, self.from.1 as i64);
+        let (t0, t1) = (self.to.0 as i64, self.to.1 as i64);
+        if f0 == f1 {
+            return None;
+        }
+        let (lo, hi) = (f0.min(f1), f0.max(f1));
+        let tol = Self::TOLERANCE_Q15 as i64;
+        let v64 = v as i64;
+        if v64 < lo - tol || v64 > hi + tol {
+            return None;
+        }
+        let out = t0 + div_round((v64 - f0) * (t1 - t0), f1 - f0);
+        i32::try_from(out).ok()
+    }
+}
+
+/// One segment-scoped scale edit for [`Ap2Doc::clone_segment_and_rescale`]:
+/// every PlaceObject record (the create AND its update records, matched by
+/// `(object_id, depth)`) of the instance NAMED `instance` inside the
+/// labeled segment `label` gets its matrix scale remapped through `remap`.
+/// `expected_records` is the exact record count the edit must touch in
+/// EACH section carrying the label — any other count is a template
+/// variant and refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegmentScaleEdit<'a> {
+    pub label: &'a str,
+    pub instance: &'a str,
+    pub remap: ScaleRemap,
+    pub expected_records: usize,
 }
 
 /// Collect the paths of EVERY section (root included, as the empty path)

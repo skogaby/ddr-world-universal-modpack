@@ -1164,3 +1164,74 @@ resolution row itself was hidden most of the time too (rows are children of an
 - When a "setting doesn't persist" report arrives for a child row, check the
   PARENT toggle's config write first — `save_mod_states` rewrites the whole
   `mods` map from live registry state on every toggle of any mod.
+
+## Same `std::function` shape, different capture layout per lambda family (2026-09-10)
+
+The results GraphTab's chart appends all take the same 0x20-byte MSVC
+`std::function` callable `{impl vft, 8 capture bytes, pad, impl_ptr}`, and the
+Step-8 judge-page injection rightly treated "capture the live vft, put our rgba
+at +0x8" as the recipe. The TIMING page's colour functors are a different lambda
+family: their impl is `cdfd0(rgba@+0xC, 0, 0, SHIFT)` with the HSV value-shift
+baked into each lambda's CODE, so (a) rgba lives at **+0xC**, +0x8 is stale
+stack from the stock caller, and (b) only the shift-0 (GREAT) lambdas render a
+colour as-is — cloning the PERFECT lambda's vft would have tinted our band.
+
+**Rule:** a vftable captured from a game callable only tells you the *shape*
+of the object, not what the impl reads from it. Before reusing a captured vft
+with your own captures, decompile that vft's call impl (slot with the
+`(uint,double,double)` signature) and confirm which capture bytes it consumes
+and whether it post-processes them. `ColorCallable::judge` / `::timing` in
+`results_graph.rs` encode the two layouts.
+
+## Two receptor-flash systems; Marvelous only has one of them (2026-09-10)
+
+"The receptor flashes a different colour per judgement" is true, but the
+mechanism is split: the coloured burst (yellow Perfect / green Great / blue
+Good) is a `screen::JudgeEffectRenderer` sprite record whose RGB is computed
+per TYPE at draw time (`FUN_180028d20`), and `judgeNotes` pushes one for grades
+**1/2/3 only** (`0x18005F560` — grade 0 falls through the `dec/jz` ladder). The
+white Marvelous flash is a different object entirely: the per-panel BM2D
+`dance_effect` clip playing `in_marvelous` — a GREYSCALE `dance_effect_bomb`
+drawn additively. Perfect ALSO plays that clip (`in_perfect`, same white art at
+half the scale) under its yellow burst — which the maintainer only noticed from
+footage after the first violet build ("I didn't realize Perfect has a flash
+too"); the template dump had said so all along. Read the template dump for
+EVERY grade before describing what "stock" does. Reading only the RE notes' "receptor
+flash = dance_effect, no colour ops" would have sent the work into an AP2 clone
++ new art; reading only the shader notes ("PS multiplies by vertex colour")
+would have sent it into a burst-colour rewrite that never fires for Marvelous.
+
+**Rules:**
+
+- When recolouring a per-grade effect, first enumerate the PUSHERS (who
+  creates the record / plays the clip for THIS grade), not just the renderer.
+  Two visually merged effects can have disjoint grade sets.
+- A greyscale additive texture is a free tint target: `afp_layer_set_color`
+  (mult CXFORM) on the layer gives a clean single-hue glow with zero art. But
+  the layer colour block PERSISTS across timeline plays — every event that
+  can play the clip must re-assert the tint it wants (`receptor.rs` writes
+  identity on non-S-Marv events, including the O.K. that follows the yellow
+  `in_marvelous_freeze` play in the same `judgeNotes` call).
+- Additive blend washes to white on bright backgrounds; the lever is
+  SATURATION of the multiplier (green ≈ 0, blue = 1), not darkness — a darker
+  multiplier only makes the glow fainter (`0xB05CE0` pastel → `0xA030FF`).
+
+## AP2 PlaceObject scale has THREE encodings in one segment (2026-09-10)
+
+`PlaceObjectView::scale` (flag `0x100`, `<ii>`/1024) is NOT the only scale
+form. The live `dance_effect_v3` bomb ramp stores `< 1` values as the compact
+flag-`0x40000` `<hh>`/32768 pair (which sits AFTER the rotation origin, not
+next to the matrix), `≥ 1` values in the classic form, and EXACTLY 1.0 with no
+field at all. An update record's matrix is fully specified per record (absent
+component = identity — the ramp is a perfect line through the field-less
+frame), whereas absent COLOUR fields persist. Reading only `view().scale`
+would have reported `None` for most of the ramp and 1.0 for the identity frame
+and led to editing the wrong bytes.
+
+**Rules:** decode scale through `PlaceObject::scale_q15()` / `scale_field()`
+(Q15 common unit, all three forms), edit through `set_scale_q15()` (keeps the
+record's own encoding; an identity record grows an appended short field only
+when no later-ordered field is present). When rescaling a ramp, declare the
+stock range and refuse outside it (`ScaleRemap`) — the range check IS the
+template-variant gate when nothing external is staged. Always dump the real
+template with bemaniutils first and look at the RAW flags per record.

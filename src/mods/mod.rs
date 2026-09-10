@@ -68,4 +68,5 @@ pub mod split_ssq_auto_discovery;
 pub mod timer_freeze;
 pub mod timing_offsets;
 pub mod training_mode;
+pub mod two_player_bpl_mode;
 pub mod webui_options;

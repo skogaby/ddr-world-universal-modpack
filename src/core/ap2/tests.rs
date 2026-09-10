@@ -3706,3 +3706,390 @@ fn write_sorts_label_table_by_name() {
     assert_eq!(re.root.label_frame("aa_label"), Some(1));
     assert_eq!(re.root.label_frame("zz_label"), Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// Scale-field access + the clone-and-rescale recipe (the receptor-flash
+// retier). Fixture mirrors the live dance_effect_v3 segment shapes: an
+// `ef_bomb` create carrying the SHORT (/32768) scale form, updates in the
+// short form, one identity update (no scale field — the stock 1.00 frame),
+// wide (/1024) updates above 1.0, plus an unnamed placeholder that must be
+// left alone — duplicated on the root and an exported sprite.
+// ---------------------------------------------------------------------------
+
+/// Raw create record: flags 0x2|0x20|0x400|0x40000 (src, name, translate,
+/// short scale) — the payload order the walker must reproduce.
+fn raw_create_short(depth: u16, obj: u16, src: u16, name_off: u16, q15: i16) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&0x40422u32.to_le_bytes());
+    d.extend_from_slice(&depth.to_le_bytes());
+    d.extend_from_slice(&obj.to_le_bytes());
+    d.extend_from_slice(&src.to_le_bytes());
+    d.extend_from_slice(&name_off.to_le_bytes());
+    // 12 bytes so far — 4-aligned, no catch-up.
+    d.extend_from_slice(&1200i32.to_le_bytes());
+    d.extend_from_slice(&1200i32.to_le_bytes());
+    d.extend_from_slice(&q15.to_le_bytes());
+    d.extend_from_slice(&q15.to_le_bytes());
+    d
+}
+
+/// Raw update record (flags 0x1|0x400 + optional scale form).
+fn raw_update(depth: u16, obj: u16, scale: Option<ScaleField>, q15: i32) -> Vec<u8> {
+    let mut flags = 0x401u32;
+    match scale {
+        Some(ScaleField::Wide { .. }) => flags |= 0x100,
+        Some(ScaleField::Short { .. }) => flags |= 0x40000,
+        _ => {}
+    }
+    let mut d = Vec::new();
+    d.extend_from_slice(&flags.to_le_bytes());
+    d.extend_from_slice(&depth.to_le_bytes());
+    d.extend_from_slice(&obj.to_le_bytes());
+    if let Some(ScaleField::Wide { .. }) = scale {
+        d.extend_from_slice(&(q15 / 32).to_le_bytes());
+        d.extend_from_slice(&(q15 / 32).to_le_bytes());
+    }
+    d.extend_from_slice(&1200i32.to_le_bytes());
+    d.extend_from_slice(&1200i32.to_le_bytes());
+    if let Some(ScaleField::Short { .. }) = scale {
+        d.extend_from_slice(&(q15 as i16).to_le_bytes());
+        d.extend_from_slice(&(q15 as i16).to_le_bytes());
+    }
+    d
+}
+
+const Q: f32 = 32768.0;
+fn q15(v: f32) -> i32 {
+    (v * Q).round() as i32
+}
+
+/// Two sections (root + sprite 9) each carrying `in_marvelous` (f0..f3, a
+/// 0.80→1.10 ramp: short, short, identity, wide) and `in_perfect` (f4..f5,
+/// 0.40→0.60 short) on instance `ef_bomb`, plus a placeholder create at
+/// f0 with no name and identity scale.
+fn receptor_fixture() -> Ap2Doc {
+    let mut b = FixtureBuilder::new("dance_effect");
+    b.push_shape(&[], 0, 1);
+    b.push_shape(&[], 0, 2);
+    let sp = b.push_sprite(&[], 9);
+    let name = b.intern("ef_bomb");
+    for path in [vec![], vec![sp]] {
+        let lead = if path.is_empty() { 3u32 } else { 0 };
+        // f0: placeholder (identity, unnamed) + ef_bomb create @0.80.
+        b.push_place(
+            &path,
+            PlaceObjectParams {
+                depth: 3,
+                object_id: 12,
+                source_tag_id: Some(1),
+                translate: Some((3440, 610)),
+                ..Default::default()
+            },
+            None,
+        );
+        b.push_place_raw(&path, raw_create_short(2, 8, 2, name, q15(0.80) as i16));
+        // f1: short 0.90; f2: identity (1.00); f3: wide 1.10.
+        b.push_place_raw(
+            &path,
+            raw_update(2, 8, Some(ScaleField::Short { at: 0 }), q15(0.90)),
+        );
+        b.push_place_raw(&path, raw_update(2, 8, None, 0));
+        b.push_place_raw(
+            &path,
+            raw_update(2, 8, Some(ScaleField::Wide { at: 0 }), q15(1.10)),
+        );
+        // f4: in_perfect create @0.40; f5: short 0.60.
+        b.push_place_raw(&path, raw_create_short(6, 32, 2, name, q15(0.40) as i16));
+        b.push_place_raw(
+            &path,
+            raw_update(6, 32, Some(ScaleField::Short { at: 0 }), q15(0.60)),
+        );
+        b.push_frame(&path, 0, lead + 2);
+        b.push_frame(&path, lead + 2, 1);
+        b.push_frame(&path, lead + 3, 1);
+        b.push_frame(&path, lead + 4, 1);
+        b.push_frame(&path, lead + 5, 1);
+        b.push_frame(&path, lead + 6, 1);
+        b.add_label(&path, "in_marvelous", 0);
+        b.add_label(&path, "in_perfect", 4);
+    }
+    b.finish()
+}
+
+fn scales(sec: &TagSection, indices: &[usize]) -> Vec<(i32, i32)> {
+    indices
+        .iter()
+        .map(|&i| match &sec.tags[i] {
+            Tag::PlaceObject(p) => p.scale_q15().expect("scale decodes"),
+            other => panic!("expected PlaceObject, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn scale_field_locates_all_three_encodings() {
+    let doc = receptor_fixture();
+    let t = &doc.root.tags;
+    // Root: [shape, shape, sprite, placeholder, create, upd, upd, upd, create, upd]
+    assert!(matches!(
+        scale_field(place_data(&t[3])),
+        Some(ScaleField::Identity { append_at: Some(_) })
+    ));
+    assert!(matches!(
+        scale_field(place_data(&t[4])),
+        Some(ScaleField::Short { at: 20 })
+    ));
+    assert!(matches!(
+        scale_field(place_data(&t[5])),
+        Some(ScaleField::Short { at: 16 })
+    ));
+    assert!(matches!(
+        scale_field(place_data(&t[6])),
+        Some(ScaleField::Identity {
+            append_at: Some(16)
+        })
+    ));
+    assert!(matches!(
+        scale_field(place_data(&t[7])),
+        Some(ScaleField::Wide { at: 8 })
+    ));
+    assert_eq!(
+        scales(&doc.root, &[3, 4, 5, 6, 7]),
+        vec![
+            (32768, 32768),
+            (q15(0.80), q15(0.80)),
+            (q15(0.90), q15(0.90)),
+            (32768, 32768),
+            // Wide form quantises to /1024: 1.10 → 1126/1024 → ×32.
+            ((q15(1.10) / 32) * 32, (q15(1.10) / 32) * 32),
+        ]
+    );
+}
+
+fn place_data(tag: &Tag) -> &[u8] {
+    match tag {
+        Tag::PlaceObject(p) => &p.data,
+        other => panic!("expected PlaceObject, got {other:?}"),
+    }
+}
+
+#[test]
+fn scale_field_refuses_unsized_blocks() {
+    // A filter block (0x10000) has an unknown length rule → None.
+    let mut d = raw_update(2, 8, None, 0);
+    let flags = u32::from_le_bytes(d[0..4].try_into().unwrap()) | 0x10000;
+    d[0..4].copy_from_slice(&flags.to_le_bytes());
+    assert_eq!(scale_field(&d), None);
+    // Truncated payload → None.
+    let d = raw_create_short(2, 8, 2, 0, 100);
+    assert_eq!(scale_field(&d[..d.len() - 2]), None);
+}
+
+#[test]
+fn set_scale_q15_keeps_encoding_and_grows_identity() {
+    // Wide: any value, rounded to /1024.
+    let mut p = PlaceObject {
+        data: raw_update(2, 8, Some(ScaleField::Wide { at: 0 }), q15(1.10)),
+        pad: Vec::new(),
+    };
+    let len = p.data.len();
+    p.set_scale_q15(q15(0.55), q15(0.55))
+        .expect("wide takes any value");
+    assert_eq!(p.data.len(), len);
+    assert_eq!(
+        p.scale_q15(),
+        Some(((q15(0.55) / 32) * 32, (q15(0.55) / 32) * 32))
+    );
+
+    // Short: |v| < 1 only.
+    let mut p = PlaceObject {
+        data: raw_update(2, 8, Some(ScaleField::Short { at: 0 }), q15(0.90)),
+        pad: Vec::new(),
+    };
+    let before = p.data.clone();
+    assert_eq!(p.set_scale_q15(q15(1.05), q15(1.05)), None);
+    assert_eq!(p.data, before, "refusal leaves the record untouched");
+    p.set_scale_q15(q15(0.45), q15(0.45))
+        .expect("short takes <1");
+    assert_eq!(p.scale_q15(), Some((q15(0.45), q15(0.45))));
+
+    // Identity: grows by an appended short field + flag 0x40000.
+    let mut p = PlaceObject {
+        data: raw_update(2, 8, None, 0),
+        pad: Vec::new(),
+    };
+    let len = p.data.len();
+    p.set_scale_q15(32768, 32768)
+        .expect("identity→identity is a no-op");
+    assert_eq!(p.data.len(), len);
+    p.set_scale_q15(q15(0.63), q15(0.63))
+        .expect("identity grows");
+    assert_eq!(p.data.len(), len + 4);
+    assert_ne!(
+        u32::from_le_bytes(p.data[0..4].try_into().unwrap()) & 0x40000,
+        0
+    );
+    assert_eq!(p.scale_q15(), Some((q15(0.63), q15(0.63))));
+    assert!(matches!(scale_field(&p.data), Some(ScaleField::Short { at }) if at == len));
+    // …but never to a value the short form cannot hold.
+    let mut p = PlaceObject {
+        data: raw_update(2, 8, None, 0),
+        pad: Vec::new(),
+    };
+    assert_eq!(p.set_scale_q15(q15(1.20), q15(1.20)), None);
+    // …and never when a later-ordered field is present (HSL, 0x20000000).
+    let mut d = raw_update(2, 8, None, 0);
+    let flags = u32::from_le_bytes(d[0..4].try_into().unwrap()) | 0x20000000;
+    d[0..4].copy_from_slice(&flags.to_le_bytes());
+    d.extend_from_slice(&[0, 0, 0, 0]);
+    let mut p = PlaceObject {
+        data: d,
+        pad: Vec::new(),
+    };
+    assert!(matches!(
+        scale_field(&p.data),
+        Some(ScaleField::Identity { append_at: None })
+    ));
+    assert_eq!(p.set_scale_q15(q15(0.5), q15(0.5)), None);
+}
+
+#[test]
+fn scale_remap_is_affine_and_range_gated() {
+    let r = ScaleRemap::from_f32((0.80, 1.15), (0.40, 0.80));
+    assert_eq!(r.apply(q15(0.80)), Some(q15(0.40)));
+    assert_eq!(r.apply(q15(1.15)), Some(q15(0.80)));
+    let mid = r.apply(q15(1.00)).unwrap();
+    assert!((mid - q15(0.40 + 0.20 * 0.40 / 0.35)).abs() <= 1);
+    // Tolerance covers quantisation; beyond it refuses.
+    assert!(r.apply(q15(0.80) - ScaleRemap::TOLERANCE_Q15).is_some());
+    assert_eq!(r.apply(q15(0.80) - ScaleRemap::TOLERANCE_Q15 - 1), None);
+    assert_eq!(r.apply(q15(1.30)), None);
+    // Degenerate range refuses.
+    assert_eq!(
+        ScaleRemap::from_f32((0.5, 0.5), (0.1, 0.2)).apply(q15(0.5)),
+        None
+    );
+}
+
+fn receptor_edits() -> [SegmentScaleEdit<'static>; 2] {
+    [
+        SegmentScaleEdit {
+            label: "in_marvelous",
+            instance: "ef_bomb",
+            remap: ScaleRemap::from_f32((0.80, 1.10), (0.40, 0.80)),
+            expected_records: 4,
+        },
+        SegmentScaleEdit {
+            label: "in_perfect",
+            instance: "ef_bomb",
+            remap: ScaleRemap::from_f32((0.40, 0.60), (0.20, 0.40)),
+            expected_records: 2,
+        },
+    ]
+}
+
+#[test]
+fn edit_clone_segment_and_rescale_retiers_both_sections() {
+    let mut doc = receptor_fixture();
+    let n = doc
+        .clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &receptor_edits())
+        .expect("recipe applies");
+    assert_eq!(n, 12, "6 records per section × 2 sections");
+
+    let sp = SpritePath {
+        tag_indices: vec![2],
+    };
+    for (sec, lead) in [(&doc.root, 3usize), (doc.section(&sp).unwrap(), 0)] {
+        // Labels: stock set + the clone at the old frame count (6).
+        assert_eq!(sec.label_frame("in_smarvelous"), Some(6));
+        assert_eq!(sec.frames.len(), 10, "4 cloned frames appended");
+        // in_marvelous ramp 0.80,0.90,1.00,1.10 → 0.40,0.5333,0.6667,0.80.
+        let m = scales(sec, &[lead + 1, lead + 2, lead + 3, lead + 4]);
+        let want = [
+            0.40f32,
+            0.40 + 0.10 * 0.40 / 0.30,
+            0.40 + 0.20 * 0.40 / 0.30,
+            0.80,
+        ];
+        for ((a, d), w) in m.iter().zip(want) {
+            assert_eq!(a, d);
+            assert!((*a - q15(w)).abs() <= 64, "got {a} want {}", q15(w));
+        }
+        // The identity update grew a field (was 16 bytes).
+        assert!(matches!(
+            scale_field(place_data(&sec.tags[lead + 3])),
+            Some(ScaleField::Short { at: 16 })
+        ));
+        // Placeholder untouched.
+        assert_eq!(scales(sec, &[lead]), vec![(32768, 32768)]);
+        // in_perfect 0.40,0.60 → 0.20,0.40.
+        assert_eq!(
+            scales(sec, &[lead + 5, lead + 6]),
+            vec![(q15(0.20), q15(0.20)), (q15(0.40), q15(0.40))]
+        );
+        // The clone carries the STOCK ramp, ids rebased by the frame shift (6).
+        let base = sec.frames[6].start_tag as usize;
+        let cl = scales(sec, &[base, base + 1, base + 2, base + 3, base + 4]);
+        assert_eq!(cl[0], (32768, 32768)); // placeholder copy
+        assert_eq!(cl[1], (q15(0.80), q15(0.80)));
+        assert_eq!(cl[2], (q15(0.90), q15(0.90)));
+        assert_eq!(cl[3], (32768, 32768));
+        assert_eq!(cl[4], ((q15(1.10) / 32) * 32, (q15(1.10) / 32) * 32));
+        assert_eq!(place_view(&sec.tags[base + 1]).object_id, 8 + 6);
+    }
+    // Round trip.
+    let bytes = doc.serialize().expect("serializes");
+    let re = Ap2Doc::parse(&bytes).expect("re-parses");
+    assert_eq!(re.serialize().unwrap(), bytes);
+}
+
+#[test]
+fn edit_clone_segment_and_rescale_is_atomic_on_refusal() {
+    // Wrong expected count → whole recipe refused, doc byte-identical.
+    let doc = receptor_fixture();
+    let before = doc.serialize().unwrap();
+    let mut d = doc.clone();
+    let mut edits = receptor_edits();
+    edits[1].expected_records = 3;
+    assert_eq!(
+        d.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &edits),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), before);
+    // Ramp outside the declared range (template variant) → refused.
+    let mut d = doc.clone();
+    let mut edits = receptor_edits();
+    edits[0].remap = ScaleRemap::from_f32((0.90, 1.10), (0.40, 0.80));
+    assert_eq!(
+        d.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &edits),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), before);
+    // Unknown instance → 0 records ≠ expected → refused.
+    let mut d = doc.clone();
+    let mut edits = receptor_edits();
+    edits[0].instance = "nope";
+    assert_eq!(
+        d.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &edits),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), before);
+    // Unknown source label → refused.
+    let mut d = doc.clone();
+    assert_eq!(
+        d.clone_segment_and_rescale(("in_nothing", "in_smarvelous"), &receptor_edits()),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), before);
+    // Applying twice refuses (label already present) and leaves the first
+    // application intact.
+    let mut d = doc.clone();
+    d.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &receptor_edits())
+        .unwrap();
+    let once = d.serialize().unwrap();
+    assert_eq!(
+        d.clone_segment_and_rescale(("in_marvelous", "in_smarvelous"), &receptor_edits()),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), once);
+}

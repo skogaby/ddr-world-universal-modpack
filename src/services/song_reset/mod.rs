@@ -58,8 +58,8 @@ use crate::{log_info, log_warn};
 // ── Actor-tree offsets (shared layout facts, same as quick_restart) ──
 /// `*(TS + 0x58)` = the active gosub child (the DPS during GAMEPLAY).
 const ACTIVE_CHILD_OFFSET: usize = 0x58;
-const FIRST_CHILD_OFFSET: usize = 0x18;
-const NEXT_SIBLING_OFFSET: usize = 0x10;
+pub(crate) const FIRST_CHILD_OFFSET: usize = 0x18;
+pub(crate) const NEXT_SIBLING_OFFSET: usize = 0x10;
 /// Actor tree flags; 0x20 = dispatch suppressed, 0x24 = dead-or-dying.
 const TREE_FLAGS_OFFSET: usize = 0x20;
 const TREE_FLAGS_DISPATCH_SUPPRESSED: u32 = 0x20;
@@ -91,7 +91,7 @@ const GPA_STEP_INDEX: usize = 0x82;
 /// (the handler's own gate is {3,4}; we require 4).
 const GPA_STEP_IN_SONG: i32 = 4;
 /// Play side (0/1).
-const GPA_SIDE_OFFSET: usize = 0x84;
+pub(crate) const GPA_SIDE_OFFSET: usize = 0x84;
 /// Music clock anchor tick (i64 — research §2.2/§6: `music_count =
 /// vt+0x248() + frameTick − SOUND_OFFSET − anchor@+0x160`). Zero until the
 /// run's first `0x1044` lands; nonzero = the clock is anchored (the
@@ -1269,7 +1269,9 @@ pub fn remove_callback(id: usize) {
 
 /// The live DPS, gated exactly like the shipped fast paths: a non-null,
 /// non-dying active child on the TransitionSequence.
-fn live_dps() -> Option<*mut u8> {
+///
+/// `pub(crate)` since 2026-09-09 (two_player_bpl_mode shares the walk).
+pub(crate) fn live_dps() -> Option<*mut u8> {
     let ts = scene_manager::current_transition_sequence()?;
     unsafe {
         let child = memory::read_ptr(ts.add(ACTIVE_CHILD_OFFSET)) as *mut u8;
@@ -1285,7 +1287,7 @@ fn live_dps() -> Option<*mut u8> {
 }
 
 /// Every GamePlayActor child of `dps` (vtable match).
-fn gameplay_actors(dps: *mut u8) -> Vec<*mut u8> {
+pub(crate) fn gameplay_actors(dps: *mut u8) -> Vec<*mut u8> {
     let target = GAMEPLAY_ACTOR_VTABLE.load(Ordering::Acquire);
     let mut out = Vec::new();
     if target.is_null() {
