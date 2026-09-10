@@ -1,16 +1,51 @@
 # Progress — Custom Resolution (arbitrary resolution rendering)
 
-Updated: 2026-09-07
-Status: COMPLETE — all 8 steps done, checkpoints #1–#4 passed (uncommitted — maintainer commits manually)
-NEXT ACTION: none for the feature. Maintainer: commit the working tree. Open follow-ups (not blockers): the scissor
-detour has never been exercised by stock content (watch for its `first dispatch` INFO); Phase-2 shader scaler deferred
-(`docs/custom_resolution.md` §9); planning dir can move to `.agents/planning/_archive/`.
+Updated: 2026-09-09
+Status: COMPLETE + one-knob revision (2026-09-09) awaiting ONE cabinet check (uncommitted — maintainer commits manually)
+NEXT ACTION: cabinet check of the one-knob build at `"output": "1920x1080"` (mod ON): expect `boot state -- output
+1920x1080 (16:9), render 1920x1080, present stock (1:1), aa game's choice; OUTPUT 6 write(s), RENDER 22 write(s)` and
+the NEW line `present chain -- aa_config=3 (onBoot chose 3) -> direct (3): …` (a `0` there on this cabinet = regression);
+picture identical to checkpoint #3 (direct mode renders 3D+2D straight into the output-sized `display`); then a 640x480
+regression run (`aa_config=0 (onBoot chose 3)`, `-> offscreen composite (0)`, SD crop picture). Ask the 1080p-stutter
+reporters for their `present chain` line + FPS Unlock setting. Open follow-ups (not blockers): the scissor detour has
+never been exercised by stock content (watch for its `first dispatch` INFO); planning dir can move to
+`.agents/planning/_archive/` after the check.
 
 Resume protocol: read this file, then `implementation/plan.md` (checklist), then
 `design/detailed-design.md` (§4 components), then `idea-honing.md` (register) and
 `research/*.md` only when a design claim needs its evidence.
 
 ## Done
+
+- **Menu-toggle persistence fix (2026-09-09, tester report)** — a tester could not change the resolution from the
+  0-0-0 menu: picking a size then restarting always came back at 720p; only hand-editing `mod-config.json` worked.
+  Root cause was NOT the row (`persist()` → `save_json_key("resolution", …)` is correct) but `is_active()` returning
+  `applied` ("a non-stock plan landed THIS boot"): on a fresh install (mod OFF at launch, or ON at stock 720p) the
+  registry recorded the ON toggle as self-disabled, and the mod-menu's `toggle_registry_mod` persists `enabled` for
+  EVERY mod on every toggle — writing `mods["custom-resolution"] = false` back (and hiding the child rows). Fix:
+  `is_active` = `capable` (load-bearing sites resolved, computed in `init` — the fps_unlock model); registry tracks
+  `requested` (intent) vs `enabled` (effective) and `save_mod_states` persists `requested`; the same trap fixed in
+  `gameplay_timing_fixes` (`armed_next_launch`). Learnings entry + AGENTS.md pattern added. Cabinet check: from a
+  config with the mod OFF, open 0-0-0 → toggle CUSTOM RESOLUTION on → pick 1920x1080 → close menu → `mod-config.json`
+  reads `"custom-resolution": true` + `"output": "1920x1080"` (log: `Mod enabled: Custom Resolution`, NOT
+  `self-disabled`) → relaunch at 1080p.
+
+- **One-knob revision (2026-09-09)** — triggered by user reports of 1080p stutter on mid-range cabinets that run other
+  native-1080p Bemani games fine. Audit: the mod adds zero per-frame CPU; the ONE mod-introduced GPU cost was the
+  `msaa: "off"` default forcing AA config 3 → 0, i.e. kicking every pcType-2..4 cabinet (and spice2x) out of the
+  engine's "direct" present chain into the offscreen-composite one (+2 `StretchRect`, +1 clear, +1 depth-copy quad, +2
+  RT switches per frame at 1080p — 20260825 RE of `FUN_1801f10e0` + the three `AfterRenderConditionImpl` vfuncs, table
+  in `docs/custom_resolution.md` §3a). `shader_fixes`' AA pixel shaders were ruled out (≈4× per lane pixel at EVERY
+  resolution — not resolution-specific). Maintainer decision: remove render ≠ output entirely and manage AA
+  opinionatedly. Changes: `plan.rs` — `PlanInput {output, sd_present}` only, `render_for` (16:9 ⇒ output, 4:3 ⇒ 720p),
+  `AaPolicy::{Stock, ForceOff}` (ForceOff for 4:3 only), `ForceLetterbox`/`PresentDepth`/`Gates` removed,
+  `present_chain_shape()` added, 24 host tests green; `present.rs` — depth swap removed, records onBoot/effective AA
+  (`aa_config()`), logs the chain shape at graphics_init; `mod.rs` — one-shot `present chain -- …` INFO in `enable`
+  (deferred via a self-removing scene callback when `enable` beats `graphics_init`); `letterbox.rs` — SD LETTERBOX only,
+  a miss no longer rolls the plan back; `rows.rs` — RENDER SCALE + MSAA rows gone; `config.rs` / `mod-config.json` —
+  `render` + `msaa` fields dropped (unknown keys ignored); `signatures.rs` — `surface_create` / `present_depth_*`
+  derivations removed (`CustomResolutionAnchors` is 5 fields; sweep ALL GREEN). Docs: `custom_resolution.md` §1a/§3/§3a
+  + touch-ups, AGENTS.md row + config, README.
 
 - PDD Steps 1–7: workspace, orientation, register (accepted wholesale 2026-09-05),
   research (SD path via Ghidra, H1 refuted by shader bytecode, `sys_copy` shape,

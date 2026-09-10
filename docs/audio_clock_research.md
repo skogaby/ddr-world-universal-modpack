@@ -7,7 +7,7 @@ feels earlier or later from play to play, with the *visual* and *aural* offsets
 moving together; (b) timing drifts slightly within a song.
 
 Status (2026-09-09): the fix this record supports ships as the
-`gameplay-timing-fixes` mod (default OFF) and is live-validated on CrossOver —
+`gameplay-timing-fixes` mod (default ON since 2026-09-10; OFF for its first cabinet build) and is live-validated on CrossOver —
 §7.1 has the measured numbers; §8 lists what only the Win7 tester can answer.
 
 Conventions: engine RVAs are relative to `xactengine2_10.dll` image base

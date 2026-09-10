@@ -10,19 +10,30 @@
 //! small number of detours for fixups that need runtime values. All settings
 //! apply at the NEXT launch — the D3D device is created once at boot.
 //!
-//! Module map (filled in by the plan's steps):
+//! ONE knob (`resolution.output`), opinionated for performance (2026-09-09):
+//! a 16:9 output renders natively (render == output) and leaves the game's
+//! AA config alone, so pcType-2..4 cabinets keep their cheaper "direct"
+//! present chain (`plan.rs` module docs); a 4:3 output renders at the stock
+//! 1280×720 with AA forced 0 because the SD crop/letterbox scaler lives in
+//! the mode-0 chain. The render ≠ output "perf mode" and the MSAA knob were
+//! removed — see `docs/custom_resolution.md` §3a for the per-frame cost table
+//! that motivated it.
+//!
+//! Module map:
 //! - [`plan`] — pure config → boot-plan model, present-mode policy, scissor
-//!   scaling (host-tested via `scripts/validate_custom_resolution.sh`).
+//!   scaling, present-chain description (host-tested via
+//!   `scripts/validate_custom_resolution.sh`).
 //! - [`sites`] — pure immediate-site finders over byte windows (host-tested).
 //! - [`patches`] — the OUTPUT (back-buffer, window client, AA) and RENDER
 //!   (surfaces, list viewports, letterbox src) imm32 sets, stock-verified,
 //!   applied atomically with rollback.
 //! - [`scissor`] — the tag-0x0C walker handler detour: canvas-px scissor
-//!   records → render-target px (the ONE per-frame piece; render ≠ 720p only).
-//! - [`present`] — the `graphics_init` detour: PRESENT rt dims → output,
-//!   window-client fit (spice2x `-w` pins the client size).
-//! - [`letterbox`] — the present-mode policy detour (SD letterbox option,
-//!   forced letterbox for 16:9 render ≠ output).
+//!   records → render-target px (the ONE per-frame piece; render ≠ 720p only,
+//!   and dormant on stock content).
+//! - [`present`] — the `graphics_init` detour: AA config write (4:3 only),
+//!   PRESENT rt dims → output, window-client fit (spice2x `-w` pins the
+//!   client size), and the AA/present-chain record for the boot log.
+//! - [`letterbox`] — the present-mode policy detour (SD letterbox option).
 //! - [`logical_screen`] — the app layer's view of the screen: the ~20 game
 //!   sites that size/position content "on the screen" (layer set-size loop,
 //!   footer/version/attract text, TEST-menu drawers, system font) read a
@@ -36,7 +47,7 @@
 //!   menu, hardware check, error screens): the game picks a fixed pixel
 //!   size per machine type, so two post-original detours multiply it by
 //!   `output_h / ref_h` — readable at 640×480 and at 4K alike.
-//! - [`rows`] — the RESOLUTION / RENDER SCALE overlay rows.
+//! - [`rows`] — the RESOLUTION / SD PRESENT MODE overlay rows.
 //! - [`display_modes`] — the fullscreen fail-safe (`EnumDisplaySettingsW`).
 //!
 //! Boot flow (`early_apply`, before `Application::onBoot` reaches display
@@ -56,15 +67,23 @@ pub mod rows;
 pub mod scissor;
 pub mod sites;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use crate::core::memory;
 use crate::mods::config;
 use crate::mods::mod_trait::{EarlyContext, Mod, ModContext};
+use crate::services::scene_manager;
 use crate::{log_info, log_warn};
 
 use plan::{AaPolicy, Aspect, Outcome, Plan, PlanInput, PresentPolicy, SdPresent};
 
 /// Registry mod id.
 pub const MOD_ID: &str = "custom-resolution";
+
+/// True once every piece of a non-inert plan landed this boot (mirrors
+/// `CustomResolutionMod::applied` for the static one-shot logger).
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct CustomResolutionMod {
     /// The plan that was applied this boot (None = inert / rejected / failed).
@@ -74,8 +93,21 @@ pub struct CustomResolutionMod {
     output_set: Option<patches::PatchSet>,
     /// The applied RENDER set (empty when the render is stock).
     render_set: Option<patches::PatchSet>,
-    /// True once every piece of the plan landed.
+    /// True once every piece of a NON-STOCK plan landed this boot. Purely a
+    /// boot-state fact for the log — NOT what `is_active` reports (see
+    /// `capable`).
     applied: bool,
+    /// True when the load-bearing boot sites resolve on this build: the
+    /// back-buffer selector (`display_backbuffer_dims`) and the
+    /// `graphics_init` / `render_surfaces_global` anchors. This is what
+    /// `is_active` reports — "the mod CAN work", so the registry keeps it
+    /// enabled (rows visible, toggle persisted) even on a boot where the plan
+    /// was stock or the mod was off at launch. Resolved in `init` (which runs
+    /// whether or not `early_apply` did — the fps_unlock precedent); the
+    /// former `is_active == applied` made a fresh install's ON toggle read
+    /// back as self-disabled and get written to the config as `false`
+    /// (tester report 2026-09-09).
+    capable: bool,
     /// True once the overlay rows are registered (so `disable` removes them).
     rows_registered: bool,
 }
@@ -96,6 +128,7 @@ impl CustomResolutionMod {
             output_set: None,
             render_set: None,
             applied: false,
+            capable: false,
             rows_registered: false,
         }
     }
@@ -106,9 +139,7 @@ impl CustomResolutionMod {
             .unwrap_or_default();
         plan::compute(&PlanInput {
             output: &cfg.output,
-            render: &cfg.render,
             sd_present: &cfg.sd_present,
-            msaa: &cfg.msaa,
         })
     }
 
@@ -131,10 +162,9 @@ impl CustomResolutionMod {
 
     fn describe(plan: &Plan) -> String {
         let policy = match plan.present_policy {
-            PresentPolicy::Stock => "stock (1:1)".to_string(),
-            PresentPolicy::ForceLetterbox => "letterbox".to_string(),
-            PresentPolicy::Sd(SdPresent::Crop) => "SD crop (960-px centre)".to_string(),
-            PresentPolicy::Sd(SdPresent::Letterbox) => "SD letterbox".to_string(),
+            PresentPolicy::Stock => "stock (1:1)",
+            PresentPolicy::Sd(SdPresent::Crop) => "SD crop (960-px centre)",
+            PresentPolicy::Sd(SdPresent::Letterbox) => "SD letterbox",
         };
         format!(
             "output {}x{} ({}), render {}x{}, present {}, aa {}",
@@ -148,12 +178,65 @@ impl CustomResolutionMod {
             plan.render.h,
             policy,
             match plan.aa {
-                AaPolicy::Stock => "stock".to_string(),
-                AaPolicy::Force(plan::AA_2X) => "2x MSAA".to_string(),
-                AaPolicy::Force(plan::AA_4X) => "4x MSAA".to_string(),
-                AaPolicy::Force(v) => format!("forced {v}"),
+                AaPolicy::Stock => "game's choice",
+                AaPolicy::ForceOff => "forced 0 (SD scaler needs mode 0)",
             }
         )
+    }
+
+    /// The one-shot present-chain line: which AA config the game runs with
+    /// and the per-frame pipeline shape that implies (`plan::present_chain_shape`).
+    fn describe_present_chain(applied: bool) -> Option<String> {
+        if !applied {
+            return Some(
+                "stock 1280x720 (inert) -- the game's own AA config and present chain".to_string(),
+            );
+        }
+        present::aa_config().map(|(chosen, effective)| {
+            format!(
+                "aa_config={} (onBoot chose {}) -> {}",
+                effective,
+                chosen,
+                plan::present_chain_shape(effective)
+            )
+        })
+    }
+
+    /// Log the present-chain line exactly once per process: now if the
+    /// graphics-init detour has already seen the display struct, otherwise
+    /// from the first scene change (the DLL's init thread races the game's
+    /// boot thread, so `enable` may run before `Application::onBoot` reaches
+    /// display init).
+    fn log_present_chain_once() {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        let applied = ACTIVE.load(Ordering::Acquire);
+        if let Some(text) = Self::describe_present_chain(applied) {
+            if !LOGGED.swap(true, Ordering::AcqRel) {
+                log_info!("CustomResolution: present chain -- {text}");
+            }
+            return;
+        }
+        let slot: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+        let slot_cb = slot.clone();
+        let id = scene_manager::on_scene_change(Box::new(move |_prev, _next| {
+            if LOGGED.load(Ordering::Acquire) {
+                return;
+            }
+            let text = Self::describe_present_chain(true).unwrap_or_else(|| {
+                "graphics_init never observed by the first scene change -- AA config unknown"
+                    .to_string()
+            });
+            if !LOGGED.swap(true, Ordering::AcqRel) {
+                log_info!("CustomResolution: present chain -- {text}");
+            }
+            if let Some(id) = slot_cb.lock().ok().and_then(|s| *s) {
+                scene_manager::remove_callback(id);
+            }
+        }));
+        if let Ok(mut s) = slot.lock() {
+            *s = Some(id);
+        }
+        drop(slot);
     }
 }
 
@@ -186,11 +269,6 @@ impl Mod for CustomResolutionMod {
             Outcome::Plan(p) => p,
         };
         log_info!("CustomResolution: plan = {}", Self::describe(&plan));
-        if plan.coerced_render {
-            log_info!(
-                "CustomResolution: 4:3 output always renders at 1280x720 (render setting ignored)"
-            );
-        }
 
         let anchors = ctx.signatures.custom_resolution_anchors();
 
@@ -256,18 +334,10 @@ impl Mod for CustomResolutionMod {
             set.rollback();
             return true;
         }
-        // Present-mode policy (no-op install for Stock / SD crop). A 16:9
-        // render ≠ output MUST have it — without the remap the game's
-        // per-scene mode-1 selection would crop the picture.
+        // Present-mode policy (no-op install for Stock / SD crop). Only the
+        // SD LETTERBOX choice needs the detour; a miss degrades to the stock
+        // crop and is not worth a rollback.
         if let Err(why) = letterbox::install(ctx.signatures, plan.present_policy) {
-            if plan.present_policy == PresentPolicy::ForceLetterbox {
-                log_warn!(
-                    "CustomResolution: {why} -- rolling back the RENDER + OUTPUT sets, staying at stock"
-                );
-                render_set.rollback();
-                set.rollback();
-                return true;
-            }
             log_warn!(
                 "CustomResolution: {why} -- SD letterbox unavailable, the stock crop applies"
             );
@@ -288,16 +358,44 @@ impl Mod for CustomResolutionMod {
         self.render_set = Some(render_set);
         self.plan = Some(plan);
         self.applied = true;
+        ACTIVE.store(true, Ordering::Release);
         log_info!("CustomResolution: early_apply complete -- effective this boot");
         true
     }
 
-    fn init(&mut self, _ctx: &ModContext) -> bool {
-        // All engine work is boot-time; `init` only owns the overlay rows.
+    fn init(&mut self, ctx: &ModContext) -> bool {
+        // All engine work is boot-time. `init` establishes CAPABILITY — the
+        // sites every plan needs — so `is_active` is truthful on boots where
+        // `early_apply` was skipped (mod off in config) or inert (stock
+        // output): the operator can still turn the mod on / pick a size from
+        // the menu and have it persist for the next launch.
+        let anchors = ctx.signatures.custom_resolution_anchors();
+        let backbuffer = ctx
+            .signatures
+            .get_address("display_backbuffer_dims")
+            .is_some();
+        self.capable = self.applied
+            || (backbuffer
+                && anchors.graphics_init.is_some()
+                && anchors.render_surfaces_global.is_some());
+        if !self.capable {
+            log_warn!(
+                "CustomResolution: load-bearing sites unresolved (display_backbuffer_dims {}, graphics_init {}, render_surfaces_global {}) -- mod self-disabled on this build",
+                if backbuffer { "ok" } else { "MISSING" },
+                if anchors.graphics_init.is_some() { "ok" } else { "MISSING" },
+                if anchors.render_surfaces_global.is_some() { "ok" } else { "MISSING" },
+            );
+        }
         true
     }
 
     fn enable(&mut self) {
+        if !self.capable {
+            // Self-disable cleanly (no rows over an inert mod); the registry
+            // records the toggle as off via `is_active`.
+            log_warn!("CustomResolution: enable requested but the mod cannot work on this build -- no rows registered");
+            return;
+        }
         rows::register();
         self.rows_registered = true;
         match &self.plan {
@@ -315,8 +413,18 @@ impl Mod for CustomResolutionMod {
                 if logical_screen::installed() { "on" } else { "OFF" },
                 if debug_ui::installed() { "on" } else { "off" },
             ),
-            None => log_info!("CustomResolution: enabled -- settings apply at the next launch"),
+            None => log_info!(
+                "CustomResolution: enabled -- nothing applied this boot (stock output, or the mod was off at launch); settings apply at the next launch"
+            ),
         }
+        // The one-shot present-chain line (performance triage anchor): a
+        // pcType-2..4 cabinet should read `aa_config=3 (onBoot chose 3) ->
+        // direct (3) …` on every 16:9 plan; `0` here means the game is paying
+        // for the offscreen-composite chain (expected on SD, or on a machine
+        // whose onBoot chose 0 itself). `enable` races the game's own boot
+        // thread, so when graphics_init has not run yet the line is deferred
+        // to the first scene change (graphics is certainly up by then).
+        Self::log_present_chain_once();
     }
 
     fn disable(&mut self) {
@@ -329,7 +437,11 @@ impl Mod for CustomResolutionMod {
         log_info!("CustomResolution: disabled -- stock resolution at the next launch");
     }
 
+    /// Capability, not boot outcome: true iff the load-bearing sites
+    /// resolved (`init`). A stock-output or off-at-launch boot is still an
+    /// ACTIVE mod whose settings apply at the next launch; the `boot state`
+    /// line reports what actually landed this boot.
     fn is_active(&self) -> bool {
-        self.applied
+        self.capable
     }
 }

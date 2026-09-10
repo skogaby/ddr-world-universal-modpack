@@ -1130,3 +1130,37 @@ encoding through the last clap and padding with `adpcm::silence_block()` is
 byte-identical (harness-proven) and ~10× faster — and it moved the tick commit
 from ~2.5 s INTO every chart to before chart time 0. If a fixed-capacity buffer
 is mostly silence, encode the extent and pad; never pay for the capacity.
+
+## 2026-09-09 — A boot-only mod's `is_active` must be CAPABILITY, or the menu toggle un-persists itself
+
+A tester picked 1080p from the 0-0-0 menu, restarted, and got 720p — repeatedly.
+The RESOLUTION row's `persist()` was fine (`save_json_key("resolution", …)`
+wrote the section). What broke the toggle was the OTHER file write on the same
+path: `ModRegistry::enable` records `entry.enabled = mod.is_active()` after
+`enable()`, and Custom Resolution's `is_active` returned `applied` — "a
+non-stock plan landed THIS boot". On a fresh install the mod is OFF in config
+(or ON at stock 720p), so `applied == false`, the registry recorded the ON
+toggle as "enabled but self-disabled (inactive) — recorded as off", and the
+mod-menu's `toggle_registry_mod` then persisted `enabled` for EVERY mod from a
+fresh `get_entries()` read — writing `mods["custom-resolution"] = false` back to
+`mod-config.json`. Any later toggle of any mod repeated the write. The
+resolution row itself was hidden most of the time too (rows are children of an
+`enabled` toggle), so the tester could only ever edit the JSON by hand.
+
+`gameplay-timing-fixes` had the identical shape (`active = false` in its
+"seams not installed this launch" branch), just not yet reported.
+
+**Rules:**
+
+- `is_active()` answers "CAN this mod work on this build" (its load-bearing
+  sites resolved), never "did its effect land this boot". A boot-only mod
+  turned ON from the menu is ACTIVE with effect-next-launch. Resolve
+  capability in `init` (which runs even when `early_apply` was skipped) —
+  `fps_unlock::patch_site` was already the model; `custom_resolution::capable`
+  and `gameplay_timing_fixes::armed_next_launch` now follow it.
+- The registry tracks operator INTENT (`requested`) separately from effective
+  state (`enabled`); `save_mod_states` persists `requested`. A self-disabled
+  mod may render `[OFF]`, but the operator's toggle must survive in the config.
+- When a "setting doesn't persist" report arrives for a child row, check the
+  PARENT toggle's config write first — `save_mod_states` rewrites the whole
+  `mods` map from live registry state on every toggle of any mod.

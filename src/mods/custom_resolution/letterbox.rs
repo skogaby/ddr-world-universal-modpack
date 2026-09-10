@@ -12,10 +12,9 @@
 //! - `Sd(Crop)`: identity (stock SD behaviour).
 //! - `Sd(Letterbox)`: 1 → 0 (the operator wants the full HUD on a 4:3 CRT);
 //!   the TEST menu's own 0 is untouched.
-//! - `ForceLetterbox` (16:9 output, smaller/larger render): every request →
-//!   0, because the crop rect is hard-coded for a 1280-wide SOURCE and would
-//!   chop a 16:9 picture that merely needs scaling.
-//! - `Stock`: the detour is not installed at all.
+//! - `Stock` (every 16:9 plan — render == output): the detour is not
+//!   installed at all; the engine's `screen_w == render_w` branch (or direct
+//!   mode, which skips the copy) makes the mode irrelevant.
 
 use std::ptr::addr_of;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -35,7 +34,6 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 static LOGGED: AtomicBool = AtomicBool::new(false);
 
 const POLICY_STOCK: u8 = 0;
-const POLICY_FORCE_LETTERBOX: u8 = 1;
 const POLICY_SD_CROP: u8 = 2;
 const POLICY_SD_LETTERBOX: u8 = 3;
 static POLICY: AtomicU8 = AtomicU8::new(POLICY_STOCK);
@@ -43,7 +41,6 @@ static POLICY: AtomicU8 = AtomicU8::new(POLICY_STOCK);
 fn encode(p: PresentPolicy) -> u8 {
     match p {
         PresentPolicy::Stock => POLICY_STOCK,
-        PresentPolicy::ForceLetterbox => POLICY_FORCE_LETTERBOX,
         PresentPolicy::Sd(SdPresent::Crop) => POLICY_SD_CROP,
         PresentPolicy::Sd(SdPresent::Letterbox) => POLICY_SD_LETTERBOX,
     }
@@ -51,7 +48,6 @@ fn encode(p: PresentPolicy) -> u8 {
 
 fn decode(v: u8) -> PresentPolicy {
     match v {
-        POLICY_FORCE_LETTERBOX => PresentPolicy::ForceLetterbox,
         POLICY_SD_CROP => PresentPolicy::Sd(SdPresent::Crop),
         POLICY_SD_LETTERBOX => PresentPolicy::Sd(SdPresent::Letterbox),
         _ => PresentPolicy::Stock,
@@ -63,8 +59,8 @@ pub fn installed() -> bool {
     INSTALLED.load(Ordering::Acquire)
 }
 
-/// Install for a non-`Stock` policy. `Stock` and `Sd(Crop)` need no detour
-/// (both are the identity mapping) and return `Ok` without installing.
+/// Install for `Sd(Letterbox)`. `Stock` and `Sd(Crop)` need no detour (both
+/// are the identity mapping) and return `Ok` without installing.
 pub fn install(sigs: &SignatureStore, policy: PresentPolicy) -> Result<(), String> {
     POLICY.store(encode(policy), Ordering::Release);
     if matches!(

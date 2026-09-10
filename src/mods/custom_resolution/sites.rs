@@ -108,7 +108,9 @@ pub fn hoist_sites(b: &[u8]) -> Option<(Imm32Site, Imm32Site)> {
     Some((site_if(b, 9, STOCK_W)?, site_if(b, 0x2C, STOCK_H)?))
 }
 
-/// Offset of the `E8` (CALL rel32 → `surface_create`) inside the hoist match.
+/// Offset of the `E8` (CALL rel32 → the surface-create function, the first
+/// `(R15D, R15D, 0x15)` OFFSCREEN1 create) inside the hoist match — a shape
+/// fact the fixture test pins; nothing derives from it any more.
 pub const HOIST_SURFACE_CREATE_CALL_OFF: usize = 0x13;
 
 /// Group 3b — RT-struct dimension stores inside the render-surface ctor body

@@ -73,7 +73,7 @@ impl Default for Config {
     }
 }
 
-/// `mods["gameplay-timing-fixes"]` per the config map (default OFF).
+/// `mods["gameplay-timing-fixes"]` per the config map (default ON since 2026-09-10).
 static WANTED: AtomicBool = AtomicBool::new(false);
 /// Live enable/disable (the mod's toggle) — a passthrough flag; seams are
 /// never uninstalled.

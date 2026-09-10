@@ -1,16 +1,35 @@
-//! Pure resolution model for the Custom Resolution mod (design §4.1).
+//! Pure resolution model for the Custom Resolution mod (design §4.1, revised
+//! 2026-09-09 to a single knob).
 //!
 //! Everything here is a function of config strings and integer dimensions —
 //! no game memory, no `crate::` imports — so the module is a dependency-free
 //! leaf that `scripts/validate_custom_resolution.sh` mounts into a host crate
 //! and unit-tests. The impure layers (`patches`, `present`, `scissor`,
-//! `canvas_fix`) consume the [`Plan`] this module produces and never re-derive
-//! any of its rules.
+//! `letterbox`, `logical_screen`) consume the [`Plan`] this module produces
+//! and never re-derive any of its rules.
 //!
 //! Vocabulary: **output** = the D3D9 back-buffer / display surface size (what
 //! the panel receives); **render** = the size of the game's internal 1280×720
 //! surfaces and list viewports (what geometry rasterises at). The stock game
 //! has both at 1280×720; the logical 1280×720 *canvas* never changes.
+//!
+//! The ONE operator knob is the output size. The render size is derived, not
+//! chosen: a 16:9 output renders natively (render == output — the engine's
+//! own `screen_w == render_w` 1:1 branch, no scaler, no extra full-screen
+//! passes), a 4:3 output keeps the stock 1280×720 render and goes through the
+//! engine's SD crop/letterbox scaler. The render ≠ output "perf mode" was
+//! removed on purpose: it forced the game out of its direct-mode present
+//! chain (below) on every real cabinet, and the linear upscale was soft.
+//!
+//! AA policy is equally opinionated. The game's AA config (`display struct
+//! +0x18`) is 0 (offscreen composite) or, on pcType-2..4 HD cabinets — every
+//! cabinet and spice2x setup seen so far — 3 ("direct" mode: 3D and 2D render
+//! straight into the screen-sized `display` surface, the COPYVIEWPORT
+//! `StretchRect` is skipped, one in-place `sys_copy_aa` pass + one present
+//! quad). Mode 3 is the CHEAPER present chain, so the plan leaves the game's
+//! choice alone whenever render == output. It is forced to 0 only for the 4:3
+//! path, which needs the mode-0 crop/letterbox scaler (stock SD cabinets run 0
+//! anyway — onBoot only picks 3 when the HD flag is set).
 
 /// Stock render/output size — the only configuration that is a literal no-op.
 pub const STOCK: Dims = Dims { w: 1280, h: 720 };
@@ -23,25 +42,6 @@ pub const MAX_SIDE: u32 = 8192;
 /// Smallest accepted output height (a 640×360 window is the smallest thing the
 /// letterbox math degrades gracefully into).
 pub const MIN_HEIGHT: u32 = 360;
-
-/// Feature gates flipped by the plan's steps: without the letterbox present
-/// policy (plan Step 5) a 16:9 output with a smaller render would be CROPPED
-/// by the game's per-scene mode-1 selection; without the native render set
-/// (Step 6) no surface can be created at a non-stock size. The pure layer
-/// refuses those configurations while a gate is off so a cabinet never sees
-/// a half-implemented picture. Both shipped as of Step 6; the gates stay so
-/// a build can be cut back to a known-good subset by flipping one constant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Gates {
-    pub letterbox_policy: bool,
-    pub native_render: bool,
-}
-
-/// The gates as shipped by the current build.
-pub const GATES: Gates = Gates {
-    letterbox_policy: true,
-    native_render: true,
-};
 
 /// Integer pixel dimensions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl Dims {
     /// `true` when `self` is at least as large as `other` in BOTH dimensions —
     /// the condition under which a depth surface of `self`'s size may legally
     /// back a colour target of `other`'s size (stock SD cabinets bind a 720p
-    /// depth to a 640×480 colour surface).
+    /// depth to a 640×480 colour surface; the 4:3 plan relies on it).
     pub fn covers(self, other: Dims) -> bool {
         self.w >= other.w && self.h >= other.h
     }
@@ -70,7 +70,7 @@ pub enum Aspect {
     Sd4x3,
 }
 
-/// The engine's two SD present modes (`FUN_1801f3f60` `mode` argument):
+/// The engine's two SD present modes (`letterbox_rect_fn` `mode` argument):
 /// `Crop` = mode 1 (960-px centre crop, what SD cabinets shipped with),
 /// `Letterbox` = mode 0 (width-fit letterbox, the TEST menu's choice).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,57 +83,29 @@ pub enum SdPresent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresentPolicy {
     /// render == output: the engine's `screen_w == render_w` branch takes the
-    /// 1:1 POINT copy regardless of mode — no detour needed.
+    /// 1:1 POINT copy regardless of mode (and mode 3 skips the copy entirely)
+    /// — no detour needed.
     Stock,
-    /// 16:9 output larger/smaller than the render: every request becomes mode
-    /// 0 so the width-fit letterbox (full-screen for matching aspect) is used
-    /// and the 960-px crop can never fire.
-    ForceLetterbox,
     /// 4:3 output: mode-1 requests become the operator's choice; mode 0 (the
     /// TEST menu) is always honoured.
     Sd(SdPresent),
 }
 
-/// The game's AA config (`display struct +0x18` → `DAT_1806f050c`): 0 none,
-/// 1 = 2× MSAA, 2 = 4× MSAA on the RENDER surfaces, 3 = "direct mode" (no
-/// MSAA; RENDER/PRESENT target the screen-sized display surface and the
-/// COPYVIEWPORT scaler is SKIPPED — only ever selected for `1 < pcType < 5`).
+/// The game's AA config values (`display struct +0x18` → the AA global).
+pub const AA_OFF: u32 = 0;
+pub const AA_2X: u32 = 1;
+pub const AA_4X: u32 = 2;
+pub const AA_DIRECT: u32 = 3;
+
+/// What the mod does with the game's AA config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AaPolicy {
-    /// Leave whatever onBoot chose (0, or 3 on pcType-2..4 cabinets).
+    /// Leave whatever onBoot chose (0, or direct mode 3 on pcType-2..4 HD
+    /// cabinets). Used whenever render == output.
     Stock,
-    /// Write this value into the display struct before graphics init.
-    Force(u8),
-}
-
-pub const AA_OFF: u8 = 0;
-pub const AA_2X: u8 = 1;
-pub const AA_4X: u8 = 2;
-pub const AA_DIRECT: u8 = 3;
-
-/// Parse the config's `msaa` string. `"auto"` is the pre-2026-09-07 name for
-/// `"off"`; unknown strings fall back to `"off"` (the safe choice).
-pub fn parse_msaa(s: &str) -> AaPolicy {
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("stock") {
-        AaPolicy::Stock
-    } else if s.eq_ignore_ascii_case("2x") {
-        AaPolicy::Force(AA_2X)
-    } else if s.eq_ignore_ascii_case("4x") {
-        AaPolicy::Force(AA_4X)
-    } else {
-        AaPolicy::Force(AA_OFF)
-    }
-}
-
-/// What to do with the PRESENT render-target's depth surface (design R12).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PresentDepth {
-    /// The stock 720p `render_depth` stays bound (render covers output).
-    Stock,
-    /// Output exceeds the render in some dimension: create an output-sized
-    /// depth surface for the PRESENT rt.
-    CreateOutputSized,
+    /// Force 0: the render ≠ output (4:3) path needs the mode-0 present-chain
+    /// scaler that direct mode skips.
+    ForceOff,
 }
 
 /// The fully resolved boot plan.
@@ -144,11 +116,6 @@ pub struct Plan {
     pub aspect: Aspect,
     pub aa: AaPolicy,
     pub present_policy: PresentPolicy,
-    pub present_depth: PresentDepth,
-    pub redirect_afp_projection: bool,
-    /// The operator asked for a non-720p render with a 4:3 output; it was
-    /// coerced back to 1280×720 (one INFO at boot).
-    pub coerced_render: bool,
 }
 
 impl Plan {
@@ -164,7 +131,7 @@ impl Plan {
     /// covers the pcType-2..4 branch; the graphics-init detour's struct write
     /// covers every branch).
     pub fn force_aa_zero(&self) -> bool {
-        self.aa == AaPolicy::Force(AA_OFF)
+        self.aa == AaPolicy::ForceOff
     }
 }
 
@@ -182,9 +149,7 @@ pub enum Outcome {
 #[derive(Clone, Copy, Debug)]
 pub struct PlanInput<'a> {
     pub output: &'a str,
-    pub render: &'a str,
     pub sd_present: &'a str,
-    pub msaa: &'a str,
 }
 
 /// Parse `"WxH"` (either case of `x`, surrounding whitespace tolerated).
@@ -201,32 +166,6 @@ pub fn parse_dims(s: &str) -> Option<Dims> {
     Some(Dims { w, h })
 }
 
-/// Resolve the `render` spec against the output: `"output"`, `"WxH"`, or
-/// `"NN%"` (1..=200, rounded to the nearest even pixel).
-pub fn resolve_render(spec: &str, output: Dims) -> Option<Dims> {
-    let spec = spec.trim();
-    if spec.eq_ignore_ascii_case("output") {
-        return Some(output);
-    }
-    if let Some(pct) = spec.strip_suffix('%') {
-        let pct: u32 = pct.trim().parse().ok()?;
-        if pct == 0 || pct > 200 {
-            return None;
-        }
-        return Some(Dims {
-            w: scale_even(output.w, pct),
-            h: scale_even(output.h, pct),
-        });
-    }
-    parse_dims(spec)
-}
-
-fn scale_even(v: u32, pct: u32) -> u32 {
-    let scaled = (v as u64 * pct as u64 + 50) / 100;
-    let scaled = scaled as u32;
-    scaled - (scaled % 2)
-}
-
 /// Classify an output size. 16:9 tolerance `|9w − 16h| ≤ 16` (1366×768-style
 /// panels), 4:3 tolerance `|3w − 4h| ≤ 12`.
 pub fn classify_aspect(d: Dims) -> Option<Aspect> {
@@ -241,13 +180,17 @@ pub fn classify_aspect(d: Dims) -> Option<Aspect> {
     }
 }
 
-/// Compute the boot plan with the build's shipped [`GATES`].
-pub fn compute(input: &PlanInput) -> Outcome {
-    compute_gated(input, GATES)
+/// The render size an output implies: native for 16:9, the stock 1280×720
+/// for 4:3 (the SD present path is a crop/letterbox OF a 720p picture).
+pub fn render_for(output: Dims, aspect: Aspect) -> Dims {
+    match aspect {
+        Aspect::Wide16x9 => output,
+        Aspect::Sd4x3 => STOCK,
+    }
 }
 
-/// Compute the boot plan with explicit gates (tests exercise both states).
-pub fn compute_gated(input: &PlanInput, gates: Gates) -> Outcome {
+/// Compute the boot plan.
+pub fn compute(input: &PlanInput) -> Outcome {
     let Some(output) = parse_dims(input.output) else {
         return Outcome::Rejected(format!(
             "resolution.output '{}' is not WxH with even dimensions",
@@ -272,69 +215,27 @@ pub fn compute_gated(input: &PlanInput, gates: Gates) -> Outcome {
             output.w, output.h
         ));
     };
-    let Some(requested_render) = resolve_render(input.render, output) else {
-        return Outcome::Rejected(format!(
-            "resolution.render '{}' is not 'output', WxH, or NN%",
-            input.render
-        ));
-    };
-    if requested_render.w > MAX_SIDE || requested_render.h > MAX_SIDE {
-        return Outcome::Rejected(format!(
-            "resolution.render {}x{} exceeds the {} px per-side limit",
-            requested_render.w, requested_render.h, MAX_SIDE
-        ));
-    }
-
-    let (render, coerced_render) = match aspect {
-        Aspect::Sd4x3 => (STOCK, requested_render != STOCK),
-        Aspect::Wide16x9 => (requested_render, false),
-    };
-
-    if output == STOCK && render == STOCK {
+    let render = render_for(output, aspect);
+    if output == STOCK {
         return Outcome::Inert;
     }
-
-    if render != STOCK && !gates.native_render {
-        return Outcome::Rejected(format!(
-            "resolution.render {}x{}: native (non-720p) rendering is not available in this build yet — set render to \"1280x720\" or wait for the native-render step",
-            render.w, render.h
-        ));
-    }
-
-    let present_policy = match aspect {
-        Aspect::Sd4x3 => PresentPolicy::Sd(parse_sd_present(input.sd_present)),
-        Aspect::Wide16x9 if render == output => PresentPolicy::Stock,
-        Aspect::Wide16x9 => PresentPolicy::ForceLetterbox,
+    // render == output takes the engine's 1:1 branch (or direct mode, which
+    // has no copy at all); the 4:3 path needs the mode-0 scaler, so the
+    // game's possible direct-mode choice is overridden there and only there.
+    let (present_policy, aa) = match aspect {
+        Aspect::Wide16x9 => (PresentPolicy::Stock, AaPolicy::Stock),
+        Aspect::Sd4x3 => (
+            PresentPolicy::Sd(parse_sd_present(input.sd_present)),
+            AaPolicy::ForceOff,
+        ),
     };
-    if present_policy == PresentPolicy::ForceLetterbox && !gates.letterbox_policy {
-        return Outcome::Rejected(format!(
-            "resolution.output {}x{} with render {}x{}: the letterbox present policy is not available in this build yet — a 16:9 output needs render == output",
-            output.w, output.h, render.w, render.h
-        ));
-    }
-
-    let aa = parse_msaa(input.msaa);
-    if aa == AaPolicy::Stock && render != output {
-        return Outcome::Rejected(format!(
-            "resolution.msaa \"stock\" with render {}x{} != output {}x{}: a pcType-2..4 cabinet boots in AA \"direct\" mode (3), which skips the present-chain scaler the render/output split needs — use \"off\", \"2x\" or \"4x\"",
-            render.w, render.h, output.w, output.h
-        ));
-    }
-
-    let present_depth = if render.covers(output) {
-        PresentDepth::Stock
-    } else {
-        PresentDepth::CreateOutputSized
-    };
+    debug_assert!(render.covers(output) || aspect == Aspect::Wide16x9);
     Outcome::Plan(Plan {
         output,
         render,
         aspect,
         aa,
         present_policy,
-        present_depth,
-        redirect_afp_projection: render != output,
-        coerced_render,
     })
 }
 
@@ -350,7 +251,6 @@ fn parse_sd_present(s: &str) -> SdPresent {
 pub fn present_mode(policy: PresentPolicy, requested: i32) -> i32 {
     match policy {
         PresentPolicy::Stock | PresentPolicy::Sd(SdPresent::Crop) => requested,
-        PresentPolicy::ForceLetterbox => 0,
         PresentPolicy::Sd(SdPresent::Letterbox) => {
             if requested == 1 {
                 0
@@ -358,6 +258,26 @@ pub fn present_mode(policy: PresentPolicy, requested: i32) -> i32 {
                 requested
             }
         }
+    }
+}
+
+/// Human-readable per-frame present-chain shape implied by an AA config
+/// value, for the boot log (RE of the 20260825 surface ctor + the three
+/// `AfterRenderConditionImpl` vfuncs; `docs/custom_resolution.md` §3a).
+/// "Full-screen ops" counts the fixed-cost passes beyond content: blits,
+/// full-screen quads and clears of a screen-sized surface.
+pub fn present_chain_shape(aa_config: u32) -> &'static str {
+    match aa_config {
+        AA_DIRECT => {
+            "direct (3): 3D+2D -> display, in-place sys_copy_aa quad, present quad; 2 full-screen ops"
+        }
+        AA_OFF => {
+            "offscreen composite (0): 3D -> RENDER, StretchRect -> render_color, sys_copy_depth quad, clear + StretchRect -> display, present quad; 5 full-screen ops"
+        }
+        AA_2X | AA_4X => {
+            "MSAA (1/2): as offscreen composite plus a resolve StretchRect; 6 full-screen ops on multisampled surfaces"
+        }
+        _ => "unknown AA config",
     }
 }
 
@@ -475,21 +395,10 @@ mod tests {
         assert!(close(debug_ui_scale(2160, false, 0.5), 1.5));
     }
 
-    const ALL_ON: Gates = Gates {
-        letterbox_policy: true,
-        native_render: true,
-    };
-    const ALL_OFF: Gates = Gates {
-        letterbox_policy: false,
-        native_render: false,
-    };
-
-    fn input<'a>(output: &'a str, render: &'a str) -> PlanInput<'a> {
+    fn input(output: &str) -> PlanInput<'_> {
         PlanInput {
             output,
-            render,
             sd_present: "crop",
-            msaa: "auto",
         }
     }
 
@@ -517,227 +426,91 @@ mod tests {
     }
 
     #[test]
-    fn t3_t6_resolve_render() {
-        let p1080 = Dims::new(1920, 1080);
-        assert_eq!(resolve_render("output", p1080), Some(p1080));
-        assert_eq!(resolve_render("OUTPUT", p1080), Some(p1080));
-        assert_eq!(resolve_render("75%", p1080), Some(Dims::new(1440, 810)));
+    fn t3_render_is_derived_from_aspect() {
         assert_eq!(
-            resolve_render("50%", Dims::new(2560, 1440)),
-            Some(Dims::new(1280, 720))
+            render_for(Dims::new(1920, 1080), Aspect::Wide16x9),
+            Dims::new(1920, 1080)
         );
         assert_eq!(
-            resolve_render("1280x720", Dims::new(3840, 2160)),
-            Some(STOCK)
+            render_for(Dims::new(3840, 2160), Aspect::Wide16x9),
+            Dims::new(3840, 2160)
         );
-        assert_eq!(resolve_render("foo", p1080), None);
-        assert_eq!(resolve_render("0%", p1080), None);
-        assert_eq!(resolve_render("300%", p1080), None);
-        // odd intermediate rounds down to even
-        assert_eq!(
-            resolve_render("33%", Dims::new(1280, 720)),
-            Some(Dims::new(422, 238))
-        );
+        assert_eq!(render_for(Dims::new(640, 480), Aspect::Sd4x3), STOCK);
+        assert_eq!(render_for(Dims::new(1600, 1200), Aspect::Sd4x3), STOCK);
     }
 
     #[test]
     fn t7_stock_is_inert() {
-        assert_eq!(
-            compute_gated(&input("1280x720", "output"), ALL_ON),
-            Outcome::Inert
-        );
-        assert_eq!(
-            compute_gated(&input("1280x720", "1280x720"), ALL_OFF),
-            Outcome::Inert
-        );
-        assert_eq!(
-            compute_gated(&input("1280x720", "100%"), ALL_OFF),
-            Outcome::Inert
-        );
+        assert_eq!(compute(&input("1280x720")), Outcome::Inert);
+        assert_eq!(compute(&input(" 1280X720 ")), Outcome::Inert);
     }
 
     #[test]
-    fn t8_native_1080p() {
-        let p = plan(compute_gated(&input("1920x1080", "output"), ALL_ON));
-        assert_eq!(p.output, Dims::new(1920, 1080));
-        assert_eq!(p.render, Dims::new(1920, 1080));
-        assert_eq!(p.aspect, Aspect::Wide16x9);
-        assert_eq!(p.present_policy, PresentPolicy::Stock);
-        assert_eq!(p.present_depth, PresentDepth::Stock);
-        assert!(p.force_aa_zero());
-        assert!(!p.redirect_afp_projection);
-        assert!(!p.coerced_render);
-        assert!(!p.render_is_stock());
-        assert!(!p.output_is_stock());
+    fn t8_native_16x9_keeps_the_games_aa_and_present_chain() {
+        for (o, d) in [
+            ("1920x1080", Dims::new(1920, 1080)),
+            ("2560x1440", Dims::new(2560, 1440)),
+            ("3840x2160", Dims::new(3840, 2160)),
+            ("1366x768", Dims::new(1366, 768)),
+            ("640x360", Dims::new(640, 360)),
+        ] {
+            let p = plan(compute(&input(o)));
+            assert_eq!(p.output, d, "{o}");
+            assert_eq!(p.render, d, "{o}");
+            assert_eq!(p.aspect, Aspect::Wide16x9, "{o}");
+            assert_eq!(p.present_policy, PresentPolicy::Stock, "{o}");
+            assert_eq!(p.aa, AaPolicy::Stock, "{o}");
+            assert!(!p.force_aa_zero(), "{o}");
+            assert!(!p.render_is_stock(), "{o}");
+            assert!(!p.output_is_stock(), "{o}");
+        }
     }
 
     #[test]
-    fn t9_1080p_output_720p_render_is_tier_a() {
-        let p = plan(compute_gated(&input("1920x1080", "1280x720"), ALL_ON));
-        assert_eq!(p.render, STOCK);
-        assert_eq!(p.present_policy, PresentPolicy::ForceLetterbox);
-        assert_eq!(p.present_depth, PresentDepth::CreateOutputSized);
-        assert!(p.redirect_afp_projection);
-        assert!(p.force_aa_zero());
-        assert!(p.render_is_stock());
-    }
-
-    #[test]
-    fn t10_4k_with_percent_render() {
-        let p = plan(compute_gated(&input("3840x2160", "75%"), ALL_ON));
-        assert_eq!(p.render, Dims::new(2880, 1620));
-        assert_eq!(p.present_policy, PresentPolicy::ForceLetterbox);
-        assert_eq!(p.present_depth, PresentDepth::CreateOutputSized);
-        assert!(p.redirect_afp_projection);
-    }
-
-    #[test]
-    fn t11_sd_crop_default() {
-        let p = plan(compute_gated(&input("640x480", "output"), ALL_OFF));
+    fn t11_sd_crop_default_forces_aa_off_and_stock_render() {
+        let p = plan(compute(&input("640x480")));
         assert_eq!(p.aspect, Aspect::Sd4x3);
         assert_eq!(p.render, STOCK);
+        assert!(p.render_is_stock());
+        assert!(!p.output_is_stock());
         assert_eq!(p.present_policy, PresentPolicy::Sd(SdPresent::Crop));
-        assert_eq!(p.present_depth, PresentDepth::Stock);
-        assert!(p.redirect_afp_projection);
+        assert_eq!(p.aa, AaPolicy::ForceOff);
         assert!(p.force_aa_zero());
-        // "output" would be 640x480 ≠ 1280x720 → coerced (the operator did not
-        // ask for anything, but the resolver still produced a non-stock size).
-        assert!(p.coerced_render);
-        let p = plan(compute_gated(&input("640x480", "1280x720"), ALL_OFF));
-        assert!(!p.coerced_render);
+        // The stock 720p depth legally backs the 480p colour target.
+        assert!(p.render.covers(p.output));
     }
 
     #[test]
-    fn t12_sd_letterbox_and_coercion() {
+    fn t12_sd_letterbox() {
         let i = PlanInput {
             output: "640x480",
-            render: "50%",
-            sd_present: "letterbox",
-            msaa: "auto",
+            sd_present: "LetterBox",
         };
-        let p = plan(compute_gated(&i, ALL_OFF));
+        let p = plan(compute(&i));
         assert_eq!(p.render, STOCK);
-        assert!(p.coerced_render);
         assert_eq!(p.present_policy, PresentPolicy::Sd(SdPresent::Letterbox));
+        assert_eq!(p.aa, AaPolicy::ForceOff);
+        // Unknown strings fall back to the stock crop.
+        let i = PlanInput {
+            output: "640x480",
+            sd_present: "banana",
+        };
+        assert_eq!(
+            plan(compute(&i)).present_policy,
+            PresentPolicy::Sd(SdPresent::Crop)
+        );
     }
 
     #[test]
     fn t13_t15_rejections() {
+        assert!(matches!(compute(&input("2560x1080")), Outcome::Rejected(_)));
         assert!(matches!(
-            compute_gated(&input("2560x1080", "output"), ALL_ON),
+            compute(&input("10240x5760")),
             Outcome::Rejected(_)
         ));
-        assert!(matches!(
-            compute_gated(&input("10240x5760", "output"), ALL_ON),
-            Outcome::Rejected(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("480x270", "output"), ALL_ON),
-            Outcome::Rejected(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("640x360", "output"), ALL_ON),
-            Outcome::Plan(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("1366x768", "output"), ALL_ON),
-            Outcome::Plan(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("nope", "output"), ALL_ON),
-            Outcome::Rejected(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("1920x1080", "banana"), ALL_ON),
-            Outcome::Rejected(_)
-        ));
-    }
-
-    #[test]
-    fn t16_msaa_policies() {
-        let mk = |msaa: &'static str| PlanInput {
-            output: "1920x1080",
-            render: "output",
-            sd_present: "crop",
-            msaa,
-        };
-        assert_eq!(
-            plan(compute_gated(&mk("stock"), ALL_ON)).aa,
-            AaPolicy::Stock
-        );
-        assert!(!plan(compute_gated(&mk("stock"), ALL_ON)).force_aa_zero());
-        assert_eq!(
-            plan(compute_gated(&mk("auto"), ALL_ON)).aa,
-            AaPolicy::Force(AA_OFF)
-        );
-        assert_eq!(
-            plan(compute_gated(&mk("off"), ALL_ON)).aa,
-            AaPolicy::Force(AA_OFF)
-        );
-        assert_eq!(
-            plan(compute_gated(&mk("2X"), ALL_ON)).aa,
-            AaPolicy::Force(AA_2X)
-        );
-        assert_eq!(
-            plan(compute_gated(&mk("4x"), ALL_ON)).aa,
-            AaPolicy::Force(AA_4X)
-        );
-        assert_eq!(
-            plan(compute_gated(&mk("banana"), ALL_ON)).aa,
-            AaPolicy::Force(AA_OFF)
-        );
-        // Stock AA can be direct mode (3), which has no scaler: refused when
-        // the render and output differ.
-        let split = PlanInput {
-            output: "3840x2160",
-            render: "1920x1080",
-            sd_present: "crop",
-            msaa: "stock",
-        };
-        assert!(matches!(
-            compute_gated(&split, ALL_ON),
-            Outcome::Rejected(_)
-        ));
-        let sd = PlanInput {
-            output: "640x480",
-            render: "output",
-            sd_present: "crop",
-            msaa: "stock",
-        };
-        assert!(matches!(compute_gated(&sd, ALL_ON), Outcome::Rejected(_)));
-    }
-
-    #[test]
-    fn t17_gates_refuse_unshipped_paths() {
-        match compute_gated(&input("1920x1080", "output"), ALL_OFF) {
-            Outcome::Rejected(msg) => assert!(msg.contains("native"), "{msg}"),
-            other => panic!("{other:?}"),
-        }
-        match compute_gated(&input("1920x1080", "1280x720"), ALL_OFF) {
-            Outcome::Rejected(msg) => assert!(msg.contains("letterbox"), "{msg}"),
-            other => panic!("{other:?}"),
-        }
-        // Letterbox gate alone unlocks Tier A but not native render.
-        let lb_only = Gates {
-            letterbox_policy: true,
-            native_render: false,
-        };
-        assert!(matches!(
-            compute_gated(&input("1920x1080", "1280x720"), lb_only),
-            Outcome::Plan(_)
-        ));
-        assert!(matches!(
-            compute_gated(&input("1920x1080", "output"), lb_only),
-            Outcome::Rejected(_)
-        ));
-        // SD never needs either gate.
-        assert!(matches!(
-            compute_gated(&input("640x480", "output"), ALL_OFF),
-            Outcome::Plan(_)
-        ));
-        // Shipped gates: letterbox policy (plan Step 5) and native render
-        // (Step 6) both landed.
-        assert_eq!(GATES, ALL_ON);
+        assert!(matches!(compute(&input("480x270")), Outcome::Rejected(_)));
+        assert!(matches!(compute(&input("nope")), Outcome::Rejected(_)));
+        assert!(matches!(compute(&input("1921x1080")), Outcome::Rejected(_)));
     }
 
     #[test]
@@ -745,7 +518,6 @@ mod tests {
         for m in [0, 1, 2] {
             assert_eq!(present_mode(PresentPolicy::Stock, m), m);
             assert_eq!(present_mode(PresentPolicy::Sd(SdPresent::Crop), m), m);
-            assert_eq!(present_mode(PresentPolicy::ForceLetterbox, m), 0);
         }
         assert_eq!(present_mode(PresentPolicy::Sd(SdPresent::Letterbox), 1), 0);
         assert_eq!(present_mode(PresentPolicy::Sd(SdPresent::Letterbox), 0), 0);
@@ -807,5 +579,14 @@ mod tests {
             scissor_scale(1, 2, 3, 4, Dims::new(1920, 1080), (0.0, 720.0), (0.0, 0.0)),
             (1, 2, 3, 4)
         );
+    }
+
+    #[test]
+    fn t23_present_chain_shape_names_every_mode() {
+        assert!(present_chain_shape(AA_DIRECT).starts_with("direct (3)"));
+        assert!(present_chain_shape(AA_OFF).starts_with("offscreen composite (0)"));
+        assert!(present_chain_shape(AA_2X).starts_with("MSAA"));
+        assert!(present_chain_shape(AA_4X).starts_with("MSAA"));
+        assert_eq!(present_chain_shape(7), "unknown AA config");
     }
 }

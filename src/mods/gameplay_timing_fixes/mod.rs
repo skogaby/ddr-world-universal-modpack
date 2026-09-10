@@ -21,10 +21,13 @@
 //!
 //! Lifecycle rules (design §0): the engine seams install at boot ONLY when
 //! the mod is enabled in `mod-config.json` (`mods["gameplay-timing-fixes"]`,
-//! default OFF for the first cabinet build); a live toggle is a passthrough
-//! flag. Toggling ON from the menu when the config had it OFF therefore takes
-//! effect at the NEXT launch (the toggle is persisted by the menu). Config
-//! section `gameplay_timing_fixes` (mode / window / latency bias /
+//! default ON since 2026-09-10 — the first cabinet build shipped it OFF); a
+//! live toggle is a passthrough flag. Toggling ON from the menu when the
+//! config had it OFF therefore takes effect at the NEXT launch — and the mod
+//! MUST report `is_active() == true` in that state (`armed_next_launch`), or
+//! the registry records the toggle as self-disabled and the menu writes it
+//! back to the config as `false` (the custom-resolution trap, 2026-09-09).
+//! Config section `gameplay_timing_fixes` (mode / window / latency bias /
 //! assist-tick alignment) — see `mods/config.rs`.
 //!
 //! Module layout: `mod.rs` (Mod trait, INFO/WARN lines), `tick_align.rs`
@@ -37,12 +40,21 @@ use crate::services::audio_clock;
 use crate::{log_info, log_warn};
 
 pub struct GameplayTimingFixesMod {
+    /// The deterministic clock is running THIS session (seams installed at
+    /// boot + game-side pieces present + `enable` ran).
     active: bool,
+    /// `enable` ran on a boot whose config had the mod OFF (no seams this
+    /// launch): the mod is functional and the operator's ON toggle is real —
+    /// it just lands at the next launch. Counts as active for the registry.
+    armed_next_launch: bool,
 }
 
 impl GameplayTimingFixesMod {
     pub fn new() -> Self {
-        Self { active: false }
+        Self {
+            active: false,
+            armed_next_launch: false,
+        }
     }
 }
 
@@ -77,8 +89,10 @@ impl Mod for GameplayTimingFixesMod {
                 "GameplayTimingFixes: enable requested but the boot-time seams were not installed (mod was OFF in config at launch) -- the toggle is saved; the clock activates at the NEXT launch"
             );
             self.active = false;
+            self.armed_next_launch = true;
             return;
         }
+        self.armed_next_launch = false;
         // Only the GAME-side pieces are knowable here: the engine observers
         // install when the GAME creates its XACT engine (the factory-return
         // window), which lands moments AFTER this enable on a normal boot —
@@ -123,10 +137,15 @@ impl Mod for GameplayTimingFixesMod {
             audio_clock::game::log_status();
         }
         self.active = false;
+        self.armed_next_launch = false;
         log_info!("GameplayTimingFixes: disabled -- gameplay clock back to stock (seams stay installed as passthrough)");
     }
 
+    /// Active when the clock runs this session OR the mod was enabled from
+    /// the menu on an OFF-at-launch boot (functional, effect next launch).
+    /// False only for the genuine self-disable (seams wanted at boot but the
+    /// game-side pieces are missing on this build).
     fn is_active(&self) -> bool {
-        self.active
+        self.active || self.armed_next_launch
     }
 }

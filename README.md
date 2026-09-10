@@ -100,7 +100,7 @@ Native support for running on StepManiaX cabinets, with no configuration needed.
 ![SMX Touch Overlay](screenshots/smx_overlay.png)
 
 ### Custom Resolution
-Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or any 16:9 size) and — for the CRT cabinets DDR World officially dropped — the 4:3 SD-cabinet output (640×480 through the game's own crop or letterbox path). Pick RESOLUTION and RENDER SCALE in the mod menu and restart; the D3D device is created once at boot, so changes always apply at the next launch. Off by default. In fullscreen the requested size must be a display mode your panel supports, or the mod logs a warning and stays at 720p; if you ever pick a size your display cannot show, edit `resolution.output` in `mod-config.json` back to `1280x720`. Do not combine with spice2x's `-forceres` / `-windowresize` options — those rewrite the back-buffer size behind the game's back.
+Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or any 16:9 size) and — for the CRT cabinets DDR World officially dropped — the 4:3 SD-cabinet output (640×480 through the game's own crop or letterbox path). Pick RESOLUTION in the mod menu and restart; the D3D device is created once at boot, so changes always apply at the next launch. 16:9 sizes render natively (no upscaler) and keep the game's own anti-aliasing/present settings, so the only extra GPU cost is the pixel count itself; 4:3 sizes render at the stock 1280×720 and go through the game's SD crop or letterbox path (SD PRESENT MODE). Off by default. In fullscreen the requested size must be a display mode your panel supports, or the mod logs a warning and stays at 720p; if you ever pick a size your display cannot show, edit `resolution.output` in `mod-config.json` back to `1280x720`. Do not combine with spice2x's `-forceres` / `-windowresize` options — those rewrite the back-buffer size behind the game's back.
 
 ## Full Feature List
 
@@ -126,7 +126,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
-| **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. Off by default; applies at the next launch. |
+| **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. On by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
 | **Anytime Speedmod Adjustment** | Change your speed mod at any point during a song, not just the first ~10 seconds. |
@@ -167,7 +167,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
 | `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
 | `gameplay_timing_fixes` | Gameplay Timing Fixes: `audio_clock.mode` (`fit` default — averages a coarse DirectSound cursor; `raw` for platforms whose cursor is already smooth), `audio_clock.window_seconds` (2–60, default 10), `audio_clock.latency_bias_ms` (added to the mean-preserving latency constant; normally 0 — auto-calibration absorbs any residual), `assist_tick_alignment` (default `true`) — all boot-only (next launch) |
-| `resolution` | Custom Resolution: `output` (`WxH`; 4:3 sizes = SD-cabinet mode), `render` (`output` / `WxH` / `NN%`), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`), `msaa` (`off` / `2x` / `4x` / `stock`) — all four editable in the mod menu (RESOLUTION / RENDER SCALE / MSAA / SD PRESENT MODE); all apply at the next launch |
+| `resolution` | Custom Resolution: `output` (`WxH`; 16:9 = native render at that size, 4:3 sizes = SD-cabinet mode at the stock 1280×720 render), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`, 4:3 only) — editable in the mod menu (RESOLUTION / SD PRESENT MODE); `test_menu_scale` (operator-only multiplier on TEST-menu text size); all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |

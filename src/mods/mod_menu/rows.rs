@@ -212,12 +212,17 @@ pub(super) fn toggle_registry_mod(id: &str, enable: bool) {
     };
     toggle_cb(id, enable);
 
-    // Persist the full enable map from a fresh registry read.
+    // Persist the full enable map from a fresh registry read — the OPERATOR'S
+    // INTENT (`requested`), not the effective `enabled` state: a mod that
+    // self-disabled on this build/boot (missing site, or a boot-only mod
+    // enabled from the menu whose effect lands next launch) must keep its
+    // config toggle as the operator set it. Persisting `enabled` here is what
+    // silently flipped `custom-resolution` back to false (2026-09-09).
     if let Some(entries_cb) = entries_cb {
         let config: HashMap<String, bool> = entries_cb()
             .into_iter()
             .filter(|e| e.id != "mod-menu")
-            .map(|e| (e.id, e.enabled))
+            .map(|e| (e.id, e.requested))
             .collect();
         crate::mods::config::save_mod_states(&config);
     }

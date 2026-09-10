@@ -42,11 +42,11 @@ const LATE_BINDING_MODS: &[&str] = &["folder-expansion", "webui-options"];
 
 /// Mods that default OFF when absent from the config `mods` map (every
 /// other mod defaults ON). Reserved for hardware-specific mods that are
-/// meaningless — or actively wrong — on cabinets without that hardware, and
-/// for engine-level fixes shipping in their first cabinet build
-/// (`gameplay-timing-fixes`, maintainer decision 2026-09-09: default OFF
-/// until the tester run confirms it).
-pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "gameplay-timing-fixes"];
+/// meaningless — or actively wrong — on cabinets without that hardware.
+/// (`gameplay-timing-fixes` sat here for its first cabinet build; promoted to
+/// default ON 2026-09-10 once the tester run confirmed it — maintainer
+/// decision.)
+pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware"];
 
 /// Whether a mod is enabled by the config `mods` map (or its default when
 /// the key is absent). The same rule `enable_with_config` applies; exposed so
@@ -135,7 +135,16 @@ pub trait Mod: Send {
 
 struct ModEntry {
     mod_impl: Box<dyn Mod>,
+    /// EFFECTIVE state: `enable()` ran and the mod reported itself active.
+    /// What the mod menu renders and what gates the mod's contributed rows.
     enabled: bool,
+    /// OPERATOR INTENT: the last `enable`/`disable` request, independent of
+    /// whether the mod self-disabled. What `mod-config.json` persists — a mod
+    /// whose load-bearing setup is missing on THIS build/boot must not have
+    /// its config toggle silently flipped off by the next unrelated menu
+    /// toggle (custom-resolution, 2026-09-09: `is_active` was "applied this
+    /// boot", so a fresh install could never turn the mod on from the menu).
+    requested: bool,
     hooks: HookManager,
 }
 
@@ -175,12 +184,18 @@ impl ModRegistry {
         self.mods.push(ModEntry {
             mod_impl,
             enabled: false,
+            requested: false,
             hooks: HookManager::new(),
         });
     }
 
     pub fn enable(&mut self, id: &str) {
         if let Some(entry) = self.mods.iter_mut().find(|e| e.mod_impl.id() == id) {
+            // Intent is recorded whether or not the mod ends up active: a
+            // menu toggle must persist as ON even when the mod can only take
+            // effect at the next launch (boot-only mods) or is inert on this
+            // build.
+            entry.requested = true;
             if entry.enabled {
                 return;
             }
@@ -189,7 +204,10 @@ impl ModRegistry {
             // failed reports `is_active() == false`, so we record it as NOT
             // enabled rather than showing a false ON over an inert mod (the
             // mod-menu renders `enabled`). Default `is_active()` is `true`, so
-            // mods that don't self-disable are unaffected.
+            // mods that don't self-disable are unaffected. NOTE for mod
+            // authors: `is_active` means "this mod CAN work" (its sites
+            // resolved), never "its effect landed this boot" — a boot-only
+            // mod enabled from the menu is active-with-effect-next-launch.
             entry.enabled = entry.mod_impl.is_active();
             if entry.enabled {
                 log_info!("Mod enabled: {}", entry.mod_impl.name());
@@ -205,6 +223,7 @@ impl ModRegistry {
 
     pub fn disable(&mut self, id: &str) {
         if let Some(entry) = self.mods.iter_mut().find(|e| e.mod_impl.id() == id) {
+            entry.requested = false;
             if !entry.enabled {
                 return;
             }
@@ -230,6 +249,7 @@ impl ModRegistry {
                 name: e.mod_impl.name().to_string(),
                 description: e.mod_impl.description().to_string(),
                 enabled: e.enabled,
+                requested: e.requested,
             })
             .collect()
     }
@@ -270,5 +290,8 @@ pub struct ModInfo {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// Effective state (render this).
     pub enabled: bool,
+    /// Operator intent (persist this) — see `ModEntry::requested`.
+    pub requested: bool,
 }

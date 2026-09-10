@@ -161,31 +161,25 @@ fn default_fps_selected() -> i32 {
 /// Config for the `custom-resolution` mod (DLL-owned section — the overlay
 /// rows write the WHOLE section back via `save_json_key`, so every field must
 /// round-trip). `output` = the back-buffer size (`"WxH"`; `"1280x720"` is
-/// stock, any 4:3 size such as `"640x480"` selects the SD-cabinet present
-/// path); `render` = the internal render size (`"output"`, `"WxH"`, or
-/// `"NN%"` of the output — ignored for 4:3 outputs, which always render at
-/// 1280×720); `presets` = the RESOLUTION overlay row's choices;
+/// stock; any 16:9 size renders natively at that size; any 4:3 size such as
+/// `"640x480"` selects the SD-cabinet present path, rendering at the stock
+/// 1280×720). The render size and the AA config are NOT configurable — the
+/// plan derives both from the output so the game keeps its cheapest present
+/// chain (`mods::custom_resolution::plan` module docs); legacy `render` /
+/// `msaa` keys are ignored. `presets` = the RESOLUTION overlay row's choices;
 /// `sd_present` = `"crop"` (stock SD behaviour, 960-px centre crop) or
-/// `"letterbox"`; `msaa` = `"off"` (default; `"auto"` is its legacy name),
-/// `"2x"`, `"4x"` (MSAA on the render surfaces) or `"stock"` (the game's own
-/// choice — 0, or "direct" mode 3 on pcType 2..4, which is refused when render
-/// != output); `test_menu_scale` = extra multiplier (0.25..=4, default 1.0) on
-/// the TEST-menu / hardware-check text and sprite size, which the mod already
-/// scales with the output height. All settings apply at the NEXT launch —
-/// the D3D device is created once at boot. Semantics live in
-/// `mods::custom_resolution::plan`.
+/// `"letterbox"`; `test_menu_scale` = extra multiplier (0.25..=4, default
+/// 1.0) on the TEST-menu / hardware-check text and sprite size, which the mod
+/// already scales with the output height. All settings apply at the NEXT
+/// launch — the D3D device is created once at boot.
 #[derive(Deserialize, Clone, Debug)]
 pub struct ResolutionConfig {
     #[serde(default = "default_res_output")]
     pub output: String,
-    #[serde(default = "default_res_render")]
-    pub render: String,
     #[serde(default = "default_res_presets")]
     pub presets: Vec<String>,
     #[serde(default = "default_res_sd_present")]
     pub sd_present: String,
-    #[serde(default = "default_res_msaa")]
-    pub msaa: String,
     #[serde(default = "default_res_test_menu_scale")]
     pub test_menu_scale: f32,
 }
@@ -194,10 +188,8 @@ impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
             output: default_res_output(),
-            render: default_res_render(),
             presets: default_res_presets(),
             sd_present: default_res_sd_present(),
-            msaa: default_res_msaa(),
             test_menu_scale: default_res_test_menu_scale(),
         }
     }
@@ -205,9 +197,6 @@ impl Default for ResolutionConfig {
 
 fn default_res_output() -> String {
     "1280x720".to_string()
-}
-fn default_res_render() -> String {
-    "output".to_string()
 }
 fn default_res_presets() -> Vec<String> {
     ["640x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
@@ -217,9 +206,6 @@ fn default_res_presets() -> Vec<String> {
 }
 fn default_res_sd_present() -> String {
     "crop".to_string()
-}
-fn default_res_msaa() -> String {
-    "off".to_string()
 }
 fn default_res_test_menu_scale() -> f32 {
     1.0

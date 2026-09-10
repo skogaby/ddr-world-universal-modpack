@@ -31,7 +31,7 @@
     "s-marvelous": true,
     "split-ssq-auto-discovery": true,
     "custom-resolution": false,
-    "gameplay-timing-fixes": false
+    "gameplay-timing-fixes": true
   },
   "diagnostics": {
     "profiling": false,
@@ -336,7 +336,6 @@
   },
   "resolution": {
     "output": "1280x720",
-    "render": "output",
     "presets": [
       "640x480",
       "1280x720",
@@ -344,8 +343,7 @@
       "2560x1440",
       "3840x2160"
     ],
-    "sd_present": "crop",
-    "msaa": "off"
+    "sd_present": "crop"
   },
   "gameplay_timing_fixes": {
     "audio_clock": {

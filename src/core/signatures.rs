@@ -21,9 +21,6 @@ pub struct CustomResolutionAnchors {
     pub render_surfaces_global: Option<*const u8>,
     pub screen_w_global: Option<*const u8>,
     pub screen_h_global: Option<*const u8>,
-    pub surface_create: Option<*const u8>,
-    pub present_depth_release: Option<*const u8>,
-    pub present_depth_addref: Option<*const u8>,
 }
 
 pub struct SignatureDefinition {
@@ -1975,7 +1972,7 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "render_surface_hoist",
         pattern: "45 33 C9 45 8D 41 15 41 BF 00 05 00 00 41 8B D7 41 8B CF E8",
-        description: "Inside the render-surface object ctor (FUN_1801f01a0 on 20260616, the 0x170-byte DAT_1806f1ef0): the compiler hoisted `MOV R15D,0x500` (imm at match+9) and, at match+0x2B, `MOV ESI,0x2d0` (imm +0x2C), then reuses both for EVERY 1280/720 surface-create argument (depth A/B, colour, render_color, render_depth, RENDER msaa pair, resolve, D24R readable depth; OFFSCREEN1 = R15D×R15D). The `E8` at match+0x13 is the first surface create `(R15D, R15D, 0x15)` → derived surface_create(w,h,fmt[,msaa]). The ctor body after the match also carries the RT-struct dim immediates custom_resolution::sites scans for (`C7 41 14 00 05 D0 02` ×3, `C7 41 14 00 05 00 05` ×1, `C7 40 16 D0 02 00 00` ×2 — first = PRESENT rt[0x10]) and, after that first PRESENT store, the CALL triple bind_colour / depth release / depth addref → derived present_depth_release / present_depth_addref. Unique on all four builds.",
+        description: "Inside the render-surface object ctor (FUN_1801f01a0 on 20260616, the 0x170-byte DAT_1806f1ef0): the compiler hoisted `MOV R15D,0x500` (imm at match+9) and, at match+0x2B, `MOV ESI,0x2d0` (imm +0x2C), then reuses both for EVERY 1280/720 surface-create argument (depth A/B, colour, render_color, render_depth, RENDER msaa pair, resolve, D24R readable depth; OFFSCREEN1 = R15D×R15D). The `E8` at match+0x13 is the first surface create `(R15D, R15D, 0x15)` = `FUN_180250950(u16 w, u16 h, u32 fmt, u32 msaa, opts*)`. The ctor body after the match also carries the RT-struct dim immediates custom_resolution::sites scans for (`C7 41 14 00 05 D0 02` ×3, `C7 41 14 00 05 00 05` ×1, `C7 40 16 D0 02 00 00` ×2 — first = PRESENT rt[0x10]). Unique on all four builds.",
     },
     SignatureDefinition {
         name: "list_viewport_table",
@@ -5037,10 +5034,9 @@ impl SignatureStore {
     /// LINEAR hits only so the mod can use them inside `early_apply` (before
     /// `resolve_derived`); [`Self::derive_custom_resolution`] publishes the
     /// same values into the store for the boot log / sweep. Anchors:
-    /// `fps_target_imm32` (onBoot), `display_backbuffer_dims`,
-    /// `render_surface_hoist`. Fields:
+    /// `fps_target_imm32` (onBoot), `display_backbuffer_dims`. Fields:
     /// - `aa_config_imm`: onBoot's `MOV dword [RSP+d],3` AA-config store at
-    ///   fps+0x69 (imm at +0x6D) — forced to 0 off-stock.
+    ///   fps+0x69 (imm at +0x6D) — forced to 0 for the 4:3 plan only.
     /// - `graphics_init`: the `CALL rel32` right after that store (the
     ///   display-struct consumer; the mod's post-init fixup detour).
     /// - `render_surfaces_global`: onBoot's first `MOV RCX,[RIP+d]` after the
@@ -5048,13 +5044,10 @@ impl SignatureStore {
     ///   (DAT_1806f1ef0 on 20260616; PRESENT rt struct at +0x80).
     /// - `screen_w_global` / `screen_h_global`: RIP targets of the HD-branch
     ///   stores in `display_backbuffer_dims` (match+11 / +21).
-    /// - `surface_create`: CALL target at hoist+0x13 — `(w, h, fmt[, msaa])`.
-    /// - `present_depth_release` / `present_depth_addref`: the 2nd/3rd CALL
-    ///   rel32 after the ctor's first `MOV dword [RAX+0x16],0x2d0` (PRESENT
-    ///   rt dims store): `bind_colour(rt, surf); release(old_depth);
-    ///   addref(new_depth)` — the refcount pair the depth-replacement fixup
-    ///   must mirror.
-    /// Every field is independent (`None` = shape not found).
+    /// Every field is independent (`None` = shape not found). (The former
+    /// `surface_create` / `present_depth_release` / `present_depth_addref`
+    /// anchors served the render < output depth swap, removed 2026-09-09
+    /// with the render knob; the RE stays in `docs/custom_resolution.md`.)
     pub fn custom_resolution_anchors(&self) -> CustomResolutionAnchors {
         let mut a = CustomResolutionAnchors::default();
         let in_module = |p: *const u8| -> bool {
@@ -5110,48 +5103,6 @@ impl SignatureStore {
                 a.screen_h_global = Some(h);
             }
         }
-
-        // ── surface ctor: surface_create + PRESENT depth refcount pair ──
-        if let Some(h) = self.get_address("render_surface_hoist") {
-            const CALL_OFF: usize = 0x13;
-            const WINDOW: usize = 0x1200;
-            let body = unsafe { std::slice::from_raw_parts(h, WINDOW) };
-            if body[CALL_OFF] == 0xE8 {
-                let t = unsafe { decode_call_rel32(h.add(CALL_OFF)) };
-                if in_module(t) {
-                    a.surface_create = Some(t);
-                }
-            }
-            // `MOV dword [RAX+0x16], h` (height + zeroed msaa/pad). Stock h =
-            // 0x2d0; custom_resolution's RENDER set rewrites it to the render
-            // height BEFORE this derivation runs, so accept any u16 height
-            // with the zero upper half rather than the stock bytes only (the
-            // `aa_config_imm` 3-or-0 precedent).
-            let is_present_dims = |w: &[u8]| {
-                w[0] == 0xC7
-                    && w[1] == 0x40
-                    && w[2] == 0x16
-                    && w[5] == 0
-                    && w[6] == 0
-                    && (w[3] != 0 || w[4] != 0)
-            };
-            if let Some(p) = body.windows(7).position(is_present_dims) {
-                let mut calls = Vec::new();
-                let mut j = p + 7;
-                while j < (p + 7 + 0x60).min(body.len() - 5) && calls.len() < 3 {
-                    if body[j] == 0xE8 {
-                        calls.push(unsafe { decode_call_rel32(h.add(j)) });
-                        j += 5;
-                    } else {
-                        j += 1;
-                    }
-                }
-                if calls.len() == 3 && in_module(calls[1]) && in_module(calls[2]) {
-                    a.present_depth_release = Some(calls[1]);
-                    a.present_depth_addref = Some(calls[2]);
-                }
-            }
-        }
         a
     }
 
@@ -5172,17 +5123,6 @@ impl SignatureStore {
                 "screen_h_global",
                 a.screen_h_global,
                 "display_backbuffer_dims",
-            ),
-            ("surface_create", a.surface_create, "render_surface_hoist"),
-            (
-                "present_depth_release",
-                a.present_depth_release,
-                "render_surface_hoist",
-            ),
-            (
-                "present_depth_addref",
-                a.present_depth_addref,
-                "render_surface_hoist",
             ),
         ] {
             match v {

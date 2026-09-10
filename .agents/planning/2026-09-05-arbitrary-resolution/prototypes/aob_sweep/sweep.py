@@ -19,7 +19,7 @@ MODULES_DIR = os.path.expanduser("~/Desktop/ddr_modules")
 BUILDS = ["20250805", "20260224", "20260721", "20260825"]
 INSTALL = os.environ.get(
     "DDR_WORLD_INSTALL",
-    "/Users/holmej/Library/Application Support/CrossOver/Bottles/bemani/drive_c/ddr_world/contents",
+    "",
 )
 LIVE = os.path.join(INSTALL, "modules", "gamemdx.dll")
 
