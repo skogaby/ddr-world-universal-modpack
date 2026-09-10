@@ -1131,6 +1131,28 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 55 53 56 57 41 54 48 8D 6C 24 C9 48 81 EC 00 01 00 00 48 C7 45 E7 FE FF FF FF 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 2F 49 8B F8 48 8B F1",
         description: "Graph chart series append (chart, &vector<double>, &color callable). Copies the series data into the chart; the callable supplies the bar color.",
     },
+    // Chart TWO-COLOUR series append (s-marvelous judgement graph — the
+    // shimmer gradient): (chart, vector<double>*, callable {vft, c0 u32
+    // @+8, c1 u32 @+0xC, pad, impl_ptr}) — the sibling 0x80 bytes BEFORE
+    // `graph_chart_append`. Same data deep-copy; the callable is pushed
+    // into `chart+0xF0` DIRECTLY (no lambda8 adapter) because it already
+    // has the renderer's outer type `function<function<uint(double,
+    // double)>(int bucket, int count)>`: per cell the renderer asks it for
+    // an inner colour functor and evaluates that at the quad's four corners
+    // (u,v ∈ {0,1}) — vertex colours, so the rasterizer interpolates. The
+    // stock ALL-MARVELOUS series (`tab+0x5F8`) rides it with the `lambda17`
+    // functor (`c0 = 0xA9FEECFF` cyan, `c1 = 0xDEA7EFFF` pink; inner
+    // `lambda47` returns `v > 0.5 ? c0 : c1` — c1 at the top of the bar,
+    // c0 at the bottom = the pearlescent vertical gradient). The mod
+    // captures that functor's vftable live and clones `{vft, light, violet}`
+    // for the pure-S-Marvelous seconds. Unique on 20250805 @0x1801BA120
+    // and 20260825 @0x1801D01C0 (Ghidra); cookie disp + the two internal
+    // CALL rel32s wildcarded, the `+0xD0`/`+0xF0` chart offsets pinned.
+    SignatureDefinition {
+        name: "graph_chart_append_2c",
+        pattern: "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 68 48 8B 05 ? ? ? ? 48 33 C4 48 89 44 24 30 49 8B F8 48 8B D9 4C 89 44 24 28 48 81 C1 D0 00 00 00 E8 ? ? ? ? 48 8D 8B F0 00 00 00 48 8B D7",
+        description: "Graph chart two-colour series append (chart, &vector<double>, &outer colour callable). The stock all-Marvelous shimmer gradient rides it; the callable is pushed without the single-colour adapter.",
+    },
     // GraphTab legend text helper (s-marvelous judgement graph):
     // (ctx {rect block*, cursor*, tab*}, &string, rgba) — creates a scaled
     // 0.6 text object, tints it, pushes into tab+0x1A0, advances the

@@ -953,3 +953,101 @@ were resized in the template). Host proof: `scripts/validate_s_marvelous.sh`
 Leg H (real template → real recipe → bemaniutils cross-check incl. the
 grown identity record), `dance_effect_v3` added to the Leg A round-trip
 set, 7 new synthetic `core/ap2` tests.
+
+---
+
+## Addendum 2026-09-10 — Judge graph: the all-Marvelous shimmer gradient
+
+Maintainer observation: stock Marvelous cells on the results judgement graph
+"have a gradient" the other tiers lack. RE (20260825; 20250805 + 20260721
+verified identical at every cited site) shows it is narrower than that —
+the gradient is a **"100 % top-tier second" flag**, and with S-Marvelous on
+it belongs to the new top tier.
+
+### RE
+
+- **Two Marvelous series, two functor types.** The rebuild appends the
+  judge stack (top → axis) filler `+0x538`, shimmer `+0x5F8`, marvelous
+  `+0x5D8`, perfect, great, good, miss. Five ride the single-colour append
+  `FUN_1801d0240` (`graph_chart_append`); **shimmer and marvelous ride a
+  TWO-colour sibling `FUN_1801d01c0`** (0x80 bytes before it — new
+  signature `graph_chart_append_2c`, exactly-once on all four builds:
+  20250805 `+0x1BA120`, 20260224 `+0x1BCFA0`, 20260721 `+0x1CFEE0`, 20260825
+  `+0x1D01C0`). Both appends push the series into `chart+0xD0`
+  (`vector<vector<double>>`) and a functor into `chart+0xF0`
+  (`vector<function<function<uint(double,double)>(int,int)>>`, 0x20-stride
+  inline `std::function`s). The single-colour append wraps the caller's
+  `uint(double,double)` functor in the `lambda8` adapter (`FUN_1801d2070`,
+  0x28 heap object) whose `(bucket, count)` invoke just returns a copy of
+  the wrapped functor; the two-colour append pushes the caller's functor
+  AS-IS because it already has the outer type.
+- **Renderer** (`BarGraph` `FUN_1801d0490`): per (series, bucket) with a
+  non-zero value it asks the series' outer functor for an inner colour
+  function (`FUN_18016f490(functor, out, bucket, count)`), computes the
+  cell rect (top `y0` = running sum + value, bottom `y1` = running sum;
+  judge chart y range `0..auto_max`) and fills it via `FUN_1801cf370`
+  (`canvas+0x78`): SIX vertices `{x, y, u, v, rgba}` — `(x0,y0) inner(0,0)`,
+  `(x1,y0) inner(1,0)`, `(x1,y1) inner(1,1)`, `(x1,y1)`, `(x0,y1)
+  inner(0,1)`, `(x0,y0)` — i.e. the inner function is evaluated at the
+  quad's four corners with `u,v ∈ {0,1}` (`v = 0` TOP, `v = 1` BOTTOM) and
+  the rasterizer interpolates the vertex colours. A flat functor ⇒ a flat
+  cell; a corner-dependent one ⇒ a gradient.
+- **Shimmer functor** (`+0x5F8`, `lambda17` vft `0x18036d370`, captures
+  `c0 = 0xA9FEECFF @+8`, `c1 = 0xDEA7EFFF @+0xC` — the rebuild writes the
+  pair to `[RSP+0x48/0x4C]` and copies the 8-byte word into the callable):
+  invoke ignores `(bucket, count)` and builds inner `lambda47` `{vft
+  0x18036d9c8, c0, c1}` (`FUN_1800f2e90`); `lambda47::invoke`
+  (`FUN_1800f4e00`) is `COMISD XMM2, 0.5; JA → [+8] (c0) else [+0xC] (c1)`
+  = **`v > 0.5 ? c0 : c1`** — pink `DEA7EF` at the top corners, cyan
+  `A9FEEC` at the bottom ⇒ the pearlescent vertical gradient. The clone
+  (vft[0] `FUN_1800f3ba0`) copies the 8-byte capture word, so a stack
+  `{vft17, c0, c1, pad, impl→self}` is a complete functor.
+- **Marvelous functor** (`+0x5D8`, `lambda18` vft `0x18036d3a8`, captures
+  `F0F0F0FF / ECE9ECFF`): invoke USES the bucket — inner `lambda48` `{idx,
+  c0, c1}`, `invoke` = `idx & 1 == 0 ? c0 : c1` regardless of `(u,v)` ⇒
+  FLAT near-white alternating per second (a barely visible column stripe),
+  **no gradient**. The other two two-colour call sites (`+0x6B8` detail-mode
+  worst-grade strip, `+0x338` TREND strip marvelous) use the same
+  alternating pattern (`lambda38` family, flat).
+- **Which seconds shimmer:** the ingest's post-pass (`FUN_1800ebd60`, after
+  bucketing) walks the seconds and, where `filler, miss, good, great,
+  perfect, shimmer ≤ 0`, SWAPS `marvelous[s] ↔ shimmer[s]` — so series 6 =
+  seconds whose every judged note is Marvelous/O.K. (gradient), series 5 =
+  Marvelous in mixed seconds (flat white). One legend entry covers both.
+- **Timing page (page 1): no gradient anywhere.** All eight FAST/SLOW
+  series are single-colour appends with HSV-shift functors (addendum
+  above); Marvelous never appears there in stock. Nothing to transplant —
+  the mod's Marvelous FAST/SLOW bands stay flat.
+
+### Mod (results_graph.rs, faithful port — maintainer choice 2026-09-10)
+
+- **Fold:** `prepare_tab` now moves every shimmer count back into the
+  marvelous series (`marv[s] += shim[s]; shim[s] = 0`) BEFORE subtracting
+  the violet vector — Marvelous never draws the gradient with the mod on
+  (it is no longer the top tier). The stock shimmer append still runs on
+  the all-zero series and draws nothing.
+- **Split:** after the subtraction the violet vector is partitioned by
+  `records::split_pure_seconds` (pure, host-tested): a second is PURE when
+  every other judge series — filler, miss, good, great, perfect AND the
+  marvelous series holding the loose Marvelous — is empty there; that is
+  the stock post-pass condition transplanted to the new top tier (an
+  S-Marv second that also has a loose Marvelous is MIXED, as it should be).
+- **Draw:** MIXED seconds keep the existing flat path (single-colour
+  append after the filler, judge vft live-captured). PURE seconds ride a
+  NEW post-original detour on `graph_chart_append_2c`: after the stock
+  shimmer append (`vec == tab+0x5F8`) of a registered judge-page tab,
+  append the pure vector with `ColorCallable::gradient(vft17_live,
+  top = VIOLET 0xB05CE0FF, bottom = VIOLET_LIGHT 0xD4A5EEFF)` — the
+  incoming shimmer functor's vftable captured pre-original, exactly the
+  stock inner `v > 0.5 ? bottom : top` per cell in our colours (light at
+  the bottom like stock's cyan). Stack order top → axis: filler, [flat
+  violet], shimmer(∅), [gradient violet], marvelous, … — per second only
+  one violet series is non-zero, so S-Marv still leads the stack.
+- **Fail-open:** the two-colour detour is optional — unresolved / install
+  failure ⇒ one WARN, `GRADIENT_AVAILABLE = false`, every violet second
+  rides the flat series (nothing lost but the gradient). The fold is
+  unconditional. Judge series unreadable ⇒ flat + WARN. First prepared tab
+  logs `… N pure S-Marv second(s) -> gradient`.
+- **Not done:** the display-mode≠0 detail strip (`+0x618..+0x6B8`, worst
+  grade per second) still files an all-S-Marv second under its MARVELOUS
+  class — a separate re-host if ever wanted.

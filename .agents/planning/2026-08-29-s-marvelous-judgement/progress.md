@@ -73,6 +73,68 @@ Resume protocol: read `implementation/plan.md` (checklist = step status),
   NORMAL display mode on the timing page — all share the judge page's
   already-verified gates, low risk.
 
+## Post-completion tweak — Judge graph shimmer gradient (2026-09-10, uncommitted)
+
+- Maintainer request: stock Marvelous cells on the results graph carry a
+  gradient the other tiers lack (an at-a-glance top-tier marker); with
+  S-Marvelous on the S-Marv cells should get a violet → lighter-violet
+  gradient and Marvelous should lose it. Also asked to check the timing
+  graph for a gradient (it has none — RE below).
+- RE (Ghidra 20260825, 20250805 + 20260721 verified identical; research
+  addendum "Judge graph: the all-Marvelous shimmer gradient"): the gradient
+  is NOT per tier — the ingest post-pass moves a second's marvelous count
+  5 → 6 when every other judge series is empty there, and ONLY series 6
+  (`+0x5F8`) draws with a gradient: the TWO-colour append `FUN_1801d01c0`
+  (0x80 before `graph_chart_append`) pushes the caller's
+  `function<function<uint(double,double)>(int,int)>` functor without the
+  lambda8 adapter; the BarGraph renderer evaluates the per-cell inner
+  functor at the quad's four corners `(u,v)` → vertex colours; the shimmer
+  functor `lambda17` → inner `lambda47` = `v > 0.5 ? c0 : c1` (cyan
+  `A9FEEC` bottom, pink `DEA7EF` top). Series 5 (`+0x5D8`, mixed seconds)
+  uses `lambda18`/`lambda48` = `bucket & 1 ? c1 : c0` (flat white
+  alternating per second). Timing page: all eight series are single-colour
+  HSV-shift appends — no gradient anywhere.
+- Maintainer decision: **faithful port** — gradient only on PURE
+  S-Marvelous seconds (every other judge series empty, incl. the loose
+  Marvelous remainder), flat violet on mixed seconds, Marvelous never
+  shimmers.
+- `core/signatures.rs`: NEW optional `graph_chart_append_2c` (prologue +
+  the `+0xD0`/`+0xF0` chart offsets; cookie disp + two CALL rel32s
+  wildcarded) — exactly-once on 20250805 `+0x1BA120` / 20260224 `+0x1BCFA0`
+  / 20260721 `+0x1CFEE0` / 20260825 `+0x1D01C0` (sweep), always 0x80 below
+  `graph_chart_append`. Install refuses it if it resolves onto the same
+  address as the single-colour append (one detour per target).
+- `records.rs`: pure `split_pure_seconds(violet, others) -> (pure, mixed)`
+  (the stock post-pass condition on the new top tier; short series count
+  as zero), 2 host tests (mirrors the post-pass incl. the filler + loose-
+  Marvelous cases and the partition invariant; short/empty/no-others).
+- `results_graph.rs`: `prepare_tab` now (1) FOLDS shimmer → marvelous
+  unconditionally, (2) subtracts violet from marvelous only (the shimmer
+  branch of the old subtraction is gone), (3) splits violet into
+  `TabState.smarv` (mixed, flat — the existing filler-append path) and
+  `TabState.smarv_pure` (gradient) when `GRADIENT_AVAILABLE`, else
+  everything stays in `smarv`. NEW 5th detour `append_2c_hook` on the
+  two-colour append: captures the incoming functor's vft pre-original,
+  post-original on `vec == tab+0x5F8` (`AppendRole::JudgeShimmer`) appends
+  `smarv_pure` with `ColorCallable::gradient(vft, top VIOLET, bottom
+  VIOLET_LIGHT 0xD4A5EEFF)` through the SAME 2c function (stack order
+  filler, flat violet, shimmer(∅), gradient violet, marvelous, … — per
+  second only one violet series is non-zero). `classify_append` /
+  `maybe_inject_series` now take the role table (`APPEND_ROLES` for the
+  single-colour hook, `APPEND_2C_ROLES` for the 2c hook). First-prepare
+  INFO grew `N pure S-Marv second(s) -> gradient`.
+- Gates: `cargo check` clean, `cargo fmt`, `validate_s_marvelous.sh` green
+  (144 lib + 97 bin tests, Legs A–H), `validate_signatures.sh` ALL GREEN
+  (2c resolves once on all four builds), `./build.sh` clean. AGENTS.md
+  row + research addendum updated.
+- CABINET DEMO PENDING: expect on the judge page a violet→light-violet
+  vertical gradient on seconds that were entirely S-Marv/O.K., flat violet
+  elsewhere, NO pearlescent gradient on any white Marvelous cell; log.txt
+  `judgement-graph gradient detour installed` at boot, `graph series
+  prepared (side N, B buckets, P pure S-Marv second(s) -> gradient)` at
+  results, no new WARN. If the light end reads too pale/too close to the
+  filler grey, tune `VIOLET_LIGHT_RGBA` (one constant).
+
 ## Post-completion tweak — "Marvelous Shimmer" row (2026-09-03, uncommitted)
 
 - Maintainer request: a GLOBAL SETTINGS row to disable the STOCK Marvelous

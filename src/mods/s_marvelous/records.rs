@@ -322,6 +322,38 @@ fn is_violet_slot(grade: u8, error_ms: i16, window_ms: i32) -> bool {
     (grade == GRADE_MARVELOUS && (error_ms as i32).abs() <= window_ms) || grade == GRADE_OK
 }
 
+/// Pure core: split the violet per-second vector into the seconds that are
+/// PURE top tier — every judged note of the second is S-Marvelous/O.K.,
+/// i.e. every OTHER judge series is empty there — and the MIXED remainder.
+///
+/// This is the stock ingest's all-Marvelous post-pass condition
+/// (`filler, miss, good, great, perfect ≤ 0` ⇒ the second's count moves
+/// to the gradient series) transplanted to the new top tier: `others` are
+/// the game's other judge series AFTER the mod's subtraction/fold, so a
+/// second that still holds a loose Marvelous is MIXED. The pure seconds
+/// draw with the stock shimmer gradient (violet → light violet), the mixed
+/// ones flat violet. Both outputs have `violet.len()` entries; a series
+/// shorter than `violet` counts as zero past its end (the game resizes all
+/// judge series together, so this never triggers in practice).
+pub fn split_pure_seconds(violet: &[f64], others: &[&[f64]]) -> (Vec<f64>, Vec<f64>) {
+    let mut pure = vec![0.0; violet.len()];
+    let mut mixed = vec![0.0; violet.len()];
+    for (s, &v) in violet.iter().enumerate() {
+        if v <= 0.0 {
+            continue;
+        }
+        let alone = others
+            .iter()
+            .all(|series| series.get(s).is_none_or(|&o| o <= 0.0));
+        if alone {
+            pure[s] = v;
+        } else {
+            mixed[s] = v;
+        }
+    }
+    (pure, mixed)
+}
+
 /// Pure core: per-second `(fast, slow)` counts of the LOOSE Marvelous
 /// slots (grade 0 outside the S-Marvelous window) for the results TIMING
 /// graph — the page whose stock series stop at PERFECT because Marvelous
@@ -680,5 +712,46 @@ mod tests {
         let (g, e) = filter_judged(&grades, &errors, &notes);
         assert_eq!(g, grades.to_vec());
         assert_eq!(e, errors.to_vec());
+    }
+
+    #[test]
+    fn split_pure_seconds_mirrors_the_stock_post_pass() {
+        // Second 0: violet only ⇒ pure (gradient). Second 1: violet + a
+        // loose Marvelous left in the stock series ⇒ mixed (flat). Second
+        // 2: violet + a Perfect ⇒ mixed. Second 3: no violet ⇒ neither.
+        // Second 4: violet + unjudged filler ⇒ mixed (stock counts the
+        // filler in its purity test too).
+        let violet = [3.0, 2.0, 1.0, 0.0, 4.0];
+        let filler = [0.0, 0.0, 0.0, 0.0, 1.0];
+        let miss = [0.0; 5];
+        let good = [0.0; 5];
+        let great = [0.0; 5];
+        let perfect = [0.0, 0.0, 2.0, 5.0, 0.0];
+        let marvelous = [0.0, 1.0, 0.0, 0.0, 0.0];
+        let (pure, mixed) = split_pure_seconds(
+            &violet,
+            &[&filler, &miss, &good, &great, &perfect, &marvelous],
+        );
+        assert_eq!(pure, vec![3.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(mixed, vec![0.0, 2.0, 1.0, 0.0, 4.0]);
+        // Partition: pure + mixed == violet everywhere.
+        for s in 0..violet.len() {
+            assert_eq!(pure[s] + mixed[s], violet[s]);
+        }
+    }
+
+    #[test]
+    fn split_pure_seconds_short_series_count_as_zero_and_empty_is_empty() {
+        // A stock series shorter than ours is treated as zero past its end
+        // (defensive — the ingest resizes all judge series together).
+        let violet = [1.0, 2.0];
+        let short = [0.0];
+        let (pure, mixed) = split_pure_seconds(&violet, &[&short]);
+        assert_eq!((pure, mixed), (vec![1.0, 2.0], vec![0.0, 0.0]));
+        let (pure, mixed) = split_pure_seconds(&[], &[&short]);
+        assert!(pure.is_empty() && mixed.is_empty());
+        // No other series at all ⇒ everything is pure.
+        let (pure, mixed) = split_pure_seconds(&violet, &[]);
+        assert_eq!((pure, mixed), (vec![1.0, 2.0], vec![0.0, 0.0]));
     }
 }
