@@ -755,3 +755,93 @@ Not changed: the graph tab's per-beat-division FAST / MARVELOUS / SLOW
 statistics box (`GraphTab+0x4B8`, ingest `FUN_1800EB9C0`) — the game files
 every grade-0/6 note into its own MARVELOUS column there (`iVar26 == 2`), so
 Marvelous is already accounted for in that box by design.
+
+---
+
+## Addendum 2026-09-10 — Timing graph (Play Graph → "Timing graph" page)
+
+The Play Graph tab has a SECOND page (`GraphTab+0x138 == 1`, the "Timing
+graph" header with the Switch-display DETAIL/NORMAL box) that the shipped
+mod did not touch: a mirrored bar chart of FAST (up, cyan family) vs SLOW
+(down, pink family) per second, legend `NOTES/SEC ■FAST MISS ■GOOD ■GREAT
+■PERFECT ■PERFECT ■GREAT ■GOOD ■SLOW MISS`. Marvelous never appears on it
+because stock Marvelous was the exempt top tier; with S-Marvelous on, a
+loose Marvelous IS a timing error and belongs on the graph.
+
+### RE (20260825 addresses; 20250805 verified identical in shape)
+
+- **Ingest** (`FUN_1800ebd60`, vslot 6): the timing group is
+  `tab+0x378 + k*0x20` — `[0]` unjudged/other, `[1..=4]` = FAST
+  miss/good/great/perfect (`stream > 0`), `[5] +0x418` = grade 0/6
+  (**never drawn**), `[6..=9]` = SLOW perfect/great/good/miss
+  (`stream ≤ 0`). Same per-second bucketing as the judge group
+  (`t_first` = first judged note, bucket `(t − t_first)/1000`), all 10
+  resized together.
+- **Rebuild** (`FUN_1800ed9f0`, vslot 7) page 1: `iVar9 =
+  FUN_1800f1eb0(&{tab, judge_axis_max})` — the **axis half-max**: tallest
+  per-second FAST stack (series 1..4) or SLOW stack (6..9), floored at
+  `judge_max × 0.5`, rounded `ceil(x × 0.5) × 2` (constants
+  `DAT_18038fbf8 = 0.5`, `DAT_18038fda8 = 2.0`, `FUN_18028b124 = ceil`).
+  Drives the gridlines (`−max..max` step 2) and BOTH charts' y range
+  (`chart+0xB0/+0xB8` = `0..max` FAST, `max..0` SLOW). The `BarGraph`
+  renderer (`FUN_1801d0490`) does NOT clip — a stack taller than the
+  range draws past the chart box. Gridlines, then the legend (9 ×
+  `FUN_1800f19c0(&ctx, &string, rgba)`, colours via `FUN_1801cdfd0(base,
+  0, 0, value_shift)` — cyan `0x39E3D3FF` shifts −0.25/−0.15/0/+0.35,
+  pink `0xE85EA3FF` +0.3/0/−0.1/−0.2), then the FAST chart appends
+  `+0x398, +0x3B8, +0x3D8, +0x3F8` and the SLOW chart `+0x498, +0x478,
+  +0x458, +0x438` through the same `graph_chart_append`
+  (`FUN_1801d0240`). The renderer draws the LAST-appended series at the
+  axis (running sum from the last index down), so PERFECT is nearest the
+  axis on both halves.
+- **Timing colour functors** differ from the judge ones: callable
+  `{vft, stale u32 @+8, rgba @+0xC}`, call impl `cdfd0(rgba@+0xC, 0, 0,
+  SHIFT, 0)` with the shift baked into the lambda's code (lambda29..32
+  FAST, 33..36 SLOW). The GREAT lambdas (`+0x3D8` → lambda31, `+0x458` →
+  lambda35, both `FUN_1800f46a0` = shift 0) are identity: a clone with
+  our rgba at +0xC renders as-is. Clone (vft[0]) copies the whole 8-byte
+  capture word (`FUN_1800f43a0`).
+- **Legend ctx** `{rect* (double[6]: x, y, _, w, h, _), int* cursor,
+  tab*}`; each line is a `TextLayer` at `(rect.x + cursor + 1, rect.y −
+  1)` (bottom-aligned, scale 0.6, glyph band ≈ 5 canvas px), cursor +=
+  width + 10. Screenshot geometry (1280×720 canvas): the row above
+  (Timing average / Variation) ends ~19 px above the legend glyphs; the
+  stock row already spans ~475 of the panel's ~496 px, so two more items
+  cannot fit on one line.
+- **TREND strip** (display mode ≠ 0) classifies seconds from series
+  `+0x298/+0x2B8/+0x2D8` (fast / marvelous / slow, grade 0/6 → marvelous)
+  — untouched (a MARVELOUS-dominant second stays "neither").
+
+### Mod (results_graph.rs, 2026-09-10)
+
+- `records::marvelous_fast_slow_per_second` (pure, host-tested): loose
+  Marvelous (grade 0, `|ms| > window`) per second, split by the STREAM
+  sign (`ms > 0` = FAST), same bucketing as `violet_per_second`.
+- **Series**: post-original on the FAST PERFECT append (`vec ==
+  tab+0x3F8`) / SLOW PERFECT append (`tab+0x438`) → append our band LAST
+  (= at the axis, between the two PERFECT bands) with the identity GREAT
+  vft captured from the same frame's `+0x3D8` / `+0x458` appends. Colours
+  (maintainer 2026-09-10): FAST `0x90EE90FF` light green, SLOW
+  `0xDAA520FF` goldenrod.
+- **Axis**: new signature `graph_timing_axis_max` (prologue +
+  `[RAX+0x380]/[RAX+0x378]` reads; exactly-once and byte-shape-identical
+  on all four builds) → post-original detour returns `max(stock,
+  2·ceil(ours/2))` with ours = tallest stack incl. our band. Without it
+  the timing half is disabled (fail-open).
+- **Legend**: two lines. On "■FAST MISS" save the cursor + rect.y and
+  lift `rect.y` by `LEGEND_LINE_HEIGHT = 11` canvas px; FAST
+  MISS/GOOD/GREAT/PERFECT pass through on the lifted line; after the
+  FAST PERFECT inject `■MARVELOUS` (light green), restore rect.y, rewind
+  the cursor to the saved start, inject `■MARVELOUS` (goldenrod) — the
+  stock PERFECT/GREAT/GOOD/SLOW MISS then follow on the lower line:
+
+  ```
+              ■FAST MISS ■GOOD ■GREAT ■PERFECT ■MARVELOUS        (early → on time)
+  NOTES/SEC   ■MARVELOUS ■PERFECT ■GREAT ■GOOD ■SLOW MISS        (on time → late)
+  ```
+
+  Keyed on the SSO string bytes (not the HSV-shifted rgba); an
+  unexpected sequence restores rect.y and gives up for the frame (one
+  WARN). `INJECTING` flag makes our own re-entrant legend calls pass
+  through. Applied on every armed tab regardless of content, so the
+  layout never jumps between songs.

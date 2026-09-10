@@ -322,6 +322,53 @@ fn is_violet_slot(grade: u8, error_ms: i16, window_ms: i32) -> bool {
     (grade == GRADE_MARVELOUS && (error_ms as i32).abs() <= window_ms) || grade == GRADE_OK
 }
 
+/// Pure core: per-second `(fast, slow)` counts of the LOOSE Marvelous
+/// slots (grade 0 outside the S-Marvelous window) for the results TIMING
+/// graph — the page whose stock series stop at PERFECT because Marvelous
+/// was the exempt top tier. Same bucketing as [`violet_per_second`]
+/// (`t_first` = first JUDGED note, bucket = `(t − t_first) / 1000`) so the
+/// two vectors align 1:1 with the game's timing series, and the same
+/// STREAM sign as [`count_marv_fast_slow`] (`ms > 0` = FAST). Both vectors
+/// come back the same length (the last bucket either side touched).
+///
+/// `None` on a stream length mismatch or a non-positive window; a
+/// never-judged record yields two empty vectors.
+pub fn marvelous_fast_slow_per_second(
+    notes: &[NoteRef],
+    grades: &[u8],
+    errors_ms: &[i16],
+    window_ms: i32,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if grades.len() != errors_ms.len() || window_ms <= 0 {
+        return None;
+    }
+    let t_first = match notes.iter().find(|n| n.judged) {
+        Some(n) => n.t_ms,
+        None => return Some((Vec::new(), Vec::new())),
+    };
+    let mut fast: Vec<f64> = Vec::new();
+    let mut slow: Vec<f64> = Vec::new();
+    for (idx, note) in notes.iter().enumerate() {
+        if !note.judged || note.t_ms < t_first || idx >= grades.len() {
+            continue;
+        }
+        let (g, ms) = (grades[idx], errors_ms[idx]);
+        if g != GRADE_MARVELOUS || (ms as i32).abs() <= window_ms {
+            continue; // not Marvelous, or S-Marvelous (top tier: exempt)
+        }
+        let bucket = ((note.t_ms - t_first) / 1000) as usize;
+        let target = if ms > 0 { &mut fast } else { &mut slow };
+        if bucket >= target.len() {
+            target.resize(bucket + 1, 0.0);
+        }
+        target[bucket] += 1.0;
+    }
+    let len = fast.len().max(slow.len());
+    fast.resize(len, 0.0);
+    slow.resize(len, 0.0);
+    Some((fast, slow))
+}
+
 /// Copy the record's note-entry vector (+0x98, 0x60-stride) into
 /// stream-aligned [`NoteRef`]s — ONLY flag≥0 entries, in order, so index
 /// `i` here pairs with `grades[i]`/`errors[i]`. Fail-closed on structural
@@ -547,6 +594,70 @@ mod tests {
         let notes = [note(true, 0)];
         assert!(violet_per_second(&notes, &[0u8, 0], &[0i16], 12).is_none());
         assert!(violet_per_second(&notes, &[0u8], &[0i16], 0).is_none());
+    }
+
+    #[test]
+    fn timing_per_second_splits_loose_marvelous_by_stream_sign() {
+        // Window 12. Slot 1 (+15, early ⇒ FAST) bucket 0; slot 2 (−20,
+        // late ⇒ SLOW) bucket 1; slot 3 is an S-Marvelous (exempt); slot 4
+        // (+13) FAST bucket 3. Both vectors padded to the longer (4).
+        let notes = [
+            note(true, 1000),
+            note(true, 1500),
+            note(true, 2500),
+            note(true, 3200),
+            note(true, 4600),
+        ];
+        let grades = [1u8, 0, 0, 0, 0];
+        let errors = [40i16, 15, -20, 3, 13];
+        let (fast, slow) = marvelous_fast_slow_per_second(&notes, &grades, &errors, 12).unwrap();
+        assert_eq!(fast, vec![1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(slow, vec![0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn timing_per_second_window_edge_and_zero_are_exempt() {
+        // |ms| == window is S-Marvelous; ms == 0 is always inside a window
+        // ≥ 1; only window+1 and beyond are loose.
+        let notes = [note(true, 0), note(true, 0), note(true, 0), note(true, 0)];
+        let grades = [0u8, 0, 0, 0];
+        let errors = [12i16, -12, 0, -13];
+        let (fast, slow) = marvelous_fast_slow_per_second(&notes, &grades, &errors, 12).unwrap();
+        assert_eq!((fast, slow), (vec![0.0], vec![1.0]));
+    }
+
+    #[test]
+    fn timing_per_second_partitions_with_violet_series() {
+        // Every judged grade-0 slot is exactly one of violet / loose-fast /
+        // loose-slow, so the per-second totals partition the Marvelous
+        // count (the graph's stacked bars must sum to the stock height).
+        let notes: Vec<NoteRef> = (0..8).map(|i| note(true, i * 400)).collect();
+        let grades = [0u8, 0, 0, 0, 0, 0, 1, 6];
+        let errors = [-20i16, -12, -3, 0, 5, 15, 40, 0];
+        let violet = violet_per_second(&notes, &grades, &errors, 12).unwrap();
+        let (fast, slow) = marvelous_fast_slow_per_second(&notes, &grades, &errors, 12).unwrap();
+        let sum = |v: &[f64]| v.iter().sum::<f64>();
+        // violet = 4 S-Marv + 1 O.K.; loose = 1 fast + 1 slow.
+        assert_eq!((sum(&violet), sum(&fast), sum(&slow)), (5.0, 1.0, 1.0));
+        assert_eq!(
+            (sum(&violet) - 1.0 + sum(&fast) + sum(&slow)) as u32,
+            count_grade(&grades, GRADE_MARVELOUS)
+        );
+    }
+
+    #[test]
+    fn timing_per_second_unjudged_and_empty() {
+        let notes = [note(false, 0), note(true, 1500), note(false, 2500)];
+        let grades = [0u8, 0, 0];
+        let errors = [30i16, 30, 30];
+        // Only slot 1 is judged; t_first = 1500 ⇒ bucket 0.
+        let (fast, slow) = marvelous_fast_slow_per_second(&notes, &grades, &errors, 12).unwrap();
+        assert_eq!((fast, slow), (vec![1.0], vec![0.0]));
+        let (fast, slow) =
+            marvelous_fast_slow_per_second(&[note(false, 0)], &[0u8], &[30i16], 12).unwrap();
+        assert!(fast.is_empty() && slow.is_empty());
+        assert!(marvelous_fast_slow_per_second(&notes, &[0u8, 0], &[0i16], 12).is_none());
+        assert!(marvelous_fast_slow_per_second(&notes, &grades, &errors, 0).is_none());
     }
 
     #[test]

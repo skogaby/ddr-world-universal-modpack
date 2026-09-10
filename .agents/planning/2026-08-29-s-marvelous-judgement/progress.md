@@ -1,6 +1,6 @@
 # Progress — S-Marvelous Judgement
 
-Updated: 2026-09-03
+Updated: 2026-09-10
 Status: **FEATURE COMPLETE (uncommitted — maintainer commits manually).**
 All 10 plan steps done; both Step-9 surfaces cabinet-verified (per-stage
 banner + end-of-credit badge); Step-10 hardening + docs done; feature
@@ -13,6 +13,62 @@ the new README hero section, then commits.
 Resume protocol: read `implementation/plan.md` (checklist = step status),
 `design/detailed-design.md` (Approved 2026-08-29), task files under
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
+
+## Post-completion tweak — Timing graph Marvelous FAST/SLOW (2026-09-10, uncommitted)
+
+- Maintainer request (screenshot of the Play Graph tab's "Timing graph"
+  page): with S-Marvelous on, a loose Marvelous is a timing error too, so
+  the mirrored FAST/SLOW timing chart must show Marvelous as well —
+  goldenrod for SLOW, light green for FAST — and the legend must grow by two
+  entries (shrink text or wrap to two lines using the empty space above).
+- RE (Ghidra 20260825 + 20250805, in `docs/s_marvelous_judgement_research.md`
+  addendum 2026-09-10): page 1 (`tab+0x138 == 1`) of the same GraphTab
+  rebuild; timing series `tab+0x378+k*0x20` ([1..=4] FAST miss..perfect,
+  [5] grade-0/6 never drawn, [6..=9] SLOW perfect..miss); FAST chart appends
+  `+0x398,+0x3B8,+0x3D8,+0x3F8`, SLOW `+0x498,+0x478,+0x458,+0x438` (the
+  BarGraph renderer draws the LAST-appended series at the axis and does NOT
+  clip); axis half-max helper `FUN_1800f1eb0(&{tab, judge_max})` =
+  `2*ceil(tallest stack/2)` feeds gridlines + both charts' y range; timing
+  colour functors `{vft, stale@+8, rgba@+0xC}` calling `cdfd0(rgba, 0,0,
+  SHIFT)` — the GREAT lambdas (`+0x3D8`/`+0x458`) are identity (shift 0);
+  legend ctx `{rect*, cursor*, tab*}`, text at `(rect.x+cursor+1, rect.y−1)`.
+- `records.rs`: pure `marvelous_fast_slow_per_second` (loose Marvelous per
+  second split by the STREAM sign, `ms > 0` = FAST; same bucketing as
+  `violet_per_second`), 4 new host tests (sign split, window edge, partition
+  with the violet series, unjudged/empty/mismatch).
+- `core/signatures.rs`: NEW `graph_timing_axis_max` — exactly-once AND
+  byte-shape-identical (shape_diff, 0x180 window) on 20250805/20260224/
+  20260721/20260825 (`+0xE5940/+0xE76F0/+0xF1AD0/+0xF1EB0`).
+- `results_graph.rs`: 4th (optional) detour on the axis helper —
+  post-original `max(stock, 2*ceil(ours/2))` with our band folded into the
+  tallest stack; timing half armed ONLY when it installed. Append hook now
+  classifies the vec against 5 gated offsets (`AppendRole`): FAST/SLOW GREAT
+  capture the identity vft for the frame, FAST/SLOW PERFECT inject our band
+  LAST (= at the axis) via `ColorCallable::timing` (rgba at +0xC; judge
+  path keeps `::judge`, rgba at +0x8). Legend hook grew a per-frame state
+  machine (`LegendPhase`, reset in the rebuild pre-hook): on "■FAST MISS"
+  save cursor + rect.y and lift rect.y by `LEGEND_LINE_HEIGHT = 11` canvas
+  px; after the FAST PERFECT inject light-green ■MARVELOUS, restore rect.y,
+  rewind the cursor, inject goldenrod ■MARVELOUS as the first SLOW item.
+  `INJECTING` flag passes our own re-entrant legend calls through; an
+  unexpected sequence restores rect.y + one WARN (stock legend, bands still
+  draw). Applied on every armed tab regardless of content (layout never
+  jumps between songs).
+- Gates: `cargo check` clean, `cargo fmt`, `validate_s_marvelous.sh` green
+  (136 lib + 91 bin tests, Legs A–G), `validate_signatures.sh` ALL GREEN,
+  `shape_diff.py --names graph_timing_axis_max` identical on all builds,
+  `./build.sh` clean. AGENTS.md row + research addendum updated.
+- CABINET DEMO PENDING. Checklist: (1) Play Graph → switch to the Timing
+  graph page: two legend lines (FAST line above with ■MARVELOUS in light
+  green after ■PERFECT; NOTES/SEC line with goldenrod ■MARVELOUS first),
+  no overlap with the "Timing average / Variation" row — if the lines sit
+  too tight/loose tune `LEGEND_LINE_HEIGHT`; (2) light-green / goldenrod
+  bands hug the axis between the two PERFECT bands; (3) tallest stacks stay
+  inside the chart box (axis detour); (4) a Marvelous-heavy full-combo
+  song shows bands ONLY for loose Marvelous (S-Marv seconds are empty);
+  (5) judge page + TREND/NORMAL display mode unchanged; (6) log has
+  `timing-graph axis detour installed` + `timing-graph Marvelous series
+  prepared`, no `timing legend sequence unexpected` WARN.
 
 ## Post-completion tweak — "Marvelous Shimmer" row (2026-09-03, uncommitted)
 

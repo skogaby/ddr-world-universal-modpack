@@ -1141,6 +1141,22 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 57 41 54 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 E7 FE FF FF FF 48 89 58 10 48 89 70 18 41 8B D8 4C 8B E1 48 8B 41 08 44 8B 08 41 FF C1",
         description: "GraphTab legend-line helper (ctx, string, rgba). Appends one colored legend text to the tab and advances the layout cursor.",
     },
+    // GraphTab TIMING-page axis half-max (s-marvelous timing graph): the
+    // rebuild calls it once per frame with `&{tab*, judge_axis_max}` and
+    // uses the int it returns as the ±y range of BOTH timing bar charts and
+    // the gridline extent. Stock scans the 8 drawn timing series
+    // (tab+0x398..+0x3F8 FAST, +0x438..+0x498 SLOW — NOT the grade-0/6
+    // series at +0x418, which is never drawn) for the tallest per-second
+    // stack, floors it at judge_max/2, and rounds up to even
+    // (`2*ceil(x/2)`). The mod's post-original detour folds its Marvelous
+    // FAST/SLOW series into the same max so the taller stacks never draw
+    // past the chart box. Byte-identical (displacements included) and
+    // exactly-once on 20250805 @0x1800E5940 and 20260825 @0x1800F1EB0.
+    SignatureDefinition {
+        name: "graph_timing_axis_max",
+        pattern: "48 83 EC 38 48 8B 01 66 0F 57 DB 4C 8B C1 48 8B 90 80 03 00 00 F2 0F 11 5C 24 40 66 0F 28 D3 48 2B 90 78 03 00 00 48 C1 FA 03 48 85 D2",
+        description: "GraphTab timing-page axis half-max (&{tab, judge_max}) -> int. Tallest FAST/SLOW per-second stack, rounded up to even; feeds both timing charts' y range.",
+    },
     // Results window build (s-marvelous FC emblems, Step 9 — runs ONCE at
     // results-scene build). Drives the per-stage clear-kind emblem: suffix
     // from the DAT_180486410 table ([10]="mfc"), refer
