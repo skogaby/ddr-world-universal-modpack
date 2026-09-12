@@ -111,12 +111,33 @@ pub fn arm(side: usize, window_ms: i32) {
     let clamped = clamp_window(window_ms);
     WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
     LAST_WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
+    ARMED_THIS_SONG[side & 1].store(true, Ordering::Relaxed);
 }
 
 /// Disarm both sides (GAMEPLAY exit).
 pub fn disarm_all() {
     WINDOW_MS[0].store(0, Ordering::Relaxed);
     WINDOW_MS[1].store(0, Ordering::Relaxed);
+}
+
+/// Per-side "classification was armed at this song's start" latch for the
+/// score-upload producer (server-upload design §4.4). Set by [`arm`], NOT
+/// cleared by the play-scene-exit [`disarm_all`] (the per-stage save fires
+/// in the results scene, after the disarm) — only [`clear_song_armed`]
+/// (mod disable) resets it. A side whose song started with the mod off
+/// therefore never gets an `s_marv` node, even if the mod was enabled
+/// mid-song.
+static ARMED_THIS_SONG: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+/// Whether the side's current/most recent song was armed from its start.
+pub fn armed_this_song(side: usize) -> bool {
+    ARMED_THIS_SONG[side & 1].load(Ordering::Relaxed)
+}
+
+/// Forget the per-song arm latch for both sides (mod disable).
+pub fn clear_song_armed() {
+    ARMED_THIS_SONG[0].store(false, Ordering::Relaxed);
+    ARMED_THIS_SONG[1].store(false, Ordering::Relaxed);
 }
 
 /// The window the side was LAST armed with (sticky across the GAMEPLAY-exit

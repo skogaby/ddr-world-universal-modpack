@@ -1,8 +1,8 @@
 {
   "mods": {
     "fast-bootup": true,
-    "series-expansion": true,
-    "folder-expansion": true,
+    "series-expansion": false,
+    "folder-expansion": false,
     "skip-intros": true,
     "song-limit-expansion": true,
     "song-playback-speed": true,

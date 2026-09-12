@@ -14,13 +14,18 @@ use crate::types::buttons::*;
 use crate::{log_info, log_warn};
 
 use windows::core::PCSTR;
-use windows::Win32::System::LibraryLoader::GetProcAddress;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
 type TriggerHoldFn = unsafe extern "C" fn(i32, *mut u32, *mut u32);
 type TenKeyFn = unsafe extern "C" fn(i32, *mut [u8; 12], *mut [u8; 12]);
-/// `arkMDXGetPanel{Up,Down,Left,Right}(player, *trigger, *hold, *release, *counter)`
-/// — the stage-panel export wrappers (see `docs/input_system_research.md`).
-type PanelGetFn = unsafe extern "C" fn(i32, *mut u8, *mut u8, *mut u8, *mut u32);
+/// `arkMDXGetPanel{Up,Down,Left,Right}(player, *state, *trigger, *press_ts,
+/// *release_ts)` — the stage-panel export wrappers. They forward straight to
+/// the 6-arg `MdxHWIO` vtable impls (`PanelImplFn` below): `state` = held
+/// level byte, `trigger` = press-edge byte, and the last two are **u64
+/// timestamps** (libavs ordinal-45 clock) that the impl writes through
+/// UNCONDITIONALLY — pass 8-byte locals or the write clobbers the stack.
+/// See `docs/input_polling_research.md` §4–5.
+type PanelGetFn = unsafe extern "C" fn(i32, *mut u8, *mut u8, *mut u64, *mut u64);
 
 struct ArkExports {
     get_start: TriggerHoldFn,
@@ -281,18 +286,25 @@ const PANEL_BUTTONS: [u32; 4] = [
 // these same slots — so the injection lives there.
 //
 // Impl shape (Ghidra, all four confirmed identical):
-//   u64 impl(this, player_i32, *state_u8, *trigger_u8, *sensors_a_u64,
-//            *sensors_b_u64)
+//   u64 impl(this, player_i32, *state_u8, *trigger_u8, *press_ts_u64,
+//            *release_ts_u64)
 // `state` = digested held level; `trigger` = press-edge byte (the ark's
-// counter bookkeeping increments on it); the sensor blobs are 4×u16
-// per-panel sensor levels shown by the I/O-check screen. player indices
-// 4..=11 are debug-keyboard rows — injection only touches 0/1.
+// counter bookkeeping increments on it); the two u64s are the panel's
+// PRESS and RELEASE TIMESTAMPS in the libavs ordinal-45 clock — the same
+// clock gamemdx stores as its frame tick `T`. gamemdx records `press_ts`
+// on the press edge and `judgeNotes` places the step at `mc − (T − P)`, so
+// a bogus value here is a bogus judgement, not a cosmetic glitch
+// (`docs/input_polling_research.md` §4–5; the earlier "4×u16 sensor level
+// blob" reading of these args was wrong). player indices 4..=11 are
+// debug-keyboard rows — injection only touches 0/1.
 //
 // Injection: OR the held level into `state`; synthesize a rising-edge
 // `trigger` via a per-(player, panel) previous-state latch
 // (first-reader-after-press wins — good enough for counters/test UI);
-// fill zero sensor blobs with a plausible constant while held so the
-// I/O-check screen displays the press.
+// when a timestamp reads ZERO (no ark/spice2x sample behind it) while an
+// injected press is held or releasing, stamp it with the current ord-45
+// time so the game sees "pressed now" instead of "pressed at t=0". A
+// nonzero value is the ark's own ring-derived stamp and is left alone.
 //
 // Install is LAZY: the vtable only exists once the game's arkMDXInitialize
 // has populated the IO singleton (seconds after our init), so [`poll`]
@@ -397,9 +409,44 @@ static PANEL_PREV_HELD: [[AtomicBool; 4]; 2] = {
     [[B; 4], [B; 4]]
 };
 
-/// Sensor level written into zeroed sensor blobs while an injected press is
-/// held (4×u16 per blob) so the I/O-check screen shows the press.
-const INJECTED_SENSOR_LEVEL: u16 = 200;
+/// libavs ordinal 45 (`XCnbrep700002c`) — the game-tick clock every pad
+/// timestamp lives in (gamemdx's `T`, libacio2's ring stamps). Resolved
+/// lazily on first need; 0 = unavailable (fail-open: leave the ark's value).
+static AVS_TICK_FN: AtomicUsize = AtomicUsize::new(0);
+static AVS_TICK_RESOLVE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+/// Current ordinal-45 time, or `None` when libavs/ordinal 45 can't be found.
+fn avs_tick_now() -> Option<u64> {
+    if !AVS_TICK_RESOLVE_ATTEMPTED.swap(true, Ordering::AcqRel) {
+        let resolved = (|| -> Option<usize> {
+            let dll = CString::new("libavs-win64.dll").ok()?;
+            // SAFETY: plain module/export lookup on a loaded DLL.
+            unsafe {
+                let handle = GetModuleHandleA(PCSTR(dll.as_ptr() as *const u8)).ok()?;
+                if handle.is_invalid() {
+                    return None;
+                }
+                let f = GetProcAddress(handle, PCSTR(45usize as *const u8))?;
+                Some(f as usize)
+            }
+        })();
+        match resolved {
+            Some(addr) => AVS_TICK_FN.store(addr, Ordering::Release),
+            None => log_warn!(
+                "InputManager: libavs-win64 ordinal 45 unresolved — injected panel presses \
+                 with no backing sample keep the ark's timestamp"
+            ),
+        }
+    }
+    let addr = AVS_TICK_FN.load(Ordering::Acquire);
+    if addr == 0 {
+        return None;
+    }
+    // SAFETY: `addr` is the ordinal-45 export, a no-arg `u64()` (Ghidra:
+    // libavs `XCnbrep700002c`, consumed identically by gamemdx/libacio2).
+    let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(addr) };
+    Some(unsafe { f() })
+}
 
 /// Shared body for the four panel vtable-impl detours.
 ///
@@ -413,11 +460,11 @@ unsafe fn panel_impl_body(
     player: i32,
     state: *mut u8,
     trigger: *mut u8,
-    sensors_a: *mut u64,
-    sensors_b: *mut u64,
+    press_ts: *mut u64,
+    release_ts: *mut u64,
 ) -> u64 {
     let ret = match hook {
-        Some(hook) => hook.call(this, player, state, trigger, sensors_a, sensors_b),
+        Some(hook) => hook.call(this, player, state, trigger, press_ts, release_ts),
         None => 0,
     };
     // One-shot diagnostics (cabinet validation aids): prove the detoured
@@ -456,10 +503,18 @@ unsafe fn panel_impl_body(
         if !prev && !trigger.is_null() {
             *trigger |= 1;
         }
-        for blob in [sensors_a, sensors_b] {
-            if !blob.is_null() && *blob == 0 {
-                let level = INJECTED_SENSOR_LEVEL as u64;
-                *blob = level | (level << 16) | (level << 32) | (level << 48);
+    }
+    // Timestamp backfill: gamemdx reads `press_ts` on the press edge and
+    // `release_ts` on the release edge (`held` false, `prev` true). A zero
+    // means no ark/spice2x sample stands behind this getter call, so the
+    // only honest stamp is "now" in the same clock. Nonzero = the ark's
+    // ring-derived stamp; never overwrite it.
+    if held || prev {
+        for ts in [press_ts, release_ts] {
+            if !ts.is_null() && *ts == 0 {
+                if let Some(now) = avs_tick_now() {
+                    *ts = now;
+                }
             }
         }
     }
@@ -473,8 +528,8 @@ macro_rules! panel_impl_detour {
             player: i32,
             state: *mut u8,
             trigger: *mut u8,
-            sensors_a: *mut u64,
-            sensors_b: *mut u64,
+            press_ts: *mut u64,
+            release_ts: *mut u64,
         ) -> u64 {
             std::panic::catch_unwind(|| {
                 panel_impl_body(
@@ -485,8 +540,8 @@ macro_rules! panel_impl_detour {
                     player,
                     state,
                     trigger,
-                    sensors_a,
-                    sensors_b,
+                    press_ts,
+                    release_ts,
                 )
             })
             .unwrap_or(0)
@@ -1433,20 +1488,22 @@ fn poll_player(player: u8) {
         if PANEL_POLLING.load(Ordering::Acquire) {
             if let Some(panel_fns) = panel_fns {
                 for (i, &bit) in PANEL_BUTTONS.iter().enumerate() {
+                    let mut held: u8 = 0;
                     let mut trigger: u8 = 0;
-                    let mut hold: u8 = 0;
-                    let mut release: u8 = 0;
-                    let mut counter: u32 = 0;
+                    // The impl writes 8 bytes through each of these — they
+                    // MUST be u64 (a u8/u32 here is a stack clobber).
+                    let mut press_ts: u64 = 0;
+                    let mut release_ts: u64 = 0;
                     unsafe {
                         panel_fns[i](
                             player as i32,
+                            &mut held,
                             &mut trigger,
-                            &mut hold,
-                            &mut release,
-                            &mut counter,
+                            &mut press_ts,
+                            &mut release_ts,
                         )
                     };
-                    let active = trigger != 0 || hold != 0;
+                    let active = held != 0 || trigger != 0;
                     state =
                         update_button(state, bit, active, ages, player, RELEASE_DELAY, &mut events);
                 }

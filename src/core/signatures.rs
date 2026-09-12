@@ -1057,6 +1057,54 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "83 BF 98 00 00 00 00 74 ?? 83 BF 94 00 00 00 00 74 ??",
         description: "NoteResultActor grade-case FAST/SLOW gate — CMP [RDI+0x98],0; JZ; CMP [RDI+0x94],0; JZ. S-Marvelous rewrites the grade CMP imm8 at match+15 (0→-1) so Marvelous shows FAST/SLOW.",
     },
+    // Song-select header-card refresh (s-marvelous S-MFC lamp). Prologue
+    // (`MOV RAX,RSP; PUSH RBP/R12-R15; LEA RBP,[RAX-frame]; SUB RSP,size`)
+    // + the body head through `CMP [RCX+0xD0],Rn` (the card's layer-object
+    // field the lamp block draws into). Wildcarded: frame constants, the
+    // security-cookie RIP + stack slot, the `-2` marker slot, and the callee-
+    // saved register the compiler picked for `this` / the zero register
+    // (R15/R12 on 20260324+, R12/R13 on 20250805/20260224), and the `DL` spill slot (0x30 on 20250805, 0x28 later).
+    // fn(this, flag: u8); the lamp block near the end formats
+    // `fullcombo_%dp_usr` / `muca_card_%s` from a clearkind-indexed table.
+    SignatureDefinition {
+        name: "selectmusic_card_refresh",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 C7 45 ?? FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 0F B6 F2 88 54 24 ?? 4C 8B ?? 48 89 4C 24 ?? 45 33 ?? 44 89 ?? 24 20 4C 39 ?? D0 00 00 00",
+        description: "Song-select header-card refresh (FUN_18015a450 on 20260825): fn(this, flag). Post-original detour target for the S-MFC lamp swap — layer object at this+0xD0, widget `fullcombo_%dp_usr`, texture `muca_card_%s` from the clearkind table.",
+    },
+    // Song-select DifficultyPanel::Reflesh (s-marvelous S-MFC lamp, the
+    // per-difficulty-row CLEAR RANK lamps). Prologue (six XMM saves — the
+    // discriminator against the header-card refresh's single XMM6 save) +
+    // the two early-out field tests `CMP [RCX+0xD0],Rn; JZ; CMP [RCX+0xC0],Rn`
+    // (music-info holder / layer object). Frame constants, cookie RIP/slot,
+    // the `-2` marker slot, register choices and the spill slot wildcarded.
+    // fn(this); rows widget `difficulty%dp_usr/dif%02d_usr`, lamp child
+    // `fc_usr`, texture `muca_dif_%s` from the clearkind table.
+    SignatureDefinition {
+        name: "selectmusic_difficulty_panel_refresh",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 C7 85 ?? ?? ?? ?? FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8 44 0F 29 40 A8 44 0F 29 48 98 44 0F 29 50 88 44 0F 29 98 78 FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 4C 8B ?? 45 33 ?? 41 8B ?? 44 89 ?? 24 ?? 48 39 ?? D0 00 00 00 0F 84 ?? ?? ?? ?? 48 39 ?? C0 00 00 00",
+        description: "sequence::selectmusic::DifficultyPanel::Reflesh (FUN_180115ea0 on 20260825): fn(this). Post-original detour target for the S-MFC lamp swap on the CLEAR RANK column — layer object at this+0xC0, rows vector<int> at this+0x1B8..0x1C0, widget `difficulty%dp_usr/dif%02d_usr/fc_usr`, texture `muca_dif_%s`.",
+    },
+    // Same function, 20250805 / 20260224 shape: the `-2` marker store uses
+    // the disp8 ModRM form (`48 C7 45 xx`) and `this` is ALSO spilled to
+    // `[RSP+x]` before the zero-register setup.
+    SignatureDefinition {
+        name: "selectmusic_difficulty_panel_refresh_v1",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 C7 45 ?? FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8 44 0F 29 40 A8 44 0F 29 48 98 44 0F 29 50 88 44 0F 29 98 78 FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 4C 8B ?? 48 89 4C 24 ?? 45 33 ?? 41 8B ?? 44 89 ?? 24 ?? 48 39 ?? D0 00 00 00 0F 84 ?? ?? ?? ?? 48 39 ?? C0 00 00 00",
+        description: "sequence::selectmusic::DifficultyPanel::Reflesh on 20250805/20260224 (FUN_180109750 / FUN_18010c190). Same layout (+0xC0 layer, +0xD0 info holder, +0x1B8 rows).",
+    },
+    // Song-select RecordPanel::Refresh (s-marvelous S-MFC lamp — the
+    // always-visible side-info DIFFICULTY / LEVEL / BEST SCORE / CLEAR RANK
+    // table, `side_%dp_usr/info_%dp_usr/item_%02d_usr/fc_usr`, textures
+    // `musi_dif_%s`). Prologue + the body head through the two field tests
+    // `CMP [RCX+0x118],RSI; JZ` (layer) and the side/song loads
+    // `MOV EBX,[RCX+0x140]` … `CMP [RCX+0x148],RSI` (side, highlighted
+    // song). Frame constants, cookie RIP/slot, JZ rel32 and the model-global
+    // RIP wildcarded; register allocation is identical on all four builds.
+    SignatureDefinition {
+        name: "selectmusic_record_panel_refresh",
+        pattern: "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 C7 45 ?? FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 4C 8B F1 33 F6 44 8B EE 89 74 24 30 48 39 B1 18 01 00 00 0F 84 ?? ?? ?? ?? 4C 8B 25 ?? ?? ?? ?? 4C 89 64 24 50 8B 99 40 01 00 00 89 5C 24 34 44 8D 7B 01 48 39 B1 48 01 00 00 74 29",
+        description: "sequence::selectmusic::RecordPanel::Refresh (FUN_18019b9f0 on 20260825): fn(this). Post-original detour target for the S-MFC lamp swap on the side-info table — layer at this+0x118 (id at layer+0x08), side at this+0x140, rows = difficulties 0..4 directly (`item_%02d` = row+1), texture `musi_dif_%s`.",
+    },
     // FullcomboActor::onMessage (s-marvelous FC splash). Prologue-anchored;
     // the `CMP EDX,0x1034` (its only handled message) pins uniqueness —
     // `81 FA 34 10 00 00` is module-unique on 20260721.

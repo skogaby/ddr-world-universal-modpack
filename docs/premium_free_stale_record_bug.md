@@ -34,7 +34,7 @@ Record fields (record-relative):
 | +0x98/+0xB8/+0xD8 | judge/ghost vectors |
 | +0x1A4 | "uploaded to e-amusement" flag (set by `FUN_1800c4350` @0526 post-save) |
 | +0x268 | end-time qword (0 = not played; save-guard field) |
-| +0x270 | clearkind (save-side; ==7 gates detailed-stats block, ==9 special) |
+| +0x270 | `folder` (the wire `<folder>`; ==7 gates the marshal's detailed-stats block, ==9 special). NOT a clear kind — the wire `<clearkind>` is `+0x54` (corrected 2026-09-12 from the packet log after the S-Marvelous upload shipped `folder` as `clearkind`) |
 
 ### Globals
 

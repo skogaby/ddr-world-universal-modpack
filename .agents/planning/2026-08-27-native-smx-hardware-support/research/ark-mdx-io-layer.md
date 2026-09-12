@@ -43,6 +43,11 @@ out-params for game-side callers instead of only zeroing.
   3-arg. Out pair = (current, previous) state — gamemdx consumes only the
   current byte and derives edges downstream, so injection = OR the held level
   into out1's low byte.
+  **Correction 2026-09-11:** the two u64 out-args are NOT sensor buffers — they
+  are the panel's press/release timestamps (libavs ord-45 clock, the clock
+  `judgeNotes` measures against), derived by the ark from libacio2's MDXF poll
+  ring. Injection must never fill them with a constant; a zero is backfilled
+  with the current ord-45 time. Full chain: `docs/input_polling_research.md`.
 - **Card-in (U2 closed):** detour `arkMDXGetEAPass` and write the configured card
   UID into its out-buffer when the overlay "Insert Card" button is pressed — a fully
   native path at this layer (no eamuse/ICCA/SpiceAPI needed).

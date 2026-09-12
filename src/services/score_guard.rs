@@ -814,11 +814,36 @@ pub fn is_stage_suppressed(side: usize) -> bool {
         return false;
     }
     QUICK_FAIL_TAINT.load(Ordering::Acquire)
-        || AUTOPLAY_TAINT[side].load(Ordering::Acquire)
+        || autoplay_taint_effective(side)
         || TRAINING_TAINT[side].load(Ordering::Acquire)
         || ASSIST_TICK_TAINT[side].load(Ordering::Acquire)
         || RATE_LEDGER.pending_count(side) > 0
         || RATE_LEDGER.overflowed(side)
+}
+
+/// TEST BUILD SWITCH — NOT a user setting: deliberately no config key, no env
+/// var, no menu row (maintainer directive 2026-09-12: score suppression must
+/// never be togglable by a user). `true` lets Autoplay stage scores through
+/// the per-stage save so server-side features can be exercised end to end
+/// with machine-perfect plays (used for the S-Marvelous upload validation).
+/// MUST be `false` in any committed/shipped build:
+/// `score_guard_tests::autoplay_taint_alone_suppresses_its_side` fails while
+/// it is `true`, and the save trampoline WARNs on every masked save so a
+/// stray test build is self-identifying in the field.
+pub const TESTING_ALLOW_AUTOPLAY_SCORES: bool = false;
+
+/// The autoplay taint as the stage-save gate sees it: the real per-side bit,
+/// except under [`TESTING_ALLOW_AUTOPLAY_SCORES`], where a set bit is masked.
+/// (This module is std-only — the save trampoline logs the WARN via
+/// [`autoplay_masked_for_testing`].)
+fn autoplay_taint_effective(side: usize) -> bool {
+    AUTOPLAY_TAINT[side].load(Ordering::Acquire) && !TESTING_ALLOW_AUTOPLAY_SCORES
+}
+
+/// True when this side's Autoplay taint is set but masked by the test-build
+/// switch — the trampoline WARNs on every such forwarded stage save.
+pub fn autoplay_masked_for_testing(side: usize) -> bool {
+    side < SIDES && TESTING_ALLOW_AUTOPLAY_SCORES && AUTOPLAY_TAINT[side].load(Ordering::Acquire)
 }
 
 /// Autoplay taint ALONE (no quick-fail / training / assist-tick / rate

@@ -18,6 +18,9 @@ pub mod assets;
 pub mod combo;
 pub mod fast_slow;
 pub mod flash;
+pub mod lamp;
+pub mod lamp_badge;
+pub mod lamp_codec;
 pub mod receptor;
 pub mod receptor_patch;
 pub mod records;
@@ -26,6 +29,8 @@ pub mod results_graph;
 pub mod results_score;
 pub mod splash;
 pub mod state;
+pub mod upload;
+pub mod upload_hook;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -91,6 +96,7 @@ pub struct SMarvelousMod {
     graph_installed: bool,
     emblem_installed: bool,
     fast_slow_installed: bool,
+    lamp_badge_installed: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -105,6 +111,7 @@ impl SMarvelousMod {
             graph_installed: false,
             emblem_installed: false,
             fast_slow_installed: false,
+            lamp_badge_installed: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -359,6 +366,10 @@ impl Mod for SMarvelousMod {
             // Best-effort — without it Marvelous never shows FAST/SLOW
             // (stock).
             self.fast_slow_installed = fast_slow::install(ctx.signatures);
+            // Song-select S-MFC lamp (server-upload Step 8): card-refresh
+            // detour. Best-effort — without it S-MFC charts keep the stock
+            // MFC lamp; the upload/echo-back data path is unaffected.
+            self.lamp_badge_installed = lamp_badge::install(ctx.signatures);
         }
         true
     }
@@ -463,6 +474,17 @@ impl Mod for SMarvelousMod {
             fast_slow::activate();
         }
 
+        // Server-side awareness (server-upload design): the `/data/s_marv`
+        // node on per-stage saves (pure recompute from the stage record via
+        // the persistence service's subtree-producer registry) + the S-MFC
+        // lamp set fed by the backend's `smarv_scores` load field and by our
+        // own S-MFC emissions. Both fail-open; neither touches a stock byte.
+        upload_hook::activate();
+        lamp::activate();
+        if self.lamp_badge_installed {
+            lamp_badge::activate();
+        }
+
         log_info!(
             "SMarvelous: enabled (window {} ms, judgement color {}, Marvelous shimmer {})",
             window,
@@ -482,7 +504,11 @@ impl Mod for SMarvelousMod {
         results_graph::deactivate();
         results_emblem::deactivate();
         fast_slow::deactivate();
+        upload_hook::deactivate();
+        lamp_badge::deactivate();
+        lamp::deactivate();
         state::disarm_all();
+        state::clear_song_armed();
         state::reset_song_state();
         if let Some(id) = self.scene_cb_id.take() {
             scene_manager::remove_callback(id);

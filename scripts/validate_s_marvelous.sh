@@ -37,11 +37,17 @@ skip() { echo "[skip] $*"; }
 # module name -> repo-relative source path. Names must be unique.
 declare -a MODULE_NAMES=(s_marvelous_state)
 declare -a MODULE_PATHS=("src/mods/s_marvelous/state.rs")
-# s_marvelous/records (std-only record-stream recompute — Step 7; mounted
-# for its pure-core test suite).
+# s_marvelous/records (std-only record-stream recompute — Step 7) +
+# s_marvelous/upload (std-only score-upload payload builder — server-upload
+# Step 2; `use super::records`). Both mount NESTED under one `s_marvelous`
+# namespace (see the lib.rs generator below) so `super::records` resolves.
+HAVE_SMARV_RECORDS=0
+HAVE_SMARV_UPLOAD=0
 if [[ -r "$REPO_ROOT/src/mods/s_marvelous/records.rs" ]]; then
-  MODULE_NAMES+=(s_marvelous_records)
-  MODULE_PATHS+=("src/mods/s_marvelous/records.rs")
+  HAVE_SMARV_RECORDS=1
+  if [[ -r "$REPO_ROOT/src/mods/s_marvelous/upload.rs" ]]; then
+    HAVE_SMARV_UPLOAD=1
+  fi
 fi
 # avs_layeredfs/afplist_ext (std-only afplist <geo> list transform — the
 # deploy-#4 geo-registration fix; mounted for its test suite).
@@ -66,6 +72,7 @@ fi
 for p in "${MODULE_PATHS[@]}"; do
   [[ -r "$REPO_ROOT/$p" ]] || die "module source missing: $p"
 done
+[[ "$HAVE_SMARV_RECORDS" == 1 ]] || die "module source missing: src/mods/s_marvelous/records.rs"
 
 TMP=$(mktemp -d)
 trap 'if [[ -z "${KEEP_TMP:-}" ]]; then rm -rf "$TMP"; fi' EXIT
@@ -96,6 +103,20 @@ mkdir -p "$TMP/src"
     echo "#[path = \"$REPO_ROOT/${MODULE_PATHS[$i]}\"]"
     echo "pub mod ${MODULE_NAMES[$i]};"
   done
+  if [[ "$HAVE_SMARV_RECORDS" == 1 ]]; then
+    echo "pub mod s_marvelous {"
+    echo "    #[path = \"$REPO_ROOT/src/mods/s_marvelous/records.rs\"]"
+    echo "    pub mod records;"
+    if [[ "$HAVE_SMARV_UPLOAD" == 1 ]]; then
+      echo "    #[path = \"$REPO_ROOT/src/mods/s_marvelous/upload.rs\"]"
+      echo "    pub mod upload;"
+      if [[ -r "$REPO_ROOT/src/mods/s_marvelous/lamp_codec.rs" ]]; then
+        echo "    #[path = \"$REPO_ROOT/src/mods/s_marvelous/lamp_codec.rs\"]"
+        echo "    pub mod lamp_codec;"
+      fi
+    fi
+    echo "}"
+  fi
 } >"$TMP/src/lib.rs"
 
 # The ap2check dev binary (Legs A/B). Compiled unconditionally (cheap, keeps

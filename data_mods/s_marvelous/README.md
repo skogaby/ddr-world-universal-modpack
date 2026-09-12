@@ -21,6 +21,9 @@ identical pixel rects so cloned geo UVs stay valid).
 | `scene_result/scre_tab_detail_base.png` | scene_result_v3 · `scre_tab_detail_base` | 108×118 | results row-label sheet, Simple results tab (Step 7) |
 | `scene_result/scre_fc_smarvelous.png` | scene_result_v3 · `scre_fc_marvelous` | 232×18 | per-stage S-MFC emblem caption (Step 9) |
 | `scene_result/scre_total_player_fc_smfc.png` | scene_result_v3 · `scre_total_player_fc_mfc` | 30×12 | total-results S-MFC badge (Step 9) |
+| `select_music/musi_dif_fc_smfc.png` | select_music_side_v3 · `musi_dif_fc_mfc` | 40×16 | song-select SIDE-INFO table CLEAR RANK S-MFC lamp (the always-visible DIFFICULTY/LEVEL/BEST SCORE/CLEAR RANK rows; FRESH atlas `smarv_sms` into `select_music_side_v3_ifs/`, generated at enable — never commit) |
+| `select_music/muca_dif_fc_smfc.png` | select_music_card_v3 · `muca_dif_fc_mfc` | 40×16 | song-select difficulty-PICKER panel CLEAR RANK S-MFC lamp (one per row; same FRESH batch/recipe as the card lamp below) |
+| `select_music/muca_card_fc_smfc.png` | select_music_card_v3 · `muca_card_fc_mfc` | 20×8 | song-select header-card S-MFC lamp (server-upload echo-back, `lamp_badge.rs`); FRESH atlas clone `smarv_smc` into `select_music_card_v3_ifs/` (generated at enable — never commit). Recipe: donor-neutral pixels (sat < 0.12) untouched, saturated pixels → hue 280°, sat floor 0.55, value ×0.90; alpha byte-identical |
 
 **Gameplay flash word (`dance_judge/smarvelous_*.png`) and the stock additive
 glow (2026-09-03).** The two variants are selected by the overlay menu's

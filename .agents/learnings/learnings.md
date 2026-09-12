@@ -1235,3 +1235,102 @@ when no later-ordered field is present). When rescaling a ramp, declare the
 stock range and refuse outside it (`ScaleRemap`) — the range check IS the
 template-variant gate when nothing external is staged. Always dump the real
 template with bemaniutils first and look at the RAW flags per record.
+
+## The panel getter's two u64 out-args are TIMESTAMPS, and every pad timestamp is host-made (2026-09-11)
+
+`arkMDXGetPanel*` → `MdxHWIO` vtable impl
+`(this, player, u8* state, u8* trigger, u64* a, u64* b)`: `a`/`b` are the
+panel's **press / release timestamps** in the libavs ordinal-45 clock (the
+same clock gamemdx stores as `T`), not "4×u16 sensor level blobs". gamemdx's
+aggregator passes `&press[btn]`/`&release[btn]` into them and the recorder
+stores `press` as the per-button press time that `judgeNotes` turns into
+`event = mc − (T − P)`. `input_manager.rs`'s SMX injection fills a zero blob
+with `0x00C800C800C800C8` — harmless only because the ark/spice2x always
+supplies a nonzero stamp first; if it ever fires for a real press the step
+never judges. Correct fill = current ord-45 time (or leave it).
+
+Where those stamps come from: `libacio2!FUN_1800227a0` stamps each 3-byte MDXF
+`0x10` poll reply with ord 45 **when the serial thread parses it**; the board
+sends no timing at all. Polling is lockstep (one request per node in flight),
+the serial thread is a non-blocking poller waking every ~2–3 ms
+(`Sleep(2)` auto-update kick + 3 ms event timeout), both pads share one
+115200 8N1 link ⇒ ~2–5 ms per sample, ~2–3 ms stamp quantization. Anyone
+reasoning about "input polling rate" must start from libacio2's threads, not
+from gamemdx (60 Hz read, timestamp-based judge — the frame phase cancels) or
+the pad board. Full chain + measurement plan: `docs/input_polling_research.md`.
+
+**Launcher caveat (2026-09-11):** the above is the libacio2 path, which is live
+under the stock bootstrap AND under spice2x in *bootstrap mode* (DLL named
+explicitly: `spice64 -modules modules arkmdxp4.dll -K …` — naming the DLL
+skips the launcher's auto-detect block, which is the only place `attach_io`
+is set, so no `acio::attach()`, no `DDRGame::attach()`; that is how
+stock-hardware White cabinets run spice2x + this modpack). spice2x in
+*emulated-IO mode* (auto-detected, the usual PC setup) IAT-stubs `ac_io_*` by
+name across every module — no opt-out flag; `-devicehookdisable` only skips
+the CreateFile device hooks — so there libacio2 never runs, a stock MDXF board
+is never polled, and press stamps come from rawinput HID events
+(`mdxf_poll(true)`, `timeGetTime`). A "faster pad polling" mod has one seam
+valid in both modes — the ark's `ac_io_mdxf_*` IAT slots (libacio2 in
+bootstrap mode ⇒ take over; spice2x in emulated mode ⇒ stand down). Local
+rig for the REAL transport: positional `arkmdxp4.dll` + `-ddr` WITHOUT
+`-io`/`-acio` (P4IO faked, ACIO unstubbed) + CrossOver `com2` → pty → MDXF
+board emulator (`docs/input_polling_research.md` §7a). Applies to BOTH arks:
+`arkmdxp4.dll` (White cabinets) runs the identical MDXF pad path
+(`FUN_18008ec10` → `FUN_180091ae0`) and imports the same six `ac_io_*` from
+libacio2 by name — the BIO2 ark was just the one analyzed first.
+
+**Firmware lead (2026-09-11):** libacio2 embeds an ACIO firmware-update path
+(`micmd_firm.c`) and names the MDXF pad-board images it would flash:
+`r8cdl-35a32k13.dat` (Renesas R8C/35A flash loader) + `newfootio100.dat`
+(MDXF app firmware v1.00 = the `version 1.0.0, Sep 28 2012` both pads reported
+in the first stock-cabinet log). They are opened by BARE name through
+`avs_fs_open`; the AVS cwd is `/` for the process lifetime (nothing imports
+`avs_fs_chdir`, ordinal 90) and `/` mounts `.` = the `contents\` dir, so the
+expected on-disk location is `contents\newfootio100.dat` next to
+`spice64.exe`/`bootstrap.exe` — NOT `modules\`/`data\`. The LayeredFS verbose
+log proves the relative-path rule live (`./prop/share-config.xml` and
+`/prop/ark-config.xml` both resolve to `contents\prop\`). A copy of that file
+would answer the sensor-scan-rate question by disassembly. Details:
+`docs/input_polling_research.md` §7c/§9a.
+
+## S-Marvelous server upload / S-MFC lamps (2026-09-12, six cabinet deploys)
+
+**Never widen a stock enum on the wire.** The song-select lamp lookups index a
+per-TU pointer table (`clearkind → "fc_mfc"…`) by the LOADED clear kind with
+NO bounds check; a stock or mod-off client handed `clearkind 11` reads one
+slot past the table. New tiers travel in ADDITIVE nodes/fields stock clients
+ignore (`/data/s_marv`, `option/smarv_scores`) — stock fields keep their
+domain, always.
+
+**Staging-buffer slot ≠ wire field name — read the packet, not the decompile.**
+The save marshal's slot fed from `rec+0x270` was taken for the clear kind; the
+packet log (`<result>` order `playtime, stagenum, folder, mcode, …, rank,
+clearkind`) showed it is `folder` and the wire clear kind is `rec+0x54`. A
+node the backend stores verbatim will faithfully persist a misread — the
+identity echo + a stock/vs-node value diff in the FIRST packet log is the
+cheapest check there is.
+
+**`PlayerWork+0x54` is the COMMITTED song, not the wheel highlight.** Keying a
+song-select badge on it "works" exactly as long as you only test the song you
+just played. The wheel highlight is the select-music model's
+`+highlight_slot` holder (`services/selectmusic_highlight.rs`); and every
+visible wheel CARD is its own object drawing its OWN song (`card+0x148`) — a
+badge on a per-card refresh must key on that card's holder or the jackets
+flip with the cursor.
+
+**One texture family per surface.** "The MFC badge" is three refreshers
+(`muca_card_fc_*` jacket, `musi_dif_fc_*` side-info table in a DIFFERENT
+package, `muca_dif_fc_*` difficulty-picker) with inlined setters; a detour on
+one never fires for the others. When a badge "still shows stock", check which
+refresher logged ENTRY before assuming the swap failed — the DifficultyPanel
+hook was correct and simply never ran while resting on a song.
+
+**Game-thread `cargo fmt` gotcha for patch scripts:** `cargo fmt` rewraps long
+`format!`/`log_*!` calls, so a Python search-and-replace written against your
+own freshly written text can miss after the next fmt. Prefer rewriting the
+whole function/file, or anchor on identifiers rather than wrapped lines.
+
+**bemani-buddy `cargo fmt`:** during this feature the tree was NOT rustfmt-clean
+(a blanket run touched ~58 files, so the agent avoided it); the maintainer then
+formatted the whole tree in `4e40eb4`, and `codegen → cargo fmt` is a zero-diff
+round trip again. Check `cargo fmt --check` before assuming either state.

@@ -8,6 +8,14 @@ DDR World handles button input through a set of named exports in `arkmdxbio2.dll
 
 ### Foot Panel Arrow Exports
 
+> **Superseded (2026-09-11):** the signature below is wrong. The export
+> wrappers dispatch to a 6-arg vtable impl
+> `(this, player, u8* state, u8* trigger, u64* press_ts, u64* release_ts)` —
+> the two u64s are per-panel press/release timestamps in the libavs ordinal-45
+> clock, derived by arkmdxbio2 from libacio2's MDXF poll ring. See
+> `docs/input_polling_research.md` §4–5. The "counter" lives behind the
+> separate `arkMDXGetPanelCounter*` exports.
+
 Signature: `(int playerIndex, bool* trigger, bool* hold, bool* release, uint* counter) -> void`
 
 | Export | Description |

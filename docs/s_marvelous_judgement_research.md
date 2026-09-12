@@ -1051,3 +1051,88 @@ it belongs to the new top tier.
 - **Not done:** the display-mode≠0 detail strip (`+0x618..+0x6B8`, worst
   grade per second) still files an all-S-Marv second under its MARVELOUS
   class — a separate re-host if ever wanted.
+
+## Addendum 2026-09-12 — Server-side awareness (`/data/s_marv` upload + S-MFC echo-back)
+
+Planning: `.agents/planning/2026-09-12-s-marvelous-server-upload/` (design +
+plan Approved 2026-09-12; `progress.md` carries the six-deploy log). Backend:
+bemani-buddy migration `019_ddr_world_smarv.sql`, `handle_save_scores`
+(`parse_smarv_node`), `option.smarv_scores` on load.
+
+### Save marshal (`ReflectSavePlayerData`, 20260825 `FUN_180018ee0`)
+
+`ark::network::ReflectSavePlayerData(side, kind, stage)` fills a per-side
+staging buffer (`DAT_1804d0f40 + side*0xBED8`) that ess
+`sys_playerdata_save_sender` serialises into the kbin `/data/result`. Kind-2
+branch, record `PlayerWork + 0x590 + stage*0x2B8` (or the COURSE record
+`PlayerWork+0x2D8` when `PlayerWork+0x4C == 10` — kind-2 saves DO fire in
+courses):
+
+| wire | record | note |
+|---|---|---|
+| `stagenum` | the `stage` argument | |
+| `folder` | `rec+0x270` | **not** a clear kind — `docs/premium_free_stale_record_bug.md` used to mislabel it; deploy #1 shipped it as `s_marv/clearkind = 7` |
+| `mcode` / `style` / `difficulty` | `rec+0x00` / `+0x08` / `+0x04` | |
+| `rank` / `clearkind` | `rec+0x50` / **`rec+0x54`** | the SAME field the results-emblem S-MFC predicate reads; 10 = MFC |
+| `score` / `exscore` / `maxcombo` | `rec+0x10` / `+0x14` / `+0x20` | |
+| `judge_marv..ng` | `rec+0x28,+0x2C,+0x30,+0x34,+0x3C,+0x40,+0x44` | the `+0x38` Boo slot is never sent |
+| `fastcount` / `slowcount` | `rec+0x6C` / `+0x70` | grades 1..=4 only (stock rule) |
+| `ghost` / `ghostsize` | EVERY element of the `rec+0xB8..+0xC0` byte vector, each `+ '0'`; size = its length | **no judged filtering** — a failed-out song emits the unjudged tail as `'0'`; staging cap `0x2004` chars |
+
+Ghost alphabet (decoder `ark::network::GetGhostData`, `FUN_18001e1d0`:
+`c − 0x30`): `'0'..'7'` = grade class 0..7 (M, P, Gr, Gd, Boo, Miss, O.K.,
+N.G.). The `s_marv/ghost` overlay adds `'8'` = S-Marvelous; it never reaches
+a stock decoder because the stock `<ghost>` is untouched and the server never
+serves it back.
+
+### Wire contract
+
+`/data/s_marv` (savekind 2 only, one node, the LATEST stage — both bemani-buddy
+and bemaniutils keep only the highest-`stagenum` `<result>`): `mcode style
+difficulty window_ms judge_smarv judge_marv(exclusive) fastcount slowcount
+clearkind(11 = S-MFC) ghostsize ghost`. Recomputed from the record streams
+(`records::read_raw_streams` + the judged mask) with `state::last_armed_window`
+— the results-screen inputs — so packet == results screen. Emitted through the
+persistence service's new `/data` subtree-producer registry
+(`register_data_node_producer`; void container via libavs ordinal 163 kbin type
+1, leaves s32/str, partial failure ⇒ ordinal-164 removal). Never touches a
+stock node.
+
+Load echo: `option/smarv_scores` = `mcode:chart:clearkind|…` for rows whose
+S-Marv clear kind differs from stock (the S-MFCs). Stock `score_str` is
+byte-identical — a stock client handed `clearkind 11` would index the lamp
+pointer table (below) one slot past its end.
+
+### Song-select lamp surfaces (all keyed on an UNCHECKED clearkind → suffix pointer table)
+
+Three refreshers draw a clear-kind lamp; each formats `<prefix>_%s` from a
+per-TU copy of the same 10/11-entry suffix table (`NULL, NULL,
+clear_assisted, clear_normal, clear_life4 ×3, fc_gofc, fc_grfc, fc_pfc,
+fc_mfc` on the card/DifficultyPanel copies; the RecordPanel copy is shifted
+by one) indexed by the loaded clear kind with NO bounds check, then runs the
+inline setter `find_child(layer_id, widget) → for each traversal(6) sibling →
+load_bitmap`. The S-MFC badge is a post-original detour on each that re-runs
+that setter with a violet texture (`lamp_badge.rs`):
+
+| surface | function (20260825) | signature | layer | widget | texture (package) | song identity |
+|---|---|---|---|---|---|---|
+| wheel jacket card | `FUN_18015a450` `fn(this, u8)` | `selectmusic_card_refresh` | `*(this+0xD0)` | `fullcombo_%dp_usr` | `muca_card_fc_%s` (select_music_card) | the CARD'S OWN song holder `*(this+0x148)` — every visible card is a separate object |
+| side-info table (DIFFICULTY / LEVEL / BEST SCORE / CLEAR RANK) | `RecordPanel::Refresh` `FUN_18019b9f0` | `selectmusic_record_panel_refresh` | `*(this+0x118)` | `side_%dp_usr/info_%dp_usr/item_%02d_usr/fc_usr`, rows = difficulties 0..4 | `musi_dif_fc_%s` (select_music_side) | the wheel highlight; side at `this+0x140` |
+| difficulty-PICKER panel | `DifficultyPanel::Reflesh` `FUN_180115ea0` | `selectmusic_difficulty_panel_refresh` (+`_v1`) | `*(this+0xC0)` | `difficulty%dp_usr/dif%02d_usr/fc_usr`, rows = `vector<int>` at `this+0x1B8..0x1C0` | `muca_dif_fc_%s` (select_music_card) | the wheel highlight |
+
+Song identity (`services/selectmusic_highlight.rs`): a HOLDER
+(`ChartMetadata`) — the model's `+highlight_slot` (`0x1B0`/`0x190`) or a
+card's `+0x148` — whose `+0x00/+0x08` is the inner `shared_ptr<music::Info>`;
+`Info` vtable slot 0 = mcode getter (the game's clear-kind lookup
+`FUN_1800ff4a0` locks that pair and calls it), slot 1 = code string. The row
+the game draws a lamp for is `holder+0x74+kind*4` (kind = `model+4+side*4`)
+or the fixed `holder+0x70` when the holder has a child redirect at `+0x10`.
+**`PlayerWork+0x54` is the COMMITTED/last-played song, not the highlight** —
+keying the badge on it made every early deploy "work" only on the song just
+played.
+
+Textures: `muca_card_fc_smfc` (20×8), `muca_dif_fc_smfc` (40×16),
+`musi_dif_fc_smfc` (40×16) — violet recolors of the MFC donors (neutral
+pixels untouched, hue 280°, sat floor 0.55, value ×0.90; alpha identical),
+FRESH atlas clones `smarv_smc` / `smarv_sms`. Still stock: the FilterPanel's
+per-player aggregate lamp (`record_%dp_usr/fc_usr`, `FUN_180119cf0`).

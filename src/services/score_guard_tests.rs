@@ -343,6 +343,25 @@ fn reset_taints_clean() {
     }
 }
 
+/// Autoplay ALONE must suppress the stage save. This test is the release
+/// guard for `score_guard::TESTING_ALLOW_AUTOPLAY_SCORES`: it FAILS while that
+/// test-build switch is `true`, so the switch can never be committed unnoticed.
+#[test]
+fn autoplay_taint_alone_suppresses_its_side() {
+    use super::score_guard;
+    let _guard = locked_clean_taints();
+    assert!(
+        !score_guard::TESTING_ALLOW_AUTOPLAY_SCORES,
+        "score_guard::TESTING_ALLOW_AUTOPLAY_SCORES is still true — revert the test-build switch"
+    );
+    score_guard::set_autoplay_taint(P1, true);
+    assert!(score_guard::is_stage_suppressed(P1));
+    assert!(!score_guard::is_stage_suppressed(P2));
+    score_guard::set_autoplay_taint(P1, false);
+    assert!(!score_guard::is_stage_suppressed(P1));
+    reset_taints_clean();
+}
+
 #[test]
 fn training_taint_suppresses_only_its_side() {
     use super::score_guard;

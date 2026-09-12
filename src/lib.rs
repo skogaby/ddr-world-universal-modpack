@@ -360,6 +360,13 @@ fn init() {
     }
     profiling::tick("stage_records");
 
+    // 4h3. Song-select highlight reader (the wheel model's highlighted
+    // music::Info → mcode) — consumed by the S-Marvelous S-MFC lamp badge.
+    // Fail-open: unavailable ⇒ the badge stays inert.
+    if !services::selectmusic_highlight::init(&signatures, &game_module) {
+        log_warn!("selectmusic_highlight unavailable -- S-MFC song-select lamps stay stock");
+    }
+
     // 4i. Custom options persistence — ess.dll save/load bridge.
     let cop_ok = custom_options_persistence::init(&signatures);
     if cop_ok {

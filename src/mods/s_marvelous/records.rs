@@ -193,6 +193,60 @@ unsafe fn read_vec_bounds<T>(record: *const u8, offset: usize) -> Option<(*const
 /// # Safety
 /// `record` must point at a live stage record, on the game thread.
 pub unsafe fn read_streams(record: *const u8) -> Option<(Vec<u8>, Vec<i16>)> {
+    let raw = read_raw_streams(record)?;
+    let (grades, errors) = raw.judged_only();
+    let marv_counter = (record.add(REC_GRADE_COUNTS) as *const i32).read_unaligned();
+    if marv_counter < 0 || count_grade(&grades, GRADE_MARVELOUS) != marv_counter as u32 {
+        return None;
+    }
+    Some((grades, errors))
+}
+
+/// The record's per-note streams as the MARSHAL sees them — every stream
+/// slot, judged or not — plus the per-slot judged mask.
+///
+/// The game's save marshal (`ReflectSavePlayerData`, 20260825) emits the
+/// wire `ghost` as EVERY element of the `+0xB8` grade vector (`'0' + grade`)
+/// with no judged filtering, so a character-for-character overlay of that
+/// string needs the unfiltered index space; the judged mask is what keeps an
+/// unjudged tail slot (grade 0, ms 0 by construction) from being mistaken
+/// for an S-Marvelous. Index `i` pairs across all three vectors.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawStreams {
+    pub grades: Vec<u8>,
+    pub ms: Vec<i16>,
+    pub judged: Vec<bool>,
+}
+
+impl RawStreams {
+    /// The judged-only parallel streams — what [`read_streams`] returns.
+    pub fn judged_only(&self) -> (Vec<u8>, Vec<i16>) {
+        let n = self.grades.len().min(self.ms.len()).min(self.judged.len());
+        let mut g = Vec::with_capacity(n);
+        let mut e = Vec::with_capacity(n);
+        for i in 0..n {
+            if self.judged[i] {
+                g.push(self.grades[i]);
+                e.push(self.ms[i]);
+            }
+        }
+        (g, e)
+    }
+}
+
+/// Copy the record's UNFILTERED grade + ms streams and the judged mask
+/// (design §4.2). Fail-closed when the two streams disagree in length. The
+/// judged mask is stream-aligned: one entry per stream slot, `true` iff a
+/// flag≥0 note entry exists at that index and is judged — slots past the
+/// note list read as unjudged (the same `min`-length tolerance
+/// [`filter_judged`] has always applied, so [`read_streams`] is
+/// bit-identical to its pre-refactor behaviour). No counter cross-check
+/// here — that belongs to the judged view, because the raw grade stream
+/// legitimately carries grade-0 garbage in unjudged slots.
+///
+/// # Safety
+/// `record` must point at a live stage record, on the game thread.
+pub unsafe fn read_raw_streams(record: *const u8) -> Option<RawStreams> {
     if record.is_null() {
         return None;
     }
@@ -201,19 +255,24 @@ pub unsafe fn read_streams(record: *const u8) -> Option<(Vec<u8>, Vec<i16>)> {
     if g_len != e_len {
         return None;
     }
-    // Empty streams are legal (a quick-failed song can end with zero judged
-    // notes — the tab shows all zeros); the counter cross-check below still
-    // applies (must be 0).
-    let raw_grades = std::slice::from_raw_parts(g_ptr, g_len);
-    let raw_errors = std::slice::from_raw_parts(e_ptr, e_len);
     let notes = read_note_refs(record)?;
-    let (grades, errors) = filter_judged(raw_grades, raw_errors, &notes);
+    // Empty streams are legal (a quick-failed song can end with zero judged
+    // notes — the tab shows all zeros; the marshal emits an empty ghost).
+    let grades = std::slice::from_raw_parts(g_ptr, g_len).to_vec();
+    let ms = std::slice::from_raw_parts(e_ptr, e_len).to_vec();
+    Some(RawStreams {
+        grades,
+        ms,
+        judged: judged_mask(&notes, g_len),
+    })
+}
 
-    let marv_counter = (record.add(REC_GRADE_COUNTS) as *const i32).read_unaligned();
-    if marv_counter < 0 || count_grade(&grades, GRADE_MARVELOUS) != marv_counter as u32 {
-        return None;
-    }
-    Some((grades, errors))
+/// Pure core: the stream-aligned judged mask for `len` stream slots from
+/// the flag≥0 note refs — `true` iff `i < notes.len() && notes[i].judged`.
+pub fn judged_mask(notes: &[NoteRef], len: usize) -> Vec<bool> {
+    (0..len)
+        .map(|i| notes.get(i).is_some_and(|n| n.judged))
+        .collect()
 }
 
 /// Keep only stream slots whose note entry was JUDGED (pure core of the
@@ -753,5 +812,37 @@ mod tests {
         // No other series at all ⇒ everything is pure.
         let (pure, mixed) = split_pure_seconds(&violet, &[]);
         assert_eq!((pure, mixed), (vec![1.0, 2.0], vec![0.0, 0.0]));
+    }
+
+    // ── RawStreams / judged_mask (server-upload Step 2) ──────────────
+
+    #[test]
+    fn judged_mask_is_stream_aligned_and_pads_past_note_list() {
+        let notes = [note(true, 0), note(false, 0), note(true, 0)];
+        // Fewer notes than slots ⇒ trailing slots read unjudged.
+        assert_eq!(
+            judged_mask(&notes, 5),
+            vec![true, false, true, false, false]
+        );
+        // More notes than slots ⇒ truncated to the stream length.
+        assert_eq!(judged_mask(&notes, 2), vec![true, false]);
+        assert!(judged_mask(&notes, 0).is_empty());
+    }
+
+    #[test]
+    fn raw_judged_only_matches_filter_judged() {
+        // The refactored `read_streams` = `read_raw_streams().judged_only()`
+        // must reproduce the pre-refactor `filter_judged` bit for bit,
+        // including the min-length tolerance for a short note list.
+        let grades = [0u8, 1, 0, 5, 0, 0];
+        let errors = [3i16, 40, -9, 0, 0, 0];
+        let notes = [note(true, 0), note(true, 0), note(false, 0), note(true, 0)];
+        let raw = RawStreams {
+            grades: grades.to_vec(),
+            ms: errors.to_vec(),
+            judged: judged_mask(&notes, grades.len()),
+        };
+        assert_eq!(raw.judged_only(), filter_judged(&grades, &errors, &notes));
+        assert_eq!(raw.judged_only(), (vec![0, 1, 5], vec![3, 40, 0]));
     }
 }

@@ -206,6 +206,64 @@ pub fn register_card_in_callback(cb: fn(u8)) {
     CARD_IN_CALLBACKS.lock().unwrap().push(cb);
 }
 
+// ── `/data` subtree producers (S-Marvelous server-upload extension) ───────
+
+/// One typed leaf of a producer's container node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeLeaf {
+    /// kbin `s32` (type 6), value by value.
+    S32(&'static str, i32),
+    /// kbin `str` (type 11), value by pointer to a NUL-terminated copy.
+    Str(&'static str, String),
+}
+
+/// A `void` container node appended directly under `/data` of the built
+/// save tree, with its leaves in order. A plain value type so producers can
+/// build it in a pure, host-tested function; the ordinal calls live here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeSpec {
+    pub name: &'static str,
+    pub leaves: Vec<NodeLeaf>,
+}
+
+/// Producer for a `/data` subtree: receives the resolved side and the
+/// `savekind` (1 card-in checkpoint, 2 per-stage, 3 logout) and returns
+/// `None` to emit nothing this save. The registry never filters by kind —
+/// producers gate themselves.
+pub type DataNodeProducer = fn(side: u8, savekind: i32) -> Option<NodeSpec>;
+
+struct DataNodeProducerEntry {
+    name: &'static str,
+    producer: DataNodeProducer,
+}
+
+static DATA_NODE_PRODUCERS: Lazy<Mutex<Vec<DataNodeProducerEntry>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Register (replace-by-name) a `/data` subtree producer. Callable any time;
+/// consulted only on forwarded saves after the original sender built the
+/// tree, under the same `persist_network` gate as the `mod_*` children.
+pub fn register_data_node_producer(name: &'static str, producer: DataNodeProducer) {
+    let mut v = DATA_NODE_PRODUCERS.lock().unwrap();
+    v.retain(|e| e.name != name);
+    v.push(DataNodeProducerEntry { name, producer });
+}
+
+/// Remove a producer registered with [`register_data_node_producer`].
+pub fn unregister_data_node_producer(name: &'static str) {
+    DATA_NODE_PRODUCERS
+        .lock()
+        .unwrap()
+        .retain(|e| e.name != name);
+}
+
+/// kbin node type of an empty container (`void`, `types.rs::NODE_START`).
+const KBIN_TYPE_VOID: i32 = 1;
+/// kbin node type of a 32-bit signed integer leaf.
+const KBIN_TYPE_S32: i32 = 6;
+/// kbin node type of a string leaf.
+const KBIN_TYPE_STR: i32 = 11;
+
 /// Guards one-time registration of the SONG_SELECT drain callback.
 static SCENE_CALLBACK_REGISTERED: AtomicBool = AtomicBool::new(false);
 
@@ -903,6 +961,12 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
     //                                      the pre-sanitiser policy did.
     //   * `FIRST` saves carry no real score and are never touched.
     let mut strip_league = false;
+    if savekind == SAVEKIND_STAGE && score_guard::autoplay_masked_for_testing(side as usize) {
+        log_warn!(
+            "score_guard: TEST BUILD — P{} AUTOPLAY stage score NOT suppressed (score_guard::TESTING_ALLOW_AUTOPLAY_SCORES); revert before release",
+            side + 1
+        );
+    }
     let suppress = match savekind {
         SAVEKIND_STAGE => score_guard::is_stage_suppressed(side as usize),
         SAVEKIND_LOGOUT => {
@@ -1012,6 +1076,7 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
     if PERSIST_NETWORK.load(Ordering::SeqCst) {
         emit_network_children(kbin_ctx, &snapshot, side, playside_raw);
         emit_string_fields(kbin_ctx, side);
+        emit_data_node_producers(kbin_ctx, side, savekind);
     }
 
     // ── Offline JSON persistence: write this side's values to mod-config.json ─
@@ -1194,6 +1259,134 @@ fn warn_str_emit_once(reason: &str) {
             "custom_options_persistence: string-field emit failed ({}) — network persistence of string fields skipped",
             reason
         );
+    }
+}
+
+/// One-shot warn latch for subtree-producer emit failures (one per process;
+/// the log line names the producer and the reason).
+static WARNED_DATA_NODE_EMIT: AtomicBool = AtomicBool::new(false);
+
+fn warn_data_node_emit_once(producer: &str, reason: &str) {
+    if !WARNED_DATA_NODE_EMIT.swap(true, Ordering::AcqRel) {
+        log_warn!(
+            "custom_options_persistence: /data/{} emit failed ({}) — node omitted, stock packet forwarded",
+            producer,
+            reason
+        );
+    }
+}
+
+/// Materialise every registered `/data` subtree producer's node into the
+/// built save tree: a `void` container directly under `<data>` (ordinal 163
+/// with kbin type 1 and no value — the same `property_node_create` ess uses
+/// for `<result>`/`<option>`; the s32 view's dead value slot is passed as 0)
+/// followed by its typed leaves. A container or leaf failure removes the
+/// partial node (ordinal 164, best effort) so the packet never carries a
+/// half-built subtree, warns once, and moves on to the next producer. The
+/// producers' own `None` is silent (their gate, their diagnostics).
+unsafe fn emit_data_node_producers(kbin_ctx: *mut u8, side: u8, savekind: i32) {
+    // Snapshot the producer list so a producer registering/unregistering
+    // from inside its own call can never deadlock the registry.
+    let producers: Vec<(&'static str, DataNodeProducer)> = DATA_NODE_PRODUCERS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| (e.name, e.producer))
+        .collect();
+    if producers.is_empty() {
+        return;
+    }
+    let Some(xml_find_child) = *addr_of!(FN_XML_FIND_CHILD) else {
+        return;
+    };
+    let Some(xml_add_child) = *addr_of!(FN_XML_ADD_CHILD) else {
+        return;
+    };
+    let Some(xml_add_child_str) = *addr_of!(FN_XML_ADD_CHILD_STR) else {
+        return;
+    };
+    let Some(xml_get_ctx) = *addr_of!(FN_XML_GET_CTX) else {
+        return;
+    };
+    let remove_node = *addr_of!(FN_XML_REMOVE_NODE);
+
+    for (producer_name, producer) in producers {
+        let Some(spec) = producer(side, savekind) else {
+            continue;
+        };
+        let data_node = xml_find_child(0, kbin_ctx, b"data\0".as_ptr() as *const i8);
+        if data_node.is_null() {
+            warn_data_node_emit_once(producer_name, "<data> not found");
+            continue;
+        }
+        let ctx = xml_get_ctx(kbin_ctx);
+        if ctx.is_null() {
+            warn_data_node_emit_once(producer_name, "get_ctx returned null");
+            continue;
+        }
+        let Ok(c_name) = CString::new(spec.name) else {
+            warn_data_node_emit_once(producer_name, "interior NUL in node name");
+            continue;
+        };
+        let container = xml_add_child(ctx, data_node, KBIN_TYPE_VOID, c_name.as_ptr(), 0);
+        if container.is_null() {
+            warn_data_node_emit_once(producer_name, "Ordinal_163 (void) returned null");
+            continue;
+        }
+        let mut failure: Option<String> = None;
+        for leaf in &spec.leaves {
+            let (leaf_name, ok) = match leaf {
+                NodeLeaf::S32(n, v) => {
+                    let Ok(c) = CString::new(*n) else {
+                        failure = Some(format!("interior NUL in leaf name {n}"));
+                        break;
+                    };
+                    (
+                        *n,
+                        !xml_add_child(ctx, container, KBIN_TYPE_S32, c.as_ptr(), *v).is_null(),
+                    )
+                }
+                NodeLeaf::Str(n, v) => {
+                    let (Ok(c), Ok(cv)) = (CString::new(*n), CString::new(v.as_str())) else {
+                        failure = Some(format!("interior NUL in leaf {n}"));
+                        break;
+                    };
+                    (
+                        *n,
+                        !xml_add_child_str(ctx, container, KBIN_TYPE_STR, c.as_ptr(), cv.as_ptr())
+                            .is_null(),
+                    )
+                }
+            };
+            if !ok {
+                failure = Some(format!("Ordinal_163 returned null for leaf {leaf_name}"));
+                break;
+            }
+        }
+        match failure {
+            None => {
+                log_info!(
+                    "custom_options_persistence: save — emitted /data/{} ({} leaves, side {}, savekind {})",
+                    spec.name,
+                    spec.leaves.len(),
+                    side,
+                    savekind
+                );
+            }
+            Some(reason) => {
+                let removed = match remove_node {
+                    Some(f) => f(container) >= 0,
+                    None => false,
+                };
+                warn_data_node_emit_once(
+                    producer_name,
+                    &format!(
+                        "{reason}; partial node {}",
+                        if removed { "removed" } else { "NOT removed" }
+                    ),
+                );
+            }
+        }
     }
 }
 

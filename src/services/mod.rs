@@ -127,6 +127,7 @@ pub mod render_notes_hook;
 pub mod scene_manager;
 pub mod score_guard;
 pub mod se_bank_synth;
+pub mod selectmusic_highlight;
 pub mod series_filter_scroll;
 pub mod smx;
 pub mod song_rate;
