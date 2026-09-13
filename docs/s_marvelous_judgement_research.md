@@ -1136,3 +1136,88 @@ Textures: `muca_card_fc_smfc` (20×8), `muca_dif_fc_smfc` (40×16),
 pixels untouched, hue 280°, sat floor 0.55, value ×0.90; alpha identical),
 FRESH atlas clones `smarv_smc` / `smarv_sms`. Still stock: the FilterPanel's
 per-player aggregate lamp (`record_%dp_usr/fc_usr`, `FUN_180119cf0`).
+
+---
+
+## Addendum 2026-09-12 — Receptor: stock white bomb + violet JudgeEffect burst
+
+Maintainer directive: the S-Marvelous receptor **bomb** goes back to stock
+white (like Marvelous), the Marvelous/Perfect bomb size changes are undone,
+and the receptor still turns violet — via the game's own per-grade **burst**
+instead. Supersedes the 2026-09-10 "Violet receptor hit flash" addendum's
+Mod section (the RE section there stands; the type-0 details below extend
+it). Retired: the `afp_layer_set_color` CXFORM tint, `receptor_patch.rs`
+(`dance_effect` retier), the `in_smarvelous` re-seek, host Leg H.
+
+### RE (20260825; 20250805 identical at every cited site)
+
+- **`dance_effect_v3` template dump** (bemaniutils, this session): the
+  `ef_bomb` sprite (id 18 → shape 16 → texture `dance_effect_bomb`) is a
+  4-point greyscale star; `dance_effect_arrow` (an arrow-outline texture in
+  the same atlas) is referenced by NO shape and NO placement — dead art, the
+  "arrow-shaped white flash" does not come from this clip. Segment timeline:
+  `in_marvelous` f0..f8 (bomb 0.80→1.15, removed f8, `stop()` f10),
+  `in_marvelous_freeze` f12 (yellow `ef_freeze`), `in_perfect` f24..f32
+  (bomb 0.40→0.80), `in_great/good/boo/miss/ng` = alpha-0 placeholder only,
+  `in_ok` f60 (yellow `ef_freeze`). Root and exported sprite 32 carry the
+  identical timeline.
+- **`JudgeEffectRenderer::push`** = `FUN_180027EC0` (20260825) /
+  `FUN_1800279D0` (20250805): `void(this, u8 lane_bits, int type)`. Builds
+  `{t0 = *(this+0x94), lanes (u32 bitset from the u8), type}` (0xC bytes)
+  and `vector::push_back`s it at `this+0xA0` (`FUN_1801CCA60`, the game's
+  allocator). NOT inlined — exactly two callers on every build:
+  `judgeNotes` (`MOV R8D,1|2|3; MOVZX EDX,CL; MOV RCX,[R13+0x150]; CALL`)
+  and the freeze-hold tick `FUN_18005F720` (`MOV RCX,[R9+0x150]; MOV R8D,4;
+  CALL`). New signature `judge_effect_push` (prologue + `+0x94` clock read;
+  unique on all four builds, shape-identical through 0x180). Derived
+  `gpa_judge_effect_off` = the disp32 of the `MOV RCX,[reg+disp32]`
+  preceding each CALL — 0x150 on all four builds, all sites agree (below the
+  `+0x208` GamePlayActor layout split, so no old/new fork).
+- **Per-type colour/size at draw** (`FUN_180028D20`, the quad emitter inside
+  `judge_effect_render`): `f = (1 − age/lifetime)·255`; lifetime = 150 ms for
+  types 0/5/6 ("flash" class), 200 ms otherwise. Base `(f,f,f)`; types 1..6
+  override — 1/4 `(f,f,f/4)`, 2/5 `(f/4,f,f/4)`, 3/6 `(f/4,f,3f/4)` — and
+  the flash class then doubles + saturates every channel (`min(2c,255)`).
+  Type 0 is therefore `(min(2f,255))×3` = pure white, full-bright for the
+  first ~75 ms then fading. **A type ≥ 7 is in NEITHER class**: not flash
+  (200 ms lifetime, 1.25 grow — exactly Perfect's), not in the colour
+  switch (base `(f,f,f)` kept — a linear white fade). Alpha byte 0xFF (the
+  fill applies the appearance fade). Size: `96 + f·k·grow` with `grow` =
+  2.0 (flash class) / 1.25 (others) → 140 px vs 123 px at f=1. The prune in
+  `judge_effect_render` uses the same two-class lifetime, so a type-7 record
+  lives exactly 200 ms like a Perfect's. The quad is emitted through the
+  SHARED `render_sprite_final` (`FUN_180025500`) — `this` = the renderer,
+  `&color` = the 4-byte stack colour — under the renderer's own SetShader
+  (`this+0x98`, program 0 = the JUDGE container). 20250805 (`FUN_180028BC0`)
+  is identical in every constant and branch.
+- **White is a perfect discriminator at the fill.** For every `f > 0` no
+  stock type is greyscale: yellow `(f,f,f/4)` has `B ≠ R`, green
+  `(f/4,f,f/4)` has `G ≠ R`, blue `(f/4,f,3f/4)` has all three distinct
+  (and the type-5/6 doubling preserves the inequalities until saturation,
+  where yellow/green still keep a `f/4`-derived channel below 255). So
+  `R == G == B` holds ONLY for types outside `1..=6` (0, and ≥ 7) and for
+  the fully-faded `(0,0,0)` of any type (which recolours to itself). Host test
+  `discriminator_against_the_games_colour_table` sweeps f ∈ 0..=255 over
+  all six stock formulas.
+
+### Mod (`receptor.rs` + pure `receptor_color.rs`, `playfield_styling::fill_hook` refcount)
+
+Zero new detours: on an S-Marv event (post-original in the judge tap;
+`flash::on_judge_event` now passes the GamePlayActor = `judge_submit`'s
+`this`), `receptor::on_smarvelous` reads `*(gpa + gpa_judge_effect_off)`,
+probes it (`memory::is_readable(ptr, 0xB8)` + offset-0 vtable ==
+`judge_effect_renderer_vtable`), and calls the game's `push(renderer,
+info+0x08 & 0xFF, BURST_TYPE = 7)`. The recolour rides `playfield_styling`'s existing
+`render_sprite_final` detour, promoted to a refcounted shared install
+(`Consumer::{PlayfieldStyling, SMarvelous}`, the `guideline_hook` shape):
+before the playfield transform, a `JudgeEffectRenderer`-vtable quad's
+COLOR4B goes through `receptor_color::recolor` — `R==G==B≠0 ⇒ c×0xA030FF`
+(the saturated additive violet; the pastel `0xB05CE0` washes out under
+additive blend, cabinet 2026-09-10). Both halves arm together or not at
+all (`receptor::activate` gates on the fill acquire). Fail-open with one
+WARN per class; identity when the mod is off. Visual result: S-Marv = the
+stock white Marvelous bomb + a violet receptor burst with EXACTLY Perfect's
+geometry and timing (200 ms, 123 px, linear fade). The first cut pushed
+type 0 (the flash class: 150 ms, 2.0 grow, ~140 px) — maintainer: "too
+large, distracting" — type 7 keeps the discriminating greyscale without the
+flash geometry.

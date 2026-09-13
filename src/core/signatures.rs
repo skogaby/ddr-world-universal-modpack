@@ -1446,6 +1446,24 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 89 5C 24 10 57 48 83 EC 40 48 8B 99 A8 00 00 00 4C 8B 89 A0 00 00 00 48 8B F9",
         description: "JudgeEffectRenderer per-frame draw. RCX = renderer this (ArrowSprite base: posX/posY @ +0x30/+0x34, shader @ +0x98, records vector @ +0xA0/+0xA8).",
     },
+    // JudgeEffectRenderer record pusher: `void push(this, u8 lane_bits,
+    // int type)` — builds `{t0 = this+0x94 (the renderer's clock), lanes,
+    // type}` and `vector::push_back`s it into `this+0xA0` (the game's own
+    // allocator). The ONLY two stock callers are `judgeNotes` (types 1/2/3
+    // = Perfect/Great/Good burst) and the freeze-hold tick (type 4); types
+    // 0/5/6 (the 150 ms "flash" path) have NO pusher on any supported
+    // build, and nothing reads the type except the renderer's own prune +
+    // emit. The s_marvelous receptor burst calls this with type 7 (outside
+    // both draw-time type classes: Perfect's 200 ms / 1.25-grow geometry
+    // with the base greyscale `(f,f,f)` colour) and recolours the resulting
+    // white quads violet at the fill. Prologue anchored (`40 53` REX-prefixed PUSH
+    // RBX), cookie disp wildcarded, then the `+0x94` clock read + register
+    // setup. Unique on 20250805 (0x1800279D0) and 20260825 (0x180027EC0).
+    SignatureDefinition {
+        name: "judge_effect_push",
+        pattern: "40 53 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 8B 81 94 00 00 00 45 33 C9 41 8B D8 4C 8B D9 44 0F B6 D2",
+        description: "JudgeEffectRenderer::push(this, u8 lane_bits, int type). Appends {this+0x94, lanes, type} to the records vector @ this+0xA0.",
+    },
     // The final overload of the per-sprite filler on the arrow sprite
     // base class. Takes explicit UV, rotation, and color — does not read
     // member UV/twist state. Handles appearance alpha, reverse, and
@@ -2244,6 +2262,7 @@ impl SignatureStore {
         self.derive_smarv_results_course_gate();
         self.derive_ghost_vec_copy();
         self.derive_two_player_bpl();
+        self.derive_smarvelous_burst();
     }
 
     /// Derive `results_course_gate_global` — the global the PlaydataTab
@@ -2549,6 +2568,104 @@ impl SignatureStore {
             self.published_value("gpa_ex_score_off")?,
             self.published_value("gpa_money_score_off")?,
         ))
+    }
+
+    /// Derive `gpa_judge_effect_off` — the GamePlayActor field holding the
+    /// `screen::JudgeEffectRenderer*` (`+0x150` on every supported build;
+    /// below the `+0x208` layout split). Consumer: the s_marvelous receptor
+    /// burst, which pushes a type-7 record through the game's own
+    /// `judge_effect_push` for the S-Marvelous lanes.
+    ///
+    /// Derivation: every stock `CALL judge_effect_push` site loads its
+    /// `this` argument with `MOV RCX,[<GamePlayActor reg>+disp32]` within
+    /// the preceding 16 bytes (judgeNotes: `MOV R8D,type; MOVZX EDX,CL;
+    /// MOV RCX,[R13+0x150]; CALL`; freeze tick: `MOV RCX,[R9+0x150]; MOV
+    /// R8D,4; CALL`). Decode the LAST such load before each call (REX.W ∈
+    /// {48,49}, opcode 8B, ModRM mod=10/reg=RCX — no SIB), require every
+    /// site to agree on one plausible 8-aligned offset, and publish it.
+    /// Any disagreement or an unreadable site ⇒ nothing published (the
+    /// burst stays unavailable, one WARN).
+    fn derive_smarvelous_burst(&mut self) {
+        const TAG: &str = "gpa_judge_effect_off";
+        let Some(push) = self.get_address("judge_effect_push") else {
+            log_warn!("  [-] {} -- judge_effect_push unresolved", TAG);
+            return;
+        };
+        let sites = self.xrefs_to(push);
+        if sites.is_empty() {
+            log_warn!("  [-] {} -- no CALL sites for judge_effect_push", TAG);
+            return;
+        }
+        let base = self.base as usize;
+        let inside = |p: usize| p.wrapping_sub(base) < self.size;
+
+        let mut agreed: Option<usize> = None;
+        for &site in &sites {
+            // Window: the 16 bytes before the E8 opcode (all inside the
+            // module — the call site itself is, and 16 bytes back stays
+            // well within the same function body).
+            let start = (site as usize).wrapping_sub(16);
+            if !inside(start) {
+                log_warn!("  [-] {} -- call site window outside module", TAG);
+                return;
+            }
+            let mut found: Option<usize> = None;
+            // Candidate `REX.W 8B ModRM disp32` = 7 bytes; scan every
+            // position whose 7 bytes end at or before the CALL.
+            for off in 0..=9usize {
+                let p = unsafe { (start as *const u8).add(off) };
+                let rex = unsafe { *p };
+                let op = unsafe { *p.add(1) };
+                let modrm = unsafe { *p.add(2) };
+                if (rex == 0x48 || rex == 0x49)
+                    && op == 0x8B
+                    && (modrm & 0xC0) == 0x80
+                    && (modrm & 0x38) == 0x08
+                    && (modrm & 0x07) != 0x04
+                {
+                    let disp = unsafe { std::ptr::read_unaligned(p.add(3) as *const i32) };
+                    if disp > 0 {
+                        found = Some(disp as usize); // keep the LAST (closest) match
+                    }
+                }
+            }
+            let Some(off) = found else {
+                log_warn!(
+                    "  [-] {} -- no `MOV RCX,[reg+disp32]` before CALL @ +0x{:X}",
+                    TAG,
+                    (site as usize).wrapping_sub(base)
+                );
+                return;
+            };
+            match agreed {
+                None => agreed = Some(off),
+                Some(prev) if prev == off => {}
+                Some(prev) => {
+                    log_warn!(
+                        "  [-] {} -- call sites disagree (0x{:X} vs 0x{:X})",
+                        TAG,
+                        prev,
+                        off
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(off) = agreed else {
+            return;
+        };
+        if !(0x40..0x400).contains(&off) || off % 8 != 0 {
+            log_warn!("  [-] {} -- implausible offset 0x{:X}", TAG, off);
+            return;
+        }
+        // `publish_value` logs the `(derived) = 0x…` line.
+        self.publish_value(TAG, off);
+    }
+
+    /// Published GamePlayActor `JudgeEffectRenderer*` field offset (see
+    /// `derive_smarvelous_burst`), or `None`.
+    pub fn gpa_judge_effect_off(&self) -> Option<usize> {
+        self.published_value("gpa_judge_effect_off")
     }
 
     fn derive_song_rate_runtime_sites(&mut self) {
@@ -3539,6 +3656,7 @@ impl SignatureStore {
             "file_manager_load",
             "metadata_insert",
             "selectmusic_view_ctor",
+            "judge_effect_push",
         ];
 
         let targets: Vec<*const u8> = XREF_TARGETS

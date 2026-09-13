@@ -22,7 +22,7 @@ pub mod lamp;
 pub mod lamp_badge;
 pub mod lamp_codec;
 pub mod receptor;
-pub mod receptor_patch;
+pub mod receptor_color;
 pub mod records;
 pub mod results_emblem;
 pub mod results_graph;
@@ -97,6 +97,7 @@ pub struct SMarvelousMod {
     emblem_installed: bool,
     fast_slow_installed: bool,
     lamp_badge_installed: bool,
+    receptor_available: bool,
     scene_cb_id: Option<usize>,
     reset_cb_id: Option<usize>,
 }
@@ -112,6 +113,7 @@ impl SMarvelousMod {
             emblem_installed: false,
             fast_slow_installed: false,
             lamp_badge_installed: false,
+            receptor_available: false,
             scene_cb_id: None,
             reset_cb_id: None,
         }
@@ -296,9 +298,6 @@ fn arm_for_play_scene() {
     state::arm(1, window);
     flash::reset_latches();
     splash::reset_latches();
-    // The receptor flash clips are rebuilt per song (fresh layers at
-    // identity colour) — forget the tracked tints so the first S-Marv
-    // write is never elided.
     receptor::reset_for_song();
 }
 
@@ -370,6 +369,12 @@ impl Mod for SMarvelousMod {
             // detour. Best-effort — without it S-MFC charts keep the stock
             // MFC lamp; the upload/echo-back data path is unaffected.
             self.lamp_badge_installed = lamp_badge::install(ctx.signatures);
+            // Violet receptor burst (2026-09-12): the game's own
+            // JudgeEffectRenderer pusher + the derived GamePlayActor
+            // renderer offset + the shared fill hook. Best-effort — without
+            // it S-Marv keeps the stock (white, burst-less) Marvelous
+            // receptor.
+            self.receptor_available = receptor::init(ctx.signatures);
         }
         true
     }
@@ -428,11 +433,14 @@ impl Mod for SMarvelousMod {
         // logging above keep working regardless.
         afp_patches::activate(color);
 
-        // Receptor flash size tiers (2026-09-10): register the dance_effect
-        // patch (clone in_marvelous -> in_smarvelous, shrink Marvelous to
-        // Perfect's old ramp, halve Perfect). Pure transform, nothing to
-        // stage; a template of unknown shape streams stock with one WARN.
-        receptor_patch::activate();
+        // Violet receptor burst: arm the type-7 push + acquire the shared
+        // fill hook for the recolour (both or neither). The dance_effect
+        // bomb stays stock white — S-Marv's bomb IS the Marvelous bomb.
+        if self.receptor_available && !receptor::activate() {
+            log_warn!(
+                "SMarvelous: receptor burst not armed -- S-Marv shows the stock Marvelous receptor"
+            );
+        }
 
         // Combo digit textures (Step 5): FRESH atlas entries + per-image
         // PNGs. Best-effort — failure leaves the combo override dormant
@@ -497,7 +505,7 @@ impl Mod for SMarvelousMod {
         ACTIVE.store(false, Ordering::Release);
         crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY, SHIMMER_ROW_KEY]);
         afp_patches::deactivate();
-        receptor_patch::deactivate();
+        receptor::deactivate();
         combo::set_assets_ready(false);
         splash::deactivate();
         results_score::deactivate();

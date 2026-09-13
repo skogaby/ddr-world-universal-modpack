@@ -30,11 +30,28 @@
 //! never tracked. The registry is cleared at GAMEPLAY enter/exit (renderers
 //! are per-song objects).
 //!
+//! ## Shared install (two consumers)
+//!
+//! The detour is refcounted like `guideline_hook`: `playfield_styling`
+//! acquires it for the transform above, and `s_marvelous` acquires it for
+//! the violet RECEPTOR BURST recolour — the game's own `JudgeEffectRenderer`
+//! pushes one record per Perfect/Great/Good (yellow/green/blue arrow-shaped
+//! flash at the receptor); S-Marvelous pushes a type-7 record (a type no
+//! stock caller uses — outside both of the draw routine's type classes, so
+//! it keeps Perfect's geometry with the un-overridden greyscale `(f,f,f)`)
+//! and this hook turns those white quads violet at the fill. Classification for that path is a
+//! single vtable compare (`JudgeEffectRenderer` offset-0 vftable) — no
+//! registry, no gameplay gate — and runs BEFORE the transform so the two
+//! compose. Either consumer may be config-disabled; the detour installs on
+//! the first acquire and is torn down on the last release.
+//!
 //! ## Hot-path budget
 //!
 //! Runs per quad (typically < 100/frame; a few hundred worst-case with the
 //! extended cull window). Work per call: two atomic loads + one ≤16-slot
-//! pointer scan + 4 float mults. No locks, no allocation, no logging.
+//! pointer scan + 4 float mults (+ one vtable compare while the
+//! s_marvelous consumer holds the hook). No locks, no allocation, no
+//! logging.
 
 use std::ptr::{addr_of, addr_of_mut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -44,6 +61,32 @@ use retour::GenericDetour;
 use crate::{log_info, log_warn};
 
 use super::MOD_ID;
+
+/// Consumers of the shared fill detour.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(crate) enum Consumer {
+    PlayfieldStyling = 0,
+    SMarvelous = 1,
+}
+
+static WANTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// What a consumer brings to `acquire`. Null pointers mean "not provided"
+/// — the fill address is mandatory for the FIRST acquire; the vtables /
+/// player array are stored when non-null (they are module-global
+/// addresses, identical whichever consumer resolved them). The
+/// playfield_styling consumer provides everything; s_marvelous provides
+/// the fill + the JudgeEffect vtable.
+#[derive(Clone, Copy)]
+pub(crate) struct FillTargets {
+    pub fill: *const u8,
+    pub arrow_vt: *const u8,
+    pub spot_vt: *const u8,
+    pub judge_vt: *const u8,
+    pub player_array: *const u8,
+}
 
 // ── ArrowSprite / renderer field offsets (Ghidra-verified; research §2/§5) ──
 
@@ -434,6 +477,35 @@ fn plan_quad(this: *mut u8, x: f32, y: f32, w: f32, h: f32, color: *const u8) ->
     })
 }
 
+/// S-Marvelous receptor-burst recolour (the `SMarvelous` consumer's whole
+/// contribution). For a `JudgeEffectRenderer` quad, hand the incoming
+/// COLOR4B to `s_marvelous::receptor::recolor_burst`; a `Some` lands in
+/// `out` and is what the fill receives. Everything else — consumer not
+/// holding the hook, null pointers, any other renderer class, a colour the
+/// recolour declines — passes the original pointer through. Panic-free by
+/// construction (checked reads + byte arithmetic); one relaxed load per
+/// quad when the consumer is idle.
+#[inline]
+unsafe fn smarv_recolor(this: *mut u8, color: *const u8, out: &mut [u8; 4]) -> *const u8 {
+    if !WANTED[Consumer::SMarvelous as usize].load(Ordering::Relaxed)
+        || this.is_null()
+        || color.is_null()
+    {
+        return color;
+    }
+    let vt = VTABLE_JUDGE.load(Ordering::Relaxed);
+    if vt == 0 || (this as *const u64).read_unaligned() != vt {
+        return color;
+    }
+    match crate::mods::s_marvelous::receptor::recolor_burst(color) {
+        Some(c) => {
+            *out = c;
+            out.as_ptr()
+        }
+        None => color,
+    }
+}
+
 unsafe extern "C" fn fill_hook_cb(
     this: *mut u8,
     sprite: *mut u8,
@@ -449,6 +521,13 @@ unsafe extern "C" fn fill_hook_cb(
         Some(h) => h,
         None => return,
     };
+
+    // Shared consumer first: the S-Marvelous burst recolour applies to
+    // JudgeEffect quads regardless of the playfield mod's state, and feeds
+    // the (possibly) recoloured pointer into the transform below so both
+    // compose. `recolored` must outlive the `hook.call`s.
+    let mut recolored = [0u8; 4];
+    let color = smarv_recolor(this, color, &mut recolored);
 
     // Fast path: mod off or outside gameplay → forward untouched.
     if !super::is_enabled() || !IN_GAMEPLAY.load(Ordering::Acquire) {
@@ -487,21 +566,45 @@ unsafe extern "C" fn fill_hook_cb(
     }
 }
 
-// ── Install / remove ────────────────────────────────────────────────
+// ── Install / remove (refcounted) ───────────────────────────────────
 
-/// Install the fill detour (load-bearing). Publishes the vtables + player
-/// array for the bind path first, then installs via `install_enabled`
-/// (store-before-enable). Returns false on failure.
-pub(crate) fn install(t: &super::ResolvedTargets) -> bool {
-    VTABLE_ARROW.store(t.arrow_renderer_vtable as u64, Ordering::Relaxed);
-    VTABLE_SPOT.store(t.spot_renderer_vtable as u64, Ordering::Relaxed);
-    VTABLE_JUDGE.store(t.judge_effect_renderer_vtable as u64, Ordering::Relaxed);
-    PLAYER_ARRAY.store(t.player_array as u64, Ordering::Release);
+/// Store whatever module-global addresses a consumer brought (non-null
+/// only). Vtables overwrite (same value from any consumer); the player
+/// array keeps an existing value (`seed_player_array` semantics).
+fn publish_targets(t: &FillTargets) {
+    if !t.arrow_vt.is_null() {
+        VTABLE_ARROW.store(t.arrow_vt as u64, Ordering::Relaxed);
+    }
+    if !t.spot_vt.is_null() {
+        VTABLE_SPOT.store(t.spot_vt as u64, Ordering::Relaxed);
+    }
+    if !t.judge_vt.is_null() {
+        VTABLE_JUDGE.store(t.judge_vt as u64, Ordering::Relaxed);
+    }
+    seed_player_array(t.player_array);
+}
 
+/// Declare interest in the fill detour, installing it on first use.
+/// Publishes the consumer's vtables / player array first (store-before-
+/// enable), then installs via `install_enabled`. Returns false when the
+/// detour could not be installed (the consumer's interest is NOT recorded
+/// in that case, so a later release is a no-op).
+pub(crate) fn acquire(consumer: Consumer, t: &FillTargets) -> bool {
+    publish_targets(t);
+    if INSTALLED.load(Ordering::Acquire) {
+        WANTED[consumer as usize].store(true, Ordering::Release);
+        return true;
+    }
+    if t.fill.is_null() {
+        log_warn!("{MOD_ID}: render_sprite_final unresolved — fill hook unavailable");
+        return false;
+    }
     unsafe {
         let target: RenderSpriteFinalFn = std::mem::transmute(t.fill);
         match crate::core::hooks::install_enabled(addr_of_mut!(FILL_HOOK), target, fill_hook_cb) {
             Ok(()) => {
+                INSTALLED.store(true, Ordering::Release);
+                WANTED[consumer as usize].store(true, Ordering::Release);
                 log_info!(
                     "{MOD_ID}: render_sprite_final hook installed @ {:p}",
                     t.fill
@@ -516,13 +619,24 @@ pub(crate) fn install(t: &super::ResolvedTargets) -> bool {
     }
 }
 
-/// Tear down the fill detour and clear the registry.
-pub(crate) fn remove() {
+/// Drop a consumer's interest. The playfield consumer's registry is
+/// cleared on its release (its scene callback is gone by then); the detour
+/// itself is torn down only when no consumer remains.
+pub(crate) fn release(consumer: Consumer) {
+    WANTED[consumer as usize].store(false, Ordering::Release);
+    if matches!(consumer, Consumer::PlayfieldStyling) {
+        clear_registry(false);
+    }
+    if WANTED.iter().any(|w| w.load(Ordering::Acquire)) {
+        return;
+    }
+    if !INSTALLED.swap(false, Ordering::AcqRel) {
+        return;
+    }
     unsafe {
         if let Some(d) = (*addr_of_mut!(FILL_HOOK)).take() {
             let _ = d.disable();
         }
     }
-    clear_registry(false);
     PANIC_WARNED.store(false, Ordering::Relaxed);
 }

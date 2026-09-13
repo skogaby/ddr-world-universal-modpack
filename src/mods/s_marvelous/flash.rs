@@ -5,8 +5,8 @@
 //! same frame (before anything renders). Design §4.4.
 //!
 //! Also the post-original fan-out point for the OTHER judge-event display
-//! surfaces that need the side's NoteResultActor (`on_judge_event`): the
-//! FAST/SLOW re-hide and the violet receptor hit-flash tint (`receptor`).
+//! surfaces (`on_judge_event`): the FAST/SLOW re-hide and the violet
+//! receptor burst (`receptor`).
 //!
 //! No play/visibility calls: the stock handler already set them for this
 //! judgement. Calibration hide and per-player judgement styling apply
@@ -100,19 +100,23 @@ const NOTE_RESULT_JUDGE_WRAPPER_OFFSET: usize = 0xA0;
 /// Post-original entry for EVERY grade event (0..=6) of an ARMED side —
 /// called from the judge tap after the stock dispatch ran. Resolves the
 /// side's NoteResultActor once (it lives in `judge_actor`'s subtree) and
-/// fans out to the display surfaces that ride the judge event:
+/// fans out to the display surfaces that ride the judge event — all of
+/// them S-Marvelous-only today:
 ///
-/// * receptor hit-flash tint (`receptor`) — every event, because it must
-///   re-assert identity on the lanes a non-S-Marv event touched;
-/// * the word re-drive + FAST/SLOW hide — S-Marvelous events only.
+/// * the violet receptor BURST (`receptor::on_smarvelous`, needs the
+///   GamePlayActor = `judge_actor` itself: the renderer hangs off it);
+/// * the word re-drive + FAST/SLOW hide (need the NoteResultActor).
 ///
-/// `info` = the judge_submit info struct (lane bitset at +0x08).
+/// Non-S-Marv events currently pass straight through (kept as the single
+/// fan-out point so a future surface that must see every event has its
+/// seam). `info` = the judge_submit info struct (lane bitset at +0x08).
 pub fn on_judge_event(side: usize, judge_actor: *mut u8, info: *const u8, smarv: bool) {
-    let nra = unsafe { find_note_result_actor(judge_actor, 0) };
-    super::receptor::on_judge_event(side, nra, info, smarv);
-    if smarv {
-        on_smarvelous(side, nra);
+    if !smarv {
+        return;
     }
+    super::receptor::on_smarvelous(side, judge_actor, info);
+    let nra = unsafe { find_note_result_actor(judge_actor, 0) };
+    on_smarvelous(side, nra);
 }
 
 /// Re-drive the side's judgement clip to `in_smarvelous`. Called when an

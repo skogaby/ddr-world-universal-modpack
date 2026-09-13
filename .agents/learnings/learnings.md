@@ -1334,3 +1334,40 @@ whole function/file, or anchor on identifiers rather than wrapped lines.
 (a blanket run touched ~58 files, so the agent avoided it); the maintainer then
 formatted the whole tree in `4e40eb4`, and `codegen → cargo fmt` is a zero-diff
 round trip again. Check `cargo fmt --check` before assuming either state.
+
+## Recolour a game effect by pushing its OWN record, not by tinting the art (2026-09-12)
+
+The S-Marvelous receptor went through three shapes in three days: a violet
+CXFORM on the `dance_effect` bomb layer (washed out; needed identity
+re-asserts on every other event because the layer colour block persists), an
+AP2 retier of the bomb sizes (Marvelous/Perfect shrunk — the maintainer
+decided against it once seen), and finally a **`JudgeEffectRenderer` record
+pushed through the game's own non-inlined `push(this, u8 lanes, int type)`**
+plus a colour override at the shared per-quad fill. The third is
+smaller than either of the first two and needed ZERO new detours: the renderer
+already owns the clock, lifetime, expansion, rotation and blend.
+
+**Rules:**
+
+- Before tinting or re-authoring art, list the effect renderer's RECORD TYPES
+  and which types have a stock pusher. An unused type is a free slot the game
+  will animate for you; its draw-time colour formula is then a DISCRIMINATOR
+  you can key on at the fill (every stock type has a `/4` channel; anything
+  outside the colour switch is greyscale). Read the type CLASSIFICATION as
+  well as the switch: type 0 (unused) was greyscale but also in the 150 ms /
+  2.0-grow "flash" class and read as too large; a type ≥ 7 is outside BOTH
+  classifications — Perfect's geometry with the base colour. Pick the free
+  slot whose OTHER properties you also want.
+- A non-inlined pusher with a fixed `this` field is worth a signature even
+  when the field offset is "obviously" constant — derive the offset from the
+  `MOV RCX,[reg+disp32]` before each stock CALL site and require all sites to
+  agree (`derive_smarvelous_burst`), so a future layout shift fails closed
+  instead of pushing into a stranger's vector.
+- When a second mod needs a detour another mod owns (`render_sprite_final`),
+  convert the install to a consumer refcount (`acquire/release`, the
+  `guideline_hook` shape) rather than adding a second `GenericDetour` or making
+  one mod depend on the other's enable state — either may be config-disabled.
+- A template dump answers "does this texture ever draw?" — `dance_effect_arrow`
+  sits in the atlas but no shape references it; the "arrow-shaped receptor
+  flash" was the sprite burst all along. Check shape→texture references before
+  assuming a texture's role from its name.

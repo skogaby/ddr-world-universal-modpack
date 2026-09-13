@@ -176,6 +176,30 @@ pub(crate) fn flash_release_perspective() {
     lane_hook::flash_release(lane_hook::FlashConsumer::PlayerPerspective);
 }
 
+/// Shared per-quad fill detour surface for `s_marvelous` (same consumer-
+/// refcount contract): the violet receptor BURST is a `JudgeEffectRenderer`
+/// record the game renders white, recoloured at the fill. `fill` =
+/// `render_sprite_final`, `judge_vt` = the JudgeEffectRenderer offset-0
+/// vftable (the quad classifier). Either may be config-disabled
+/// independently of this mod.
+pub(crate) fn fill_acquire_smarvelous(fill: *const u8, judge_vt: *const u8) -> bool {
+    fill_hook::acquire(
+        fill_hook::Consumer::SMarvelous,
+        &fill_hook::FillTargets {
+            fill,
+            arrow_vt: std::ptr::null(),
+            spot_vt: std::ptr::null(),
+            judge_vt,
+            player_array: std::ptr::null(),
+        },
+    )
+}
+
+/// Drop `s_marvelous`'s interest in the fill detour.
+pub(crate) fn fill_release_smarvelous() {
+    fill_hook::release(fill_hook::Consumer::SMarvelous);
+}
+
 /// Drain the lane-clip pending queue (perspective's lane pass drives this
 /// when playfield_styling is config-disabled; one atomic load when idle).
 pub(crate) fn lane_apply_pending() {
@@ -549,13 +573,20 @@ impl Mod for PlayfieldStylingMod {
         // Fill detour + BOTH cull-site patches (collector + guideline) +
         // BOTH guideline detours. Any failure → refuse enable, roll back,
         // no rows.
-        if !fill_hook::install(&targets) {
+        let fill_targets = fill_hook::FillTargets {
+            fill: targets.fill,
+            arrow_vt: targets.arrow_renderer_vtable,
+            spot_vt: targets.spot_renderer_vtable,
+            judge_vt: targets.judge_effect_renderer_vtable,
+            player_array: targets.player_array,
+        };
+        if !fill_hook::acquire(fill_hook::Consumer::PlayfieldStyling, &fill_targets) {
             log_warn!("{MOD_ID}: fill hook unavailable — refusing enable");
             return;
         }
         if !cull_window::ensure_installed() {
             log_warn!("{MOD_ID}: cull-window patch unavailable — refusing enable");
-            fill_hook::remove();
+            fill_hook::release(fill_hook::Consumer::PlayfieldStyling);
             return;
         }
         if !guideline_hook::acquire(
@@ -566,7 +597,7 @@ impl Mod for PlayfieldStylingMod {
         ) {
             log_warn!("{MOD_ID}: guideline hooks unavailable — refusing enable");
             cull_window::clear_scale_contribution();
-            fill_hook::remove();
+            fill_hook::release(fill_hook::Consumer::PlayfieldStyling);
             return;
         }
 
@@ -621,7 +652,7 @@ impl Mod for PlayfieldStylingMod {
             scene_manager::remove_callback(id);
         }
         guideline_hook::release(guideline_hook::Consumer::PlayfieldStyling);
-        fill_hook::remove();
+        fill_hook::release(fill_hook::Consumer::PlayfieldStyling);
         lane_hook::remove();
         // Identity latch + stock cull bound so a mid-song disable is
         // visually stock by the next frame (the detours also gate on
