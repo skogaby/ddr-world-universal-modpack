@@ -415,11 +415,20 @@ pub struct SMarvelousConfig {
     /// use the default.
     #[serde(default)]
     pub judgement_color: Option<String>,
-    /// Stock Marvelous word shimmer (the additive `marvelous_ef` pulse on
-    /// the gameplay flash). Default `true` = stock; `false` mutes it in the
-    /// dance_judge patch so the stock Marvelous word renders static like the
-    /// S-Marvelous word (whose pulse is always muted). Live-editable from the
-    /// overlay menu's "Marvelous Shimmer" row; applies next song.
+    /// Receptor feedback on an S-Marvelous hit: `"purple"` (the violet
+    /// `JudgeEffectRenderer` burst over the stock white bomb — the default)
+    /// or `"white"` (no burst; the receptor shows exactly the stock
+    /// Marvelous feedback). Live-editable from the overlay menu's "Receptor
+    /// Flash Color" row; applies to the next hit. Unknown values log once
+    /// and use the default.
+    #[serde(default)]
+    pub receptor_flash: Option<String>,
+    /// RETIRED (parse-but-ignore, 2026-09-13). The former "Marvelous
+    /// Shimmer" ON/OFF row — the stock Marvelous word's additive
+    /// `marvelous_ef` pulse is now ALWAYS muted in the dance_judge patch (the
+    /// pulse was judged ugly outright). `Some` ⇒ the key is present in the
+    /// file and the mod logs one INFO at enable; the DLL never writes it
+    /// back, so the next row edit drops it from the section.
     #[serde(default)]
     pub marvelous_shimmer: Option<bool>,
 }

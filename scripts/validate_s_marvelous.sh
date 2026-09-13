@@ -321,10 +321,12 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
     };
     println!("word_shape_id={word_shape_id}");
     println!("donor_region={donor_region}");
-    // The DLL's exact options (assets::word_clone_opts(false)): mute the
-    // additive marvelous_ef self-glow in the cloned chain, stock untouched.
-    // Muted-or-nothing here — the harness must prove the mute applies on
-    // the REAL template (the DLL's runtime fallback to an unmuted clone is
+    // The DLL's SHIPPED options (assets::word_clone_opts(true) — the first
+    // rung of run_word_clone's ladder): mute the additive marvelous_ef
+    // self-glow in the cloned chain AND in the stock Marvelous word (the
+    // stock pulse is always muted since 2026-09-13; the "Marvelous Shimmer"
+    // row is retired). Muted-or-nothing here — the harness must prove both
+    // mutes apply on the REAL template (the DLL's runtime fallback rungs are
     // for unknown skins).
     let Some(ids) = doc.clone_word_segment_with_new_shape_ex(
         "in_marvelous",
@@ -332,21 +334,23 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
         word_shape_id,
         ap2::WordCloneOpts {
             mute_additive_glow: true,
-            mute_source_additive_glow: false,
+            mute_source_additive_glow: true,
         },
     ) else {
         println!("FAIL smarv-patch: recipe returned None");
         return 1;
     };
     println!("muted_records={}", ids.muted_records);
+    println!("stock_muted_records={}", ids.muted_source_records);
 
-    // Second pass on a fresh parse: the "Marvelous Shimmer OFF" shape
-    // (assets::word_clone_opts(true)) must ALSO apply on the real template
-    // — same ids, stock chain silenced too, output size unchanged (in-place
-    // edits only).
+    // Second pass on a fresh parse: the FALLBACK rung (word_clone_opts(false)
+    // — S-Marv mute only) must ALSO apply on the real template with the same
+    // ids and clone mute count, leave the stock pulse alone (proving the
+    // pulse is real and the source mute is what silences it), and produce
+    // the same output size (in-place edits only).
     {
         let Some(mut doc2) = ap2::Ap2Doc::parse(&data) else {
-            println!("FAIL smarv-patch: parse (shimmer-off pass)");
+            println!("FAIL smarv-patch: parse (fallback pass)");
             return 1;
         };
         let Some(ids2) = doc2.clone_word_segment_with_new_shape_ex(
@@ -355,25 +359,28 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
             word_shape_id,
             ap2::WordCloneOpts {
                 mute_additive_glow: true,
-                mute_source_additive_glow: true,
+                mute_source_additive_glow: false,
             },
         ) else {
-            println!("FAIL smarv-patch: shimmer-off recipe returned None");
+            println!("FAIL smarv-patch: fallback recipe returned None");
             return 1;
         };
         if (ids2.new_shape_id, ids2.new_sprite_id, ids2.muted_records)
             != (ids.new_shape_id, ids.new_sprite_id, ids.muted_records)
         {
-            println!("FAIL smarv-patch: shimmer-off pass changed the allocated ids / clone mute count");
+            println!("FAIL smarv-patch: fallback pass changed the allocated ids / clone mute count");
             return 1;
         }
-        println!("stock_muted_records={}", ids2.muted_source_records);
+        if ids2.muted_source_records != 0 {
+            println!("FAIL smarv-patch: fallback pass muted stock records with the source mute off");
+            return 1;
+        }
         let Some(out2) = doc2.serialize() else {
-            println!("FAIL smarv-patch: shimmer-off serialize");
+            println!("FAIL smarv-patch: fallback serialize");
             return 1;
         };
         let Some(re2) = ap2::Ap2Doc::parse(&out2) else {
-            println!("FAIL smarv-patch: shimmer-off re-parse");
+            println!("FAIL smarv-patch: fallback re-parse");
             return 1;
         };
         let stock2 = re2
@@ -402,20 +409,20 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
                 Some(alphas)
             })
             .unwrap_or_default();
-        println!("shimmer_off_stock_additive_alphas={stock2:?}");
-        if stock2.is_empty() || stock2.iter().any(|&a| a != 0) {
-            println!("FAIL smarv-patch: shimmer-off pass left the stock additive glow unmuted");
+        println!("fallback_stock_additive_alphas={stock2:?}");
+        if !stock2.iter().any(|&a| a != 0) {
+            println!("FAIL smarv-patch: fallback pass altered the stock additive glow (or it is absent — nothing for the shipped mute to silence)");
             return 1;
         }
-        // Size parity with the shimmer-on output is asserted after that
+        // Size parity with the shipped output is asserted after that
         // output is serialized below.
-        println!("shimmer_off_out_len={}", out2.len());
+        println!("fallback_out_len={}", out2.len());
     }
     let Some(mut out) = doc.serialize() else {
         println!("FAIL smarv-patch: serialize");
         return 1;
     };
-    println!("shimmer_on_out_len={}", out.len());
+    println!("shipped_out_len={}", out.len());
     let Some(re) = ap2::Ap2Doc::parse(&out) else {
         println!("FAIL smarv-patch: re-parse");
         return 1;
@@ -438,10 +445,10 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
     println!("label_frame={label_frame}");
     println!("section_frames={}", sec.frames.len());
 
-    // Mute proof on the serialized output: every additive-blend object in
-    // the CLONED top sprite has mult alpha 0 on all its records; the STOCK
-    // word sprite still carries a non-zero additive alpha (the pulse is
-    // real and was left alone).
+    // Mute proof on the serialized SHIPPED output: every additive-blend
+    // object in BOTH the CLONED top sprite and the STOCK word sprite has
+    // mult alpha 0 on all its records (the fallback pass above proved the
+    // stock pulse is real — non-zero before the source mute).
     let additive_alphas = |sprite_id: u16| -> Option<Vec<i32>> {
         let sp = sec.tags.iter().find_map(|t| match t {
             ap2::Tag::DefineSprite(s) if s.id == sprite_id => Some(s),
@@ -472,8 +479,8 @@ fn smarv_patch(afp: &str, bsi: &str, geo_dir: &str, out_afp: &str) -> i32 {
         println!("FAIL smarv-patch: cloned additive glow not muted");
         return 1;
     }
-    if !stock.iter().any(|&a| a != 0) {
-        println!("FAIL smarv-patch: stock additive glow altered (or absent)");
+    if stock.is_empty() || stock.iter().any(|&a| a != 0) {
+        println!("FAIL smarv-patch: stock additive glow not muted in the shipped output");
         return 1;
     }
 
@@ -1304,16 +1311,16 @@ D_SECTION_FRAMES=$(grep -oE '^section_frames=[0-9]+' "$SMARV_DIR/patch.txt" | cu
   || die "Leg D: smarv-patch did not report ids"
 D_MUTED=$(grep -oE '^muted_records=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
 [[ -n "$D_MUTED" && "$D_MUTED" -gt 0 ]] \
-  || die "Leg D: additive-glow mute edited no records on the real template (expected the marvelous_ef create + updates)"
-echo "    [glow] $D_MUTED additive-glow records muted in the cloned chain (stock pulse untouched — asserted by smarv-patch)"
+  || die "Leg D: additive-glow mute edited no records in the cloned chain on the real template (expected the marvelous_ef create + updates)"
 D_STOCK_MUTED=$(grep -oE '^stock_muted_records=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
 [[ -n "$D_STOCK_MUTED" && "$D_STOCK_MUTED" -gt 0 ]] \
-  || die "Leg D: Marvelous-shimmer-OFF pass muted no stock records on the real template"
-D_LEN_ON=$(grep -oE '^shimmer_on_out_len=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
-D_LEN_OFF=$(grep -oE '^shimmer_off_out_len=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
-[[ -n "$D_LEN_ON" && "$D_LEN_ON" == "$D_LEN_OFF" ]] \
-  || die "Leg D: shimmer ON/OFF outputs differ in size ($D_LEN_ON vs $D_LEN_OFF) — the stock mute must be in-place"
-echo "    [glow] shimmer OFF: $D_STOCK_MUTED stock additive-glow records muted too (same ids, same output size)"
+  || die "Leg D: the shipped recipe muted no STOCK Marvelous records on the real template"
+echo "    [glow] shipped recipe: $D_MUTED additive-glow records muted in the cloned chain + $D_STOCK_MUTED in the stock Marvelous word (both asserted silent by smarv-patch)"
+D_LEN_SHIPPED=$(grep -oE '^shipped_out_len=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
+D_LEN_FALLBACK=$(grep -oE '^fallback_out_len=[0-9]+' "$SMARV_DIR/patch.txt" | cut -d= -f2)
+[[ -n "$D_LEN_SHIPPED" && "$D_LEN_SHIPPED" == "$D_LEN_FALLBACK" ]] \
+  || die "Leg D: shipped/fallback outputs differ in size ($D_LEN_SHIPPED vs $D_LEN_FALLBACK) — the stock mute must be in-place"
+echo "    [glow] fallback rung (S-Marv mute only): same ids, stock pulse left alone, same output size"
 
 # The REAL geo rewrite (same core/geo fn the DLL asset staging runs).
 "$AP2CHECK" geo-rewrite "$GEO_DIR/dance_judge_shape${WORD_SHAPE_ID}" \

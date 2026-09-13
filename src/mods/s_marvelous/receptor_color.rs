@@ -1,10 +1,66 @@
-//! Pure layer of the S-Marvelous receptor burst (`receptor.rs`): the lane
-//! bitset the game's pusher takes, the white-quad discriminator, and the
-//! violet recolour. std-only — mounted by `scripts/validate_s_marvelous.sh`
-//! for its host tests.
+//! Pure layer of the S-Marvelous receptor burst (`receptor.rs`): the
+//! operator's flash-colour choice, the lane bitset the game's pusher takes,
+//! the white-quad discriminator, and the violet recolour. std-only —
+//! mounted by `scripts/validate_s_marvelous.sh` for its host tests.
 
 /// Maximum panels per side (doubles) — the pusher takes a `u8` bitset.
 pub const MAX_LANES: u32 = 8;
+
+/// What the receptor shows on an S-Marvelous hit. Chosen by the "Receptor
+/// Flash Color" overlay row / `s_marvelous.receptor_flash`.
+///
+/// The `dance_effect` bomb is stock in BOTH modes (S-Marv's bomb IS the
+/// white Marvelous bomb); the choice is only whether the mod ALSO pushes
+/// its violet `JudgeEffectRenderer` burst on top of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceptorFlash {
+    /// Push the type-7 burst and recolour it violet (the 2026-09-12 look).
+    Purple,
+    /// Push nothing — the receptor shows exactly what stock Marvelous shows
+    /// (the white bomb, no burst).
+    White,
+}
+
+impl ReceptorFlash {
+    pub const DEFAULT: ReceptorFlash = ReceptorFlash::Purple;
+    /// Overlay-row values (parallel to the row's labels).
+    pub const ALL: [ReceptorFlash; 2] = [ReceptorFlash::Purple, ReceptorFlash::White];
+
+    /// Config key (`s_marvelous.receptor_flash`).
+    pub fn key(self) -> &'static str {
+        match self {
+            ReceptorFlash::Purple => "purple",
+            ReceptorFlash::White => "white",
+        }
+    }
+    /// Overlay-row label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReceptorFlash::Purple => "PURPLE",
+            ReceptorFlash::White => "WHITE",
+        }
+    }
+    pub fn from_key(key: &str) -> Option<ReceptorFlash> {
+        ReceptorFlash::ALL.into_iter().find(|c| c.key() == key)
+    }
+    /// Overlay-row value = index into `ALL`.
+    pub fn index(self) -> i32 {
+        ReceptorFlash::ALL
+            .iter()
+            .position(|c| *c == self)
+            .map(|i| i as i32)
+            .unwrap_or(0)
+    }
+    pub fn from_index(i: i32) -> Option<ReceptorFlash> {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| ReceptorFlash::ALL.get(i).copied())
+    }
+    /// Whether this choice pushes the violet burst at all.
+    pub fn pushes_burst(self) -> bool {
+        matches!(self, ReceptorFlash::Purple)
+    }
+}
 
 /// The S-Marvelous violet as a per-channel multiplier on the white burst.
 ///
@@ -144,5 +200,30 @@ mod tests {
             Some([0xA0, 0x30, 0xFF, 0xFF])
         );
         assert_eq!(recolor([0, 0, 0, 255]), None);
+    }
+
+    #[test]
+    fn receptor_flash_keys_indices_and_defaults() {
+        assert_eq!(ReceptorFlash::DEFAULT, ReceptorFlash::Purple);
+        assert!(ReceptorFlash::DEFAULT.pushes_burst());
+        assert!(!ReceptorFlash::White.pushes_burst());
+        for (i, m) in ReceptorFlash::ALL.iter().enumerate() {
+            assert_eq!(m.index(), i as i32);
+            assert_eq!(ReceptorFlash::from_index(i as i32), Some(*m));
+            assert_eq!(ReceptorFlash::from_key(m.key()), Some(*m));
+        }
+        assert_eq!(
+            ReceptorFlash::from_key("purple"),
+            Some(ReceptorFlash::Purple)
+        );
+        assert_eq!(ReceptorFlash::from_key("white"), Some(ReceptorFlash::White));
+        assert_eq!(ReceptorFlash::from_key("violet"), None);
+        assert_eq!(ReceptorFlash::from_key(""), None);
+        assert_eq!(ReceptorFlash::from_index(-1), None);
+        assert_eq!(ReceptorFlash::from_index(2), None);
+        // Row labels are the operator-facing words, upper-case like the
+        // sibling rows'.
+        assert_eq!(ReceptorFlash::Purple.label(), "PURPLE");
+        assert_eq!(ReceptorFlash::White.label(), "WHITE");
     }
 }

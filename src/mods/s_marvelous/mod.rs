@@ -52,10 +52,10 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LIVE_WINDOW_MS: AtomicI32 = AtomicI32::new(state::DEFAULT_WINDOW_MS);
 
 /// Overlay menu row keys (GLOBAL SETTINGS, grouped under this mod's header;
-/// registration order = display order: window, colour, then shimmer).
+/// registration order = display order: window, colour, then receptor flash).
 const WINDOW_ROW_KEY: &str = "smarv_window_ms";
 const COLOR_ROW_KEY: &str = "smarv_judgement_color";
-const SHIMMER_ROW_KEY: &str = "smarv_marvelous_shimmer";
+const RECEPTOR_ROW_KEY: &str = "smarv_receptor_flash";
 
 /// The LIVE "Judgement Color" choice as a `JudgementColor::index()`. Seeded
 /// from `s_marvelous.judgement_color` at enable; the overlay row writes it
@@ -63,15 +63,20 @@ const SHIMMER_ROW_KEY: &str = "smarv_marvelous_shimmer";
 /// when it next loads the dance_judge package — normally next song).
 static LIVE_COLOR_IDX: AtomicI32 = AtomicI32::new(0);
 
-/// The LIVE "Marvelous Shimmer" choice (`true` = stock pulse ON). Seeded
-/// from `s_marvelous.marvelous_shimmer` at enable; the overlay row writes it
-/// and forwards it to the dance_judge patch, which reads it per template
-/// load — applies next song. Default ON (stock).
-static LIVE_SHIMMER_ON: AtomicBool = AtomicBool::new(true);
+/// The LIVE "Receptor Flash Color" choice as a `ReceptorFlash::index()`.
+/// Seeded from `s_marvelous.receptor_flash` at enable; the overlay row
+/// writes it and hands it to the receptor module, which reads it per
+/// S-Marv event — applies to the very next hit.
+static LIVE_RECEPTOR_IDX: AtomicI32 = AtomicI32::new(0);
 
 fn live_color() -> assets::JudgementColor {
     assets::JudgementColor::from_index(LIVE_COLOR_IDX.load(Ordering::Relaxed))
         .unwrap_or(assets::JudgementColor::DEFAULT)
+}
+
+fn live_receptor_flash() -> receptor_color::ReceptorFlash {
+    receptor_color::ReceptorFlash::from_index(LIVE_RECEPTOR_IDX.load(Ordering::Relaxed))
+        .unwrap_or(receptor_color::ReceptorFlash::DEFAULT)
 }
 
 /// Write the whole `s_marvelous` section from the live values —
@@ -83,7 +88,7 @@ fn persist_section() {
         serde_json::json!({
             "window_ms": LIVE_WINDOW_MS.load(Ordering::Relaxed),
             "judgement_color": live_color().key(),
-            "marvelous_shimmer": LIVE_SHIMMER_ON.load(Ordering::Relaxed),
+            "receptor_flash": live_receptor_flash().key(),
         }),
     );
 }
@@ -157,13 +162,40 @@ fn configured_color() -> assets::JudgementColor {
     }
 }
 
-/// Read the operator/persisted "Marvelous Shimmer" choice from
-/// `s_marvelous.marvelous_shimmer` (absent ⇒ stock ON).
-fn configured_shimmer() -> bool {
-    config::get()
+/// Read the operator/persisted receptor flash choice from
+/// `s_marvelous.receptor_flash` (unknown key ⇒ one INFO + default).
+fn configured_receptor_flash() -> receptor_color::ReceptorFlash {
+    use receptor_color::ReceptorFlash;
+    let raw = config::get()
         .and_then(|c| c.s_marvelous.as_ref())
-        .and_then(|s| s.marvelous_shimmer)
-        .unwrap_or(true)
+        .and_then(|s| s.receptor_flash.clone());
+    match raw {
+        None => ReceptorFlash::DEFAULT,
+        Some(k) => ReceptorFlash::from_key(&k).unwrap_or_else(|| {
+            log_info!(
+                "SMarvelous: receptor_flash '{}' unknown -- using {}",
+                k,
+                ReceptorFlash::DEFAULT.key()
+            );
+            ReceptorFlash::DEFAULT
+        }),
+    }
+}
+
+/// One INFO for installs whose config still carries the RETIRED
+/// `s_marvelous.marvelous_shimmer` key (the stock Marvelous word's pulse is
+/// now always muted; the ON/OFF row is gone). Never reinterpreted; the
+/// next `persist_section` drops it from the file.
+fn note_retired_keys() {
+    let present = config::get()
+        .and_then(|c| c.s_marvelous.as_ref())
+        .and_then(|s| s.marvelous_shimmer);
+    if let Some(v) = present {
+        log_info!(
+            "SMarvelous: config key s_marvelous.marvelous_shimmer ({}) is retired and ignored -- the stock Marvelous shimmer is always muted now",
+            v
+        );
+    }
 }
 
 /// Register (or idempotently re-register — `register_scalar_row` replaces by
@@ -198,8 +230,9 @@ fn register_overlay_row(initial: i32) {
 /// The "Judgement Color" enum row (ALL PURPLE / PURPLE SHADOW), directly
 /// under the window row. Edits update the live choice, persist the section
 /// and re-stage the word art immediately — the additive `marvelous_ef`
-/// glow stays muted on the S-Marv copy regardless of the choice
-/// (`assets::word_clone_opts`), so an all-violet word renders static too.
+/// glow is muted on BOTH the S-Marv copy and the stock Marvelous word
+/// regardless of the choice (`assets::word_clone_opts`), so every word
+/// renders static.
 fn register_color_row(initial: assets::JudgementColor) {
     use crate::mods::mod_menu::{self, EnumRowSpec};
     use assets::JudgementColor;
@@ -228,32 +261,33 @@ fn register_color_row(initial: assets::JudgementColor) {
     });
 }
 
-/// The "Marvelous Shimmer" ON/OFF enum row, third in the section. OFF mutes
-/// the STOCK Marvelous word's additive `marvelous_ef` pulse in the
-/// dance_judge patch (the S-Marvelous word is always static) — for players
-/// who want the now-second tier to stop glowing. Edits persist the section
-/// and hand the flag to the patch, which reads it at the next template load
-/// (next song).
-fn register_shimmer_row(initial_on: bool) {
+/// The "Receptor Flash Color" enum row (PURPLE / WHITE), third in the
+/// section. PURPLE = the violet `JudgeEffectRenderer` burst on every S-Marv
+/// hit (the 2026-09-12 look); WHITE = no burst, so the receptor shows
+/// exactly the stock Marvelous feedback (the white `dance_effect` bomb —
+/// which is stock in both modes). Edits persist the section and hand the
+/// choice to the receptor module, which reads it per event — the very next
+/// hit follows it.
+fn register_receptor_row(initial: receptor_color::ReceptorFlash) {
     use crate::mods::mod_menu::{self, EnumRowSpec};
+    use receptor_color::ReceptorFlash;
     mod_menu::register_enum_row(EnumRowSpec {
-        key: SHIMMER_ROW_KEY.to_string(),
-        label: "Marvelous Shimmer".to_string(),
-        hint: "Stock Marvelous word glow pulse. S-Marvelous never shimmers. Applies next song."
+        key: RECEPTOR_ROW_KEY.to_string(),
+        label: "Receptor Flash Color".to_string(),
+        hint: "S-Marvelous receptor flash: violet burst, or white (identical to Marvelous). Applies immediately."
             .to_string(),
         parent_row_key: Some("s-marvelous".to_string()),
-        values: vec![0, 1],
-        labels: vec!["OFF".to_string(), "ON".to_string()],
-        initial_value: i32::from(initial_on),
+        values: ReceptorFlash::ALL.iter().map(|m| m.index()).collect(),
+        labels: ReceptorFlash::ALL.iter().map(|m| m.label().to_string()).collect(),
+        initial_value: initial.index(),
         on_change: std::sync::Arc::new(|v| {
-            let on = v != 0;
-            LIVE_SHIMMER_ON.store(on, Ordering::Relaxed);
+            let Some(mode) = ReceptorFlash::from_index(v) else {
+                return;
+            };
+            LIVE_RECEPTOR_IDX.store(mode.index(), Ordering::Relaxed);
             persist_section();
-            afp_patches::set_marvelous_shimmer(on);
-            log_info!(
-                "SMarvelous: Marvelous shimmer {} (applies next song)",
-                if on { "ON" } else { "OFF" }
-            );
+            receptor::set_flash_mode(mode);
+            log_info!("SMarvelous: receptor flash color {}", mode.label());
         }),
     });
 }
@@ -389,10 +423,11 @@ impl Mod for SMarvelousMod {
         let color = configured_color();
         LIVE_COLOR_IDX.store(color.index(), Ordering::Relaxed);
         register_color_row(color);
-        let shimmer_on = configured_shimmer();
-        LIVE_SHIMMER_ON.store(shimmer_on, Ordering::Relaxed);
-        register_shimmer_row(shimmer_on);
-        afp_patches::set_marvelous_shimmer(shimmer_on);
+        let receptor_flash = configured_receptor_flash();
+        LIVE_RECEPTOR_IDX.store(receptor_flash.index(), Ordering::Relaxed);
+        register_receptor_row(receptor_flash);
+        receptor::set_flash_mode(receptor_flash);
+        note_retired_keys();
         ACTIVE.store(true, Ordering::Release);
 
         if scene_manager::is_available() {
@@ -435,7 +470,9 @@ impl Mod for SMarvelousMod {
 
         // Violet receptor burst: arm the type-7 push + acquire the shared
         // fill hook for the recolour (both or neither). The dance_effect
-        // bomb stays stock white — S-Marv's bomb IS the Marvelous bomb.
+        // bomb stays stock white — S-Marv's bomb IS the Marvelous bomb. The
+        // "Receptor Flash Color" row gates the push per event on top of
+        // this (WHITE ⇒ armed but silent).
         if self.receptor_available && !receptor::activate() {
             log_warn!(
                 "SMarvelous: receptor burst not armed -- S-Marv shows the stock Marvelous receptor"
@@ -494,16 +531,16 @@ impl Mod for SMarvelousMod {
         }
 
         log_info!(
-            "SMarvelous: enabled (window {} ms, judgement color {}, Marvelous shimmer {})",
+            "SMarvelous: enabled (window {} ms, judgement color {}, receptor flash {})",
             window,
             color.key(),
-            if shimmer_on { "ON" } else { "OFF" }
+            receptor_flash.key()
         );
     }
 
     fn disable(&mut self) {
         ACTIVE.store(false, Ordering::Release);
-        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY, SHIMMER_ROW_KEY]);
+        crate::mods::mod_menu::remove_rows_for(&[WINDOW_ROW_KEY, COLOR_ROW_KEY, RECEPTOR_ROW_KEY]);
         afp_patches::deactivate();
         receptor::deactivate();
         combo::set_assets_ready(false);

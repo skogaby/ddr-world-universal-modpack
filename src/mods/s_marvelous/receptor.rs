@@ -41,14 +41,22 @@
 //! vtable mismatch at event time ⇒ skip, one WARN per song. Game-thread-
 //! only (inside the judge_submit dispatch — the same thread the stock
 //! pushers run on).
+//!
+//! Operator choice: the "Receptor Flash Color" row ([`ReceptorFlash`]) —
+//! PURPLE pushes the violet burst (above), WHITE pushes nothing so the
+//! receptor is the stock Marvelous one (the white bomb alone). The choice
+//! is a live flag read per event ([`set_flash_mode`]); the fill hook stays
+//! acquired in both modes (its recolour only ever touches greyscale quads,
+//! which nothing pushes in WHITE mode — a toggle never installs or removes
+//! a detour).
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
 use crate::core::memory;
 use crate::core::signatures::SignatureStore;
 use crate::{log_info, log_warn};
 
-use super::receptor_color::{lane_bits, recolor};
+use super::receptor_color::{lane_bits, recolor, ReceptorFlash};
 
 /// `judge_submit` info struct: `+0x08` lane bitset (bit i = panel i,
 /// doubles 0..7) — `judgeNotes` builds it; the stock 0x1028 handler reads
@@ -80,6 +88,11 @@ static RENDERER_OFF: AtomicUsize = AtomicUsize::new(0);
 
 /// Mod enabled AND the fill hook acquired — the push + recolour gate.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// The LIVE "Receptor Flash Color" choice as a `ReceptorFlash::index()`.
+/// Written by [`set_flash_mode`] (mod enable + the overlay row), read by
+/// [`on_smarvelous`] per event — an edit applies to the very next hit.
+static FLASH_MODE: AtomicI32 = AtomicI32::new(0);
 
 /// One-shot WARN latches per failure class (reset per song).
 static WARNED_RENDERER: AtomicBool = AtomicBool::new(false);
@@ -156,6 +169,18 @@ pub fn reset_for_song() {
     WARNED_VTABLE.store(false, Ordering::Relaxed);
 }
 
+/// Live "Receptor Flash Color" apply: PURPLE ⇒ the next S-Marv hit pushes
+/// the violet burst, WHITE ⇒ it pushes nothing (stock Marvelous receptor).
+/// A pure flag — nothing is installed or torn down.
+pub fn set_flash_mode(mode: ReceptorFlash) {
+    FLASH_MODE.store(mode.index(), Ordering::Release);
+}
+
+/// The live choice (unknown index ⇒ default).
+pub fn flash_mode() -> ReceptorFlash {
+    ReceptorFlash::from_index(FLASH_MODE.load(Ordering::Acquire)).unwrap_or(ReceptorFlash::DEFAULT)
+}
+
 /// Fill-hook entry (render thread, per `JudgeEffectRenderer` quad while the
 /// s_marvelous consumer holds the hook): recolour a white (ours) quad
 /// violet; `None` = pass the game's colour through. `color` points at the
@@ -172,7 +197,9 @@ pub fn recolor_burst(color: *const u8) -> Option<[u8; 4]> {
 }
 
 /// Post-original, for an S-Marvelous event of an armed side: push one
-/// [`BURST_TYPE`] record for the event's lanes through the game's own pusher.
+/// [`BURST_TYPE`] record for the event's lanes through the game's own pusher
+/// — unless the operator chose the WHITE receptor flash, in which case the
+/// hit leaves the stock Marvelous receptor alone.
 ///
 /// * `gpa` — the side's GamePlayActor (`judge_submit`'s `this`; the same
 ///   object `judgeNotes` reads the renderer from).
@@ -180,6 +207,9 @@ pub fn recolor_burst(color: *const u8) -> Option<[u8; 4]> {
 ///   nothing to do.
 pub fn on_smarvelous(side: usize, gpa: *mut u8, info: *const u8) {
     if !ACTIVE.load(Ordering::Acquire) || gpa.is_null() || info.is_null() {
+        return;
+    }
+    if !flash_mode().pushes_burst() {
         return;
     }
     let push = PUSH_FN.load(Ordering::Acquire);

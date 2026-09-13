@@ -4,7 +4,8 @@
 //!
 //! The doc-transform core is `core/ap2`'s host-tested
 //! [`Ap2Doc::clone_word_segment_with_new_shape_ex`] recipe (run through
-//! [`super::assets::run_word_clone`] with the additive-glow mute) — this module is
+//! [`super::assets::run_word_clone`] with the additive-glow mutes — the
+//! S-Marv copy's AND the stock Marvelous word's) — this module is
 //! the thin impure wiring around it: staged-state storage, the v1 skin
 //! gate, latched WARNs, and the ready/applied atomics.
 //!
@@ -41,13 +42,6 @@ static PATCH_READY: AtomicBool = AtomicBool::new(false);
 static PATCH_APPLIED: AtomicBool = AtomicBool::new(false);
 
 static STAGED: Lazy<Mutex<Option<StagedPatch>>> = Lazy::new(|| Mutex::new(None));
-
-/// LIVE "Marvelous Shimmer" choice: `true` = also mute the STOCK Marvelous
-/// word's additive `marvelous_ef` pulse in the patch (shimmer OFF). Read by
-/// the patch fn at every dance_judge load, so an overlay edit applies when
-/// the package next loads — normally next song. The S-Marv copy's glow is
-/// muted unconditionally regardless of this flag.
-static MUTE_STOCK_GLOW: AtomicBool = AtomicBool::new(false);
 
 static REGISTER_ONCE: Once = Once::new();
 
@@ -117,13 +111,6 @@ pub fn set_judgement_color(color: assets::JudgementColor) -> bool {
     }
 }
 
-/// Live "Marvelous Shimmer" apply: `shimmer_on == false` ⇒ the patch also
-/// mutes the stock Marvelous word's additive pulse at the next dance_judge
-/// load. Always succeeds (a pure flag — the patch fn reads it per load).
-pub fn set_marvelous_shimmer(shimmer_on: bool) {
-    MUTE_STOCK_GLOW.store(!shimmer_on, Ordering::Release);
-}
-
 /// Make the registered patch fn inert (mod disable). Templates already
 /// loaded stay patched in game memory; subsequent loads stream stock.
 pub fn deactivate() {
@@ -160,12 +147,11 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     }
 
     // The real transform — the same host-tested recipe the enable-time dry
-    // run executed on these exact bytes (the stock-glow mute is the one
-    // live input; it never changes the allocated ids).
-    let mute_stock = MUTE_STOCK_GLOW.load(Ordering::Acquire);
+    // run executed on these exact bytes (the recipe has no live inputs, so
+    // the allocated ids are those of the dry run by construction).
     let run = || -> Option<(Vec<u8>, usize, usize)> {
         let mut doc = Ap2Doc::parse(afp)?;
-        let ids = assets::run_word_clone(&mut doc, staged.word_shape_id, mute_stock)?;
+        let ids = assets::run_word_clone(&mut doc, staged.word_shape_id)?;
         // The staged geo/texture names were derived from the dry-run ids;
         // a mismatch would bind the new shape to a geo we never wrote.
         if ids.new_shape_id != staged.new_shape_id || ids.new_sprite_id != staged.new_sprite_id {
@@ -181,14 +167,13 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
         Some((out, muted, muted_stock)) => {
             PATCH_APPLIED.store(true, Ordering::Release);
             log_info!(
-                "SMarvelous: dance_judge patched ({} -> {} bytes, {} segment, shape {}, additive glow records muted: {} (S-Marv) / {} (stock Marvelous, shimmer {})",
+                "SMarvelous: dance_judge patched ({} -> {} bytes, {} segment, shape {}, additive glow records muted: {} (S-Marv) / {} (stock Marvelous)",
                 afp.len(),
                 out.len(),
                 NEW_LABEL,
                 staged.new_shape_id,
                 muted,
-                muted_stock,
-                if mute_stock { "OFF" } else { "ON" }
+                muted_stock
             );
             Some((out, vec![0u8; 2]))
         }

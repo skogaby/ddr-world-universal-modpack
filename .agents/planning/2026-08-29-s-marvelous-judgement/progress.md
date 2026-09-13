@@ -1,18 +1,61 @@
 # Progress — S-Marvelous Judgement
 
-Updated: 2026-09-10
+Updated: 2026-09-13
 Status: **FEATURE COMPLETE (uncommitted — maintainer commits manually).**
 All 10 plan steps done; both Step-9 surfaces cabinet-verified (per-stage
 banner + end-of-credit badge); Step-10 hardening + docs done; feature
 marked complete by the maintainer 2026-08-30. Residual regression-sweep
 items accepted as deferred (list below) — pick them up opportunistically
 in future sessions, none block the feature.
-NEXT ACTION: none. Maintainer supplies `screenshots/s_marvelous.png` for
-the new README hero section, then commits.
+NEXT ACTION: cabinet-verify the 2026-09-13 tweak (shimmer always muted +
+the "Receptor Flash Color" row — see the entry below), then the
+maintainer commits.
 
 Resume protocol: read `implementation/plan.md` (checklist = step status),
 `design/detailed-design.md` (Approved 2026-08-29), task files under
 `.agents/tasks/2026-08-29-s-marvelous-judgement/step<NN>/`.
+
+## Post-completion tweak — shimmer row retired + "Receptor Flash Color" row (2026-09-13, uncommitted)
+
+- Maintainer requests: (1) remove the "Marvelous Shimmer" toggle — the
+  stock pulse is ugly outright, so the baked-in behaviour is to omit it;
+  (2) a new GLOBAL SETTINGS row "Receptor Flash Color" = PURPLE (the
+  current violet burst) / WHITE (clone the Marvelous receptor 1:1 — i.e.
+  NO burst, the white bomb alone; maintainer confirmed "no burst" over
+  "white-coloured burst").
+- `assets.rs`: `run_word_clone(doc, shape)` lost its `mute_stock_glow`
+  input — the ladder now ALWAYS starts at `word_clone_opts(true)` (both
+  mutes) → S-Marv mute only (+WARN once) → unmuted (+WARN once); the dry
+  run runs the identical ladder. `afp_patches.rs`: `MUTE_STOCK_GLOW` +
+  `set_marvelous_shimmer` deleted; the patch INFO drops the shimmer state.
+  `core/ap2` `WordCloneOpts::mute_source_additive_glow` unchanged (doc
+  reworded); its fixture tests untouched.
+- `receptor_color.rs` (pure): NEW `ReceptorFlash { Purple, White }` with
+  the `JudgementColor` shape (`ALL/key/label/index/from_index/from_key/
+  DEFAULT`, `pushes_burst()`), + one host test. `receptor.rs`: `FLASH_MODE`
+  atomic + `set_flash_mode` / `flash_mode`; `on_smarvelous` returns before
+  the push when `!pushes_burst()`. The fill hook stays acquired in both
+  modes (its recolour only ever sees greyscale quads, which nothing pushes
+  in WHITE) — a toggle never installs/removes a detour. Applies to the
+  very next hit (no per-song latch).
+- `mod.rs`: `smarv_receptor_flash` enum row (third in the section, replaces
+  the shimmer row; `LIVE_RECEPTOR_IDX`, seeded from
+  `s_marvelous.receptor_flash`, emitted by `persist_section`, removed on
+  disable). `note_retired_keys()` logs one INFO when a config still carries
+  `marvelous_shimmer` (parse-but-ignore; `persist_section` no longer emits
+  it, so the next row edit drops it from the file). `config.rs`: new
+  `receptor_flash: Option<String>`, `marvelous_shimmer` marked RETIRED.
+- Harness Leg D (`validate_s_marvelous.sh`): pass 1 is now the SHIPPED
+  `{true,true}` shape (asserts BOTH the cloned and the stock word's
+  additive alphas are all 0 on the real template — 3 + 3 records), pass 2
+  is the `{true,false}` fallback rung (same ids / clone mute count, stock
+  pulse provably non-zero `[51, 25, 0]`, same 11532-byte output).
+- Gates: `cargo check` clean, `cargo fmt` (no unrelated churn),
+  `validate_s_marvelous.sh` green (164 lib + 97 bin tests, Legs A–G),
+  `./build.sh` clean. No signature / consumer-offset changes (no
+  `validate_signatures.sh` run needed). README config row + AGENTS.md
+  S-Marvelous entry updated.
+- NOT yet cabinet-verified.
 
 ## Post-completion tweak — Timing graph Marvelous FAST/SLOW (2026-09-10, uncommitted)
 

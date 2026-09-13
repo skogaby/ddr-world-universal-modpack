@@ -84,11 +84,13 @@ pub struct WordCloneOpts {
     /// ALSO silence the additive placements inside the SOURCE (stock) word
     /// sprite chain — the same in-place mult-alpha zeroing as
     /// `mute_additive_glow`, applied to the original definitions AFTER the
-    /// copies are made (so the copies' own mute count is unaffected). This
-    /// is the "Marvelous shimmer OFF" option: with a higher tier on screen
-    /// some players want the stock Marvelous word static too. The chain is
-    /// the word's own sprite lineage (resolved by content), so nothing
-    /// outside the labeled word segment is touched. Same fail-closed rule.
+    /// copies are made (so the copies' own mute count is unaffected). The
+    /// S-Marvelous patch ships with this ON: with a higher tier on screen
+    /// the stock Marvelous word's pulse was judged ugly outright (it was an
+    /// operator toggle — "Marvelous Shimmer" — from 2026-09-03 until
+    /// 2026-09-13). The chain is the word's own sprite lineage (resolved by
+    /// content), so nothing outside the labeled word segment is touched.
+    /// Same fail-closed rule.
     pub mute_source_additive_glow: bool,
 }
 
