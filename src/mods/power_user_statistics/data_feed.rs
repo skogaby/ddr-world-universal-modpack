@@ -37,17 +37,19 @@ const MAX_TIMED_GRADE_INDEX: u32 = 4;
 /// `judge_submit`'s payload delta is `actual − expected` (Ghidra
 /// `FUN_18005fcc0` on 20260825: `result+8 − note+8`; `< 0` bumps the FAST
 /// counter `+0x1C4`), i.e. NEGATIVE = FAST (early). That is the value the
-/// feed stores (`MsErrorAccum`, `latest_ms_error`, the CSV `Delta` column
-/// — kept raw so `Actual = Expected + Delta` holds, and the calibration /
-/// diagnostics taps, whose sign models were cabinet-verified on it).
+/// feed stores (`MsErrorAccum`, `latest_ms_error`, `StepRecord::delta_ms` —
+/// kept raw so `actual_ms = expected_ms + delta_ms` holds in memory) and what
+/// the calibration / diagnostics taps consume (their sign models were
+/// cabinet-verified on it).
 ///
-/// Every ON-SCREEN readout (pacemaker → ms-error digits + color, the
-/// widget's Current / μ) shows the OPPOSITE sign: POSITIVE = FAST, NEGATIVE
-/// = SLOW. That is the game's own results convention — the stage record's
-/// per-note ms stream (`rec+0xD8`, written by `FUN_1801e6ca0` as
-/// `expected − actual`) drives the results graph with FAST on the positive
-/// axis — and what testers expected (2026-09: "slow is negative, fast is
-/// positive"). Apply at the display boundary only.
+/// Every USER-FACING readout (pacemaker → ms-error digits + color, the
+/// widget's Current / μ, AND the CSV export's `Delta` column) shows the
+/// OPPOSITE sign: POSITIVE = FAST, NEGATIVE = SLOW. That is the game's own
+/// results convention — the stage record's per-note ms stream (`rec+0xD8`,
+/// written by `FUN_1801e6ca0` as `expected − actual`) drives the results
+/// graph with FAST on the positive axis — and what testers expected (2026-09:
+/// "slow is negative, fast is positive"; the CSV was the last raw-sign
+/// surface, reported swapped 2026-09-13). Apply at the display boundary only.
 #[inline]
 pub fn display_ms(captured_ms: i32) -> i32 {
     captured_ms.wrapping_neg()

@@ -279,11 +279,14 @@ Shaped by being an in-process hook DLL where the engine-facing code has no test 
   at a side's first judgement of a song and KEPT through the post-song loader (0-idx
   29) and the stage results (30) — `carries_over_from_gameplay` — so the breakdown is
   readable after the song; any other destination hides (quick-fail skip-results 29→24,
-  restart 29→28 re-arms). **Sign convention of every on-screen ms readout (widget
-  Current/μ, pacemaker→ms-error digits + color): POSITIVE = FAST (early), NEGATIVE =
-  SLOW** — `data_feed::display_ms` negates the captured `judge_submit` delta (`actual −
-  expected`, negative = fast) at the display boundary; the CSV `Delta` and the
-  calibration/diagnostic taps keep the raw sign. **Miss (grade 5) is NOT a timing
+  restart 29→28 re-arms). **Sign convention of every user-facing ms readout (widget
+  Current/μ, pacemaker→ms-error digits + color, AND the CSV export's `Delta` column):
+  POSITIVE = FAST (early), NEGATIVE = SLOW** — `data_feed::display_ms` negates the
+  captured `judge_submit` delta (`actual − expected`, negative = fast) at each display
+  boundary (`csv_export::write_csv` included since 2026-09-13 — the CSV shipped raw and
+  was reported swapped; header byte-identical, `Delta = Expected − Actual`); only
+  `StepRecord`/`MsErrorAccum` in memory and the calibration/diagnostic taps keep the raw
+  sign. **Miss (grade 5) is NOT a timing
   sample** (its payload delta reads 0) — EX-loss only, like OK, and it leaves
   `latest_ms_error` alone so the pacemaker readout holds the last real step
   (`MAX_TIMED_GRADE_INDEX`, tester feedback 2026-09).

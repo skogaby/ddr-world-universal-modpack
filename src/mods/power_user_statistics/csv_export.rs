@@ -138,6 +138,14 @@ fn write_csv(
     // interpretable. Every row carries the per-song latched requested
     // percent and the committed exact ratio (identity songs uniformly emit
     // 100 and 1/1 — see `RateSnapshot::csv_rate_cells`).
+    //
+    // `Delta` follows the same sign convention as every on-screen readout
+    // (`data_feed::display_ms`): POSITIVE = FAST (early), NEGATIVE = SLOW
+    // (late) — i.e. `Delta = Expected − Actual`, the game's own results
+    // stream convention. `Expected`/`Actual` stay raw chart/hit timestamps.
+    // The raw captured payload is `actual − expected`; exporting it verbatim
+    // put FAST on the negative axis, the inverse of the widget and the
+    // README's stated convention (bug report 2026-09-13).
     let (requested, effective) = identity.rate.csv_rate_cells();
     file.write_all(
         b"Expected,Actual,Delta (Ms Error),Song Rate Requested (%),Song Rate Effective\r\n",
@@ -146,7 +154,11 @@ fn write_csv(
         let _ = write!(
             file,
             "{},{},{},{},{}\r\n",
-            step.expected_ms, step.actual_ms, step.delta_ms, requested, effective
+            step.expected_ms,
+            step.actual_ms,
+            data_feed::display_ms(step.delta_ms),
+            requested,
+            effective
         );
     }
 

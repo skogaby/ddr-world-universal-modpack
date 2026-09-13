@@ -289,9 +289,19 @@ and the GraphTab draws FAST on the positive axis — and that is what the
 testers expected. Fix: `data_feed::display_ms` negates at the display
 boundary; the pacemaker digits/sign/color and the widget's signed
 readouts (Current, μ) show POSITIVE = FAST, NEGATIVE = SLOW. The captured
-value is unchanged everywhere else (CSV `Delta` keeps `Actual = Expected
-+ Delta`; the calibration and diagnostics taps keep their cabinet-verified
-sign models). The white zone is `|v| < threshold` — sign-free.
+value is unchanged in memory (the calibration and diagnostics taps keep
+their cabinet-verified sign models). The white zone is `|v| < threshold` —
+sign-free.
+
+**"The CSV export's +/− for FAST/SLOW is swapped" (2026-09-13).** The
+first fix above deliberately left the step-data CSV's `Delta (Ms Error)`
+column raw (`Actual − Expected`, negative = FAST) so `Actual = Expected +
+Delta` held arithmetically — but that made the CSV the ONE user-facing
+surface whose sign disagreed with the widget, the pacemaker readout, the
+game's own results graph, and the README's stated convention. Fix:
+`csv_export::write_csv` runs the same `display_ms` negation per row, so
+`Delta = Expected − Actual` (POSITIVE = FAST). Header byte-identical;
+`Expected`/`Actual` unchanged; `StepRecord::delta_ms` in memory stays raw.
 
 **"A Miss counts as a perfect 0 ms step."** Miss (grade 5, 0x102D) is a
 timeout: the payload delta at `+4` reads 0, not a measurement. The feed
