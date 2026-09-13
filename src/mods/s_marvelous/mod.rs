@@ -45,6 +45,16 @@ use crate::{log_info, log_warn};
 /// removed callback can fire one last time after `disable`.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the S-Marvelous mod is currently enabled (set for the whole
+/// enable..disable span). Sibling mods key display decisions on it — the
+/// Power User Statistics streamlined readout shows its S-Marv tally (and
+/// an exclusive Marv count) only while this is true. The `state::*`
+/// counters are the per-song data; this is the "is the tier a thing on
+/// this cabinet right now" flag.
+pub(crate) fn is_enabled() -> bool {
+    ACTIVE.load(Ordering::Acquire)
+}
+
 /// The LIVE S-Marvelous window (ms). Seeded from `s_marvelous.window_ms` at
 /// enable; the overlay menu's scalar row writes it. Read at each
 /// GAMEPLAY-entry arm, so an edit applies NEXT song (per-song latch, design

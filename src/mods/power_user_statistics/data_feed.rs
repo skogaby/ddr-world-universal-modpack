@@ -15,7 +15,16 @@ use crate::core::signatures::SignatureStore;
 use crate::services::song_rate::clock_patch::RateSnapshot;
 use crate::{log_info, log_warn};
 
-use super::{csv_export, timing_stats_widget};
+use super::{csv_export, readout, timing_stats_widget};
+
+/// Sign convention of the CAPTURED ms error vs the DISPLAYED one — the
+/// feed stores the raw `actual − expected` delta (NEGATIVE = FAST); every
+/// user-facing readout negates it at the display boundary (POSITIVE = FAST).
+/// The rule and its rationale live with the composer in `readout`
+/// (`display_ms` / `display_ms_f64`); `display_ms` is re-exported here
+/// because this module is where the raw value is born and where its
+/// consumers (CSV export, pacemaker swap) historically looked for it.
+pub use readout::display_ms;
 
 /// Normal grade judgment opcodes: 0x1028 + grade (0..7).
 /// Grades 0..4 (M/P/G/Gd/Boo) carry a meaningful ms-error.
@@ -31,37 +40,6 @@ const OPCODE_OK: u32 = 0x102E;
 /// Highest grade index whose payload delta is a real timing measurement
 /// (0 = Marvelous .. 4 = Boo). Miss (5) and OK (6) are excluded.
 const MAX_TIMED_GRADE_INDEX: u32 = 4;
-
-/// Sign convention of the CAPTURED ms error vs the DISPLAYED one.
-///
-/// `judge_submit`'s payload delta is `actual − expected` (Ghidra
-/// `FUN_18005fcc0` on 20260825: `result+8 − note+8`; `< 0` bumps the FAST
-/// counter `+0x1C4`), i.e. NEGATIVE = FAST (early). That is the value the
-/// feed stores (`MsErrorAccum`, `latest_ms_error`, `StepRecord::delta_ms` —
-/// kept raw so `actual_ms = expected_ms + delta_ms` holds in memory) and what
-/// the calibration / diagnostics taps consume (their sign models were
-/// cabinet-verified on it).
-///
-/// Every USER-FACING readout (pacemaker → ms-error digits + color, the
-/// widget's Current / μ, AND the CSV export's `Delta` column) shows the
-/// OPPOSITE sign: POSITIVE = FAST, NEGATIVE = SLOW. That is the game's own
-/// results convention — the stage record's per-note ms stream (`rec+0xD8`,
-/// written by `FUN_1801e6ca0` as `expected − actual`) drives the results
-/// graph with FAST on the positive axis — and what testers expected (2026-09:
-/// "slow is negative, fast is positive"; the CSV was the last raw-sign
-/// surface, reported swapped 2026-09-13). Apply at the display boundary only.
-#[inline]
-pub fn display_ms(captured_ms: i32) -> i32 {
-    captured_ms.wrapping_neg()
-}
-
-/// `display_ms` for the accumulated (f64) mean. `0.0 - x` rather than `-x`
-/// so an exact-zero mean stays +0.0 (`{:+.2}` would otherwise print
-/// "-0.00").
-#[inline]
-pub fn display_ms_f64(captured_mean: f64) -> f64 {
-    0.0 - captured_mean
-}
 
 /// Player side offset on GamePlayActor.
 const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
@@ -87,12 +65,20 @@ static DETOUR: OnceLock<GenericDetour<JudgeSubmitFn>> = OnceLock::new();
 pub struct MsErrorAccum {
     pub current: i32,
     pub max_abs: i32,
+    /// The SIGNED (captured-sign) error of the step that set `max_abs` —
+    /// the streamlined readout's "Max Δ" shows whether the worst step was
+    /// fast or slow. Maintained by `readout::update_max` (ties keep the
+    /// earlier step).
+    pub max_signed: i32,
     pub sum_abs: i64,
     pub sum: i64,
     pub count: u32,
     /// Cumulative EX score lost (max_possible - actual).
     /// Each step: loss = 3 - ex_value_for_grade.
     pub ex_loss: i32,
+    /// Per-grade tallies indexed by engine grade (`judge_code − 0x1028`,
+    /// 0 = Marvelous .. 6 = O.K.); every grade opcode counts, timed or not.
+    pub grade_counts: [u32; readout::GRADE_COUNT],
     pub per_step: Option<Vec<StepRecord>>,
     /// Songcode + difficulty captured on the first judgment of the song.
     pub song_identity: Option<SongIdentity>,
@@ -119,10 +105,12 @@ impl MsErrorAccum {
         Self {
             current: 0,
             max_abs: 0,
+            max_signed: 0,
             sum_abs: 0,
             sum: 0,
             count: 0,
             ex_loss: 0,
+            grade_counts: [0; readout::GRADE_COUNT],
             per_step: None,
             song_identity: None,
         }
@@ -131,15 +119,26 @@ impl MsErrorAccum {
     pub fn reset(&mut self, collect_per_step: bool) {
         self.current = 0;
         self.max_abs = 0;
+        self.max_signed = 0;
         self.sum_abs = 0;
         self.sum = 0;
         self.count = 0;
         self.ex_loss = 0;
+        self.grade_counts = [0; readout::GRADE_COUNT];
         self.song_identity = None;
         if collect_per_step {
             self.per_step = Some(Vec::new());
         } else {
             self.per_step = None;
+        }
+    }
+
+    /// Count one grade event (`grade_index` = `judge_code − 0x1028`).
+    /// Out-of-range indices are ignored — never indexes in the hook path.
+    #[inline]
+    fn tally_grade(&mut self, grade_index: u32) {
+        if let Some(slot) = self.grade_counts.get_mut(grade_index as usize) {
+            *slot = slot.saturating_add(1);
         }
     }
 }
@@ -358,14 +357,16 @@ unsafe extern "C" fn judge_submit_hook(
                     let bufs = buffers();
                     if let Ok(mut b) = bufs[player_side].try_lock() {
                         b.current = ms_error;
+                        let (max_abs, max_signed) =
+                            readout::update_max(b.max_abs, b.max_signed, ms_error);
+                        b.max_abs = max_abs;
+                        b.max_signed = max_signed;
                         let abs_err = ms_error.unsigned_abs() as i32;
-                        if abs_err > b.max_abs {
-                            b.max_abs = abs_err;
-                        }
                         b.sum_abs += abs_err as i64;
                         b.sum += ms_error as i64;
                         b.count += 1;
                         b.ex_loss += ex_loss_this_step;
+                        b.tally_grade(grade_index);
 
                         if let Some(ref mut steps) = b.per_step {
                             let note_ptr = *(result as *const *const u8);
@@ -384,11 +385,12 @@ unsafe extern "C" fn judge_submit_hook(
                     }
                 } else {
                     // Miss / freeze OK (or a timed grade with a null payload,
-                    // which should not happen): EX contribution only, no
-                    // ms-error sample, no CSV row.
+                    // which should not happen): EX contribution + grade tally
+                    // only, no ms-error sample, no CSV row.
                     let bufs = buffers();
                     if let Ok(mut b) = bufs[player_side].try_lock() {
                         b.ex_loss += ex_loss_this_step;
+                        b.tally_grade(grade_index);
                     }
                 }
 

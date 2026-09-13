@@ -11,9 +11,10 @@
 //! Thin contributor over `services::bottom_text` — this mod owns NO hook.
 //! The service holds the single detour on the game's bottom-text renderer
 //! and blanks the eight persistent text objects while any contributor asks
-//! (`HideReason::HideBottomTextMod` here; power_user_statistics' horizontal
-//! readout is the other planned contributor, which must hide the stock line
-//! regardless of this toggle). RE: `docs/hex_edit_porting.md` Hack 3 (with
+//! (`HideReason::HideBottomTextMod` here; power_user_statistics' BOTTOM LINE
+//! widget layout is the other contributor — it hides the stock line for its
+//! widgets' on-screen phase regardless of this toggle). RE:
+//! `docs/hex_edit_porting.md` Hack 3 (with
 //! the 2026-09-13 corrections — the doc's "detour → return" shape freezes
 //! the last-drawn strings; the service blanks instead).
 //!

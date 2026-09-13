@@ -48,8 +48,9 @@
 //! The service is deliberately mod-agnostic: [`HideReason`] is a small
 //! contributor set, the effective state is their OR. The `hide-bottom-text`
 //! mod is one contributor (the operator's cabinet-wide preference); the
-//! power-user-statistics horizontal readout will be another — it needs the
-//! stock text gone under its own layout regardless of the operator toggle.
+//! power-user-statistics BOTTOM LINE widget layout is the other — it needs
+//! the stock text gone under its own line for exactly its widgets' on-screen
+//! phase (gameplay + results carry-over), regardless of the operator toggle.
 //! Each contributor owns exactly one bit and toggles only that bit.
 //!
 //! ## Degradation
@@ -76,9 +77,9 @@ use crate::{log_info, log_warn};
 pub enum HideReason {
     /// The operator's cabinet-wide `hide-bottom-text` mod toggle.
     HideBottomTextMod,
-    /// Power User Statistics' horizontal bottom readout — replaces the
-    /// stock line with its own layout, so the stock text must be gone
-    /// whatever the operator toggle says.
+    /// Power User Statistics' BOTTOM LINE widget layout — replaces the
+    /// stock line with its own readout while its widgets are on screen, so
+    /// the stock text must be gone whatever the operator toggle says.
     PowerUserStatistics,
 }
 

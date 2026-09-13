@@ -440,27 +440,58 @@ pub struct SMarvelousConfig {
 /// back (`save_json_key`). Cabinet-wide; the offsets are MIRRORED between
 /// P1 and P2 (the horizontal offset is signed relative to each side's own
 /// screen edge, so one value moves both blocks symmetrically).
+///
+/// Two LAYOUTS, each with its OWN offsets so repositioning one never
+/// disturbs the other: `widget_offset_x` / `widget_offset_y` /
+/// `widget_alignment` belong to the `"vertical"` side column (the original
+/// keys, kept for existing configs); `horizontal_offset_x` /
+/// `horizontal_offset_y` belong to the `"horizontal"` bottom line, whose
+/// alignment is baked in (OUTER EDGE — a single line has nothing to align
+/// about). `widget_layout` picks which is active and `widget_content` which
+/// fields show.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct PowerUserStatisticsConfig {
-    /// Widget scale in percent of the stock size. Default 100; clamped
-    /// 50..=150.
+    /// Widget scale in percent of the stock size (both layouts). Default
+    /// 100; clamped 50..=150.
     #[serde(default)]
     pub widget_scale_percent: Option<i32>,
-    /// Horizontal offset in px from the stock block centre, POSITIVE = inward
-    /// (toward the screen centre), negative = outward (toward that side's
-    /// edge). Default 0; clamped -50..=400.
+    /// `"vertical"` (default — one field per line, a column beside each
+    /// playfield) or `"horizontal"` (every field on one line along the
+    /// bottom edge; the stock CREDIT / PASELI / ONLINE text is hidden while
+    /// the line is on screen). Unknown values warn once and use the default.
+    #[serde(default)]
+    pub widget_layout: Option<String>,
+    /// `"detailed"` (default — EX loss, current/max/abs-mean/mean ms error,
+    /// calories) or `"streamlined"` (Δ, Max Δ, EX loss, S-Marv when the
+    /// S-Marvelous mod is enabled, Marv, Perfect, Great, Good, Miss).
+    /// Unknown values warn once and use the default.
+    #[serde(default)]
+    pub widget_content: Option<String>,
+    /// SIDE COLUMN horizontal offset in px from the stock block centre,
+    /// POSITIVE = inward (toward the screen centre), negative = outward
+    /// (toward that side's edge). Default 0; clamped -80..=600.
     #[serde(default)]
     pub widget_offset_x: Option<i32>,
-    /// Vertical offset in px from the stock block top, POSITIVE = down.
-    /// Default 0; clamped -400..=200.
+    /// SIDE COLUMN vertical offset in px from the stock block top, POSITIVE
+    /// = down. Default 0; clamped -425..=295.
     #[serde(default)]
     pub widget_offset_y: Option<i32>,
-    /// Per-line text alignment about each side's anchor x: `"center"`
-    /// (default), `"outer"` (P1 left-aligned / P2 right-aligned — flush
-    /// toward the screen edges) or `"inner"` (P1 right / P2 left — biased
-    /// toward screen centre). Unknown values warn once and use the default.
+    /// SIDE COLUMN per-line text alignment about each side's anchor x:
+    /// `"center"` (default), `"outer"` (P1 left-aligned / P2 right-aligned —
+    /// flush toward the screen edges) or `"inner"` (P1 right / P2 left —
+    /// biased toward screen centre). Unknown values warn once and use the
+    /// default.
     #[serde(default)]
     pub widget_alignment: Option<String>,
+    /// BOTTOM LINE horizontal offset in px from the stock corner-text
+    /// anchor (P1 x = 10, P2 x = 1270), POSITIVE = inward. Default 0;
+    /// clamped -10..=1000 (+630 centres P1's line on screen).
+    #[serde(default)]
+    pub horizontal_offset_x: Option<i32>,
+    /// BOTTOM LINE vertical offset in px from the stock bottom-text row
+    /// (y = 700), POSITIVE = down. Default 0; clamped -700..=20.
+    #[serde(default)]
+    pub horizontal_offset_y: Option<i32>,
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-

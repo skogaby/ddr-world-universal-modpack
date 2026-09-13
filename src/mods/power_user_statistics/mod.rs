@@ -2,6 +2,7 @@ pub mod calorie_feed;
 pub mod csv_export;
 pub mod data_feed;
 pub mod pacemaker_swap;
+pub mod readout;
 pub mod timing_stats_widget;
 
 use crate::mods::mod_trait::{Mod, ModContext};
