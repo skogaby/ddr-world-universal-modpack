@@ -1,21 +1,35 @@
 # Progress — Custom Resolution (arbitrary resolution rendering)
 
-Updated: 2026-09-09
-Status: COMPLETE + one-knob revision (2026-09-09) awaiting ONE cabinet check (uncommitted — maintainer commits manually)
-NEXT ACTION: cabinet check of the one-knob build at `"output": "1920x1080"` (mod ON): expect `boot state -- output
-1920x1080 (16:9), render 1920x1080, present stock (1:1), aa game's choice; OUTPUT 6 write(s), RENDER 22 write(s)` and
-the NEW line `present chain -- aa_config=3 (onBoot chose 3) -> direct (3): …` (a `0` there on this cabinet = regression);
-picture identical to checkpoint #3 (direct mode renders 3D+2D straight into the output-sized `display`); then a 640x480
-regression run (`aa_config=0 (onBoot chose 3)`, `-> offscreen composite (0)`, SD crop picture). Ask the 1080p-stutter
-reporters for their `present chain` line + FPS Unlock setting. Open follow-ups (not blockers): the scissor detour has
-never been exercised by stock content (watch for its `first dispatch` INFO); planning dir can move to
-`.agents/planning/_archive/` after the check.
+Updated: 2026-09-13
+Status: COMPLETE + one-knob revision (2026-09-09) + AFP-canvas fix (2026-09-13) awaiting cabinet check (uncommitted — maintainer commits manually)
+NEXT ACTION: cabinet check of the AFP-canvas build at `"output": "1920x1080"` (and/or 4K): song select — scroll the
+wheel and watch the jacket flip on each new highlight: the rotation must be about the jacket's own vertical axis with
+stock-720p foreshortening (no upper-left skew). Log: `logical screen installed -- 4 app-layer load(s) + 4 AFP callback
+load(s) read the 1280x720 canvas (bm2d half-pixel offset 0.750x0.750 render px); 30 untouched physical`. Also eyeball
+static AFP bitmaps for any new softness (expected: none visible — the half-pixel term moved by ≤ 0.25 px at 1080p,
+≤ 1 px at 4K). Then the still-pending one-knob checks below.
 
 Resume protocol: read this file, then `implementation/plan.md` (checklist), then
 `design/detailed-design.md` (§4 components), then `idea-honing.md` (register) and
 `research/*.md` only when a design claim needs its evidence.
 
 ## Done
+
+- **AFP-canvas fix (2026-09-13, maintainer report: "jacket spin animation is skewed above 720p")** — the song-select
+  jacket's 3D flip on highlight change looked skewed at 1080p/4K while every 2D element was correct. Root cause via
+  Ghidra (gamemdx 20260825 + libafp 2.13.7): libafp's Flash `PerspectiveProjection` builds the default projection
+  object from the AFP STREAM's stage size (`afp_stream_get_info` → 1280×720: center (640,360), focal ∝ 1280) but its
+  matrix builder `FUN_180051a00` takes the `2/w, 2/h` NDC extents from the `get_screen_rect` callback (slot 12 =
+  gamemdx `FUN_18021b490`, display-info pointer) — and the mod's `logical_screen` "render family" fed that callback +
+  the projection callback + the BM2D ctx rect/BM2DGroup rect the RENDER size (register D19). Stage-space center with
+  render-space extents ⇒ vanishing point at render (640,360) = canvas (427,240) and a 2/3 focal length. `z = 0`
+  geometry cancels the center term exactly, which is why nothing 2D showed it. Fix: `Family::Render` → `Family::Afp`,
+  all four sites read the same 1280×720 canvas block as the design family (one fake block, one slot). Trade-off: the
+  gamemdx projection callback's D3D9 half-pixel translate becomes half a CANVAS pixel (the `0.5f` is loaded once into
+  XMM1 and shared by the `S` scale and the `T` translate — not separately redirectable); sub-pixel, SD unchanged.
+  D19 in `idea-honing.md` is superseded. Docs: `custom_resolution.md` §5/§5b/§8/§10, research §6.2 + §10 banner,
+  AGENTS.md row, learnings entry. `cargo check` / `cargo fmt` / `./build.sh` clean; no signature or fixed-offset
+  change (no sweep needed).
 
 - **Menu-toggle persistence fix (2026-09-09, tester report)** — a tester could not change the resolution from the
   0-0-0 menu: picking a size then restarting always came back at 720p; only hand-editing `mod-config.json` worked.

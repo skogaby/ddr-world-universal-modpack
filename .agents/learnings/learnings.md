@@ -1371,3 +1371,38 @@ already owns the clock, lifetime, expansion, rotation and blend.
   sits in the atlas but no shape references it; the "arrow-shaped receptor
   flash" was the sprite burst all along. Check shape→texture references before
   assuming a texture's role from its name.
+
+## A 2D-correct render proves nothing about 3D: check where perspective CENTERS come from (2026-09-13)
+
+The custom-resolution mod fed libafp's render callbacks (`get_screen_rect`, the
+projection callback, the BM2D ctx rect) the RENDER size, reasoning that the
+D3D9 half-pixel correction "must match the render target". Every static screen
+was pixel-perfect at 1080p and 4K; only the song-select jacket FLIP was skewed.
+Root cause: libafp's Flash `PerspectiveProjection` derives its projection
+center and focal length from the AFP STREAM's authored stage size (1280×720 —
+`afp_stream_get_info`) but takes the `2/w, 2/h` NDC extents from the
+`get_screen_rect` callback. Stage-space center + render-space extents = a
+vanishing point at canvas (427,240) and a 2/3 focal length. For `z = 0` the
+center term cancels exactly (`x_ndc = 2x/w − 1` whatever the center), so no 2D
+test could ever expose it.
+
+**Rules:**
+
+- When an engine has TWO sources for "the screen size" (a stream/asset-authored
+  size and a device/callback size), any fix that changes one must audit every
+  formula that mixes them — perspective/projection builders first, because
+  they are the only place the two enter non-linearly. Test with content that
+  has z ≠ 0 (a 3D flip, a rotated card), not just a static screen.
+- A matrix "composition" in a callback (`C × P`) is a coordinate-space
+  contract: `C` maps back to pixels in ONE unit, `P` expects pixels in ONE
+  unit. Write down the unit of every factor before deciding which dimension
+  block a load should read. The mod's H1 note ("would double-transform") was
+  wrong for exactly this reason — the walker's NDC → `C` → pixels → `P` → NDC
+  is the identity in 2D by construction.
+- A shared immediate (`0.5f` loaded once into a register and used for scale AND
+  translate) cannot be redirected per-use; when the fix leaves a sub-pixel
+  residue because of that, quantify it (here 0.75 px at 1080p) and record it
+  rather than adding a second mechanism.
+- Ghidra: libafp's callback-table thunks (`(*DAT_180245160)(…)`) show up as
+  "no callers" until the program is (re)analysed — an empty `get_function_callers`
+  on an obviously-used helper means re-run analysis, not that it is dead.

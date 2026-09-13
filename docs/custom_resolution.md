@@ -185,18 +185,87 @@ will say if anything ever reaches it.
 
 The game keeps a per-display-info block (w/h) behind a POINTER global; 38
 `MOV r64,[RIP+disp32]` loads of it exist. Classified by content + anchor and the
-disp32 redirected to mod-owned pointer slots (near-alloc): **design (4)** — the
-two screen w/h getters the layer set-size loop uses for roots 1/3/5/6/7 + the
-footer text setup + the loading text — read a constant `{1280,720}` so every
-screen-sized layer root is a 1280×720 canvas the walker scales to the viewport;
-**render (4)** — the AFP projection callback, BM2DGroup ctor/ctx reset — read
-`{render}` (the bm2d VS DOES consume c50–c53, H1 refuted); **physical (30; 29 on
-20250805)** — surface ctor, letterbox, list viewports, frame-begin bind, gd
-device layer, the ark draw-callback API (`screen × pct / 100`, RIP-relative
-`100.0f` within [−0x60,+0x80)) and the system font (`DIVSS [r+0x74/0x78]`) — stay
-on the real block. The install REFUSES on any other family shape. This replaced
-two failed attempts (re-canvasing root 7 alone; scaling the DLL's widgets) —
+disp32 redirected to ONE mod-owned pointer slot (near-alloc) → a fake block
+reading the constant `{1280, 720}`: **design (4)** — the two screen w/h getters
+the layer set-size loop uses for roots 1/3/5/6/7 + the footer text setup + the
+loading text — so every screen-sized layer root is a 1280×720 canvas the walker
+scales to the viewport; **AFP (4)** — the projection callback's ortho extents,
+`get_screen_rect`, the BM2D ctx reset and the BM2DGroup ctor rect — the AFP
+stage/canvas space (§5b: these read the RENDER size until 2026-09-13, which is
+what skewed the song-select jacket flip); **physical (30; 29 on 20250805)** —
+surface ctor, letterbox, list viewports, frame-begin bind, gd device layer, the
+ark draw-callback API (`screen × pct / 100`, RIP-relative `100.0f` within
+[−0x60,+0x80)) and the system font (`DIVSS [r+0x74/0x78]`) — stay on the real
+block. The install REFUSES on any other family shape. This replaced two failed
+attempts (re-canvasing root 7 alone; scaling the DLL's widgets) —
 `progress.md` checkpoint #2 runs 1–4 record why.
+
+## 5b. AFP callbacks read the CANVAS, not the render size (2026-09-13)
+
+Symptom: at every 16:9 output above 720p the song-select jacket "flip" (the
+brief 3D rotation when a new jacket is highlighted) was skewed — vanishing
+toward the upper-left of the jacket instead of its own axis, with stronger
+foreshortening than stock. 2D content was pixel-perfect, so the culprit had to
+be something only z ≠ 0 geometry consumes.
+
+The pipeline (gamemdx 20260825 + `libafp-win64` 2.13.7, Ghidra):
+
+- libafp implements Flash's `PerspectiveProjection` (`afp-geom.c`,
+  `afp-play.c`). The default projection object per play work
+  (`afp_play_work_default_perspective_projection_o_work`) is built by the
+  perspective-object init from **the STREAM's stage size**
+  (`afp_stream_get_info` +0x10/+0x12 = header rect width/height, i.e. the
+  authored 1280×720): `fov = 55°`, `center = (w/2, h/2)`, `focal ∝ w`,
+  stored at `proj+0x8 f, +0xC cx, +0x10 cy, +0x18 w, +0x1C h`.
+- The display-object render (`FUN_1800d90b0`) pushes the world matrix, and
+  when the work has a projection object AND the layer's 3D flag is set,
+  builds the projection with the perspective matrix builder
+  (`FUN_180051a00(proj, out, view = current world matrix)`), pushes it on
+  the "projection matrix" stack (`FUN_180022f80`) and later pops it. That
+  builder transforms the center by the view matrix, then takes `w, h` from
+  **`get_screen_rect`** (libafp slot 12 → gamemdx `{0, 0, screen_w,
+  screen_h}` from the display-info pointer) and `near/far` from slot 13.
+  Result, D3DX row-vector form: `row0 = [2f/w, 0, 0, 0]`, `row1 = [0, −2f/h,
+  0, 0]`, `row2 = [2x'/w − 1, 1 − 2y'/h, (far+near)/(far−near), 1]`, `row3 =
+  [−(2f/w)x' − (2x'/w − 1)z', (2f/h)y' − (1 − 2y'/h)z', −far·near/(far−near)
+  − z', −z']` — i.e. `x_ndc = 2/w·(x' + f(x − x')/(z − z')) − 1`: stage pixels
+  in, NDC out, perspective divide by `w = z − z'`. For `z = 0` it is exactly
+  `2x/w − 1` whatever the center or focal length — pure 2D can never show a
+  center/extent mismatch.
+- The draw dispatch (`FUN_180023580`/`FUN_180023fd0`) uploads the stack top
+  through slot 11 = gamemdx's projection callback (`FUN_18021b4e0` on
+  20260825, `FUN_18021b040` on 20260616) whenever the pushed count changes
+  (NULL when the stack is empty). gamemdx composes `M = C × P` (D3DX
+  row-major; `FUN_180220350(out, A, B)` = `B·A`, `FUN_18021c1a0(out, A, B)`
+  = `A·B` on 3×4 column-major affines), where `C = T(1,−1)·S(ctx.w/2,
+  −ctx.h/2)·T(ctx.x − 0.5, ctx.y − 0.5)` — NDC → BM2D ctx-rect pixels minus the
+  D3D9 half-pixel — and `P` is libafp's matrix (or the NULL-case ortho over
+  the display-info dims). The bm2d VS computes `v × C × P` on the walker's
+  canvas-NDC positions (H1: `flash_parameter.viewProjection` c50–c53). So
+  `C` maps back to pixels in the ctx rect's units and `P` expects pixels in
+  `get_screen_rect`'s units, with a center/focal length in STAGE units.
+  Stock 720p: all three are 1280×720. Render family at 1080p: ctx/screen
+  = 1920×1080, stage = 1280×720 → the vanishing point sits at render (640,
+  360) = canvas (427, 240) and `f` is 2/3 of what the 1920-wide coordinates
+  need → the skew.
+
+Fix: the four AFP sites read the same 1280×720 block as the design family
+(`Family::Afp`; the `render` fake block is gone). Everything libafp-side is
+then the stock 720p arithmetic and the GPU rasterises at render size. The
+one trade-off: `C`'s half-pixel translate becomes half a CANVAS pixel
+(`0.5·render/1280` render px — 0.75 at 1080p, 1.0 at 1440p, 1.5 at 4K) instead
+of half a render pixel. It cannot be fixed independently — the callback loads
+`0.5f` ONCE into XMM1 (`MOVSS XMM1,[DAT_18035b7b4]`) and uses it for BOTH the
+`S` scale (`MULSS`) and the `T` translate (`SUBSS XMM0,XMM1`, register form).
+The bilinear phase multiset at exact 3× is unchanged by a 1-px shift, and SD
+(render == canvas) is byte-identical to before. `ctx.x/ctx.y` (the
+BM2DGroupWithPan pan offsets) are now interpreted in canvas units too, which
+is what the app writes. Register D19 ("render family for exactness when
+render ≠ output") described a sub-pixel effect that was real but secondary;
+the 3D center is the load-bearing one. Also of note from the same RE: slot 6
+(`set_filter`, `FUN_18021ad10`) already normalises libafp's filter rect by the
+`1280.0f/720.0f` rodata — the AFP path was canvas-space everywhere except
+these four loads.
 
 ## 5a. Debug-UI scale (`debug_ui.rs`) — TEST menu / hardware check / error screens
 
@@ -251,7 +320,10 @@ depth swap — §3 keeps the shape.)
 
 ## 8. Hypothesis outcomes (research §10)
 
-- H1 REFUTED offline (bm2d VS reads c50–c53) → the render family of §5.
+- H1 REFUTED offline (bm2d VS reads c50–c53) → the AFP family of §5, which
+  read the RENDER size until 2026-09-13 and the 1280×720 canvas since (§5b —
+  libafp's 3D perspective center/focal length come from the stream's stage
+  size, so the extents must be canvas too).
 - H2 CONFIRMED benign on CrossOver/D3DMetal (720p depth under a 1080p/4K colour
   target rendered), fixed anyway for real D3D9 by §3.
 - H3 no read-back consumer surfaced through gameplay → results at 4K (native and
@@ -284,6 +356,10 @@ render < output perf mode it would have served no longer exists (§1a).
 - Never reintroduce a policy that writes AA 0 for a 16:9 plan — that is the
   present-chain regression §3a exists to document. Direct mode is safe at any
   output size because the RENDER set makes `render_depth` output-sized.
+- Never feed the four AFP callback loads (§5b) anything but the 1280×720
+  canvas: libafp's perspective center and focal length are derived from the
+  AFP stream's authored stage size and cannot follow the screen rect. Any
+  2D test passes regardless — check the song-select jacket flip.
 - The DLL's early_apply INFO/WARN lines may be absent from `log.txt` (debughook
   attach race) — read the `boot state` line and the `debughook: attached` line
   number before concluding a step did not run.

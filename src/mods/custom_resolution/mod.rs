@@ -38,11 +38,16 @@
 //!   sites that size/position content "on the screen" (layer set-size loop,
 //!   footer/version/attract text, TEST-menu drawers, system font) read a
 //!   constant 1280×720 (the design space they were authored against), the
-//!   AFP callbacks read the RENDER size, the renderer/device layer keeps the
-//!   real back-buffer. Every screen-sized layer root thereby becomes a
-//!   1280×720 canvas that the walker scales to the physical viewport —
-//!   game text, loading art and the DLL's widgets all land right at any
-//!   output (cabinet-derived 2026-09-05 after two narrower attempts).
+//!   four libafp render callbacks read the SAME 1280×720 canvas (the AFP
+//!   stage space — libafp's 3D perspective derives its projection center
+//!   and focal length from the stream's authored stage size, so the
+//!   screen-rect/ctx-rect sites must agree with it; feeding them the
+//!   render size skewed the song-select jacket flip above 720p), the
+//!   renderer/device layer keeps the real back-buffer. Every screen-sized
+//!   layer root thereby becomes a 1280×720 canvas that the walker scales to
+//!   the physical viewport — game text, loading art and the DLL's widgets
+//!   all land right at any output (cabinet-derived 2026-09-05 after two
+//!   narrower attempts).
 //! - [`debug_ui`] — the ark draw-callback API's font/sprite scale (TEST
 //!   menu, hardware check, error screens): the game picks a fixed pixel
 //!   size per machine type, so two post-original detours multiply it by

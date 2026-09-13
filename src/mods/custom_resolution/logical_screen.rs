@@ -30,10 +30,34 @@
 //!   bare list whose walker context IS the physical viewport, so they
 //!   scale by construction and broke when fed 1280×720 (cabinet, 2026-09-05
 //!   run 4: hardware check no longer centred).
-//! - **Render** — the AFP callbacks (projection matrix, render-ctx rect,
-//!   BM2DGroup rect): a half-pixel correction that must match the RENDER
-//!   target (register D19), i.e. `render.w/h` — equal to the physical size
-//!   in Tier B and to 1280×720 in Tier A / SD.
+//! - **AFP** — the four libafp render-callback sites (the projection
+//!   callback's ortho extents, `get_screen_rect`, the BM2D render-ctx reset
+//!   and the BM2DGroup ctor rect). These read the SAME constant 1280×720
+//!   (the "canvas" — the stage size every AFP stream is authored against),
+//!   NOT the render size. Until 2026-09-13 they read the render size
+//!   (register D19: "the half-pixel correction must match the RENDER
+//!   target"), which is indistinguishable for 2D content but wrong for
+//!   AFP 3D: libafp's Flash `PerspectiveProjection` builds its matrix
+//!   (`afp-types.c` perspective builder) from the projection center and
+//!   focal length it derived from the STREAM's stage size (1280×720, via
+//!   `afp_stream_get_info`) but takes the `2/w, 2/h` NDC extents from the
+//!   `get_screen_rect` callback — so at 1080p a jacket flipping about its
+//!   own axis vanished toward render px (640,360) = canvas (427,240) with
+//!   a focal length authored for a 1280-wide stage: the "skewed jacket
+//!   spin" at every 16:9 output above 720p. Pure 2D (z = 0) collapses the
+//!   perspective to the identity whatever the center/focal length, which
+//!   is why only the flip showed it. The bm2d vertex shader multiplies the
+//!   walker's canvas-NDC positions by `C × P` where gamemdx's `C` maps NDC
+//!   back to the BM2D ctx rect in pixels (minus the half-pixel) and libafp's
+//!   `P` maps stage pixels to NDC — every one of those four sites must
+//!   agree on ONE pixel space, and only the canvas makes the stream-derived
+//!   center/focal length correct. Trade-off: the half-pixel term becomes
+//!   half a CANVAS pixel (0.5·render/1280 render px — 0.75 px at 1080p,
+//!   1.5 px at 4K) instead of half a render pixel; the `0.5f` is loaded
+//!   once into XMM1 and shared by the scale AND the translate in the
+//!   callback, so it cannot be redirected independently. Sub-pixel, the
+//!   bilinear phase multiset at 3× is unchanged, and at SD (render ==
+//!   canvas) nothing changes at all.
 //!
 //! Mechanism: every `MOV r64,[RIP+disp32]` load of the info POINTER is
 //! classified by content (CONSERVATIVE — a misrouted physical reader is a
@@ -42,7 +66,7 @@
 //! carrying only `{w, h}`. Anchored exclusions: the letterbox load (exact),
 //! the surface-ctor body, the list-viewport builder. Family rules verified
 //! offline on 20250805 / 20260224 / 20260721 / 20260825 (17 physical loads
-//! left untouched on every build; design 17–18; render 4).
+//! left untouched on every build; design 17–18; AFP 4).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -76,10 +100,10 @@ const SURFACE_CTOR_FWD: usize = 0x1400;
 const LIST_VP_BACK: usize = 0x200;
 const LIST_VP_FWD: usize = 0x400;
 /// The layer-table builder sits right before `layer_dispatcher`; its one
-/// info load is the BM2DGroup ctor rect (+0x24/+0x28) → render family.
+/// info load is the BM2DGroup ctor rect (+0x24/+0x28) → AFP family.
 const LAYER_BUILDER_BACK: usize = 0x600;
 /// The AFP callback module follows `wrapper_render`; its three info loads
-/// (projection matrix, get-screen-rect, ctx reset) → render family.
+/// (projection matrix, get-screen-rect, ctx reset) → AFP family.
 const AFP_MODULE_START: usize = 0x800;
 const AFP_MODULE_END: usize = 0x2000;
 /// Content windows.
@@ -91,16 +115,22 @@ const PCT_BACK: usize = 0x60;
 const PCT_FWD: usize = 0x80;
 
 /// Exact family sizes that must hold before ANY write (offline, all four
-/// builds: design 4 = 2 getters + footer + loading text; render 4; the ark
+/// builds: design 4 = 2 getters + footer + loading text; AFP 4; the ark
 /// percentage drawers 10–11 and the system font 3 stay physical).
 const EXPECT_DESIGN: usize = 4;
 const EXPECT_GETTERS: usize = 2;
-const EXPECT_RENDER: usize = 4;
+const EXPECT_AFP: usize = 4;
 
+/// Which fake block a redirected load reads. Both families read the same
+/// constant 1280×720 today (module docs); they stay distinct so the
+/// classifier's exact-shape gate and the boot log keep telling them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Family {
+    /// App-layer "screen" readers (layer set-size getters, footer/loading
+    /// text) — the design space they were authored against.
     Design,
-    Render,
+    /// The libafp render callbacks — the AFP stage/canvas space.
+    Afp,
 }
 
 struct Load {
@@ -110,7 +140,9 @@ struct Load {
     getter: bool,
 }
 
-/// Install the redirects for the given render size. Idempotent; any
+/// Install the redirects. `render` is the plan's render size — informational
+/// only (the bm2d half-pixel term is reported in render pixels); every
+/// redirected load reads the constant 1280×720 canvas. Idempotent; any
 /// classification anomaly ⇒ one WARN and NO writes.
 pub fn install(sigs: &SignatureStore, module_base: *const u8, module_size: usize, render: Dims) {
     if DONE.swap(true, Ordering::AcqRel) {
@@ -157,37 +189,35 @@ pub fn install(sigs: &SignatureStore, module_base: *const u8, module_size: usize
     let loads = unsafe { classify(module_base, module_size, info_global, &anchors) };
     let getters = loads.iter().filter(|l| l.getter).count();
     let design = loads.iter().filter(|l| l.family == Family::Design).count();
-    let render_n = loads.iter().filter(|l| l.family == Family::Render).count();
-    if getters != EXPECT_GETTERS || render_n != EXPECT_RENDER || design != EXPECT_DESIGN {
+    let afp_n = loads.iter().filter(|l| l.family == Family::Afp).count();
+    if getters != EXPECT_GETTERS || afp_n != EXPECT_AFP || design != EXPECT_DESIGN {
         log_warn!(
-            "CustomResolution: logical-screen classifier off-shape (getters {getters}/{EXPECT_GETTERS}, render {render_n}/{EXPECT_RENDER}, design {design}/{EXPECT_DESIGN}) -- not installed"
+            "CustomResolution: logical-screen classifier off-shape (getters {getters}/{EXPECT_GETTERS}, afp {afp_n}/{EXPECT_AFP}, design {design}/{EXPECT_DESIGN}) -- not installed"
         );
         return;
     }
 
-    // Fake blocks (only w/h are ever read through the redirected loads) and
-    // the two pointer slots the redirected disp32s reach.
-    let design_block = unsafe { memory::alloc_zeroed(0x40) };
-    let render_block = unsafe { memory::alloc_zeroed(0x40) };
+    // ONE fake block (only w/h are ever read through the redirected loads):
+    // the 1280×720 canvas both families are authored against. One pointer
+    // slot in rel32 range of the module for the redirected disp32s.
+    let canvas_block = unsafe { memory::alloc_zeroed(0x40) };
     let slots = unsafe { memory::alloc_near(module_base, 16) };
-    if design_block.is_null() || render_block.is_null() || slots.is_null() {
+    if canvas_block.is_null() || slots.is_null() {
         log_warn!("CustomResolution: logical-screen allocation failed -- not installed");
         return;
     }
     unsafe {
-        memory::write_u32(design_block, STOCK.w);
-        memory::write_u32(design_block.add(4), STOCK.h);
-        memory::write_u32(render_block, render.w);
-        memory::write_u32(render_block.add(4), render.h);
-        memory::write_ptr(slots, design_block);
-        memory::write_ptr(slots.add(8), render_block);
+        memory::write_u32(canvas_block, STOCK.w);
+        memory::write_u32(canvas_block.add(4), STOCK.h);
+        memory::write_ptr(slots, canvas_block);
     }
 
     let mut n = 0usize;
     for l in &loads {
+        // Both families read the canvas block (module docs: the AFP
+        // callbacks moved off the render size on 2026-09-13).
         let slot = match l.family {
-            Family::Design => slots,
-            Family::Render => unsafe { slots.add(8) },
+            Family::Design | Family::Afp => slots,
         };
         let disp_addr = unsafe { l.insn.add(3) as *mut u8 };
         let rip = unsafe { l.insn.add(7) } as isize;
@@ -205,12 +235,16 @@ pub fn install(sigs: &SignatureStore, module_base: *const u8, module_size: usize
             Err(e) => log_warn!("CustomResolution: logical-screen redirect failed: {e:?}"),
         }
     }
+    // The bm2d half-pixel offset in render pixels (module docs: half a
+    // canvas pixel now that the AFP callbacks read the canvas).
+    let half_px_x = 0.5 * render.w as f32 / STOCK.w as f32;
+    let half_px_y = 0.5 * render.h as f32 / STOCK.h as f32;
     log_info!(
-        "CustomResolution: logical screen installed -- {} app-layer load(s) read 1280x720 (design), {} AFP load(s) read {}x{} (render); {} untouched physical",
+        "CustomResolution: logical screen installed -- {} app-layer load(s) + {} AFP callback load(s) read the 1280x720 canvas (bm2d half-pixel offset {:.3}x{:.3} render px); {} untouched physical",
         design,
-        render_n,
-        render.w,
-        render.h,
+        afp_n,
+        half_px_x,
+        half_px_y,
         n_physical(module_base, module_size, info_global, &loads)
     );
     INSTALLED.store(n > 0, Ordering::Release);
@@ -334,14 +368,14 @@ unsafe fn classify(base: *const u8, size: usize, info: *const u8, a: &Anchors) -
             // (its `+0x30 = prio` store trips the device-marker heuristic,
             // which the anchor makes unnecessary here).
             if has_pair_read(w40) {
-                Some(Family::Render)
+                Some(Family::Afp)
             } else {
                 None
             }
         } else if in_range(a.afp) {
-            // Render family only when the content is a plain w/h consumer.
+            // AFP family only when the content is a plain w/h consumer.
             if !has_device_marker(w40) && (has_float_use(win) || has_pair_read(w40)) {
-                Some(Family::Render)
+                Some(Family::Afp)
             } else {
                 None
             }

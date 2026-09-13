@@ -412,6 +412,19 @@ path. **Hypothesis H1 (§10): confirm by dumping the bm2d VS.** If it *is*
 consumed, the fix is still one site: feed the callback the logical 1280×720
 instead of `DAT_1806f20d8`.
 
+> **Resolved (2026-09-13, `custom_resolution.md` §5b):** H1 was refuted (the
+> VS does consume c50–c53), and the matrix is NOT a double transform: the
+> composition order is `C × P` with `C` = NDC → ctx-rect pixels − 0.5 and `P`
+> = pixels → NDC, so the VS input IS the walker's NDC and the product is the
+> D3D9 half-pixel offset (NULL case) or libafp's Flash-style perspective
+> (`FUN_180051a00` in libafp 2.13.7: center/focal length from the STREAM's
+> stage size via `afp_stream_get_info`, `2/w, 2/h` from the `get_screen_rect`
+> callback = slot 12). The shipped mod first fed these sites the RENDER size
+> (register D19); that skewed the song-select jacket flip above 720p and was
+> corrected to the 1280×720 canvas — the "one site" above is really the four
+> display-info loads of the AFP module + the BM2DGroup ctor, all of which must
+> agree with the stream's stage space.
+
 ### 6.3 Render context and layer roots
 
 - BM2D render context (0x88, `FUN_18021a1b0`, `*DAT_1806f1ff8`): `+0x8..+0x14`
@@ -534,7 +547,9 @@ init-time code that Konami has not touched across a year of builds.
 
 > **Outcomes (2026-09-07, shipped as `src/mods/custom_resolution/` — see
 > `docs/custom_resolution.md` §8):** H1 REFUTED offline (bm2d VS consumes
-> c50–c53 → the AFP loads read the RENDER dims via `logical_screen`); H2 benign on
+> c50–c53 → the AFP loads read the RENDER dims via `logical_screen` — REVISED
+> 2026-09-13 to the 1280×720 canvas after the skewed jacket-flip report,
+> `custom_resolution.md` §5b); H2 benign on
 > CrossOver, fixed for real D3D9 by an output-sized PRESENT depth swapped with the
 > engine's own refcount idiom; H3 no read-back consumer hit through results at 4K;
 > H4 spice2x forwards the size but PINS the `-w` window (client resize needed);
