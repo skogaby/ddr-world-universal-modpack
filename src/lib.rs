@@ -23,10 +23,11 @@ use crate::core::signatures::SignatureStore;
 use crate::mods::mod_menu::MOD_MENU_STATE;
 use crate::mods::mod_trait::{EarlyContext, Mod, ModContext, ModRegistry};
 use crate::services::{
-    afp_patcher, asset_loader, avs_layeredfs, bm2d_api, bm2d_package, cull_window, custom_options,
-    custom_options_persistence, game_audio, input_manager, judge_hook, movie_policy, movie_sync,
-    options_scroll, overlay_draw, render_notes_hook, scene_manager, se_bank_synth,
-    series_filter_scroll, song_rate, song_reset, stage_records, texture_resolver, widget_renderer,
+    afp_patcher, asset_loader, avs_layeredfs, bm2d_api, bm2d_package, bottom_text, cull_window,
+    custom_options, custom_options_persistence, game_audio, input_manager, judge_hook,
+    movie_policy, movie_sync, options_scroll, overlay_draw, render_notes_hook, scene_manager,
+    se_bank_synth, series_filter_scroll, song_rate, song_reset, stage_records, texture_resolver,
+    widget_renderer,
 };
 
 #[no_mangle]
@@ -170,6 +171,7 @@ fn init() {
         Box::new(mods::autoplay::AutoplayMod::new()),
         Box::new(mods::announcer_mute::AnnouncerMuteMod::new()),
         Box::new(mods::anytime_speedmod::AnytimeSpeedmodMod::new()),
+        Box::new(mods::hide_bottom_text::HideBottomTextMod::new()),
         Box::new(mods::split_ssq_auto_discovery::SplitSsqAutoDiscoveryMod::new()),
         Box::new(mods::series_expansion::SeriesExpansionMod::new()),
         Box::new(mods::folder_expansion::FolderExpansionMod::new()),
@@ -549,6 +551,16 @@ fn init() {
     // (playfield_styling or player_perspective) to enable installs lazily.
     cull_window::init(&signatures, game_module.base, game_module.size);
     profiling::tick("cull_window");
+
+    // 6e. Bottom-text hide service — the single detour on the system-HUD
+    // bottom-text renderer, passthrough until a contributor (the
+    // hide-bottom-text mod, or power_user_statistics' horizontal readout)
+    // asks to hide. Requires the renderer AOB + the derived slot array;
+    // fail-open to stock text.
+    if !bottom_text::init(&signatures) {
+        log_warn!("Bottom-text hide service unavailable -- stock bottom status text");
+    }
+    profiling::tick("bottom_text");
 
     // 7. Register mods. The instances were constructed in step 2c above
     // (so early_apply could run); here we move them into the registry

@@ -41,12 +41,17 @@ use std::collections::HashMap;
 const LATE_BINDING_MODS: &[&str] = &["folder-expansion", "webui-options"];
 
 /// Mods that default OFF when absent from the config `mods` map (every
-/// other mod defaults ON). Reserved for hardware-specific mods that are
-/// meaningless — or actively wrong — on cabinets without that hardware.
+/// other mod defaults ON). Two families belong here:
+/// * hardware-specific mods that are meaningless — or actively wrong — on
+///   cabinets without that hardware (`smx-hardware`);
+/// * pure-preference mods that REMOVE stock information an operator may
+///   rely on (`hide-bottom-text` blanks the credit / PASELI / ONLINE
+///   readouts) — a fresh install must keep those until the operator opts in.
+///
 /// (`gameplay-timing-fixes` sat here for its first cabinet build; promoted to
 /// default ON 2026-09-10 once the tester run confirmed it — maintainer
 /// decision.)
-pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware"];
+pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "hide-bottom-text"];
 
 /// Whether a mod is enabled by the config `mods` map (or its default when
 /// the key is absent). The same rule `enable_with_config` applies; exposed so

@@ -107,6 +107,14 @@
 //!   `M` before the eamuse library boots, so every modpack cabinet reports
 //!   `MDX:J:F:M:<ext>` on the wire (`model=`), in `/env/profile/soft_id_code`
 //!   and on the title screen. No config, fail-open to the stock identity.
+//!
+//! - **bottom_text** — Multi-contributor hide of the bottom-of-screen status
+//!   readouts (centre network-status / CREDIT / COIN line, P1/P2 PASELI
+//!   corners, attract-idle SOFTWARE/SYSTEM/HARDWARE ID lines). One detour on
+//!   the system-HUD renderer that, while any contributor asks, blanks the
+//!   eight persistent text objects instead of recomposing them. Contributors:
+//!   the `hide-bottom-text` mod (operator toggle) and power_user_statistics'
+//!   horizontal readout (needs the stock line gone under its own layout).
 
 pub mod afp_patcher;
 pub mod analyze_hook;
@@ -116,6 +124,7 @@ pub mod audio_sync_diag;
 pub mod avs_layeredfs;
 pub mod bm2d_api;
 pub mod bm2d_package;
+pub mod bottom_text;
 pub mod chart_length;
 pub mod cull_window;
 pub mod custom_options;

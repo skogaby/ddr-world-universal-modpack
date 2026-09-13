@@ -136,6 +136,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
 | **Anytime Speedmod Adjustment** | Change your speed mod at any point during a song, not just the first ~10 seconds. |
 | **Announcer Mute** | Silences the announcer's combo callouts and cheers (per-player option). |
+| **Hide Bottom Text** | Hides every bottom-of-screen status readout — ONLINE/CHECKING/MAINTENANCE, CREDIT/FREE PLAY/EVENT MODE, coin count, PASELI balances, and the attract-screen ID lines. Off by default (it removes operator-useful info). |
 | **Real Speed Fix** | Real Speed scroll uses Core BPM instead of Max BPM — sane scroll on variable-BPM songs. |
 | **Power User Statistics** | Live ms-error/EX/calorie stats, pacemaker→ms-error swap, CSV step export. |
 | **Music Wheel Song Length** | Shows each song's real play length (M:SS) next to the BPM at song select. |

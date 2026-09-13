@@ -1883,6 +1883,56 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B C4 55 48 8D 68 A1 48 81 EC E0 00 00 00 48 C7 45 C7 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 E8 0F 29 78 D8 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 2F 48 8B D9 0F B7 81 82 00 00 00 8B 4C C1 58 85 C9 0F 84",
         description: "In-game announcer/voice dispatcher entry — combo callouts, score-state cues and stage-clear cheer SFX. Detoured by the announcer-mute mod (conditional early-return).",
     },
+    // ── Bottom-text (system HUD line) renderer + its blank loop ────────
+    // The bottom-of-screen status readouts — centre: network status
+    // (ONLINE / CHECKING… / MAINTENANCE / OFFLINE MODE / LOCAL MODE …),
+    // the CREDIT / FREE PLAY / EVENT MODE line and the COIN/TOKEN count;
+    // corners: P1 / P2 PASELI balances; centre-above (attract idle): the
+    // SOFTWARE / SYSTEM / HARDWARE ID lines — are EIGHT persistent text
+    // objects held in one 8-slot pointer array, all owned by a single
+    // per-frame "system HUD" tick (FUN_18000a9a0 on 20260825). Every
+    // frame in ark system status ∈ {3,5,6} the tick calls the RENDERER
+    // (FUN_180009630 — the function docs/hex_edit_porting.md Hack 3 names
+    // FUN_180009680), which recomposes slots 0/1/2/3/7 and writes each
+    // through the text object's `set_text(inner, str, 1)` vcall; in every
+    // other status the tick's else-branch writes the game's own "" literal
+    // into all eight slots instead. The text objects PERSIST between
+    // frames (the else-branch exists precisely to clear them), so hiding
+    // = detour the renderer and run that same blank loop in its place
+    // (an early-return alone would freeze the last-drawn strings).
+    //
+    // `bottom_text_render` = the renderer's full relocation-free prologue
+    // (MOV R11,RSP; home R12; PUSH RBP; LEA RBP,[R11-0xA8]; SUB
+    // RSP,0x1A0; XMM6 save; security cookie load (disp wildcarded); home
+    // RBX/RDI; the `memset(buf+1, 0, 0xFF)` arg setup + `MOV byte
+    // [RBP-0x80],0`) through the CALL opcode. Ghidra-verified single hit:
+    // 0x180009220 (20250805), 0x1800096A0 (20260224), 0x180009630
+    // (20260825); byte-identical body shape on all three.
+    SignatureDefinition {
+        name: "bottom_text_render",
+        pattern: "4C 8B DC 4D 89 63 20 55 49 8D AB 58 FF FF FF 48 81 EC A0 01 00 00 41 0F 29 73 E8 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 80 00 00 00 49 89 5B 08 48 8D 4D 81 33 D2 41 B8 FF 00 00 00 49 89 7B 18 C6 45 80 00 E8",
+        description: "Bottom-of-screen status-text renderer entry (credit/coin/PASELI/EVENT MODE/FREE PLAY + the centre network-status line; FUN_180009630 on 20260825). Detoured by services::bottom_text — when any contributor asks to hide, the callback skips the original and blanks the eight text objects with the game's own \"\" literal instead.",
+    },
+    // The system-HUD tick's else-branch — `TEST BPL,BPL; JZ +7; CALL
+    // renderer; JMP epilogue; LEA RBX,[slots]; MOV EDI,8; loop { MOV
+    // RAX,[RBX]; TEST; JZ; MOV RAX,[RAX+0x18]; MOV RCX,[RAX]; MOV
+    // RAX,[RCX]; MOV R8D,R14D(=1); LEA RDX,[""]; CALL [RAX+0x10]; ADD
+    // RBX,8; DEC RDI; JNZ }`. derive_bottom_text reads: the CALL rel32 at
+    // match+5 (must equal `bottom_text_render` — identity cross-check that
+    // the AOB'd renderer IS the function this tick feeds), the RIP disp32
+    // at match+15 → `bottom_text_slots` (the 8 × ptr array,
+    // DAT_1806f2c90 on 20260825), the imm32 at match+20 (must be 8) and
+    // the RIP disp32 at match+48 → `bottom_text_empty_str` (the game's ""
+    // literal, DAT_1802dda70). The `+0x18` holder offset, the `[RCX]`
+    // inner deref, the `+0x10` vtable slot and the `1` flag are LITERAL in
+    // the pattern, so the service's replica of the loop is attested by the
+    // match itself. Single hit: 0x18000A86C (20250805), 0x18000ACEC
+    // (20260224), 0x18000AC7C (20260825).
+    SignatureDefinition {
+        name: "bottom_text_blank_loop",
+        pattern: "40 84 ED 74 07 E8 ?? ?? ?? ?? EB 5E 48 8D 1D ?? ?? ?? ?? BF 08 00 00 00 48 8B 03 48 85 C0 74 17 48 8B 40 18 48 8B 08 48 8B 01 45 8B C6 48 8D 15 ?? ?? ?? ?? FF 50 10 48 83 C3 08 48 FF CF 75 D8",
+        description: "System-HUD tick else-branch that blanks all eight bottom-text objects (`set_text(**(slot+0x18), \"\", 1)` × 8). Source of the derived `bottom_text_slots` (RIP at +15) and `bottom_text_empty_str` (RIP at +48); the CALL at +5 cross-checks `bottom_text_render`.",
+    },
     // ── Split SSQ Auto-Discovery: the SSQ path builder ────────────────
     // `void build_ssq_path(char out[0x100], const char* basename, int
     // difficulty)` — the ONE function that decides which `<basename>[_N].ssq`
@@ -2263,6 +2313,110 @@ impl SignatureStore {
         self.derive_ghost_vec_copy();
         self.derive_two_player_bpl();
         self.derive_smarvelous_burst();
+        self.derive_bottom_text();
+    }
+
+    /// Derive the bottom-text service's two data addresses from the
+    /// system-HUD tick's blank loop (`bottom_text_blank_loop`):
+    ///
+    /// * `bottom_text_slots` — RIP disp32 at match+15 (`LEA RBX,[rip]`): the
+    ///   8 × pointer array of persistent text objects (`DAT_1806f2c90` on
+    ///   20260825 — slot 0 centre CREDIT/FREE PLAY/EVENT MODE line, 1 COIN
+    ///   count, 2/3 P1/P2 PASELI corners, 4–6 SOFTWARE/SYSTEM/HARDWARE ID,
+    ///   7 centre network status).
+    /// * `bottom_text_empty_str` — RIP disp32 at match+48 (`LEA RDX,[rip]`):
+    ///   the game's own `""` literal the loop writes (`DAT_1802dda70`).
+    ///
+    /// Gates (all-or-nothing — a miss publishes NOTHING, and also
+    /// un-resolves `bottom_text_render` so a consumer cannot install a
+    /// hide-that-freezes detour without the blank capability):
+    /// * both AOBs resolved, and each unique in the module;
+    /// * the `CALL rel32` at match+5 decodes to `bottom_text_render` — the
+    ///   AOB'd renderer IS the function this tick feeds (identity check);
+    /// * the loop bound imm32 at match+20 is exactly 8;
+    /// * both derived addresses lie inside the module, and the "" literal
+    ///   really is a NUL byte.
+    fn derive_bottom_text(&mut self) {
+        const TAG: &str = "bottom_text";
+        const CALL_OFF: usize = 5;
+        const SLOTS_DISP_OFF: usize = 15;
+        const COUNT_IMM_OFF: usize = 20;
+        const EMPTY_DISP_OFF: usize = 48;
+        const EXPECTED_SLOT_COUNT: u32 = 8;
+
+        let (Some(render), Some(blank)) = (
+            self.get_address("bottom_text_render"),
+            self.get_address("bottom_text_blank_loop"),
+        ) else {
+            self.resolved.remove("bottom_text_render");
+            log_warn!("  [-] {} -- renderer / blank-loop AOB unresolved", TAG);
+            return;
+        };
+        for name in ["bottom_text_render", "bottom_text_blank_loop"] {
+            let hits = self.get_all_matches(name);
+            if hits.len() != 1 {
+                self.resolved.remove("bottom_text_render");
+                log_warn!(
+                    "  [-] {} -- {} expected exactly 1 match, found {}",
+                    TAG,
+                    name,
+                    hits.len()
+                );
+                return;
+            }
+        }
+        unsafe {
+            if *blank.add(CALL_OFF) != 0xE8 {
+                self.resolved.remove("bottom_text_render");
+                log_warn!("  [-] {} -- expected CALL rel32 at blank-loop+5", TAG);
+                return;
+            }
+            let call_target = decode_call_rel32(blank.add(CALL_OFF));
+            if call_target != render {
+                self.resolved.remove("bottom_text_render");
+                log_warn!(
+                    "  [-] {} -- tick calls +0x{:X}, renderer AOB is +0x{:X} (identity mismatch)",
+                    TAG,
+                    (call_target as usize).wrapping_sub(self.base as usize),
+                    (render as usize).wrapping_sub(self.base as usize)
+                );
+                return;
+            }
+            let count = (blank.add(COUNT_IMM_OFF) as *const u32).read_unaligned();
+            if count != EXPECTED_SLOT_COUNT {
+                self.resolved.remove("bottom_text_render");
+                log_warn!(
+                    "  [-] {} -- slot count imm32 is {} (expected {})",
+                    TAG,
+                    count,
+                    EXPECTED_SLOT_COUNT
+                );
+                return;
+            }
+            let slots = decode_rip_relative(blank.add(SLOTS_DISP_OFF));
+            let empty = decode_rip_relative(blank.add(EMPTY_DISP_OFF));
+            let slots_off = (slots as usize).wrapping_sub(self.base as usize);
+            let empty_off = (empty as usize).wrapping_sub(self.base as usize);
+            // The array is 8 × 8 bytes; it must fit entirely in the module.
+            if slots_off >= self.size || slots_off + 8 * 8 > self.size {
+                self.resolved.remove("bottom_text_render");
+                log_warn!("  [-] {} -- slot array outside module", TAG);
+                return;
+            }
+            if empty_off >= self.size || *empty != 0 {
+                self.resolved.remove("bottom_text_render");
+                log_warn!(
+                    "  [-] {} -- empty-string literal outside module or not NUL",
+                    TAG
+                );
+                return;
+            }
+            // Everything validated — publish the pair.
+            self.resolved.insert("bottom_text_slots".into(), slots);
+            self.resolved.insert("bottom_text_empty_str".into(), empty);
+            log_info!("  [+] bottom_text_slots (derived) @ +0x{:X}", slots_off);
+            log_info!("  [+] bottom_text_empty_str (derived) @ +0x{:X}", empty_off);
+        }
     }
 
     /// Derive `results_course_gate_global` — the global the PlaydataTab

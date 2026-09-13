@@ -313,6 +313,73 @@ don't no-op the whole function — instead detour the **text-draw vcall** and dr
 the calls whose target object is in `{ebc08, ebc00, ebc10, ebc18}` (let `ebc38`
 through), or zero only the credit/coin/paseli format strings in `.rdata`.
 
+### ⚠️ 2026-09-13 corrections (fresh RE for the `hide-bottom-text` mod — IMPLEMENTED)
+
+Re-verified on 20250805 / 20260224 / 20260825 (Ghidra) + 20260721 (offline sweep);
+the section above has three structural errors that matter for an implementation:
+
+1. **"Detour → immediate `return`" does NOT hide the text — it FREEZES it.** The
+   `(*(obj+0x18)+0x10)(obj, str, 1)` vcall is a *set-text* on a **persistent** text
+   object, not a one-shot draw. The objects are created once (state 1 of the tick's
+   state machine, below) and re-rendered every frame from whatever string was last
+   set. Skip the renderer and the last-composed strings stay on screen forever. The
+   game itself proves this: the renderer's sole caller has an else-branch whose only
+   job is to write the `""` literal into every object when the renderer is *not*
+   called.
+2. **The renderer's caller is the load-bearing structure.** `FUN_18000a9a0`
+   (20260825; `FUN_18000a590` on 20250805, `FUN_18000aa10` on 20260224) is a per-frame
+   **system-HUD tick** with a 3-state machine in `DAT_1806f2c88`: 0 → wait for the
+   font/text subsystem (`FUN_180009210`), 1 → **create the eight text objects**
+   (`FUN_1800092d0`), 2 → steady state. In steady state it queries the ark system
+   status (`(*DAT_1806f2428)(&5)`); status ∈ {3,5,6} ⇒ call the renderer, else ⇒
+   **blank all eight objects** with `""`. It also owns the coin-insert SFX and the ID
+   latch (`DAT_180cf3340`): when `DAT_1806f2254` (set by the attract/title sequences
+   in `TransitionSequence::createNextSequence` cases 5/6/7) is on and credits = coins
+   = 0, `FUN_180009c60` writes `SOFTWARE ID: %s` / `SYSTEM  ID: %s` / `HARDWARE ID: %s`
+   into objects 4–6 once; when the condition drops they are blanked once.
+3. **The renderer is `FUN_180009630` on 20260825** (the doc's `FUN_180009680` is the
+   20260324 address). Its 20250805 analog is `FUN_180009220`, 20260224 `FUN_1800096a0`,
+   20260721 `+0x9660`.
+
+**The eight text objects** live in one pointer array (`DAT_1806f2c90` on 20260825,
+8-byte stride; `DAT_1806ebc00` was the 20260324 name — the doc's `ebc08/ebc00/…`
+list is this array read in a different order). Positions from the creator
+(`FUN_1800092d0`; `cx` = screen_w × 0.5, `by` = screen_h − 20; HD values, SD in
+parentheses):
+
+| slot | x, y | align | writer | content |
+|---|---|---|---|---|
+| 0 | `cx`, `by` | centre | renderer | `CREDIT%s:%2d` / `FREE PLAY` / `EVENT MODE` |
+| 1 | `cx + 96` (`+120`), `by` | centre | renderer | `%s%s:%2d/%2d` — COIN / TOKEN count (blank in free-play / event) |
+| 2 | `10`, `by` | left | renderer | P1 `PASELI: %s [+ %s]` / `EXTRA PASELI: %s` / `PASELI: NOT AVAILABLE` |
+| 3 | `screen_w − 10`, `by` | right | renderer | P2 PASELI (same forms) |
+| 4 | `cx`, `by − 80` | centre | ID latch | `SOFTWARE ID: %s` |
+| 5 | `cx`, `by − 60` | centre | ID latch | `SYSTEM  ID: %s` |
+| 6 | `cx`, `by − 40` | centre | ID latch | `HARDWARE ID: %s` |
+| 7 | `cx − 104` (`−320`), `by` | centre (left on SD) | renderer | `ONLINE` / `CHECKING[.…]` / `MAINTENANCE` / `OFFLINE MODE` / `LOCAL MODE` / `ERROR` / `NOT AVAILABLE` (+ a per-state colour via the object's vfunc `+0x18`) |
+
+So the "corner text" (PASELI, slots 2/3) and the "centre-bottom text" (network
+status + credit line + coin count, slots 7/0/1 reading left→right) and the
+attract-idle ID lines (4–6) are ONE subsystem — no other bottom-text drawer exists.
+
+**What shipped (`services/bottom_text.rs` + `mods/hide_bottom_text.rs`):** one
+`GenericDetour` on the renderer (AOB `bottom_text_render` = its prologue). While any
+contributor asks to hide, the callback skips the original and runs an exact replica
+of the tick's own blank loop over the array instead — `set_text(**(slot+0x18), "", 1)`
+for every non-null slot, using the game's own `""` literal. The array base, the `""`
+literal, the `0x18` holder offset, the `+0x10` vtable slot, the `1` flag and the slot
+count (8) all come from the tick's else-branch AOB `bottom_text_blank_loop`
+(`derive_bottom_text`: CALL at +5 must decode to the renderer AOB — identity gate;
+imm32 at +20 must be 8; RIP at +15 → `bottom_text_slots`, RIP at +48 →
+`bottom_text_empty_str`; all-or-nothing, and a failure un-resolves the renderer too so
+a hide-that-freezes detour can never install). Because the ID latch writes slots 4–6
+*earlier in the same tick*, the per-frame blank covers them as well. Known cosmetic
+limit: after a hide→show toggle, slots 0/1/2/3/7 come back next frame (the renderer
+rewrites them) but the ID lines stay blank until the attract latch next re-arms.
+The service is contributor-based (`HideReason` OR-set) so power-user-statistics'
+horizontal bottom readout can hide the stock line independently of the operator's
+`hide-bottom-text` toggle.
+
 ---
 
 ## Hack 4 — Timing Offsets (Sound / Input / Render / Bomb-frame) + High-Precision Input
@@ -656,7 +723,7 @@ both; only absolute addresses differ.
 |---|---|---|---|
 | 1 Mute announcer | dispatcher `FUN_180055a50`; path str `"data/sound/win/voice.xwb"` | `voice.xwb` byte: **yes**. Entry-guard: fragile (re-derive per build) | Hook `FUN_180055a50` early-return, or the portable `voice.xwb` byte poke |
 | 2 Center arrows | builder `FUN_18006c230`; setter `FUN_18006f5d0` | No (was code caves; ABI-specific) | Post-hook `FUN_18006f5d0`; for 1P rewrite X of `arrow_raw`/`arrow`/`freeze_judge`; force `double` lane branch + selector |
-| 3 Hide bottom text | renderer `FUN_180009680`; block @ rdata | **Yes** (333-byte block, identical layout) | **Detour `FUN_180009680` → `return` (does only corner-text; safe to no-op)**; or suppress per-object draws to keep the network-status line |
+| 3 Hide bottom text | renderer `FUN_180009680`; block @ rdata | **Yes** (333-byte block, identical layout) | **IMPLEMENTED (`hide-bottom-text` mod + `services::bottom_text`, 2026-09-13):** detour the renderer (AOB) and, while hiding, run the caller's own blank loop over the 8 persistent text objects (derived from the `bottom_text_blank_loop` AOB). A bare early-return FREEZES the last strings — see the 2026-09-13 corrections in the Hack 3 section. |
 | 4 Timing offsets (×4 + bool) | init `FUN_18002bbd0`; builder `FUN_180012f50`; rdata table | **Yes** (imm32 / rdata constants) | AOB-scan builder; patch defaults, OR re-set via config-map setter / write live state (`DAT_1806ebc70+0x1261` for HIGH_PRECISION_INPUT) |
 | 5 FPS target | app-init `FUN_1800020f0` = `Application::onBoot` (display target imm32 at struct+0x1C → global `DAT_1806ea488`, read once by `Renderer:initGs`) | **Yes** (single imm32) for a static value | **IMPLEMENTED (`fps-unlock` mod):** AOB-scan `C7 44 24 ?? 3C 00 00 00 75 08 C7 44 24 ?? 4B 00 00 00`, byte-patch the imm32 (match+4) in `early_apply`. Consumed once at boot → static value, applies next launch. Per-scene switching dropped (infeasible + no World speedup). |
 | 6 Timing preset select (new) | selector `FUN_180012e50`; `arkMDXGetMachineType`/`PCType` (arkmdxbio2) | n/a (logic, not data) | Detour `FUN_180012e50`, force return index `0..9` from config — hardware-agnostic, runs once at init |
