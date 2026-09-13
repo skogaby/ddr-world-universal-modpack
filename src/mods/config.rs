@@ -575,9 +575,13 @@ impl Default for GameplayTimingFixesConfig {
 /// `gameplay_timing_fixes.audio_clock`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct AudioClockConfig {
-    /// `"fit"` (default — sliding LSQ over the DirectSound play-cursor
-    /// staircase) or `"raw"` (single newest cursor read; for platforms whose
-    /// cursor is smooth). Unknown ⇒ one WARN + `"fit"`.
+    /// `"fit"` (default — the sliding LSQ over the DirectSound play-cursor
+    /// staircase drives the in-song count), `"anchor"` (the cursor is read
+    /// ONCE per voice to latch the onset error; the song then runs on the
+    /// stock tick plus that constant — fixes the 0–10 ms startup error only,
+    /// never lets the cursor steer the in-song clock) or `"raw"` (single
+    /// newest cursor read; only for platforms whose cursor is smooth).
+    /// Unknown ⇒ one WARN + `"fit"`.
     #[serde(default = "default_audio_clock_mode")]
     pub mode: String,
     /// Fit history in seconds (clamped 2..=60).

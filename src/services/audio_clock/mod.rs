@@ -5,7 +5,8 @@
 //!
 //! Layout (design §0):
 //! - [`fit`] — PURE sliding-window LSQ of the DirectSound play cursor vs QPC.
-//! - [`onset`] — PURE arm / sanity-gate state machine.
+//! - [`onset`] — PURE arm / sanity-gate state machine (and the `anchor`
+//!   mode's latched-Δ hold).
 //! - [`engine`] — render-thread observers (shared `0x435A50` cursor dispatcher,
 //!   the `0x43CAC0` produce hook, voice-start identity for streaming AND
 //!   in-memory waves), publishing the [`fit::Line`] and the song/aux
@@ -27,19 +28,32 @@ pub mod game;
 pub mod onset;
 pub mod seqpub;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 
 pub use seqpub::SeqPub;
 
 use crate::log_warn;
 
-/// Fit mode (config `gameplay_timing_fixes.audio_clock.mode`).
+/// Clock mode (config `gameplay_timing_fixes.audio_clock.mode`). All three
+/// share the same arm: the song voice's exact onset `F0` plus the DirectSound
+/// play-cursor line. They differ in what drives the count AFTER the arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Sliding-window LSQ (default).
+    /// Sliding-window LSQ of the play cursor drives the count every frame
+    /// (default): fixes the onset error AND follows the DAC rate in-song.
     Fit,
-    /// Newest cursor read extrapolated at the nominal rate.
+    /// Newest cursor read extrapolated at the nominal rate drives the count.
+    /// Only for platforms whose cursor is already smooth — on a staircase
+    /// cursor this injects the staircase into the game clock.
     Raw,
+    /// The cursor is consulted ONCE per voice: at the arm the onset error
+    /// `E − (T − A)` is latched and thereafter the count is the stock
+    /// `T − A` plus that constant. Fixes the 0–10 ms onset error, never lets
+    /// the cursor steer the in-song clock (the conservative mode: no
+    /// exposure to DirectSound-emulation cursor wander, no stock-reversion
+    /// step when the fit loses its history mid-song). Gives up the in-song
+    /// tick-vs-DAC drift correction.
+    Anchor,
 }
 
 impl Mode {
@@ -47,7 +61,34 @@ impl Mode {
         match text.trim().to_ascii_lowercase().as_str() {
             "fit" => Some(Self::Fit),
             "raw" => Some(Self::Raw),
+            "anchor" => Some(Self::Anchor),
             _ => None,
+        }
+    }
+
+    /// Config-file spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fit => "fit",
+            Self::Raw => "raw",
+            Self::Anchor => "anchor",
+        }
+    }
+
+    fn to_u8(self) -> u8 {
+        match self {
+            Self::Fit => 0,
+            Self::Raw => 1,
+            Self::Anchor => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Raw,
+            2 => Self::Anchor,
+            _ => Self::Fit,
         }
     }
 }
@@ -79,7 +120,7 @@ static WANTED: AtomicBool = AtomicBool::new(false);
 /// never uninstalled.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CONFIG_LATCHED: AtomicBool = AtomicBool::new(false);
-static MODE_RAW: AtomicBool = AtomicBool::new(false);
+static MODE: AtomicU8 = AtomicU8::new(0);
 static WINDOW_SECONDS: AtomicU32 = AtomicU32::new(10);
 static LATENCY_BIAS_MILLI: AtomicI32 = AtomicI32::new(0);
 static TICK_ALIGNMENT: AtomicBool = AtomicBool::new(true);
@@ -106,7 +147,7 @@ pub fn configure_from_config() {
             Mode::Fit
         }
     };
-    MODE_RAW.store(mode == Mode::Raw, Ordering::Release);
+    MODE.store(mode.to_u8(), Ordering::Release);
     WINDOW_SECONDS.store(
         section.audio_clock.window_seconds.clamp(2, 60),
         Ordering::Release,
@@ -129,11 +170,7 @@ pub fn wants_engine() -> bool {
 #[must_use]
 pub fn config() -> Config {
     Config {
-        mode: if MODE_RAW.load(Ordering::Acquire) {
-            Mode::Raw
-        } else {
-            Mode::Fit
-        },
+        mode: Mode::from_u8(MODE.load(Ordering::Acquire)),
         window_seconds: WINDOW_SECONDS.load(Ordering::Acquire),
         latency_bias_ms: LATENCY_BIAS_MILLI.load(Ordering::Acquire) as f32 / 1000.0,
         assist_tick_alignment: TICK_ALIGNMENT.load(Ordering::Acquire),
@@ -168,6 +205,16 @@ mod tests {
     fn mode_parses_case_insensitively() {
         assert_eq!(Mode::parse(" FIT "), Some(Mode::Fit));
         assert_eq!(Mode::parse("raw"), Some(Mode::Raw));
+        assert_eq!(Mode::parse("Anchor"), Some(Mode::Anchor));
         assert_eq!(Mode::parse("smooth"), None);
+    }
+
+    #[test]
+    fn mode_round_trips_through_the_atomic_encoding() {
+        for mode in [Mode::Fit, Mode::Raw, Mode::Anchor] {
+            assert_eq!(Mode::from_u8(mode.to_u8()), mode);
+            assert_eq!(Mode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(Mode::from_u8(200), Mode::Fit);
     }
 }

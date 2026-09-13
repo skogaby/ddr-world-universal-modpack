@@ -292,7 +292,10 @@ I:boot: time: tick: bits=64, freq=999984252/s, no wrap        ← CrossOver / Ap
 Under Rosetta the emulated TSC runs at exactly 1 GHz; `999984252` therefore
 makes every game millisecond `1e9/999984252 − 1 = +15.75 ppm` short — the game
 clock runs fast by that amount, which is precisely the +15.9…+16.0 ppm game-vs-QPC
-slope the v2 capture measured. On native hardware the 500 ms QPC-referenced
+slope the v2 capture measured. **The calibration is re-run every boot and its
+error is not repeatable:** a 2026-09-13 boot on the same machine read
+`freq=999928836/s` (+71.2 ppm), confirmed by that session's +70.6 ppm
+game-vs-QPC fit (§7.3). On native hardware the 500 ms QPC-referenced
 calibration should be good to a few ppm, and a CPU without an invariant TSC
 falls back to `timeGetTime()` (whose rate is the system-timer crystal). **The
 tester's `log.txt` `time:` lines identify which source their cabinet uses.**
@@ -460,13 +463,80 @@ blocks are self-contained), cutting per-song synthesis from ~2.9 s to ~0.3 s —
 which incidentally moved the stock-shaped tick commit from ~2.5 s INTO the
 chart to before chart time 0.
 
+### 7.3 Clock modes — `fit` / `anchor` / `raw` (anchor added 2026-09-13)
+
+All three modes share the ARM: the song voice's exact `F0` (§3.5) plus the
+cursor line at the arm frame give this play's stock onset error
+`Δ = E − (T − A)`. They differ in what drives the count afterwards:
+
+| Mode | In-song count | Cursor exposure after the arm | Line loss mid-song |
+|---|---|---|---|
+| `fit` (default) | `E(t_frame)` from the 10 s LSQ line — the DAC rate | slow cursor wander (period ≳ window) passes 1:1 into the game clock | passthrough to stock for ~2.5 s (`ready` needs 256 passes), then back — a STEP of size Δ |
+| `anchor` | stock `T − A + Δ` | none — the cursor is read once per voice | none (Δ needs no line); passthrough only if the origin ALSO changed and no line can re-latch |
+| `raw` | newest cursor read + nominal-rate extrapolation | the full staircase (±5 ms per read) | as `fit` |
+
+`anchor` exists because of a community review of the shipped `fit` mode: a
+DDR/ITG player pointed out that ITGMania has had years of mid-song micro-drift
+reports attributed to the DirectSound play cursor's reported position, and that
+handing the in-song rate to that cursor is an aggressive change compared with
+correcting only the startup phase. The analysis (2026-09-13) agreed on the
+structure — `fit` is a low-pass filter, so any cursor phase error slower than
+its window IS transmitted, and no Win7 capture of the cursor exists to bound
+it — while noting the two implementations differ materially: StepMania reads
+the cursor once per frame raw (the staircase goes straight into the music
+clock), whereas `fit` averages ~1000 reads and extrapolates one pass, which
+suppresses the per-read staircase ~30× (`fit.rs` host test). `anchor` is the
+conservative answer: it keeps the whole measured benefit (the ±5 ms onset
+error, §7.1) and the assist-tick alignment (which needs only the onsets), and
+gives up the in-song rate correction — whose native-cabinet magnitude is
+unknown (the −16…−22 ppm measured live is the Rosetta RDTSC calibration, §4;
+a native QPC-locked tick vs an onboard HDA codec is expected near 0 ppm).
+Both modes emit the same `armed … [mode] … delta_vs_stock=…` INFO and `onset`
+CSV row, so a Win7 capture answers the "how much does the cursor wander" question
+regardless of which mode the cabinet runs.
+
+Implementation: `GatePolicy::hold_anchor` + `Phase::Active.anchor_delta_ms`
+in `onset.rs` (pure, host-tested: identical arm, drift-free hold, continuity
+through a missing/stale/not-ready line, Δ re-latch on an origin republication
+for the same voice, seek/new-voice re-gating, constant-integer offset).
+
+**Live (CrossOver, 2026-09-13, 4 arms):** `anchor` did exactly what the table
+says — per-frame correction `round(delta_vs_stock)` held with sd 0.000 and
+0.0 ppm slope over 26–44 s voices (vs the −16…−22 ppm the 09-09 `fit` runs
+followed). The same capture quantified what it gives up on THIS platform: the
+game clock ran **+70.6 / +69.6 ppm** vs QPC during the two songs, because this
+boot's libavs calibration read `freq=999928836/s` (⇒ +71.2 ppm) where the
+09-09 boots read `999984252` (+15.75 ppm) — **the Rosetta RDTSC calibration
+error varies per boot** (§4's 5 × 100 ms spin). With the DAC at −4.4 ppm vs
+QPC that is ≈ +75 ppm game-vs-DAC ≈ 9 ms over a 2-minute song, uncorrected in
+`anchor`, corrected in `fit`. So under CrossOver `fit` is objectively the
+better mode. Whether the same holds on native Win7 depends on two unmeasured
+terms — the native calibration error (expected small: a real TSC counted over
+500 ms of QPC) and the audio-codec-crystal vs CPU/HPET-crystal mismatch
+(≈ 0 for a PCH-clocked onboard codec, tens of ppm for a USB DAC). ONE Win7
+capture in either mode measures both: `error_vs_committed_rate_ppm` (game tick
+vs QPC) − `cursor_rate_error_ppm` (DAC vs QPC) in `analyze_audio_sync.py` is
+the drift `fit` removes and `anchor` leaves. **The same number is now in the
+log alone:** every disarm INFO of a voice that had at least one line-measured
+frame after its arm carries `in-song drift (DAC clock minus game tick) ±X ms
+over Y s = ±Z ppm -- LEFT uncorrected (anchor mode …) | corrected (…)` —
+`Session` keeps the arm's Δ and the newest `(E_line − (T−A)) − Δ`
+(`onset::Drift`, restarted at an origin re-latch; the diverging frame of a
+seek is excluded; lineless anchor-mode frames carry no measurement). Negative
+= the game tick ran fast vs the DAC (the CrossOver RDTSC case). So a Win7
+tester's bare `log.txt` in EITHER mode answers the question; no CSV needed.
+
 ---
 
 ## 8. Open / unmeasured
 
-- Win7 DS cursor granularity and the stock onset distribution on the tester's
-  cabinet (the first tester run of the shipped build answers both via the
-  `armed … fit(sd=…)` lines / `onset` CSV rows).
+- Win7 DS cursor granularity, its slow-wander behaviour (the §7.3 question), and
+  the stock onset distribution on the tester's cabinet (the first tester run
+  with `diagnostics.audio_sync` ON answers all three via the `armed … fit(sd=…)`
+  lines / `onset` CSV rows / `output_cursor_segments`' `cursor_rate_error_ppm`
+  + `fit_residual_ms`). As of 2026-09-13 several Win7 cabinets have played the
+  shipped `fit` build and reported sync "significantly better" — anecdotal,
+  no capture returned.
 - Whether the tester's CPU takes the RDTSC or the `timeGetTime()` tick path
   (their `log.txt`).
 - Whether the mean stock onset phase is 5 ms (the model) or a few ms later

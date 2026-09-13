@@ -157,8 +157,15 @@ pub(super) fn on_disabled() {
     engine::clear_voices();
     if let Ok(mut guard) = SESSION.try_lock() {
         if let Some(session) = guard.as_mut() {
-            if let Some(Event::Disarmed { generation, .. }) = session.disarm(Reason::Explicit) {
-                log_info!("audio_clock: disarmed gen {} (mod disabled)", generation);
+            if let Some(Event::Disarmed {
+                generation, drift, ..
+            }) = session.disarm(Reason::Explicit)
+            {
+                log_info!(
+                    "audio_clock: disarmed gen {} (mod disabled){}",
+                    generation,
+                    drift_suffix(drift)
+                );
             }
         }
     }
@@ -204,8 +211,14 @@ pub fn init(signatures: &SignatureStore) -> bool {
         return false;
     }
     PAIRING_INSTALLED.store(true, Ordering::Release);
+    let mode = super::config().mode;
+    let policy = if mode == super::Mode::Anchor {
+        GatePolicy::anchor(frequency)
+    } else {
+        GatePolicy::new(frequency)
+    };
     if let Ok(mut guard) = SESSION.lock() {
-        *guard = Some(Session::new(GatePolicy::new(frequency)));
+        *guard = Some(Session::new(policy));
     }
     if scene_manager::is_available() {
         IN_PLAY_SCENE.store(
@@ -231,15 +244,17 @@ pub fn init(signatures: &SignatureStore) -> bool {
             bump_origin(0);
             if let Ok(mut guard) = SESSION.try_lock() {
                 if let Some(session) = guard.as_mut() {
-                    if let Some(Event::Disarmed { generation, .. }) =
-                        session.disarm(Reason::Explicit)
+                    if let Some(Event::Disarmed {
+                        generation, drift, ..
+                    }) = session.disarm(Reason::Explicit)
                     {
                         log_info!(
-                            "audio_clock: disarmed gen {} (scene {} -> {}{})",
+                            "audio_clock: disarmed gen {} (scene {} -> {}{}){}",
                             generation,
                             _previous,
                             scene,
-                            if play { ", play scene" } else { "" }
+                            if play { ", play scene" } else { "" },
+                            drift_suffix(drift)
                         );
                     }
                 }
@@ -263,7 +278,13 @@ pub fn init(signatures: &SignatureStore) -> bool {
         });
     }
     log_info!(
-        "audio_clock: game side ready -- (T,QPC) pairing detour on input_tick_function @ {:p}, frame_tick_global @ {:p}, QPC {} Hz",
+        "audio_clock: game side ready -- mode {} ({}), (T,QPC) pairing detour on input_tick_function @ {:p}, frame_tick_global @ {:p}, QPC {} Hz",
+        mode.as_str(),
+        match mode {
+            super::Mode::Fit => "cursor line drives the in-song count",
+            super::Mode::Raw => "newest cursor read drives the in-song count",
+            super::Mode::Anchor => "onset error latched once per voice, stock tick drives the in-song count",
+        },
         entry,
         global,
         frequency
@@ -395,6 +416,37 @@ fn callout_inner(actor: usize, rbx: i32) -> i32 {
     }
 }
 
+/// The in-song drift clause appended to every disarm INFO — the one number a
+/// bare `log.txt` needs for the fit-vs-anchor decision (research §7.3): how
+/// far the DAC-derived count pulled away from the stock tick (+Δ) over this
+/// voice. Sign: DAC minus game tick, so negative = the game tick ran FAST
+/// relative to the sound card. Empty when the voice had no measured frame
+/// after its arm.
+fn drift_suffix(drift: Option<super::onset::Drift>) -> String {
+    let Some(drift) = drift else {
+        return String::new();
+    };
+    let freq = frequency();
+    let span_s = if freq > 0 {
+        drift.span_ticks as f64 / freq as f64
+    } else {
+        0.0
+    };
+    let ppm = drift
+        .ppm(freq)
+        .map_or_else(|| "n/a".to_string(), |ppm| format!("{ppm:+.1} ppm"));
+    format!(
+        " -- in-song drift (DAC clock minus game tick) {:+.2} ms over {:.1} s = {} -- {}",
+        drift.residual_ms,
+        span_s,
+        ppm,
+        match super::config().mode {
+            super::Mode::Anchor => "LEFT uncorrected (anchor mode holds the stock tick)",
+            _ => "corrected (the count followed the cursor line)",
+        }
+    )
+}
+
 fn report(
     event: Event,
     actor: usize,
@@ -439,8 +491,9 @@ fn report(
                 (c_ms * 1000.0) as i64 as u64,
             ]);
             log_info!(
-                "audio_clock: armed gen={} F0={} (W={} P={} Wc={} lead+margin={:.2} ms) delta_vs_stock={:+.2} ms C={:.2} ms offset={} ms E={:.2} ms stock={} ms anchor={} waited={} frame(s) fit(n={}, sd={:.3} ms, slope={:.2} f/s)",
+                "audio_clock: armed gen={} [{}] F0={} (W={} P={} Wc={} lead+margin={:.2} ms) delta_vs_stock={:+.2} ms C={:.2} ms offset={} ms E={:.2} ms stock={} ms anchor={} waited={} frame(s) fit(n={}, sd={:.3} ms, slope={:.2} f/s)",
                 generation,
+                super::config().mode.as_str(),
                 f0,
                 w,
                 p,
@@ -496,8 +549,17 @@ fn report(
                 );
             }
         }
-        Event::Disarmed { generation, reason } => {
-            log_info!("audio_clock: disarmed gen {} ({:?})", generation, reason);
+        Event::Disarmed {
+            generation,
+            reason,
+            drift,
+        } => {
+            log_info!(
+                "audio_clock: disarmed gen {} ({:?}){}",
+                generation,
+                reason,
+                drift_suffix(drift)
+            );
         }
     }
 }
