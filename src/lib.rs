@@ -58,6 +58,19 @@ fn init() {
     profiling::start();
     log_info!("DDR World Hook DLL starting...");
 
+    // 0a. Software-identity rev override — ALWAYS-ON, config-independent,
+    // and RACE-CRITICAL in the other direction from LayeredFS: it must be
+    // installed before the launcher reaches libavs-ea3's `ea3_boot`, which
+    // spice2x calls a few hundred ms after loading the hook DLLs (the
+    // ea3-ident read, `dll_entry_init` and the patcher sit in between).
+    // Nothing here needs config or gamemdx; under `-z` it waits (bounded)
+    // for the libavs modules themselves. Fail-open: a miss logs one WARN and
+    // the game keeps its stock identity.
+    if !services::ident_override::init() {
+        log_warn!("ident_override unavailable -- the game will identify with its stock rev");
+    }
+    profiling::tick("ident_override");
+
     // 0. Centralized config store. Must be loaded BEFORE the LayeredFS init
     // (its config section + the shader-synthesis plan) and the early_apply
     // phase so race-critical mods can be config-gated, and before

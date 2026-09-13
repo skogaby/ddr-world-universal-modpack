@@ -101,6 +101,12 @@
 //!   state at playhead 0), zero the score/combo/judge accumulators and
 //!   restore the gauge. Triggered by `quick_restart_or_fail`; the
 //!   `request_reset(t_ms)` shape is the Training Mode foundation.
+//!
+//! - **ident_override** — Always-on software-identity rev override: one
+//!   detour on libavs-ea3's `ea3_boot` rewrites the `/ea3/soft/rev` node to
+//!   `M` before the eamuse library boots, so every modpack cabinet reports
+//!   `MDX:J:F:M:<ext>` on the wire (`model=`), in `/env/profile/soft_id_code`
+//!   and on the title screen. No config, fail-open to the stock identity.
 
 pub mod afp_patcher;
 pub mod analyze_hook;
@@ -115,6 +121,7 @@ pub mod cull_window;
 pub mod custom_options;
 pub mod custom_options_persistence;
 pub mod game_audio;
+pub mod ident_override;
 pub mod input_manager;
 pub mod judge_hook;
 pub mod mfplat_vih_fix;

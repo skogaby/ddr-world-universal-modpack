@@ -154,6 +154,10 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 
 The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
 
+## The Game Identifies Itself as a Modded Build
+
+With the modpack loaded, the game always reports the software revision letter **`M`** in its identity string — e.g. `MDX:J:F:M:2026082500` instead of the stock `MDX:J:F:A:…` — on the title screen, in the test menu, and in every request it sends to the server. This is unconditional (it does not depend on which mods are enabled) and requires no configuration; your `prop/ea3-ident.xml` is not modified on disk. It lets a server tell modpack cabinets apart from stock ones. (`M` was chosen over the community's `X` on purpose: bemaniutils-based servers treat a DDR rev of `X` as an "omnimix" install and file its scores under a separate version key; `M` has no special meaning to any known server and is handled like a stock revision.)
+
 ## Settings & Configuration
 
 Almost everything is adjustable in-game (mod menu for cabinet-wide settings, the options-menu tab for per-player settings). Per-player settings follow your card — with a supporting server they roam with your profile; without one, they persist locally on the cabinet.

@@ -1,4 +1,5 @@
-//! Module Resolver — Finds gamemdx.dll and arkmdxbio2.dll in process memory.
+//! Module Resolver — Finds gamemdx.dll, arkmdxbio2.dll and the libavs DLLs in
+//! process memory.
 
 use std::ffi::CString;
 use windows::core::PCSTR;
@@ -19,6 +20,15 @@ unsafe impl Sync for GameModule {}
 
 const GAME_MODULE_NAME: &str = "gamemdx.dll";
 const ARK_DLL_NAMES: &[&str] = &["arkmdxbio2.dll", "arkmdxp3.dll", "arkmdxp4.dll"];
+/// AVS core (fs + property API). `avs2-core.dll` is the legacy name.
+const LIBAVS_DLL_NAMES: &[&str] = &["libavs-win64.dll", "libavs-win32.dll", "avs2-core.dll"];
+/// AVS eamuse library (`ea3_boot`, xrpc, eacoin). `avs2-ea3.dll` is the
+/// legacy name spice2x also probes for.
+const LIBAVS_EA3_DLL_NAMES: &[&str] = &[
+    "libavs-win64-ea3.dll",
+    "libavs-win32-ea3.dll",
+    "avs2-ea3.dll",
+];
 
 pub fn wait_for_game_module() -> GameModule {
     loop {
@@ -40,6 +50,20 @@ pub fn resolve_ark_module() -> Option<GameModule> {
         }
     }
     None
+}
+
+/// The loaded AVS core DLL (`libavs-win64.dll`), if any.
+pub fn resolve_libavs_module() -> Option<GameModule> {
+    LIBAVS_DLL_NAMES
+        .iter()
+        .find_map(|name| resolve_module(name))
+}
+
+/// The loaded AVS eamuse DLL (`libavs-win64-ea3.dll`), if any.
+pub fn resolve_libavs_ea3_module() -> Option<GameModule> {
+    LIBAVS_EA3_DLL_NAMES
+        .iter()
+        .find_map(|name| resolve_module(name))
 }
 
 fn resolve_module(name: &str) -> Option<GameModule> {
