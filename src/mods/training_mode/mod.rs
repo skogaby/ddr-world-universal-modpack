@@ -277,10 +277,15 @@ pub(crate) fn seed_rows_for_highlight(digest: u64, audio_len_ms: u32) {
 /// nonzero start (assist_tick's "P1 or the only enabled side" class —
 /// correct for every eligible session shape).
 fn pre_shift_side() -> Option<usize> {
-    let entered = [
-        stage_records::side_entered(0),
-        stage_records::side_entered(1),
-    ];
+    // The Multiplayer Bot's phantom side reads as entered during its play
+    // window but its rows are an unmirrored stale cache — never governs.
+    let entered = [0usize, 1].map(|side| {
+        if crate::mods::multiplayer_bot::is_bot_side(side) {
+            Some(false)
+        } else {
+            stage_records::side_entered(side)
+        }
+    });
     match (entered[0], entered[1]) {
         (Some(true), Some(false)) => Some(0),
         (Some(false), Some(true)) => Some(1),

@@ -2,19 +2,17 @@
 //!
 //! Registers a bool-toggle option on the Assist (Page5) and Mods (Page6)
 //! tabs via the custom options framework. When a player enables autoplay,
-//! the pre-judge callback swaps that side's IFootPanel pointer for the
-//! game's built-in AutoFootPanel, which populates the Results vector with
-//! perfect auto-inputs before the native judgeNotes runs.
+//! the mod asks the shared `foot_panel_swap` service for the `Perfect`
+//! controller on that side: the service's pre-judge callback swaps the side's
+//! IFootPanel pointer for the game's built-in AutoFootPanel (populating the
+//! Results vector with perfect auto-inputs before the native judgeNotes runs)
+//! and its post-judge callback restores it. This mod owns no judge callbacks
+//! and no panel object of its own — `services/foot_panel_swap` is the single
+//! owner of that seam (the multiplayer bot is its other client, and a bot
+//! armed on a side outranks this mod's request for that side).
 //!
-//! Per-player isolation: each side's autoplay flag is an independent
-//! AtomicBool. P1 toggling autoplay on does not affect P2's state.
-//!
-//! Judge-hook integration:
-//!   * Pre-judge callback (`Priority::Late`): reads the per-side atomic;
-//!     if false, no-ops. If true, stashes the original foot panel, writes
-//!     AutoFootPanel into the slot, and calls AutoFootPanel::update.
-//!   * Post-judge callback (`Priority::Early`): restores the stashed
-//!     foot panel pointer for the relevant side.
+//! Per-player isolation: each side's autoplay request is independent. P1
+//! toggling autoplay on does not affect P2's state.
 //!
 //! Anti-fake watermark: while a song is being autoplayed, a bouncing
 //! rainbow "Autoplay Enabled" label (the Hello World mod's DVD-screensaver
@@ -22,119 +20,32 @@
 //! screen, so captured footage/screenshots of autoplayed scores are
 //! identifiable. See the watermark section below for the exact rules.
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::core::memory;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec};
-use crate::services::judge_hook::{self, CallbackHandle, Priority};
+use crate::services::foot_panel_swap::{self, Controller};
 use crate::services::{scene_manager, score_guard, stage_records, widget_renderer};
 use crate::types::scenes::scene;
 use crate::widgets::bounce::{hsv_to_rgb, Bouncer};
 use crate::widgets::text_widget::TextWidget;
 use crate::{log_info, log_warn};
 
-const NOTE_LIST_PTR: usize = 0x0B0;
-const NOTE_COUNT: usize = 0x168;
-const AUTO_PANEL_SIZE: usize = 0x40;
-
-type AutoUpdateFn = unsafe extern "C" fn(*mut u8, *const u8, i32, i32);
-
-// ── Shared state read by the callbacks ──────────────────────────────
-static mut AUTO_PANEL: *mut u8 = std::ptr::null_mut();
-static mut AUTO_UPDATE: Option<AutoUpdateFn> = None;
-static FOOT_PANEL_OFFSET: AtomicUsize = AtomicUsize::new(0);
-
-// ── Per-player autoplay enable flags ────────────────────────────────
-// Written by the custom-options change callback; read by the pre-judge
-// callback to decide whether to swap the foot panel for this side.
-static AUTOPLAY_ENABLED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-
-// ── Per-frame scratch state ─────────────────────────────────────────
-// One stash per side so P1 and P2 can restore independently when both
-// are in gameplay simultaneously (double-play or versus).
-static ORIGINAL_FOOT_PANEL: [AtomicPtr<u8>; 2] = [
-    AtomicPtr::new(std::ptr::null_mut()),
-    AtomicPtr::new(std::ptr::null_mut()),
-];
-
-/// Offset of the play-side enum (0=left/P1, 1=right/P2) within the
-/// gameplay actor struct. Located immediately before the play-mode
-/// field at +0x88. In doubles mode the value is 0 (left side owns
-/// both pads).
-const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
-
 fn autoplay_on_change(player_side: u8, new_value: i32) {
     if player_side < 2 {
         let enabled = new_value != 0;
-        AUTOPLAY_ENABLED[player_side as usize].store(enabled, Ordering::Release);
+        let side = player_side as usize;
+        // The shared swap service applies the request per judge frame (a bot
+        // armed on this side outranks it — see `foot_panel_swap`).
+        foot_panel_swap::set_perfect(side, enabled);
         // Mirror the per-side state into the score guard so the profile-save
         // trampoline suppresses this side's score upload while autoplay is on.
-        score_guard::set_autoplay_taint(player_side as usize, enabled);
+        score_guard::set_autoplay_taint(side, enabled);
         log_info!(
             "Autoplay: side={} {}",
             player_side,
             if enabled { "ON" } else { "OFF" }
         );
-    }
-}
-
-fn autoplay_pre_judge(actor: *mut u8, music_count: i32) {
-    let fp_offset = FOOT_PANEL_OFFSET.load(Ordering::Acquire);
-    if fp_offset == 0 {
-        return;
-    }
-
-    let side = unsafe { *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) };
-    // In singles/doubles, side is 0 (left). In versus, side 1 (right) for P2.
-    // Treat any value outside 0..=1 as side 0 to handle doubles gracefully
-    // (doubles player controls both pads from the LEFT side slot).
-    let side_idx = if side == 1 { 1usize } else { 0usize };
-
-    if !AUTOPLAY_ENABLED[side_idx].load(Ordering::Acquire) {
-        return;
-    }
-
-    unsafe {
-        let fp_slot = actor.add(fp_offset);
-        let original_fp = *(fp_slot as *const *mut u8);
-        ORIGINAL_FOOT_PANEL[side_idx].store(original_fp, Ordering::Release);
-
-        memory::write_ptr(fp_slot, AUTO_PANEL as *const u8);
-
-        if let Some(update_fn) = AUTO_UPDATE {
-            let note_count = memory::read_i32(actor.add(NOTE_COUNT) as *const u8);
-            update_fn(
-                AUTO_PANEL,
-                actor.add(NOTE_LIST_PTR) as *const u8,
-                note_count,
-                music_count,
-            );
-        }
-    }
-}
-
-fn autoplay_post_judge(actor: *mut u8, _music_count: i32) {
-    let fp_offset = FOOT_PANEL_OFFSET.load(Ordering::Acquire);
-    if fp_offset == 0 {
-        return;
-    }
-
-    let side = unsafe { *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) };
-    let side_idx = if side == 1 { 1usize } else { 0usize };
-
-    if !AUTOPLAY_ENABLED[side_idx].load(Ordering::Acquire) {
-        return;
-    }
-
-    unsafe {
-        let fp_slot = actor.add(fp_offset);
-        let original_fp =
-            ORIGINAL_FOOT_PANEL[side_idx].swap(std::ptr::null_mut(), Ordering::AcqRel);
-        if !original_fp.is_null() {
-            memory::write_ptr(fp_slot, original_fp);
-        }
     }
 }
 
@@ -202,11 +113,12 @@ fn new_watermark_state() -> WatermarkState {
     }
 }
 
-/// Whether `side`'s autoplay flag should count toward the watermark: ON and
-/// the side is entered (unknown entered-state ⇒ counts — see the rules
-/// above).
+/// Whether `side` counts toward the watermark: the swap service's EFFECTIVE
+/// controller for the side is `Perfect` (so a side driven by the multiplayer
+/// bot — which outranks a cached `autoplay = ON` — never lights it) and the
+/// side is entered (unknown entered-state ⇒ counts — see the rules above).
 fn side_autoplay_engaged(side: usize) -> bool {
-    AUTOPLAY_ENABLED[side].load(Ordering::Acquire)
+    foot_panel_swap::controller(side) == Controller::Perfect
         && stage_records::side_entered(side).unwrap_or(true)
 }
 
@@ -301,9 +213,6 @@ fn spawn_watermark_thread(st: Arc<Mutex<WatermarkState>>) {
 }
 
 pub struct AutoplayMod {
-    judge_notes_addr: *const u8,
-    pre_handle: Option<CallbackHandle>,
-    post_handle: Option<CallbackHandle>,
     watermark: Arc<Mutex<WatermarkState>>,
 }
 
@@ -312,9 +221,6 @@ unsafe impl Send for AutoplayMod {}
 impl AutoplayMod {
     pub fn new() -> Self {
         Self {
-            judge_notes_addr: std::ptr::null(),
-            pre_handle: None,
-            post_handle: None,
             watermark: Arc::new(Mutex::new(new_watermark_state())),
         }
     }
@@ -331,42 +237,16 @@ impl Mod for AutoplayMod {
         "Per-player auto-play toggle in the options menu"
     }
     fn required_signatures(&self) -> &[&str] {
-        &[
-            "judge_notes",
-            "auto_foot_panel_vtable",
-            "auto_foot_panel_update",
-        ]
+        // The judge swap's signatures (`judge_notes`, `auto_foot_panel_vtable`,
+        // `auto_foot_panel_update`) are owned by `foot_panel_swap`; this mod
+        // only needs that service to be up.
+        &[]
     }
 
-    fn init(&mut self, ctx: &ModContext) -> bool {
-        self.judge_notes_addr = ctx.signatures.require_address("judge_notes");
-        let vtable = ctx.signatures.require_address("auto_foot_panel_vtable");
-        let update_addr = ctx.signatures.require_address("auto_foot_panel_update");
-
-        match judge_hook::foot_panel_offset() {
-            Some(off) => {
-                FOOT_PANEL_OFFSET.store(off, Ordering::Release);
-                log_info!("Autoplay: using foot panel offset 0x{:X}", off);
-            }
-            None => {
-                log_warn!(
-                    "Autoplay: judge_hook did not detect foot panel offset -- autoplay inactive"
-                );
-                return false;
-            }
-        }
-
-        unsafe {
-            AUTO_PANEL = memory::alloc_zeroed(AUTO_PANEL_SIZE);
-            if AUTO_PANEL.is_null() {
-                log_warn!("Autoplay: failed to allocate AutoFootPanel buffer");
-                return false;
-            }
-            memory::write_ptr(AUTO_PANEL, vtable);
-            AUTO_UPDATE = Some(std::mem::transmute::<
-                *const u8,
-                unsafe extern "C" fn(*mut u8, *const u8, i32, i32),
-            >(update_addr));
+    fn init(&mut self, _ctx: &ModContext) -> bool {
+        if !foot_panel_swap::is_available() {
+            log_warn!("Autoplay: foot_panel_swap service unavailable -- autoplay inactive");
+            return false;
         }
         true
     }
@@ -375,8 +255,9 @@ impl Mod for AutoplayMod {
         // Fail closed: an autoplayed score is fabricated, so autoplay must not
         // be usable unless the score-submission guard can suppress its upload.
         // If the guard's save hook didn't install, refuse to enable entirely —
-        // register no judge callbacks and no option row, so the player has no
-        // way to produce a faked score that would reach the server.
+        // register no option row (so no request ever reaches the swap
+        // service) and no watermark, so the player has no way to produce a
+        // faked score that would reach the server.
         if !score_guard::is_available() {
             log_warn!(
                 "Autoplay: score-submission guard unavailable -- refusing to enable (fail-closed)"
@@ -384,22 +265,9 @@ impl Mod for AutoplayMod {
             return;
         }
 
-        // Register the judge-hook callbacks so we can intercept judgeNotes.
-        self.pre_handle = judge_hook::register_pre(Priority::Late, autoplay_pre_judge);
-        self.post_handle = judge_hook::register_post(Priority::Early, autoplay_post_judge);
-
-        if self.pre_handle.is_none() || self.post_handle.is_none() {
-            log_warn!(
-                "Autoplay: judge_hook service unavailable (pre={}, post={}) -- autoplay inactive",
-                self.pre_handle.is_some(),
-                self.post_handle.is_some()
-            );
-            return;
-        }
-
-        // Register the custom option. The change callback updates the
-        // per-player AtomicBool; the initial dispatch (fired by
-        // register_option for both sides with default_value=0) will set
+        // Register the custom option. The change callback forwards the
+        // per-player request to the swap service; the initial dispatch (fired
+        // by register_option for both sides with default_value=0) will set
         // both sides to OFF.
         if custom_options::is_available() {
             let spec = RegisterSpec::bool_toggle("autoplay")
@@ -421,24 +289,16 @@ impl Mod for AutoplayMod {
             log_warn!("Autoplay: custom_options service unavailable -- option row will not render");
         }
 
-        // Start the "Autoplay Enabled" watermark. Only reached when the
-        // judge hooks registered, i.e. autoplay can actually engage.
+        // Start the "Autoplay Enabled" watermark. Only reached when the swap
+        // service is up (init gate), i.e. autoplay can actually engage.
         spawn_watermark_thread(self.watermark.clone());
 
         log_info!("Autoplay: enabled (per-player, toggled via options menu)");
     }
 
     fn disable(&mut self) {
-        if let Some(h) = self.pre_handle.take() {
-            judge_hook::unregister(h);
-        }
-        if let Some(h) = self.post_handle.take() {
-            judge_hook::unregister(h);
-        }
-        AUTOPLAY_ENABLED[0].store(false, Ordering::Release);
-        AUTOPLAY_ENABLED[1].store(false, Ordering::Release);
-        ORIGINAL_FOOT_PANEL[0].store(std::ptr::null_mut(), Ordering::Release);
-        ORIGINAL_FOOT_PANEL[1].store(std::ptr::null_mut(), Ordering::Release);
+        foot_panel_swap::set_perfect(0, false);
+        foot_panel_swap::set_perfect(1, false);
         {
             let mut s = self.watermark.lock().unwrap();
             s.running = false;

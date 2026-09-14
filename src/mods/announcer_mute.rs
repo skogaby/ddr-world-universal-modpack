@@ -71,13 +71,19 @@ static mut ANNOUNCER_HOOK: Option<GenericDetour<AnnouncerFn>> = None;
 
 /// Cabinet-wide effective mute. Entered side governs; P1 wins when both
 /// sides are in. Falls back to `p1 || p2` when entered state is unknown.
+/// The Multiplayer Bot's phantom side never governs (its rows are an
+/// unmirrored stale cache).
 fn effective_mute() -> bool {
     let p1 = MUTE_ENABLED[0].load(Ordering::Acquire);
     let p2 = MUTE_ENABLED[1].load(Ordering::Acquire);
-    match (
-        stage_records::side_entered(0),
-        stage_records::side_entered(1),
-    ) {
+    let entered = |side: usize| {
+        if crate::mods::multiplayer_bot::is_bot_side(side) {
+            Some(false)
+        } else {
+            stage_records::side_entered(side)
+        }
+    };
+    match (entered(0), entered(1)) {
         (Some(true), _) => p1,
         (Some(false), Some(true)) => p2,
         (Some(false), Some(false)) => false,

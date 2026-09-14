@@ -485,7 +485,11 @@ fn on_scene_change(prev: i32, next: i32) {
         // the rebuild, so the choice at the first judge dispatch sees one
         // consistent snapshot. Mid-session changes apply next song.
         for side in 0..2usize {
-            let enabled = ASSIST_TICK_ENABLED[side].load(Ordering::Acquire);
+            // The Multiplayer Bot's phantom side never wants ticks: its row
+            // is an unmirrored stale cache, and a clap track it "enabled"
+            // would play for the human who did not turn it on.
+            let enabled = ASSIST_TICK_ENABLED[side].load(Ordering::Acquire)
+                && !crate::mods::multiplayer_bot::is_bot_side(side);
             LATCHED_ENABLED[side].store(enabled, Ordering::Release);
             // Score containment (training design §4.7/R5, a deliberate
             // behavior change): a side that plays with claps enabled must

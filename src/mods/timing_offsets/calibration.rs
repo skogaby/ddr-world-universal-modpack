@@ -178,11 +178,17 @@ fn on_gameplay_entry() {
         return;
     }
 
-    // Guard 1: exactly one entered side.
-    let outcome = compute::census(
-        stage_records::side_entered(0),
-        stage_records::side_entered(1),
-    );
+    // Guard 1: exactly one entered side. The Multiplayer Bot's phantom side
+    // reads as entered during its play window — it is not a second player
+    // (its judgements are the bot's, filtered out by the armed-side tap).
+    let human_entered = |side: usize| {
+        if crate::mods::multiplayer_bot::is_bot_side(side) {
+            Some(false)
+        } else {
+            stage_records::side_entered(side)
+        }
+    };
+    let outcome = compute::census(human_entered(0), human_entered(1));
     let side = match outcome {
         CensusOutcome::Single { side } => side,
         CensusOutcome::TwoPlayers => {

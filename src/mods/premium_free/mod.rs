@@ -168,17 +168,24 @@ const MIRRORED_OPTIONS: [&str; 1] = [OPT_ID];
 /// side that isn't in the session.
 static DESIRED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+/// `stage_records::side_entered` minus the Multiplayer Bot's phantom side.
+fn human_entered(side: usize) -> Option<bool> {
+    if crate::mods::multiplayer_bot::is_bot_side(side) {
+        return Some(false);
+    }
+    stage_records::side_entered(side)
+}
+
 /// Cabinet-wide effective freeze. Entered side governs; P1 wins when both
 /// are in (versus rows are mirrored anyway, so they agree). With entered
 /// state unknown fall back to `p1 || p2` (a stray profile load can never
-/// silently DROP a freeze another player relies on).
+/// silently DROP a freeze another player relies on). The Multiplayer Bot's
+/// phantom side reads as entered during its play window but its rows are
+/// an unmirrored stale cache — it never governs.
 fn effective_freeze() -> bool {
     let p1 = DESIRED[0].load(Ordering::Acquire);
     let p2 = DESIRED[1].load(Ordering::Acquire);
-    match (
-        stage_records::side_entered(0),
-        stage_records::side_entered(1),
-    ) {
+    match (human_entered(0), human_entered(1)) {
         (Some(true), _) => p1,
         (Some(false), Some(true)) => p2,
         (Some(false), Some(false)) => false,

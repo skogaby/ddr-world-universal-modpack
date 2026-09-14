@@ -46,6 +46,7 @@ pub mod hide_bottom_text;
 pub mod mod_menu;
 pub mod mod_trait;
 pub mod movie_size_customization;
+pub mod multiplayer_bot;
 pub mod music_wheel_song_length;
 pub mod non_native_os_support;
 pub mod note_types_expansion;

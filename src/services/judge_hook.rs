@@ -31,8 +31,10 @@ use crate::{log_info, log_warn};
 
 /// Default offset, within a `GamePlayActor` instance, of the pointer
 /// slot that holds the active `IFootPanel` implementation — the value
-/// used on older builds. Subscribers that swap the panel (autoplay) or
-/// read it for per-frame input (mine-hit detection) consult this offset.
+/// used on older builds. The ONE subscriber that swaps the panel
+/// (`services::foot_panel_swap`, on behalf of autoplay AND the multiplayer
+/// bot) and readers that consult it for per-frame input (mine-hit
+/// detection) use this offset.
 const FOOT_PANEL_PTR: usize = 0x270;
 /// Alternative offset used on newer builds. The service's detector
 /// probes `judgeNotes`'s disassembly for whichever of the two the

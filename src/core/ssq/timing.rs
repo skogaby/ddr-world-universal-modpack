@@ -132,6 +132,16 @@ impl TempoConverter {
     pub fn entry_count(&self) -> usize {
         self.time_offsets.len()
     }
+    /// The raw `(time_offset_ticks, seconds_ticks)` pairs, in file order.
+    /// Read-only view for consumers that need the inverse mapping
+    /// (music count → beat position), e.g. the offline bot simulator's
+    /// freeze-hold clock.
+    pub fn entries(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.time_offsets
+            .iter()
+            .copied()
+            .zip(self.tempo_data.iter().copied())
+    }
 }
 
 /// Integer linear interpolation. Given two points `(x1, y1)` and `(x2, y2)`,

@@ -67,6 +67,16 @@ LABELS = {
         "ja": 'オートプレイ',
         "ko": '자동 플레이',
     },
+    "bot_opponent": {
+        "en": 'BOT OPPONENT (1P ONLY)',
+        "ja": 'ボット対戦 (1P専用)',
+        "ko": '봇 대전 (1P 전용)',
+    },
+    "bot_opponent_level": {
+        "en": 'BOT LEVEL',
+        "ja": 'ボットレベル',
+        "ko": '봇 레벨',
+    },
     "premium_free": {
         "en": 'PREMIUM FREE',
         "ja": 'プレミアムフリー',
@@ -539,6 +549,65 @@ PREVIEWS = [
             "ko": [
                 '어시스트 틱의 클랩 음량을 조정합니다.',
                 '100% 미만이면 작아지고, 100%를 넘으면 커집니다.',
+            ],
+        },
+    ),
+    PreviewSpec(
+        'bot_opponent',
+        'off',
+        WIDE,
+        {
+            "en": [
+                'Play VERSUS against a computer opponent when you are the only player.',
+                'OFF: Normal single-player play.',
+            ],
+            "ja": [
+                '1人プレイ時にコンピューター相手とVERSUS対戦します。',
+                'OFF: 通常のシングルプレイです。',
+            ],
+            "ko": [
+                '혼자 플레이할 때 컴퓨터 상대와 VERSUS 대전을 합니다.',
+                'OFF: 일반 싱글 플레이입니다.',
+            ],
+        },
+    ),
+    PreviewSpec(
+        'bot_opponent',
+        'on',
+        WIDE,
+        {
+            "en": [
+                'Play VERSUS against a computer opponent when you are the only player.',
+                'ON: The next song is a 2-player VERSUS session. A bot plays your chart on the '
+                'empty pad at the chosen BOT LEVEL. Its score is never saved.',
+            ],
+            "ja": [
+                '1人プレイ時にコンピューター相手とVERSUS対戦します。',
+                'ON: 次の曲が2人VERSUSになり、空いている側でボットが選んだBOT LEVELであなたと同じ譜面をプレイします。ボットのスコアは保存されません。',
+            ],
+            "ko": [
+                '혼자 플레이할 때 컴퓨터 상대와 VERSUS 대전을 합니다.',
+                'ON: 다음 곡이 2인 VERSUS로 진행되며, 비어 있는 패드에서 봇이 선택한 BOT LEVEL로 같은 채보를 플레이합니다. 봇의 스코어는 저장되지 않습니다.',
+            ],
+        },
+    ),
+    PreviewSpec(
+        'bot_opponent_level',
+        None,
+        WIDE,
+        {
+            "en": [
+                'Sets how well the computer opponent plays.',
+                '1: A beginner with a real chance of failing. 10: An expert aiming for '
+                'MARVELOUS FULL COMBOS.',
+            ],
+            "ja": [
+                'コンピューター相手の実力を設定します。',
+                '1: 失敗することもある初心者。10: MARVELOUS FULL COMBOを狙う上級者。',
+            ],
+            "ko": [
+                '컴퓨터 상대의 실력을 설정합니다.',
+                '1: 실패할 수도 있는 초보자. 10: MARVELOUS FULL COMBO를 노리는 상급자.',
             ],
         },
     ),

@@ -1,4 +1,10 @@
 /target
+/updater/target
+/tools/bot_sim/target
+# bot_sim default report/JSON outputs (generated, machine-local)
+/bot_sim_report.html
+/bot_sim_report.json
+/release
 **/.DS_Store
 capture/
 mod_assets/

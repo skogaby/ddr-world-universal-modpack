@@ -1,0 +1,18 @@
+# Throwaway build probe (PDD Step 4 research). NOT part of the product.
+# Question it answers: does a Rust binary using rustls(ring)+ureq+zip+serde_json
+# cross-compile via cargo-xwin for the tier-3 x86_64-win7-windows-msvc target
+# with -Z build-std, the way the DLL's release build does?
+[package]
+name = "win7-tls-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 2
+lto = true

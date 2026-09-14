@@ -1,6 +1,6 @@
 # DDR World Universal Modpack
 
-A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, practice tools, a deterministic sound-card-locked music clock that removes the game's play-to-play timing jitter, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
+A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, a computer opponent for solo versus play, practice tools, a deterministic sound-card-locked music clock that removes the game's play-to-play timing jitter, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
 
 Everything ships as a single hook DLL loaded by [spice2x](https://spice2x.github.io/). Install it, press **0** three times on a pinpad, and start toggling.
 
@@ -24,11 +24,37 @@ This modpack is also **datecode-agnostic**! Through memory scanning and pattern 
    - the `data_mods/` folder (textures and assets many mods need)
    - `mod-config.json` (a ready-to-go default configuration)
    - `judgement_offsets.csv` (optional but recommended — a community-sourced sync list for ~1,440 songs)
+   - `ddr_world_hook_updater.exe` (optional — keeps all of the above current automatically; see [Automatic updates](#automatic-updates))
 3. Add the hook to your spice2x launch options: `-z ddr_world_hook.dll` (in `gamestart.bat` as a new parameter to `spice2x.exe`).
 4. Launch the game. You'll see a splash message in the top-left confirming the modpack loaded.
 5. **First boot only:** if a red warning appears telling you to reboot, restart the game once — the modpack builds its menu textures on first launch.
 
 That's it. Everything is enabled with sensible defaults out of the box.
+
+### Automatic updates
+
+The release zip ships a small updater, `ddr_world_hook_updater.exe`. Run it from `gamestart.bat` on the line **before** spice2x and every launch checks GitHub for a newer release and installs it before the game starts:
+
+```bat
+@echo off
+cd /d %~dp0
+ddr_world_hook_updater.exe
+start spice64.exe -ddr -modules modules -z ddr_world_hook.dll
+```
+
+Just the bare exe name — a plain `.exe` call blocks the batch file until the updater has finished, so the game never starts mid-update. What it does:
+
+- **Checks** the latest release on GitHub (one API request; ~0.3 s when nothing changed). Offline, rate-limited, or any other failure ⇒ it prints one `skipped (...)` line and the game starts with what you have.
+- **Installs** the new `ddr_world_hook.dll`, `data_mods/`, `README.md` and the updater itself. Files a newer release stopped shipping are removed **only if you never modified them**; anything you added yourself under `data_mods/` (custom song packs, texture packs) and the modpack's own caches are never touched.
+- **Merges** your `mod-config.json`: every value you have set stays exactly as it is; keys the release adds (new mods, new settings) are appended with their defaults. Menu rows you reordered stay in your order; a new option is slotted into the section it belongs to in the release (a brand-new section is placed right after the section that precedes it in the release, wherever you keep that section). Options the release dropped are left in your file (the game ignores them).
+- **Merges** your `judgement_offsets.csv`: every offset you set is kept; blank cells are filled from the community list and songs you don't have yet are appended.
+- **Backs up** everything it replaces or removes in `.ddr_world_hook_updater/backup/` (last update only) and writes `ddr_world_hook_updater.log` in the game folder. If an update fails half-way (even a power cut), the next run restores the previous state first and then tries again. An unreadable `mod-config.json` or CSV is left untouched (a copy is kept in `.ddr_world_hook_updater/unparseable/`) and everything else still updates.
+
+Options: `--check` reports whether an update is available without changing anything (exit code 3 when one is); `--force` reinstalls the current release; `--include-prerelease` also considers pre-releases (for testers); `--from-zip <file>` installs a local release zip instead of downloading (`--tag <name>` labels it). Remove the line from `gamestart.bat` to stop updating. The installed release is recorded in `ddr_world_hook_updater.manifest.json` — delete it to force a reinstall on the next run.
+
+Notes: the updater always follows the **latest published release** — if you run a newer local build of your own, keep the updater line out of that machine's bat (or the updater will "update" you back to the published one). On CrossOver/Wine run it through the `.bat` like on Windows; launched on its own it waits up to 60 s for Enter before closing so you can read its output. It does not touch spice2x, your game data, or your `.bat` file.
+
+**Testing a private build.** Testers get three files from the maintainer: the release zip, a bare `ddr_world_hook_updater.exe`, and `install-update-YYYYMMDD.bat`. Copy all three into the game folder (the one with `spice64.exe`), close the game, double-click the `.bat`. It runs the updater on that zip with the same merging, backup and rollback as a public release, so your settings and offsets are kept, and it tells you what it did. Because a private build is newer than anything on GitHub, **remove the automatic updater line from `gamestart.bat` while you are on a test build** — otherwise the next launch would put the latest public release back.
 
 ### The Mod Menu
 
@@ -40,7 +66,7 @@ Press **0 three times** on either pinpad to open the in-game mod menu. Navigate 
 - **APPEARANCE** — 12 menu themes with animated backgrounds
 ![Menu Image 1](screenshots/menu_1.png)
 ![Menu Image 2](screenshots/menu_2.png)
-Per-player options (autoplay, assist tick, song speed, styling, cosmetics, etc.) also live in the game's **own options menu** on a new **MODPACK** tab, right alongside the stock options — and they follow your player profile.
+Per-player options (autoplay, the versus bot, assist tick, song speed, styling, cosmetics, etc.) also live in the game's **own options menu** on a new **MODPACK** tab, right alongside the stock options — and they follow your player profile.
 ![Menu Image 3](screenshots/menu_3.png)
 
 ### Pinpad Hotkeys
@@ -50,6 +76,17 @@ With the full suite enabled, the cabinet pinpads double as a hotkey panel — no
 <p align="center"><img src="screenshots/key_legend.svg" alt="Pinpad hotkey legend: 7 rewind, 9 fast forward, 4 set loop start, 5 clear loop markers, 6 set loop end, 1 quick restart, 3 quick exit, 0 pressed three times opens the mod menu; 9 pressed three times at song select logs out" width="560"></p>
 
 ## Highlights
+
+### Versus Bot — Play 2-Player Against the Machine
+Playing alone? Turn on **BOT OPPONENT (1P ONLY)** in the options menu, pick a **BOT LEVEL** from 1 to 10, and the next song is a genuine two-player VERSUS session — the empty pad is taken by a computer opponent that plays your exact chart, at your speed mod and lane options, with a `BOT LV<n>` name plate on its side of the screen. Both READY panels, both lanes, both gauges, both results panes: it is the game's own 2P mode, driven natively, with a player whose feet the modpack controls.
+
+The level is real skill, not a score multiplier. Every arrow the bot hits is judged by the game's actual judge on a press placed by a timing model — a level-10 bot full-combos essentially every chart and lands a **Marvelous** Full Combo on about seven songs in ten; a level-1 bot scatters Greats, Goods and Misses and fails the majority of songs outright. In between, the curve is tuned so that each step up is a noticeably better dancer (level 4 and above almost never fail). Quick restart re-rolls the bot with a fresh pattern, so no two attempts play out the same.
+
+Turn on **2-Player BPL Mode** as well and you get the in-shop battle HUD against the bot — live score boards, the score-ratio gauges, and the 1st / 2nd badges swapping as the lead changes — the closest thing to a tournament match you can have on one cabinet with one player.
+
+Everything else is left honest: your saves are your own (the bot's side never reaches the server), the extra stage is decided by *your* result alone, and the moment the song's results are over the session is plain 1P again. The bot never engages in real 2P, doubles, course or event play.
+
+![Versus Bot](screenshots/versus_bot.png)
 
 ### Song Playback Speed
 Play any song at **25%–175%** speed, with everything in sync — audio (pitch-preserved, or classic vinyl-style if you prefer), arrows, judging, even the background video if you opt in. Song-select previews follow your speed setting too, so you can dial it in by ear. Practice hard charts slow; push past 100% for a challenge. Scores at non-100% speeds are never submitted, so your records stay honest.
@@ -79,7 +116,7 @@ A brand-new judgement tier above Marvelous: steps landed within **±12 ms** earn
 Press **1** mid-song to instantly restart it (optionally with a countdown), **3** to bail out to song select, and triple-press **9** at song select to end your session on the spot. Combined with **Premium Free** (unlimited stages per credit), your cabinet becomes a practice machine.
 
 ### 2-Player BPL Mode
-Playing head-to-head with a friend? Turn on **2-Player BPL Mode** and every local 2-player versus song gets the in-shop battle HUD that's normally locked behind two LAN-linked cabinets and a matching session: a score board per player, side-by-side score-ratio gauges, live **1st / 2nd** rank badges that swap the moment the lead changes, and the running point margin between you. Spectators can read who's winning at a glance without squinting at two separate scores. It's the game's own battle UI — same art, same animations — running on ordinary versus play, so it shows whichever score type your cabinet uses (money or EX) and never touches scoring or saves. Solo, doubles and course play are unaffected.
+Playing head-to-head with a friend — or against the [Versus Bot](#versus-bot--play-2-player-against-the-machine)? Turn on **2-Player BPL Mode** and every local 2-player versus song gets the in-shop battle HUD that's normally locked behind two LAN-linked cabinets and a matching session: a score board per player, side-by-side score-ratio gauges, live **1st / 2nd** rank badges that swap the moment the lead changes, and the running point margin between you. Spectators can read who's winning at a glance without squinting at two separate scores. It's the game's own battle UI — same art, same animations — running on ordinary versus play, so it shows whichever score type your cabinet uses (money or EX) and never touches scoring or saves. Solo, doubles and course play are unaffected.
 
 ![Single Cabinet BPL](screenshots/single_cabinet_bpl.png)
 ### Player Perspective + Playfield Styling
@@ -119,10 +156,11 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Per-Song Judgement Offsets** | Per-song, per-player judgement offsets that follow the song wheel; community pre-seed included. |
 | **Quick Restart / Fail** | Pinpad 1 = instant in-place restart (optional countdown); 3 = instant fail to song select. |
 | **Quick Logout** | Triple-9 at song select ends the session through the game's normal logout flow. |
-| **2-Player BPL Mode** | The in-shop battle HUD (per-player score boards, score-ratio gauges, live 1st/2nd rank badges, point margin) in ordinary local 2-player versus play. Display-only. |
+| **2-Player BPL Mode** | The in-shop battle HUD (per-player score boards, score-ratio gauges, live 1st/2nd rank badges, point margin) in ordinary local 2-player versus play — including versus-bot sessions. Display-only. |
 | **Classic Difficulty Adjustment** | Double-tap pad UP/DOWN at song select to raise/lower difficulty, like every DDR before World. |
 | **Premium Free** | Unlimited stages per credit (per-player toggle). |
 | **Autoplay** | Perfect auto-play with an on-screen watermark; scores never submitted. |
+| **Multiplayer Bot** | Solo versus against a computer opponent: BOT OPPONENT (1P ONLY) + BOT LEVEL 1–10 per player. The empty pad becomes a real second player on your exact chart and lane options, judged by the game's own judge; two lanes, two gauges, two results panes, `BOT LV<n>` name plate. Your saves and the extra-stage rule are untouched; the bot's side is never submitted. Never engages in real 2P, doubles, course or event play. |
 | **S-Marvelous Judgement** | A display-only judgement tier above Marvelous for steps within ±12 ms: violet judgement flash, combo digits, S-MFC splash, its own results row/graph series, and S-MFC emblems. Scores are untouched — to the game (and the network) an S-Marvelous IS a Marvelous. |
 | **Assist Tick** | Sample-exact clap at each arrow's judgement moment, with volume control. |
 | **Player Perspective** | OVERHEAD / HALLWAY / DISTANT lane views, per player. |
@@ -155,7 +193,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 
 ## Your Scores Are Safe
 
-The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
+The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. In a Versus Bot session the bot's side carries the same mark (it never reaches the server) while your own side is saved exactly as in any stock play. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
 
 ## The Game Identifies Itself as a Modded Build
 
@@ -234,6 +272,7 @@ The modpack is developed and tested under CrossOver, and includes dedicated supp
 - **Something's broken?** Open an issue and **attach `log.txt`** (spice2x's log from the game folder). If the game crashed hard, also attach `ddr_hook_crash.log` if present, and the mini-dump file if that's also present.
 - **Menu labels missing / blank textures?** Reboot the game once — first-boot texture generation requires it.
 - **Weird boot behavior after a game update?** Delete `data_mods/_cache/` — all caches rebuild automatically.
+- **Updater trouble?** Attach `ddr_world_hook_updater.log` (game folder). A failed update rolls itself back; the files it replaced last time are in `.ddr_world_hook_updater/backup/`. `ddr_world_hook_updater.exe --check` tells you what it would do.
 - **Investigating timing swings?** With Gameplay Timing Fixes on, `log.txt` alone already tells the story: each song's `audio_clock: armed … delta_vs_stock=±N ms` line is that play's stock startup error, and its `disarmed … in-song drift … = ±Z ppm` line is how far the game's tick and the sound card drifted apart during the song (in `fit` mode that drift was corrected; in `anchor` mode it was left in place — a large value there is the signal to prefer `fit`). For deeper digging, the optional `diagnostics.audio_sync` recorder captures per-hit errors, frame/judge work durations, gameplay clocks and verified internal audio-start/output-cursor observations without changing timing — and one `onset` row per song. See [capture instructions and limitations](docs/audio_sync_diagnostics_v2.md); `python3 scripts/analyze_audio_sync.py <csv>` summarises a capture. Leave it off outside diagnostic runs. When reporting a timing issue, attach both `log.txt` and `audio-sync-diagnostics-v2.csv` (the CSV is replaced on every launch, so copy it before relaunching).
 - A mod that can't find what it needs in your game build disables just itself and logs a warning; the rest keeps working.
 
@@ -252,9 +291,11 @@ cargo check --target x86_64-pc-windows-msvc   # fast type check
 cargo test                                     # host tests (pure layers)
 ./build.sh                                     # release build via cargo-xwin (macOS/Linux)
 ./build_win7.sh                                # Windows 7-compatible build
+cargo test --manifest-path updater/Cargo.toml  # the auto-updater's host tests
+./scripts/build_release_archive.sh             # release/: zip (Win7 DLL + updater + data), bare updater exe, tester install .bat
 ```
 
-Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too.
+Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too. The auto-updater is a separate crate in `updater/` (plain Rust, no game dependencies); the release script builds it with the same Windows 7 recipe and refuses to package any binary that would not load on Windows 7.
 
 **Where to start reading:**
 

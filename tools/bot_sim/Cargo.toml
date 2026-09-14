@@ -1,0 +1,19 @@
+[package]
+name = "bot-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Offline Multiplayer Bot simulator: runs the DLL's real skill/planner code against a directory of DDR World SSQ charts through a model of the game's judge, gauge and scoring, and writes a self-contained HTML report."
+publish = false
+
+# Not a member of the root package's build — a plain native crate (like
+# `updater/`) so `cargo run` / `cargo test` work on the maintainer's macOS host
+# without the DLL's Windows-only dependencies.
+[workspace]
+
+[[bin]]
+name = "bot-sim"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+debug = false

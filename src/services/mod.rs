@@ -129,6 +129,7 @@ pub mod chart_length;
 pub mod cull_window;
 pub mod custom_options;
 pub mod custom_options_persistence;
+pub mod foot_panel_swap;
 pub mod game_audio;
 pub mod ident_override;
 pub mod input_manager;

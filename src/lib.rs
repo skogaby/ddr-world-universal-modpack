@@ -169,6 +169,7 @@ fn init() {
         Box::new(mods::quick_logout::QuickLogoutMod::new()),
         Box::new(mods::classic_difficulty::ClassicDifficultyMod::new()),
         Box::new(mods::autoplay::AutoplayMod::new()),
+        Box::new(mods::multiplayer_bot::MultiplayerBotMod::new()),
         Box::new(mods::announcer_mute::AnnouncerMuteMod::new()),
         Box::new(mods::anytime_speedmod::AnytimeSpeedmodMod::new()),
         Box::new(mods::hide_bottom_text::HideBottomTextMod::new()),
@@ -467,6 +468,18 @@ fn init() {
         log_warn!("JudgeHook unavailable -- mods that depend on judge dispatch will no-op");
     }
     profiling::tick("judge_hook");
+
+    // 6b0. Foot-panel swap — the single owner of the judgeNotes foot-panel
+    // swap (autoplay's `Perfect` controller + the multiplayer bot's `Bot`
+    // controller). A judge_hook subscriber, so it inits right after the
+    // dispatcher and before any mod `init` (both client mods refuse to init
+    // without it).
+    if crate::services::foot_panel_swap::init(&signatures) {
+        log_info!("FootPanelSwap started");
+    } else {
+        log_warn!("FootPanelSwap unavailable -- autoplay and multiplayer-bot inert");
+    }
+    profiling::tick("foot_panel_swap");
 
     // 6a1. Analyze dispatcher — shared detour on IStepReader::Analyze. Owns
     // the single detour that NoteTypesExpansion (mine injection) and the

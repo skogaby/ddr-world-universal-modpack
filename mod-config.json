@@ -8,6 +8,7 @@
     "song-playback-speed": true,
     "timer-freeze": true,
     "autoplay": true,
+    "multiplayer-bot": true,
     "announcer-mute": true,
     "note-types-expansion": true,
     "premium-free": true,
@@ -167,6 +168,16 @@
       },
       {
         "id": "autoplay",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "bot_opponent",
+        "overlay": true,
+        "in_game": true
+      },
+      {
+        "id": "bot_opponent_level",
         "overlay": true,
         "in_game": true
       },

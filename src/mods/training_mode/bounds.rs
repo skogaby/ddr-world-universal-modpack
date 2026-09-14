@@ -599,13 +599,15 @@ pub fn row_derived_bounds() -> (i32, i32) {
 /// resolves — side 0 in versus (both actors live; P1 governs, matching
 /// the scene-26 classifier, and the bound rows are mirrored across sides
 /// by `versus_mirror` so the side choice is value-neutral), the single
-/// entered side otherwise.
+/// entered side otherwise. The Multiplayer Bot's phantom side is skipped:
+/// its actor is live but its rows are an unmirrored stale cache.
 pub fn try_resolve_row_bounds() -> bool {
     if !RESOLUTION_PENDING.load(Ordering::Acquire) {
         return true;
     }
-    let Some((side, chart_end)) =
-        (0..2).find_map(|side| song_reset::chart_end_raw(side).map(|end| (side, end)))
+    let Some((side, chart_end)) = (0..2)
+        .filter(|&side: &i32| !crate::mods::multiplayer_bot::is_bot_side(side as usize))
+        .find_map(|side| song_reset::chart_end_raw(side).map(|end| (side, end)))
     else {
         return false;
     };

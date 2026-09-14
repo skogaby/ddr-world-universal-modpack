@@ -90,7 +90,7 @@ const BLEND_SRC_ONE: u32 = 2;
 //
 // Offsets confirmed via Ghidra:
 //   - GamePlayActor[+0x84] = playSide (i32), already used by
-//     `mods::autoplay` for the per-side AutoFootPanel swap.
+//     `services::foot_panel_swap` for the per-side AutoFootPanel swap.
 //   - wrapper[+0x00] = PlayerWork* — observed in the accessor
 //     anchored by the `player_work_table_anchor` signature (the
 //     deref-and-check-byte sequence reads the first qword of each

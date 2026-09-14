@@ -2174,6 +2174,12 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "80 B8 ?? ?? 00 00 00 74 08 48 05 ?? ?? 00 00 EB 06 48 05 ?? ?? 00 00 8B 00",
         description: "The per-frame score read in `MatchingDancePlaySequence::onUpdate` state 0xB (FUN_180061cc0+0xC28 on 20260825): `CMP byte [GamePlayActor+isEx],0; JZ; ADD RAX,exScore; JMP; ADD RAX,moneyScore; MOV EAX,[RAX]` — the game's own \"which score counter does this side display\" selector. derive_two_player_bpl publishes the three imm32s as `gpa_is_ex_off` (match+2, 0x1D0 = the cached use-EX-score byte), `gpa_ex_score_off` (match+11, 0x1D8) and `gpa_money_score_off` (match+19, 0x1D4) so two_player_bpl_mode's onUpdate replacement reads exactly what stock BPL reads, with the offsets attested per build instead of hardcoded (all three sit below the +0x208 GamePlayActor layout fork and match song_reset's GPA_SCORE_OFFSET/GPA_EX_SCORE_OFFSET). Unique on all four builds.",
     },
+    // ── Multiplayer Bot (multiplayer_bot) ───────────────────────────────
+    SignatureDefinition {
+        name: "extra_stage_grant",
+        pattern: "48 83 EC 38 48 8B 05 ?? ?? ?? ?? 48 8B 10 80 7A 59 00 0F 85 ?? ?? ?? ?? 85 C9 0F 85 ?? ?? ?? ?? 48 83 7A 70 00 0F 85 ?? ?? ?? ?? 83 7A 04 01 0F 84",
+        description: "Entry of the extra-stage grant `void(int arg)` (FUN_1801ddcd0 on 20260825; 0x1801c6970 on 20250805, 0x1801ca7e0 on 20260224): `SUB RSP,38; MOV RAX,[rip+game_work_global]; MOV RDX,[RAX]; CMP byte [RDX+0x59],0 (already granted); JNZ out; TEST ECX,ECX (arg must be 0); JNZ out; CMP qword [RDX+0x70],0 (course); JNZ out; CMP dword [RDX+0x4],1 (double); JZ out` — then `max_stage + 1 == 3` and, for EVERY side with `PlayerWork+0x4 != 0`: `record[0]+0x50 >= 0xF` (AAA), `PlayerWork+0x1710 == 0`, gauge option in {0, 0xC}, `record[0]+0x270 != 7`; on success `GameWork+0x59 = 1`. Called from `ResultSequence::onUpdate` case 0x16 (results window-out) when the stage counter is 0 — INSIDE the Multiplayer Bot's play window, so a low-level bot that did not AAA would block the human's extra stage. Consumer: `multiplayer_bot::extra_stage_guard` detours the MATCH address (nothing read at match+N) and clears the bot side's entered byte around the original while an impersonation is active. Soft consumer (`get_address`): a miss leaves the stock rule + one WARN. GameWork disp32 and the four JCC rel32s wildcarded; unique on all four builds.",
+    },
 ];
 
 pub struct SignatureStore {

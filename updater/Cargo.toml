@@ -1,0 +1,52 @@
+# Standalone auto-updater for the modpack (ships as ddr_world_hook_updater.exe
+# at the root of every release zip). Deliberately NOT a workspace member of the
+# hook DLL crate: the root manifest is a plain package with unstable
+# cargo-features, and keeping this crate independent means its host tests run
+# with a plain `cargo test` and the DLL build is never affected.
+#
+# trim-paths is nightly-only; this repo is already nightly-pinned
+# (rust-toolchain.toml applies here too). It strips builder home/username
+# paths from the shipped binary — see the root Cargo.toml for the same setting.
+cargo-features = ["trim-paths"]
+
+[package]
+name = "ddr-world-hook-updater"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The binary is intentionally snake_case to match the DLL it updates
+# (ddr_world_hook.dll → ddr_world_hook_updater.exe); cargo's kebab-case naming
+# warning for this target is expected and harmless.
+[[bin]]
+name = "ddr_world_hook_updater"
+path = "src/main.rs"
+
+# Dependencies are added by the plan step that first uses them (nightly cargo
+# warns on unused dependencies).
+[dependencies]
+# HTTPS via rustls + bundled webpki roots: independent of the OS TLS stack
+# (unpatched Win7 has no TLS 1.2, which GitHub requires) and of the OS root
+# store. Synchronous, small.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: the merged mod-config.json keeps the user's key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Asset digest verification + install-manifest file hashes.
+sha2 = "0.10"
+# std's canonicalize() yields \\?\C:\... verbatim paths on Windows, which read
+# badly in messages/logs and trip some Win32 consumers; dunce strips the prefix
+# when (and only when) the plain form is equivalent. Identity on other hosts.
+dunce = "1"
+# Release archives are Info-ZIP deflate; read + write (tests build fixtures).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Detecting a double-click launch (the updater is the console's only process)
+# so the window can wait for Enter instead of vanishing. Windows-only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[profile.release]
+opt-level = 2
+lto = true
+trim-paths = "all"

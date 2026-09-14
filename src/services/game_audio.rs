@@ -437,6 +437,49 @@ pub fn is_available() -> bool {
     AUDIO.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
+/// Offset of the "pan SEs by side" byte inside the audio manager object
+/// (`FUN_1801aa500` on 20260825: `MOV RAX,[rip+audio_manager]; MOV byte
+/// [RAX+0x20C4],BL` — byte-identical on all four supported builds). Stock
+/// writes it from `createNextSequence` cases 0x16/0x24/0x2e/0x3b with
+/// `GameWork+0 == 1` (local versus); the SE player (`FUN_1801aa220`) pans
+/// side 0 / side 1 SEs left / right while it is set, centre otherwise.
+const MGR_VERSUS_PAN_BYTE: usize = 0x20C4;
+
+/// The audio manager OBJECT (`*audio_manager_global`), probed through
+/// `+0x20C4`; `None` when unresolved / null / unreadable.
+fn manager_object_for_pan() -> Option<*mut u8> {
+    let global = MANAGER_GLOBAL_ADDR.load(std::sync::atomic::Ordering::Acquire);
+    if global == 0 || !crate::core::memory::is_readable(global as *const u8, 8) {
+        return None;
+    }
+    // SAFETY: probed readable; the global is a game static.
+    let mgr = unsafe { *(global as *const usize) };
+    if mgr == 0 || !crate::core::memory::is_readable(mgr as *const u8, MGR_VERSUS_PAN_BYTE + 1) {
+        return None;
+    }
+    Some(mgr as *mut u8)
+}
+
+/// The current versus SE-pan byte (`None` when the manager is unavailable).
+pub fn versus_pan() -> Option<u8> {
+    let mgr = manager_object_for_pan()?;
+    // SAFETY: probed readable through the byte.
+    Some(unsafe { crate::core::memory::read_u8(mgr.add(MGR_VERSUS_PAN_BYTE)) })
+}
+
+/// Write the versus SE-pan byte (the Multiplayer Bot's cosmetic D22: a bot
+/// session pans SEs like a real versus session). Returns `false` when the
+/// manager is unavailable — callers treat that as "leave the stock pan".
+pub fn set_versus_pan(value: u8) -> bool {
+    let Some(mgr) = manager_object_for_pan() else {
+        return false;
+    };
+    // SAFETY: probed readable through the byte; the manager is a live game
+    // object that stock code writes this byte of from the same thread.
+    unsafe { crate::core::memory::write_u8(mgr.add(MGR_VERSUS_PAN_BYTE), value) };
+    true
+}
+
 /// Register a mod-owned bank pair with the game's engine and claim a free
 /// sound-bank slot on the audio manager.
 ///

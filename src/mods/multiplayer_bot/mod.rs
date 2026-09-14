@@ -1,0 +1,328 @@
+//! Multiplayer Bot — a computer-controlled VERSUS opponent for a single player.
+//!
+//! Plan Step 4 state — the user-facing feature end to end: the pure cores
+//! (`eligibility`, `skill`, `planner`, `session`), the engine adapter
+//! (`filler`) that feeds the `foot_panel_swap` service's cloned-vtable
+//! `BotFootPanel`, the two per-player option rows (BOT OPPONENT (1P ONLY) /
+//! BOT LEVEL) whose values land in [`option_on`] / [`level`], and the
+//! windowed impersonation (`impersonation`) that turns the empty pad into a
+//! genuine second player from the song-select commit through the stage
+//! results, plus the extra-stage guard (`extra_stage_guard`) — the feature's
+//! only detour — that keeps the bot out of the game's extra-stage grant. A
+//! dev-only self-test (`self_test`) still arms the bot on the human's own
+//! lane for the `mismatch=0` build-portability probe.
+//!
+//! Host validation: `scripts/validate_multiplayer_bot.sh` (the `tools/bot_sim`
+//! crate mounts the pure files); offline tuning: `scripts/bot_sim.sh`.
+
+pub mod eligibility;
+pub mod extra_stage_guard;
+pub mod filler;
+pub mod impersonation;
+pub mod planner;
+pub mod self_test;
+pub mod session;
+pub mod skill;
+
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+use crate::mods::mod_trait::{Mod, ModContext};
+use crate::services::custom_options::{self, RegisterError, RegisterSpec, ScalarFormat, ShowWhen};
+use crate::services::{foot_panel_swap, scene_manager, score_guard, song_reset, stage_records};
+use crate::{log_info, log_warn};
+
+/// `init` succeeded (every prerequisite service is up) — `is_active`.
+static CAPABLE: AtomicBool = AtomicBool::new(false);
+
+/// Option id of the bool parent row (wire `mod_bot_opponent`).
+pub const OPT_ID: &str = "bot_opponent";
+/// Option id of the scalar child row (wire `mod_bot_opponent_level`).
+pub const OPT_LEVEL_ID: &str = "bot_opponent_level";
+/// Default BOT LEVEL (design R1).
+pub const DEFAULT_LEVEL: i32 = 5;
+
+/// Per-side BOT OPPONENT choice, written by the option row's change callback.
+/// Only the ENTERED side's value matters — per-side option values outlive the
+/// player (the JSON cache primes both sides), so consumers gate on
+/// `stage_records::side_entered` and never on this alone.
+static OPTION_ON: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// Per-side BOT LEVEL (1..=10), clamped on store.
+static LEVEL: [AtomicI32; 2] = [AtomicI32::new(DEFAULT_LEVEL), AtomicI32::new(DEFAULT_LEVEL)];
+
+/// The side's BOT OPPONENT row value (`false` for an out-of-range side).
+pub fn option_on(side: usize) -> bool {
+    OPTION_ON
+        .get(side)
+        .map(|a| a.load(Ordering::Acquire))
+        .unwrap_or(false)
+}
+
+/// The side's BOT LEVEL row value, clamped to `1..=10` (default for an
+/// out-of-range side).
+pub fn level(side: usize) -> u8 {
+    let raw = LEVEL
+        .get(side)
+        .map(|a| a.load(Ordering::Acquire))
+        .unwrap_or(DEFAULT_LEVEL);
+    eligibility::clamp_level(raw)
+}
+
+/// Whether `side` is currently the PHANTOM player — the impersonated bot.
+///
+/// During a bot session `stage_records::side_entered` reads `Some(true)`
+/// for BOTH sides (the flip is what makes the game build a second player),
+/// but `versus_mirror` never engages (it only engages at song select with
+/// both sides entered), so the bot side's option rows are whatever the last
+/// real player on that pad left in the JSON cache. Every cabinet-wide policy
+/// that folds both sides' option values into one decision by "P1 governs
+/// when both entered" (premium free, training pre-shift / loop latch,
+/// auto-calibration's census, assist tick's latch, announcer mute) must treat
+/// a side for which this is `true` as NOT entered, or a human on P2 plays
+/// under the previous P1 player's preferences. Lock-free.
+pub fn is_bot_side(side: usize) -> bool {
+    impersonation::active_bot_side() == Some(side)
+}
+
+/// Change callback of the BOT OPPONENT row. Fires for both sides at
+/// registration (from a non-render thread) and on every edit; the body is
+/// an atomic store plus one INFO — it must never panic (a panic permanently
+/// no-ops the callback).
+fn on_option_change(player_side: u8, new_value: i32) {
+    let Some(slot) = OPTION_ON.get(player_side as usize) else {
+        return;
+    };
+    let on = new_value != 0;
+    slot.store(on, Ordering::Release);
+    log_info!(
+        "MultiplayerBot: side={} BOT OPPONENT {}",
+        player_side,
+        if on { "ON" } else { "OFF" }
+    );
+}
+
+/// Change callback of the BOT LEVEL row — clamps on store (a stale cached
+/// value can only ever land on a legal level).
+fn on_level_change(player_side: u8, new_value: i32) {
+    let Some(slot) = LEVEL.get(player_side as usize) else {
+        return;
+    };
+    slot.store(
+        eligibility::clamp_level(new_value) as i32,
+        Ordering::Release,
+    );
+}
+
+/// Load-side persistence transform of the BOT LEVEL row: a server / JSON
+/// cache value outside `1..=10` lands on the nearest legal level.
+fn clamp_level_transform(_id: &str, value: i32) -> i32 {
+    eligibility::clamp_level(value) as i32
+}
+
+fn identity_transform(_id: &str, value: i32) -> i32 {
+    value
+}
+
+/// Register the two option rows (design §4.3 / R1). Parent first — the
+/// framework validates `ShowWhen` parents synchronously. A `Duplicate` is a
+/// re-enable: reseed the atomics from the registry (the duplicate path does
+/// not re-fire `on_change`) and show the rows again. Every failure is
+/// fail-open: the row is the feature's only enable source, so a missing row
+/// simply leaves the bot off.
+fn register_rows() {
+    if !custom_options::is_available() {
+        log_warn!(
+            "MultiplayerBot: custom_options unavailable -- no enable source, bot rows absent"
+        );
+        return;
+    }
+    let spec = RegisterSpec::bool_toggle(OPT_ID)
+        .display_name("Bot Opponent (1P Only)")
+        .description("Play VERSUS against a computer opponent on the empty pad")
+        .default_value(0)
+        .on_change(on_option_change);
+    match custom_options::register_option(spec) {
+        Ok(_handle) => {
+            log_info!("MultiplayerBot: registered BOT OPPONENT (1P ONLY) option");
+        }
+        Err(RegisterError::Duplicate { .. }) => {
+            for side in 0..2u8 {
+                on_option_change(side, custom_options::get_value(side, OPT_ID).unwrap_or(0));
+            }
+            custom_options::set_option_available(OPT_ID, true);
+        }
+        Err(e) => {
+            log_warn!(
+                "MultiplayerBot: BOT OPPONENT row registration failed: {e} -- no enable source, bot stays off"
+            );
+            return;
+        }
+    }
+    register_level_row();
+}
+
+/// Register the BOT LEVEL child row. Only after the parent is known
+/// registered, and only when the scalar-row machinery is up (bool rows need
+/// no scalar donor, so the parent can exist while this row cannot); missing
+/// ⇒ the level stays at its default.
+fn register_level_row() {
+    if !custom_options::row_injection_available() {
+        log_warn!(
+            "MultiplayerBot: scalar row machinery unavailable -- BOT LEVEL row absent, level stays at {}",
+            DEFAULT_LEVEL
+        );
+        return;
+    }
+    let spec = RegisterSpec::scalar(
+        OPT_LEVEL_ID,
+        eligibility::MIN_LEVEL as i32,
+        eligibility::MAX_LEVEL as i32,
+        1,
+        ScalarFormat::Integer,
+    )
+    .display_name("Bot Level")
+    .description("1 = beginner, 10 = expert")
+    .default_value(DEFAULT_LEVEL)
+    .show_when(ShowWhen::Equals {
+        parent_id: OPT_ID.into(),
+        value: 1,
+    })
+    .persist_transform(identity_transform, clamp_level_transform)
+    .on_change(on_level_change);
+    match custom_options::register_option(spec) {
+        Ok(_handle) => {
+            log_info!("MultiplayerBot: registered BOT LEVEL option under BOT OPPONENT");
+        }
+        Err(RegisterError::Duplicate { .. }) => {
+            for side in 0..2u8 {
+                on_level_change(
+                    side,
+                    custom_options::get_value(side, OPT_LEVEL_ID).unwrap_or(DEFAULT_LEVEL),
+                );
+            }
+            custom_options::set_option_available(OPT_LEVEL_ID, true);
+        }
+        Err(e) => {
+            log_warn!(
+                "MultiplayerBot: BOT LEVEL row registration failed: {e} -- level stays at {}",
+                DEFAULT_LEVEL
+            );
+        }
+    }
+}
+
+pub struct MultiplayerBotMod {
+    scene_cb: Option<usize>,
+    reset_cb: Option<usize>,
+}
+
+impl MultiplayerBotMod {
+    pub fn new() -> Self {
+        Self {
+            scene_cb: None,
+            reset_cb: None,
+        }
+    }
+}
+
+impl Default for MultiplayerBotMod {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Mod for MultiplayerBotMod {
+    fn id(&self) -> &str {
+        "multiplayer-bot"
+    }
+    fn name(&self) -> &str {
+        "Multiplayer Bot"
+    }
+    fn description(&self) -> &str {
+        "Play VERSUS against a computer opponent whose skill follows a 1-10 level"
+    }
+    fn required_signatures(&self) -> &[&str] {
+        // Everything is reached through already-derived services; checked
+        // at init so the mod degrades to "absent" instead of panicking.
+        &[]
+    }
+
+    fn init(&mut self, ctx: &ModContext) -> bool {
+        let mut ok = true;
+        if !foot_panel_swap::is_available() {
+            log_warn!("MultiplayerBot: foot_panel_swap service unavailable -- mod inactive");
+            ok = false;
+        } else if !foot_panel_swap::bot_objects_ready() {
+            log_warn!("MultiplayerBot: bot panel objects unavailable -- mod inactive");
+            ok = false;
+        }
+        if !stage_records::is_available() {
+            log_warn!("MultiplayerBot: stage_records unavailable -- mod inactive");
+            ok = false;
+        } else if stage_records::player_option_offset().is_none() {
+            log_warn!("MultiplayerBot: player Option offset underived -- mod inactive");
+            ok = false;
+        }
+        if !scene_manager::is_available() {
+            log_warn!("MultiplayerBot: scene_manager unavailable -- mod inactive");
+            ok = false;
+        }
+        if !score_guard::is_available() {
+            log_warn!("MultiplayerBot: score guard unavailable -- mod inactive (fail-closed)");
+            ok = false;
+        }
+        // Optional: the extra-stage guard's signature (fail-open, its own WARN).
+        extra_stage_guard::init(ctx.signatures);
+        CAPABLE.store(ok, Ordering::Release);
+        ok
+    }
+
+    fn enable(&mut self) {
+        if !CAPABLE.load(Ordering::Acquire) {
+            return;
+        }
+        register_rows();
+        extra_stage_guard::enable();
+        let self_test = self_test::configure();
+        if self.scene_cb.is_none() {
+            // The impersonation runs FIRST: its flip must land on the same
+            // 25 -> 26 edge, and the self-test's GAMEPLAY arm skips a side
+            // whose controller is already the bot's.
+            self.scene_cb = Some(scene_manager::on_scene_change(Box::new(|prev, next| {
+                impersonation::on_scene_change(prev, next);
+                self_test::on_scene_change(prev, next);
+            })));
+        }
+        if self.reset_cb.is_none() && song_reset::is_available() {
+            self.reset_cb = Some(song_reset::on_song_reset(|t_ms| {
+                impersonation::on_song_reset(t_ms);
+                self_test::on_song_reset(t_ms);
+            }));
+        }
+        log_info!(
+            "MultiplayerBot: enabled (bot rows + impersonation ready; extra-stage guard {}; self-test {})",
+            if extra_stage_guard::is_installed() { "on" } else { "OFF (stock rule)" },
+            if self_test != 0 { "ARMED" } else { "off" }
+        );
+    }
+
+    fn disable(&mut self) {
+        // There is no unregister; hide both rows until the next enable
+        // (which hits `Duplicate` and shows them again).
+        custom_options::set_option_available(OPT_ID, false);
+        custom_options::set_option_available(OPT_LEVEL_ID, false);
+        impersonation::shutdown();
+        extra_stage_guard::disable();
+        self_test::shutdown();
+        if let Some(id) = self.scene_cb.take() {
+            scene_manager::remove_callback(id);
+        }
+        if let Some(id) = self.reset_cb.take() {
+            song_reset::remove_callback(id);
+        }
+        log_info!("MultiplayerBot: disabled");
+    }
+
+    fn is_active(&self) -> bool {
+        CAPABLE.load(Ordering::Acquire)
+    }
+}
