@@ -93,11 +93,10 @@ pub fn start_song(side: usize, level: u8, seed: u64) {
     WARNED_PANIC[side].store(false, Ordering::Release);
     WARNED_UNREADABLE[side].store(false, Ordering::Release);
     log_info!(
-        "MultiplayerBot: filler start side={} level={} sigma={:.1}ms p_miss={:.2}% seed={:#x}",
+        "MultiplayerBot: filler start side={} level={} {} seed={:#x}",
         side,
         level,
-        curve.sigma_ms,
-        curve.p_miss * 100.0,
+        curve.describe(),
         seed
     );
 }

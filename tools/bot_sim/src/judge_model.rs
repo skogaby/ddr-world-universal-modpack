@@ -442,11 +442,27 @@ mod tests {
         }
     }
 
-    /// A σ = 0 curve makes every hit exact — the model must produce an MFC.
+    /// A zero-lean, zero-jitter curve makes every hit exact — the model must
+    /// produce an MFC.
     fn perfect_curve() -> Curve {
         Curve {
-            sigma_ms: 0.0,
+            lean_ms: 0.0,
+            tight_ms: 0.0,
+            drift_ms: 0.0,
+            loose_ms: 0.0,
+            p_tight: 1.0,
             p_miss: 0.0,
+            form_sd: 0.0,
+            late_bias_sd: 0.0,
+            sign_stickiness: 1.0,
+        }
+    }
+
+    /// Every note a flubbed Miss.
+    fn all_miss_curve() -> Curve {
+        Curve {
+            p_miss: 1.0,
+            ..perfect_curve()
         }
     }
 
@@ -504,10 +520,7 @@ mod tests {
         assert_eq!(card.score, 1_000_000);
 
         // A curve that always misses ⇒ head Miss, tail N.G.
-        let all_miss = Curve {
-            sigma_ms: 0.0,
-            p_miss: 1.0,
-        };
+        let all_miss = all_miss_curve();
         let card = simulate(&c, 1, &all_miss, 1, 0, &cfg());
         assert_eq!(card.counts[MISS], 2);
         assert_eq!(card.counts[NG], 1);
@@ -537,10 +550,7 @@ mod tests {
             .map(|i| tap(i * 512, &t, &[(i % 4) as usize]))
             .collect();
         let c = chart(notes);
-        let all_miss = Curve {
-            sigma_ms: 0.0,
-            p_miss: 1.0,
-        };
+        let all_miss = all_miss_curve();
         let card = simulate(&c, 1, &all_miss, 7, 0, &cfg());
         assert_eq!(card.counts[MISS], 200);
         assert!(card.failed);

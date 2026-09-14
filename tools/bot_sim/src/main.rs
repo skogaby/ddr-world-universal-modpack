@@ -52,10 +52,11 @@ OPTIONS:
   --fps <n>              Judge frame rate (default 60)
   --smarv-ms <n>         S-Marvelous window for the S-MARV column (default 12)
   --threads <n>          Worker threads (default: available parallelism)
-  --sigma-l1 <ms>        Override skill::SIGMA_L1_MS (tuning what-if)
-  --sigma-l10 <ms>       Override skill::SIGMA_L10_MS
-  --pmiss-l1 <p>         Override skill::P_MISS_L1
-  --pmiss-exp <e>        Override skill::P_MISS_EXP (1.0 = linear fall-off)
+  --set <key>=<value>    Override a skill::Params anchor (tuning what-if; repeatable):
+                         lean_l1_ms lean_knee_ms lean_knee_level lean_l10_ms tight_l1_ms
+                         tight_l10_ms drift_ratio loose_l1_ms loose_l10_ms pocket_l1 pocket_exp
+                         p_miss_l1 p_miss_exp form_sd late_bias_sd sign_stickiness
+                         e.g. --set lean_l10_ms=9 --set form_sd=0.5
   --summary              Print the per-level table to stdout (tuning loops)
   --no-html              Skip the HTML report (with --summary / --json)
   -h, --help
@@ -78,49 +79,94 @@ pub struct Args {
     pub html: bool,
 }
 
-/// Optional what-if overrides of the skill constants. The DLL's `skill.rs`
-/// exposes the constants and `curve()`; overriding here re-derives the same
-/// shape with different anchors without touching the mounted source.
+/// Optional what-if overrides of the skill anchors. The DLL's `skill.rs`
+/// exposes `Params`/`DEFAULT` and `curve_from`; an override is a modified
+/// copy of `DEFAULT` fed through the SAME function, so the simulator can
+/// never drift from the shipped shape.
 pub mod skill_override {
-    use crate::bot::skill::{Curve, P_MISS_EXP, P_MISS_L1, SIGMA_L10_MS, SIGMA_L1_MS};
+    use crate::bot::skill::{curve_from, Curve, Params, DEFAULT};
 
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Copy)]
     pub struct Override {
-        pub sigma_l1: Option<f64>,
-        pub sigma_l10: Option<f64>,
-        pub pmiss_l1: Option<f64>,
-        pub pmiss_exp: Option<f64>,
+        pub params: Params,
+        pub touched: bool,
+    }
+
+    impl Default for Override {
+        fn default() -> Self {
+            Override {
+                params: DEFAULT,
+                touched: false,
+            }
+        }
     }
 
     impl Override {
         pub fn is_identity(&self) -> bool {
-            self.sigma_l1.is_none()
-                && self.sigma_l10.is_none()
-                && self.pmiss_l1.is_none()
-                && self.pmiss_exp.is_none()
+            !self.touched
         }
         pub fn curve(&self, level: u8) -> Curve {
-            if self.is_identity() {
-                return crate::bot::skill::curve(level);
+            curve_from(&self.params, level)
+        }
+        /// Apply one `key=value` assignment.
+        pub fn set(&mut self, assignment: &str) -> Result<(), String> {
+            let (key, value) = assignment
+                .split_once('=')
+                .ok_or_else(|| format!("--set needs key=value, got {assignment}"))?;
+            let f = || {
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("bad value for {key}: {value}"))
+            };
+            let p = &mut self.params;
+            match key.trim() {
+                "lean_l1_ms" => p.lean_l1_ms = f()?,
+                "lean_knee_ms" => p.lean_knee_ms = f()?,
+                "lean_l10_ms" => p.lean_l10_ms = f()?,
+                "lean_knee_level" => {
+                    p.lean_knee_level = value
+                        .trim()
+                        .parse::<u8>()
+                        .map_err(|_| format!("bad value for {key}: {value}"))?
+                }
+                "tight_l1_ms" => p.tight_l1_ms = f()?,
+                "tight_l10_ms" => p.tight_l10_ms = f()?,
+                "drift_ratio" => p.drift_ratio = f()?,
+                "loose_l1_ms" => p.loose_l1_ms = f()?,
+                "loose_l10_ms" => p.loose_l10_ms = f()?,
+                "pocket_l1" => p.pocket_l1 = f()?,
+                "pocket_exp" => p.pocket_exp = f()?,
+                "p_miss_l1" => p.p_miss_l1 = f()?,
+                "p_miss_exp" => p.p_miss_exp = f()?,
+                "form_sd" => p.form_sd = f()?,
+                "late_bias_sd" => p.late_bias_sd = f()?,
+                "sign_stickiness" => p.sign_stickiness = f()?,
+                other => return Err(format!("unknown skill anchor {other}")),
             }
-            let s1 = self.sigma_l1.unwrap_or(SIGMA_L1_MS);
-            let s10 = self.sigma_l10.unwrap_or(SIGMA_L10_MS);
-            let p1 = self.pmiss_l1.unwrap_or(P_MISS_L1);
-            let pe = self.pmiss_exp.unwrap_or(P_MISS_EXP);
-            let l = level.clamp(1, 10) as f64;
-            let t = (l - 1.0) / 9.0;
-            Curve {
-                sigma_ms: s1 * (s10 / s1).powf(t),
-                p_miss: p1 * ((10.0 - l) / 9.0).powf(pe),
-            }
+            self.touched = true;
+            Ok(())
         }
         pub fn describe(&self) -> String {
+            let p = &self.params;
             format!(
-                "sigma_l1={} sigma_l10={} pmiss_l1={} pmiss_exp={}",
-                self.sigma_l1.unwrap_or(SIGMA_L1_MS),
-                self.sigma_l10.unwrap_or(SIGMA_L10_MS),
-                self.pmiss_l1.unwrap_or(P_MISS_L1),
-                self.pmiss_exp.unwrap_or(P_MISS_EXP)
+                "lean={}/{}@L{}/{} tight={}/{} drift×{} loose={}/{} pocket_l1={} pocket_exp={} p_miss_l1={} p_miss_exp={} form_sd={} late_bias_sd={} stickiness={}",
+                p.lean_l1_ms,
+                p.lean_knee_ms,
+                p.lean_knee_level,
+                p.lean_l10_ms,
+                p.tight_l1_ms,
+                p.tight_l10_ms,
+                p.drift_ratio,
+                p.loose_l1_ms,
+                p.loose_l10_ms,
+                p.pocket_l1,
+                p.pocket_exp,
+                p.p_miss_l1,
+                p.p_miss_exp,
+                p.form_sd,
+                p.late_bias_sd,
+                p.sign_stickiness
             )
         }
     }
@@ -242,34 +288,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "bad --threads".to_string())?;
                 threads = threads.max(1);
             }
-            "--sigma-l1" => {
-                ov.sigma_l1 = Some(
-                    need(&mut it, "--sigma-l1")?
-                        .parse()
-                        .map_err(|_| "bad --sigma-l1".to_string())?,
-                )
-            }
-            "--sigma-l10" => {
-                ov.sigma_l10 = Some(
-                    need(&mut it, "--sigma-l10")?
-                        .parse()
-                        .map_err(|_| "bad --sigma-l10".to_string())?,
-                )
-            }
-            "--pmiss-l1" => {
-                ov.pmiss_l1 = Some(
-                    need(&mut it, "--pmiss-l1")?
-                        .parse()
-                        .map_err(|_| "bad --pmiss-l1".to_string())?,
-                )
-            }
-            "--pmiss-exp" => {
-                ov.pmiss_exp = Some(
-                    need(&mut it, "--pmiss-exp")?
-                        .parse()
-                        .map_err(|_| "bad --pmiss-exp".to_string())?,
-                )
-            }
+            "--set" => ov.set(&need(&mut it, "--set")?)?,
             "--summary" => summary = true,
             "--no-html" => html = false,
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),

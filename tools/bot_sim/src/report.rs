@@ -92,7 +92,12 @@ fn meta_json(m: &Meta) -> String {
     let curves: Vec<String> = m
         .curves
         .iter()
-        .map(|(l, c)| format!("[{},{:.3},{:.5}]", l, c.sigma_ms, c.p_miss))
+        .map(|(l, c)| {
+            format!(
+                "[{},{:.3},{:.3},{:.3},{:.3},{:.5},{:.5}]",
+                l, c.lean_ms, c.tight_ms, c.drift_ms, c.loose_ms, c.p_tight, c.p_miss
+            )
+        })
         .collect();
     let errs: Vec<String> = m
         .parse_errors
@@ -125,7 +130,9 @@ fn timestamp() -> String {
 }
 
 /// Plain-text per-level table (what the HTML's section 1 shows), for tuning
-/// loops on the console. "MFC+" counts MFC and S-MFC together.
+/// loops on the console. "MFC+" counts MFC and S-MFC together; the judgement
+/// mix columns are shares of every judged tap (S-Marv = Marvelous within the
+/// S-Marvelous window, Marv = the EXCLUSIVE remainder).
 pub fn summary_table(meta: &Meta, cards: &[Scorecard]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -139,8 +146,28 @@ pub fn summary_table(meta: &Meta, cards: &[Scorecard]) -> String {
     );
     let _ = writeln!(
         out,
-        "{:>3} {:>6} {:>7} {:>9} {:>8} {:>6} {:>6} {:>6} {:>6} {:>6} | fail% b/B/D/E/C",
-        "L", "sigma", "p_miss", "mean", "median", "EX%", "FC%", "MFC+%", "SMFC%", "fail%"
+        "{:>3} {:>5} {:>5} {:>5} {:>4} {:>6} | {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} | {:>7} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} | {:>5} {:>4} | fail% b/B/D/E/C | MFC+% b/B/D/E/C",
+        "L",
+        "lean",
+        "tight",
+        "loose",
+        "pkt%",
+        "pmiss%",
+        "SMrv%",
+        "Marv%",
+        "Perf%",
+        "Grt%",
+        "Good%",
+        "Miss%",
+        "score",
+        "EX%",
+        "FC%",
+        "PFC%",
+        "MFC+%",
+        "SMFC%",
+        "fail%",
+        "slow%",
+        "±sd"
     );
     for &(level, c) in &meta.curves {
         let cs: Vec<&Scorecard> = cards.iter().filter(|x| x.level == level).collect();
@@ -148,10 +175,7 @@ pub fn summary_table(meta: &Meta, cards: &[Scorecard]) -> String {
             continue;
         }
         let n = cs.len() as f64;
-        let mut scores: Vec<i32> = cs.iter().map(|x| x.score).collect();
-        scores.sort_unstable();
-        let mean = scores.iter().map(|&v| v as f64).sum::<f64>() / n;
-        let median = scores[scores.len() / 2];
+        let mean_score = cs.iter().map(|x| x.score as f64).sum::<f64>() / n;
         let ex = cs
             .iter()
             .filter(|x| x.ex_max > 0)
@@ -161,37 +185,87 @@ pub fn summary_table(meta: &Meta, cards: &[Scorecard]) -> String {
         let pct =
             |f: &dyn Fn(&&Scorecard) -> bool| 100.0 * cs.iter().filter(|x| f(x)).count() as f64 / n;
         let fc = pct(&|x| x.fc.is_some());
+        let pfc = pct(&|x| {
+            matches!(
+                x.fc,
+                Some(crate::scoring::FullCombo::Marvelous | crate::scoring::FullCombo::Perfect)
+            )
+        });
         let mfc = pct(&|x| matches!(x.fc, Some(crate::scoring::FullCombo::Marvelous)));
         let smfc = pct(&|x| x.smfc);
         let fail = pct(&|x| x.failed);
-        let by_diff: Vec<String> = crate::chart::Difficulty::ALL
+        // Judgement mix over every judged tap (freeze O.K./N.G. excluded).
+        let sum = |g: usize| cs.iter().map(|x| x.counts[g] as f64).sum::<f64>();
+        let smarv: f64 = cs.iter().map(|x| x.smarv as f64).sum();
+        let taps = sum(crate::scoring::MARV)
+            + sum(crate::scoring::PERF)
+            + sum(crate::scoring::GREAT)
+            + sum(crate::scoring::GOOD)
+            + sum(crate::scoring::BOO)
+            + sum(crate::scoring::MISS);
+        let share = |v: f64| if taps > 0.0 { 100.0 * v / taps } else { 0.0 };
+        let by_diff = |f: &dyn Fn(&&&Scorecard) -> bool| -> String {
+            crate::chart::Difficulty::ALL
+                .iter()
+                .map(|d| {
+                    let ds: Vec<&&Scorecard> = cs.iter().filter(|x| x.difficulty == *d).collect();
+                    if ds.is_empty() {
+                        "  -".to_string()
+                    } else {
+                        format!(
+                            "{:3.0}",
+                            100.0 * ds.iter().filter(|x| f(x)).count() as f64 / ds.len() as f64
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        // FAST/SLOW balance per song (stock semantics: Perfect/Great/Good
+        // only, Marvelous exempt) — the mean SLOW share over songs with any
+        // FAST/SLOW judgement and its per-song std-dev (how much a song's
+        // split varies around that mean).
+        let slow_shares: Vec<f64> = cs
             .iter()
-            .map(|d| {
-                let ds: Vec<&&Scorecard> = cs.iter().filter(|x| x.difficulty == *d).collect();
-                if ds.is_empty() {
-                    "  -".to_string()
-                } else {
-                    format!(
-                        "{:3.0}",
-                        100.0 * ds.iter().filter(|x| x.failed).count() as f64 / ds.len() as f64
-                    )
-                }
-            })
+            .filter(|x| x.fast + x.slow > 0)
+            .map(|x| x.slow as f64 / (x.fast + x.slow) as f64)
             .collect();
+        let (slow_mean, slow_sd) = if slow_shares.is_empty() {
+            (f64::NAN, f64::NAN)
+        } else {
+            let m = slow_shares.iter().sum::<f64>() / slow_shares.len() as f64;
+            let v =
+                slow_shares.iter().map(|x| (x - m).powi(2)).sum::<f64>() / slow_shares.len() as f64;
+            (100.0 * m, 100.0 * v.sqrt())
+        };
+        let fail_by_diff = by_diff(&|x| x.failed);
+        let mfc_by_diff = by_diff(&|x| matches!(x.fc, Some(crate::scoring::FullCombo::Marvelous)));
         let _ = writeln!(
             out,
-            "{:>3} {:>6.1} {:>6.2}% {:>9.0} {:>8} {:>6.1} {:>6.1} {:>6.1} {:>6.2} {:>6.1} | {}",
+            "{:>3} {:>5.1} {:>5.1} {:>5.1} {:>4.0} {:>6.2} | {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.1} | {:>7.0} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.2} {:>5.1} | {:>5.1} {:>4.1} | {} | {}",
             level,
-            c.sigma_ms,
+            c.lean_ms,
+            c.tight_ms,
+            c.loose_ms,
+            c.p_tight * 100.0,
             c.p_miss * 100.0,
-            mean,
-            median,
+            share(smarv),
+            share(sum(crate::scoring::MARV) - smarv),
+            share(sum(crate::scoring::PERF)),
+            share(sum(crate::scoring::GREAT)),
+            share(sum(crate::scoring::GOOD)),
+            share(sum(crate::scoring::MISS)),
+            mean_score,
             ex,
             fc,
+            pfc,
             mfc,
             smfc,
             fail,
-            by_diff.join("/")
+            slow_mean,
+            slow_sd,
+            fail_by_diff,
+            mfc_by_diff
         );
     }
     out
@@ -309,10 +383,10 @@ function median(a){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);const m
 // ---- 1. level overview
 (function(){
   const rows=[];
-  const hdr=`<tr><th>Level</th><th>σ ms</th><th>p_miss</th><th>songs</th><th>mean score</th><th>median</th><th>EX %</th><th>any FC %</th><th>MFC %</th><th>S-MFC %</th><th>fail %</th><th>mean miss %</th><th>judgement mix</th></tr>`;
+  const hdr=`<tr><th>Level</th><th>lean ms</th><th>tight σ</th><th>loose σ</th><th>pocket</th><th>p_miss</th><th>songs</th><th>mean score</th><th>median</th><th>EX %</th><th>any FC %</th><th>MFC %</th><th>S-MFC %</th><th>fail %</th><th>mean miss %</th><th>judgement mix</th></tr>`;
   for(const L of META.levels){
     const cs=CARDS.filter(c=>c[C.level]===L);if(!cs.length)continue;
-    const cv=META.curves.find(x=>x[0]===L)||[L,0,0];
+    const cv=META.curves.find(x=>x[0]===L)||[L,0,0,0,0,0,0];
     const scores=cs.map(c=>c[C.score]);
     const ex=cs.map(c=>pct(c[C.ex],c[C.exmax]));
     const anyfc=cs.filter(c=>c[C.fc]>=0).length,mfc=cs.filter(c=>c[C.fc]===0).length,smfc=cs.filter(c=>c[C.smfc]).length,fail=cs.filter(c=>c[C.failed]).length;
@@ -320,7 +394,7 @@ function median(a){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);const m
     const sum=k=>cs.reduce((s,c)=>s+c[C[k]],0);
     const sm=sum('smarv'),ma=sum('marv')-sm,pe=sum('perf'),gr=sum('great'),go=sum('good'),mi=sum('miss');
     const seg=(v,cls)=>`<span class="${cls}" style="width:${pct(v,tot).toFixed(2)}%;background:var(--${cls})" title="${cls} ${pct(v,tot).toFixed(1)}%"></span>`;
-    rows.push(`<tr><td><b>LV ${L}</b></td><td>${cv[1].toFixed(1)}</td><td>${(cv[2]*100).toFixed(2)}%</td><td>${cs.length}</td><td>${fmt(Math.round(mean(scores)))}</td><td>${fmt(Math.round(median(scores)))}</td><td>${mean(ex).toFixed(1)}</td><td>${pct(anyfc,cs.length).toFixed(1)}</td><td>${pct(mfc,cs.length).toFixed(1)}</td><td>${pct(smfc,cs.length).toFixed(2)}</td><td>${pct(fail,cs.length).toFixed(1)}</td><td>${pct(mi,tot).toFixed(2)}</td><td><div class="bar">${seg(sm,'smarv')}${seg(ma,'marv')}${seg(pe,'perf')}${seg(gr,'great')}${seg(go,'good')}${seg(mi,'miss')}</div></td></tr>`);
+    rows.push(`<tr><td><b>LV ${L}</b></td><td>${cv[1].toFixed(1)}</td><td>${cv[2].toFixed(1)}</td><td>${cv[4].toFixed(1)}</td><td>${(cv[5]*100).toFixed(0)}%</td><td>${(cv[6]*100).toFixed(2)}%</td><td>${cs.length}</td><td>${fmt(Math.round(mean(scores)))}</td><td>${fmt(Math.round(median(scores)))}</td><td>${mean(ex).toFixed(1)}</td><td>${pct(anyfc,cs.length).toFixed(1)}</td><td>${pct(mfc,cs.length).toFixed(1)}</td><td>${pct(smfc,cs.length).toFixed(2)}</td><td>${pct(fail,cs.length).toFixed(1)}</td><td>${pct(mi,tot).toFixed(2)}</td><td><div class="bar">${seg(sm,'smarv')}${seg(ma,'marv')}${seg(pe,'perf')}${seg(gr,'great')}${seg(go,'good')}${seg(mi,'miss')}</div></td></tr>`);
   }
   document.getElementById('levels').innerHTML=hdr+rows.join('');
 })();

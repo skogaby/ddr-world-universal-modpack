@@ -66,10 +66,9 @@ pub fn configure() -> u8 {
     if armed != 0 {
         let c = skill::curve(armed);
         log_info!(
-            "MultiplayerBot: SELF-TEST armed at LV{} (sigma={:.1}ms p_miss={:.2}%) -- the bot will play EVERY entered side's own lane",
+            "MultiplayerBot: SELF-TEST armed at LV{} ({}) -- the bot will play EVERY entered side's own lane",
             armed,
-            c.sigma_ms,
-            c.p_miss * 100.0
+            c.describe()
         );
     }
     armed

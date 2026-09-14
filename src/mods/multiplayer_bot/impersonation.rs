@@ -414,14 +414,13 @@ fn apply(plan: eligibility::Plan) {
 
     let c = skill::curve(level);
     log_info!(
-        "MultiplayerBot: side {} impersonated as \"BOT LV{}\" for P{}'s song mcode={} diff={} (sigma={:.1}ms p_miss={:.2}% seed={:#x})",
+        "MultiplayerBot: side {} impersonated as \"BOT LV{}\" for P{}'s song mcode={} diff={} ({} seed={:#x})",
         bot,
         level,
         human + 1,
         song_mcode,
         song_difficulty,
-        c.sigma_ms,
-        c.p_miss * 100.0,
+        c.describe(),
         seed
     );
 }

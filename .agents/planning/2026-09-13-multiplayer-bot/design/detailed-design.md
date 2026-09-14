@@ -1,6 +1,6 @@
 # Multiplayer Bot — Detailed Design
 
-Status: Approved 2026-09-13 (revised 2026-09-13 — no-Boo judge correction, one-judgement-per-frame, gauge/scoring facts, `tools/bot_sim` replaces the synthetic harness; revisions approved in conversation the same day)
+Status: Approved 2026-09-13 (revised 2026-09-13 — no-Boo judge correction, one-judgement-per-frame, gauge/scoring facts, `tools/bot_sim` replaces the synthetic harness; revised 2026-09-14 — §4.6 skill model retuned to a lean + two-regime jitter shape after the first cabinet playtest, targets set by the maintainer in conversation)
 
 ## 1. Overview
 
@@ -47,7 +47,7 @@ other side.
 | R3 | The bot plays **the human's exact chart**: same song, style, and difficulty. |
 | R4 | While engaged, the game presents a 2P versus session: two `GamePlayActor`s, versus HUD layout, READY panel for both sides, both results panes on the stage results screen (0-idx scene 30). |
 | R5 | The bot's name plate reads **`BOT LV<n>`** wherever the game draws a player name (HUD, BPL frame, results). |
-| R6 | The bot's play quality follows a **two-curve skill model** of the level: Gaussian timing error σ(L) and per-note miss probability p(L), with a fresh random seed every play (quick restarts and in-place resets re-roll), decisions fixed per note for the note's life. Freeze arrows are held whenever their head was hit; shock arrows are always avoided. |
+| R6 | The bot's play quality follows a **level-indexed skill model** (§4.6): a per-song early/late lean, a two-regime (pocket / loose) Gaussian jitter, a per-note miss probability and a per-song form factor, with a fresh random seed every play (quick restarts and in-place resets re-roll), decisions fixed per note for the note's life. Freeze arrows are held whenever their head was hit; shock arrows are always avoided. |
 | R7 | The bot uses the **human's lane options** (speed, arrow skin, cut options, etc.) except **gauge type = NORMAL**. |
 | R8 | The impersonation **ends** at the first scene change out of the play window {26, 27, 28, 29, 30}: TOTAL RESULTS, the stage-bump wait, EAM exit, and any quick-fail/limbo path run as a stock 1P session. |
 | R9 | The **human's saves are untouched**: their per-stage and logout saves proceed as stock. The bot side must never reach the server: its side carries the autoplay taint (per-stage save suppressed, logout save sanitised) on top of the game's own no-card gating. |
@@ -314,29 +314,74 @@ const PLAY_WINDOW: [i32; 5] = [26, 27, 28, 29, 30];
 
 ### 4.6 `mods/multiplayer_bot/skill.rs` (pure)
 
+(Revised 2026-09-14 after the first cabinet playtest — the zero-mean Gaussian of the approved
+design is replaced by a **lean + two-regime jitter** model; targets and the reason below.)
+
 ```rust
-pub struct Curve { pub sigma_ms: f64, pub p_miss: f64 }
-pub fn curve(level: u8) -> Curve;                 // level clamped 1..=10
+pub struct Params { lean_l1_ms, lean_knee_ms, lean_knee_level, lean_l10_ms, tight_l1_ms,
+                    tight_l10_ms, drift_ratio, loose_l1_ms, loose_l10_ms, pocket_l1,
+                    pocket_exp, p_miss_l1, p_miss_exp, form_sd, late_bias_sd, sign_stickiness }
+pub const DEFAULT: Params;                        // the shipped anchors
+pub struct Curve { lean_ms, tight_ms, drift_ms, loose_ms, p_tight, p_miss, form_sd,
+                   late_bias_sd, sign_stickiness }
+pub fn curve(level: u8) -> Curve;                 // = curve_from(&DEFAULT, level); level clamped 1..=10
+pub fn curve_from(p: &Params, level: u8) -> Curve;// the simulator's what-ifs go through the SAME fn
 pub struct Rng(u64);                              // xorshift64*; seeded per play
-impl Rng { pub fn new(seed: u64) -> Self; pub fn next_f64(&mut self) -> f64; pub fn gaussian(&mut self) -> f64; }
+pub struct Form { p_late, sign: ±1, drift, factor }   // per-song bias + current side, drift, form
+impl Form { pub fn new(rng: &mut Rng, c: &Curve) -> Self; }
 pub enum Plan { Hit { d_ms: i32 }, Miss }
-pub fn decide(rng: &mut Rng, c: &Curve) -> Plan;  // Miss if u < p_miss; else d = round(σ·z), |d| > 124 ⇒ Miss
+pub fn decide(rng: &mut Rng, form: &mut Form, c: &Curve) -> Plan;
 pub fn grade_for_offset(d_ms: i32) -> u8;         // 0..=3 by the game's GRADED windows, 5 beyond ±124 (never 4)
 ```
 
-Curves — constants tuned 2026-09-13 on the full World chart corpus with `scripts/bot_sim.sh`
-(they are the only tunables; re-run the simulator after any change):
+Per note: Miss with probability `p_miss · form.factor`; else `d = round(lean + jitter)` where
+`lean = sign · (lean_ms + drift)` and the jitter is `N(0, tight_ms)` with probability
+`p_tight` ("in the pocket") or `N(0, loose_ms · form.factor)` otherwise; `|d| > 124 ⇒ Miss`.
+The **side** `sign` is a two-state Markov chain: each note keeps the previous side with
+probability `sign_stickiness` (0.7 ⇒ runs of a few notes — rushing one phrase, dragging the
+next) or redraws it from the song's `p_late` (drawn once per song as `clamp(0.5 +
+late_bias_sd·z, 0.1, 0.9)`, so a typical song is 35–65 % late, an occasional one 20/80 — never
+100/0). The **magnitude** drift is AR(1) (ρ 0.97/note, stationary sd `drift_ms`), independent
+of the side, so a tight stretch stays tight across a side flip. `form.factor` is log-normal
+(sd `form_sd`, median 1), drawn once per song, scaling BOTH the loose σ and `p_miss` (a bad
+day is wilder and flubbier — it turns the NORMAL gauge's sharp miss-rate knee into a smooth
+per-level fail ramp). The `Form` lives in the planner's `SongState`, so a song reset re-rolls it.
+Grades depend on |d| only, so the side chain does not move the grade mix (host-tested: every
+bucket within 1 % of a frozen-side run).
 
-- `σ(L) = 60 · (5.4/60)^((L−1)/9)` ms → L1 60.0, L2 45.9, L3 35.1, L4 26.9, L5 20.6, L6 15.7,
-  L7 12.0, L8 9.2, L9 7.1, L10 5.4.
-- `p_miss(L) = 0.13 · ((10 − L)/9)^1.4` → L1 13.0 %, L2 11.0 %, L3 9.1 %, L5 5.7 %, L9 0.6 %,
-  L10 0.
-- Corpus outcome (6,621 SINGLE charts, 1 seed): L10 ≈ 71 % MFC-or-S-MFC (4 % S-MFC; the
-  remainder PFCs — MFC probability is `P(Marv)^notes`, so `σ₁₀` is razor-sensitive: 5.0 ⇒
-  86 %, 6.0 ⇒ 42 %); L9 5 % MFC; fail rate L1 60 % (Beginner 7 % … Expert 95 %), L2 27 %,
-  L3 5 %, L4 0.3 %, L5+ 0. The NORMAL gauge's knee is ≈ 7 % misses, so the gradual ramp comes
-  from an explicit `p_miss` that decays slowly (exponent 1.4) rather than from the Gaussian
-  tail beyond ±124 (σ 60 ⇒ 3.4 %; the earlier σ 75 ⇒ 9.8 % produced an L1→L2 cliff).
+**Why a lean.** The S-Marvelous band `|d| ≤ 12` is 24 ms wide, the exclusive-Marvelous shell
+`12 < |d| ≤ 17` only 10 ms; ANY zero-centred unimodal error distribution — however wide — puts
+≥ 2.4× more Marvelous-tier hits in the S-Marv band than in the shell, so "Marvelous more common
+than S-Marvelous" is unreachable by widening σ. Centring the tight core ON the shell (a
+consistent early/late lean — the uncalibrated-dancer shape) is the only way; the lean is
+largest at L1 (17 ms — a beginner's pocket hits spill into Perfect), 14.5 ms at the knee (L8)
+and 11.7 ms at L10 where S-Marvelous takes over.
+
+Curves (`DEFAULT`, `curve_from`): lean linear 17 → 14.5 over L1..8, then linear to 11.7 at L10;
+tight σ geometric 3.5 → 2.5; drift sd = 0.6 · tight; loose σ geometric 60 → 12; pocket share
+`1 − 0.65 · ((10−L)/9)` (35 % → 100 %); `p_miss = 0.015 · ((10−L)/9)^1.4`; `form_sd` 0.35;
+`late_bias_sd` 0.15, `sign_stickiness` 0.7 (level-independent). Corpus SLOW share of the
+stock FAST/SLOW counters: mean 50 % at every level with a per-song sd of 9 % (L1) → 31 % (L10 —
+few counted judgements per song, so its split is coarse).
+
+Corpus outcome (6,621 SINGLE charts × 3 seeds — the tuning targets set by the maintainer after
+playtesting the 2026-09-13 constants, which gave L10 71 % MFC, L1 60 % fail, ≥ 50 % S-Marv from
+L6 and EX% saturated 96.6/99.0/99.9 over L8–10):
+
+| L | S-Marv % | Marv % | Perf % | Great % | Good % | Miss % | EX % | FC % | PFC % | MFC % | fail % |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 15.3 | 18.3 | 28.3 | 24.1 | 7.6 | 6.4 | 62.4 | 3.5 | 0 | 0 | 11.6 (2 b … 20 C) |
+| 4 | 20.7 | 31.8 | 30.4 | 14.0 | 1.8 | 1.3 | 78.6 | 16.6 | 0.1 | 0 | 0.1 |
+| 7 | 26.0 | 46.3 | 23.2 | 4.0 | 0.1 | 0.4 | 89.7 | 44.4 | 2.8 | 0 | 0 |
+| 8 | 27.9 | 50.6 | 19.3 | 2.0 | 0 | 0.2 | 92.4 | 61.0 | 10.4 | 0 | 0 |
+| 9 | 42.2 | 48.1 | 9.1 | 0.6 | 0 | 0.1 | 96.7 | 80.8 | 34.4 | 0.3 | 0 |
+| 10 | 60.9 | 36.8 | 2.3 | 0 | 0 | 0 | 99.2 | 98.0 | 98.0 | 9.8 (28 b … 1 E/C) | 0 |
+
+— L10 ≈ 10 % MFC corpus-wide (MFC is `P(Marv)^notes`, so short Beginner charts carry most of
+it: 28 % Beginner, 10 % Basic, 3 % Difficult, 1 % Expert/Challenge), L1 fails ≈ 12 %,
+exclusive Marvelous > S-Marvelous through L9 (S-Marv ≈ ¼ of steps at L7, dominant at L10 only),
+EX% climbing ≈ 4–5 points per level with no plateau, fail ramp 12 / 4 / 1 / 0 % over L1–4.
+
 - Game windows (inclusive, ms): Marvelous ±17, Perfect ±34, Great ±84, **Good ±124 — the
   outermost graded window. DDR World has no Boo**: the judge's table still carries a ±160
   row but its accept test is `grade < 4`, so a 125..160 ms event is matched, rejected
@@ -541,7 +586,7 @@ chart corpus:
 ```
 scripts/bot_sim.sh <ssq-dir> [--out report.html] [--json out.json] [--levels 1-10]
                    [--diffs b,B,D,E,C] [--seeds 3] [--filter substr] [--fps 60] [--smarv-ms 12]
-                   [--sigma-l1 ms] [--sigma-l10 ms] [--pmiss-l1 p]     # tuning what-ifs
+                   [--set <anchor>=<value> …]                           # skill::Params what-ifs
 ```
 
 - `chart.rs` — SSQ → notes per SINGLE difficulty (taps/jumps, REP freeze heads with tick

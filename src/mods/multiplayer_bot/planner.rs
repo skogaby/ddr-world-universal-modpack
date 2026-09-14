@@ -22,7 +22,7 @@
 //! life. Dependency-free so the host harness can mount it; the engine adapter
 //! (`filler.rs`) builds `NoteView`s from the live `GameNote`s.
 
-use super::skill::{self, Curve, Plan, Rng};
+use super::skill::{self, Curve, Form, Plan, Rng};
 
 /// The stock `update`'s press lookahead: a press is emitted from `E − 8`.
 pub const LOOKAHEAD_MS: i32 = 8;
@@ -81,6 +81,9 @@ pub struct SongState {
     pub cursor: usize,
     /// Planned grade counts (0 Marvelous … 4 Boo, 5 Miss) of judged notes.
     tally: [u32; 6],
+    /// The dancer's per-song lean/drift state, rolled at the first decision
+    /// (a rebuilt `SongState` — song reset — re-rolls it).
+    form: Option<Form>,
 }
 
 impl SongState {
@@ -94,6 +97,7 @@ impl SongState {
             last_event: [i32::MIN; 8],
             cursor: 0,
             tally: [0; 6],
+            form: None,
         }
     }
 
@@ -167,7 +171,10 @@ fn resolve(st: &mut SongState, n: &NoteView, rng: &mut Rng, c: &Curve) -> Plan {
     }
     let raw = match st.plans.get(idx).copied().flatten() {
         Some(p) => p,
-        None => skill::decide(rng, c),
+        None => {
+            let form = st.form.get_or_insert_with(|| Form::new(rng, c));
+            skill::decide(rng, form, c)
+        }
     };
     let arrows = (0..8).filter(|&p| is_arrow_panel(n.state[p]));
     let plan = match raw {

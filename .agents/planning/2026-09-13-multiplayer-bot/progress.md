@@ -4,8 +4,13 @@ Updated: 2026-09-14
 Status: FEATURE COMPLETE — all 6 plan steps implemented and the maintainer confirmed the full bot
 session on cabinet ("everything looks great in-game", 2026-09-14). User docs updated (README hero
 section + Full Feature List row + BPL/Scores cross-references; `screenshots/versus_bot.png`).
+**Skill model RETUNED 2026-09-14** after the maintainer's playtest + distribution review (see
+Deviations) — `skill.rs` is now a lean + two-regime jitter model; design §4.6 rewritten.
 Uncommitted — maintainer commits manually.
-NEXT ACTION (maintainer): `git commit` (no attribution trailers). Optional follow-ups, none
+NEXT ACTION (maintainer): playtest the retuned bot (L10 should PFC nearly every song and MFC only
+~1 in 10; L1 should fail ~1 in 10; the Marvelous count should exceed S-Marvelous until L9/L10;
+the FAST/SLOW readout should show BOTH sides with a per-song tilt and short runs), then `git commit` (no attribution
+trailers). Optional follow-ups, none
 blocking: bemani-buddy migration for `opt_mod_bot_opponent` / `opt_mod_bot_opponent_level` (other
 repo); the individual §7.3 items not yet ticked below can be spot-checked at leisure (every
 `MultiplayerBot` WARN names its fail-open cause, so a field log is self-diagnosing).
@@ -113,11 +118,28 @@ then `design/detailed-design.md` §4 for the component you are touching. RE fact
 
 ## Deviations & open questions
 
-- **Skill-curve tuning — DONE 2026-09-13 (maintainer-approved after viewing the report):**
-  `skill.rs` constants `SIGMA_L1_MS 60 / SIGMA_L10_MS 5.4 / P_MISS_L1 0.13 / P_MISS_EXP 1.4`
-  (was 75 / 5 / 0.05 / 1.5). Corpus: L10 71 % MFC+ (4 % S-MFC, rest PFC), fail L1 60 % (b 7 …
-  E 95), L2 27 %, L3 5 %, L4 0.3 %, L5+ 0. `bot_sim` what-ifs: `--sigma-l1/--sigma-l10/
-  --pmiss-l1/--pmiss-exp`, `--summary --no-html` for console loops.
+- **Skill model RETUNE — 2026-09-14 (maintainer targets after playtest):** the 2026-09-13
+  zero-mean Gaussian (σ 60→5.4, p_miss 0.13→0, exp 1.4) gave L10 71 % MFC, L1 60 % fail,
+  ≥ 50 % S-Marv from L6 and EX% saturated (96.6/99.0/99.9) over L8–10. Targets: ~10 % MFC at L10,
+  ~10 % fail at L1, exclusive Marvelous > S-Marvelous nearly everywhere (S-Marv common only
+  from ~L7, dominant at L9/10), a smooth EX% ramp. Key insight: a zero-centred bell of ANY width
+  puts ≥ 2.4× more Marvelous-tier hits in the 24 ms S-Marv band than the 10 ms Marvelous shell
+  — the Marv > S-Marv target is unreachable by σ alone, so the model gained a per-song ±LEAN
+  centring the tight core on the shell (17 → 14.5 @L8 → 11.7 ms), an AR(1) drift, a two-regime
+  jitter (pocket σ 3.5→2.5 w.p. 35 %→100 %, loose σ 60→12), `p_miss 0.015·u^1.4`, and a per-song
+  log-normal `form` factor (sd 0.35) on loose σ + p_miss (smooths the NORMAL gauge's sharp
+  miss-rate knee: fail 12/4/1/0 % over L1–4 instead of a cliff). Result (3 seeds): L10 9.8 % MFC
+  (98 % PFC), L1 11.6 % fail, Marv > S-Marv through L9, S-Marv 15 → 26 (L7) → 61 % (L10), EX
+  62 → 79 → 90 → 92 → 97 → 99. All anchors in `skill::Params`/`DEFAULT`; `curve_from` is shared
+  with the simulator's `--set key=value` overrides (the old `--sigma-*`/`--pmiss-*` flags are
+  gone); `Form` lives in the planner's `SongState` (re-rolled per song / reset). Summary table
+  grew per-grade shares, mean score, PFC%, per-difficulty MFC%, and the per-song SLOW share ± sd.
+  **Same-day follow-up:** the lean's SIDE is a sticky Markov chain (per-song `p_late` 50/50 ±
+  0.15, stickiness 0.7) instead of one sign per song — every song shows both FAST and SLOW
+  (maintainer: an all-one-side attempt reads as unnatural); grade mix provably unchanged.
+  78 host tests. Record: `.agents/scratchpad/2026-09-13-multiplayer-bot/skill-retune/`.
+- (superseded) Skill-curve tuning 2026-09-13: `SIGMA_L1_MS 60 / SIGMA_L10_MS 5.4 / P_MISS_L1
+  0.13 / P_MISS_EXP 1.4` — the constants the playtest rejected.
 - Model simplifications (report §4): head-Missed freeze ⇒ N.G. (game may tap-Miss the tail);
   accepted-candidate-past-+160 ⇒ Miss (game double-submits); ranks = community table.
 
