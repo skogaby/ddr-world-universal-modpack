@@ -4,7 +4,7 @@
 //! (`eligibility`, `skill`, `planner`, `session`), the engine adapter
 //! (`filler`) that feeds the `foot_panel_swap` service's cloned-vtable
 //! `BotFootPanel`, the two per-player option rows (BOT OPPONENT (1P ONLY) /
-//! BOT LEVEL) whose values land in [`option_on`] / [`level`], and the
+//! BOT LEVEL) whose values land in [`option_on`] / [`mode`], and the
 //! windowed impersonation (`impersonation`) that turns the empty pad into a
 //! genuine second player from the song-select commit through the stage
 //! results, plus the extra-stage guard (`extra_stage_guard`) — the feature's
@@ -12,12 +12,21 @@
 //! dev-only self-test (`self_test`) still arms the bot on the human's own
 //! lane for the `mismatch=0` build-portability probe.
 //!
+//! **Target Score** (2026-09-14): the level row's eleventh value replays the
+//! human's loaded pacemaker ghost note for note (`ghost` = the pure sampler,
+//! `ghost_source` = the GhostActor reader; the planner reproduces freeze /
+//! shock N.G.s too). Both rows persist LOCALLY only (`PersistMode::Local` —
+//! the backend never stores them) and the level row renders text values
+//! (`Level 1`…`Level 10`, `Target Score`) through `ScalarFormat::Labeled`.
+//!
 //! Host validation: `scripts/validate_multiplayer_bot.sh` (the `tools/bot_sim`
 //! crate mounts the pure files); offline tuning: `scripts/bot_sim.sh`.
 
 pub mod eligibility;
 pub mod extra_stage_guard;
 pub mod filler;
+pub mod ghost;
+pub mod ghost_source;
 pub mod impersonation;
 pub mod planner;
 pub mod self_test;
@@ -27,26 +36,33 @@ pub mod skill;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::mods::mod_trait::{Mod, ModContext};
-use crate::services::custom_options::{self, RegisterError, RegisterSpec, ScalarFormat, ShowWhen};
+use crate::services::custom_options::{
+    self, PersistMode, RegisterError, RegisterSpec, ScalarFormat, ShowWhen,
+};
 use crate::services::{foot_panel_swap, scene_manager, score_guard, song_reset, stage_records};
 use crate::{log_info, log_warn};
+
+pub use eligibility::BotMode;
 
 /// `init` succeeded (every prerequisite service is up) — `is_active`.
 static CAPABLE: AtomicBool = AtomicBool::new(false);
 
-/// Option id of the bool parent row (wire `mod_bot_opponent`).
+/// Option id of the bool parent row (JSON cache only — never on the wire).
 pub const OPT_ID: &str = "bot_opponent";
-/// Option id of the scalar child row (wire `mod_bot_opponent_level`).
+/// Option id of the level child row (JSON cache only — never on the wire).
+/// Values `1..=10` are skill levels, `11` the Target Score replay.
 pub const OPT_LEVEL_ID: &str = "bot_opponent_level";
 /// Default BOT LEVEL (design R1).
 pub const DEFAULT_LEVEL: i32 = 5;
+/// The level a Target Score song plays at when no usable ghost exists.
+pub const GHOST_FALLBACK_LEVEL: u8 = 10;
 
 /// Per-side BOT OPPONENT choice, written by the option row's change callback.
 /// Only the ENTERED side's value matters — per-side option values outlive the
 /// player (the JSON cache primes both sides), so consumers gate on
 /// `stage_records::side_entered` and never on this alone.
 static OPTION_ON: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-/// Per-side BOT LEVEL (1..=10), clamped on store.
+/// Per-side BOT LEVEL row value (`1..=11`), clamped on store.
 static LEVEL: [AtomicI32; 2] = [AtomicI32::new(DEFAULT_LEVEL), AtomicI32::new(DEFAULT_LEVEL)];
 
 /// The side's BOT OPPONENT row value (`false` for an out-of-range side).
@@ -57,14 +73,19 @@ pub fn option_on(side: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// The side's BOT LEVEL row value, clamped to `1..=10` (default for an
-/// out-of-range side).
-pub fn level(side: usize) -> u8 {
+/// The side's BOT LEVEL row value, clamped to the row's range (default for
+/// an out-of-range side).
+pub fn level_value(side: usize) -> i32 {
     let raw = LEVEL
         .get(side)
         .map(|a| a.load(Ordering::Acquire))
         .unwrap_or(DEFAULT_LEVEL);
-    eligibility::clamp_level(raw)
+    eligibility::clamp_value(raw)
+}
+
+/// The side's bot mode — the decoded level row.
+pub fn mode(side: usize) -> BotMode {
+    BotMode::from_value(level_value(side))
 }
 
 /// Whether `side` is currently the PHANTOM player — the impersonated bot.
@@ -101,21 +122,18 @@ fn on_option_change(player_side: u8, new_value: i32) {
 }
 
 /// Change callback of the BOT LEVEL row — clamps on store (a stale cached
-/// value can only ever land on a legal level).
+/// value can only ever land on a legal value).
 fn on_level_change(player_side: u8, new_value: i32) {
     let Some(slot) = LEVEL.get(player_side as usize) else {
         return;
     };
-    slot.store(
-        eligibility::clamp_level(new_value) as i32,
-        Ordering::Release,
-    );
+    slot.store(eligibility::clamp_value(new_value), Ordering::Release);
 }
 
-/// Load-side persistence transform of the BOT LEVEL row: a server / JSON
-/// cache value outside `1..=10` lands on the nearest legal level.
+/// Load-side persistence transform of the BOT LEVEL row: a JSON cache value
+/// outside `1..=11` lands on the nearest legal value.
 fn clamp_level_transform(_id: &str, value: i32) -> i32 {
-    eligibility::clamp_level(value) as i32
+    eligibility::clamp_value(value)
 }
 
 fn identity_transform(_id: &str, value: i32) -> i32 {
@@ -139,6 +157,7 @@ fn register_rows() {
         .display_name("Bot Opponent (1P Only)")
         .description("Play VERSUS against a computer opponent on the empty pad")
         .default_value(0)
+        .persist_mode(PersistMode::Local)
         .on_change(on_option_change);
     match custom_options::register_option(spec) {
         Ok(_handle) => {
@@ -172,20 +191,30 @@ fn register_level_row() {
         );
         return;
     }
+    // An enum-like selector on the scalar donor: the value layer renders
+    // TEXT (`Level 1`..`Level 10`, `Target Score`) — no per-value chip
+    // textures. Fine == coarse step so Start-held presses step one value.
     let spec = RegisterSpec::scalar(
         OPT_LEVEL_ID,
         eligibility::MIN_LEVEL as i32,
-        eligibility::MAX_LEVEL as i32,
+        eligibility::TARGET_VALUE,
         1,
-        ScalarFormat::Integer,
+        ScalarFormat::Labeled {
+            prefix: "Level ",
+            terminal_value: eligibility::TARGET_VALUE,
+            terminal_label: "Target Score",
+        },
     )
     .display_name("Bot Level")
-    .description("1 = beginner, 10 = expert")
+    .description(
+        "Level 1 = beginner, Level 10 = expert; Target Score replays your pacemaker target",
+    )
     .default_value(DEFAULT_LEVEL)
     .show_when(ShowWhen::Equals {
         parent_id: OPT_ID.into(),
         value: 1,
     })
+    .persist_mode(PersistMode::Local)
     .persist_transform(identity_transform, clamp_level_transform)
     .on_change(on_level_change);
     match custom_options::register_option(spec) {
@@ -238,7 +267,7 @@ impl Mod for MultiplayerBotMod {
         "Multiplayer Bot"
     }
     fn description(&self) -> &str {
-        "Play VERSUS against a computer opponent whose skill follows a 1-10 level"
+        "Play VERSUS against a computer opponent: a 1-10 skill level, or a replay of your pacemaker target"
     }
     fn required_signatures(&self) -> &[&str] {
         // Everything is reached through already-derived services; checked
@@ -272,6 +301,9 @@ impl Mod for MultiplayerBotMod {
         }
         // Optional: the extra-stage guard's signature (fail-open, its own WARN).
         extra_stage_guard::init(ctx.signatures);
+        // Optional: the Target Score ghost source (fail-open — a miss means
+        // every Target song falls back to LV10 with a WARN + toast).
+        ghost_source::init(ctx.signatures);
         CAPABLE.store(ok, Ordering::Release);
         ok
     }

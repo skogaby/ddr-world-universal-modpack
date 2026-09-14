@@ -8,8 +8,13 @@
 //! (`snapshot_for_save`, `resolve_from_load`, `json_persisted`) consume the
 //! matrix METHODS pinned here — so "Session serializes nothing" is enforced
 //! structurally by these tests, not re-derived per call site.
+//!
+//! [`PersistMode::Local`] (Multiplayer Bot Target Score, 2026-09-14): the
+//! cabinet-only mode — JSON cache in both directions, never on the wire. The
+//! load gate is split by [`LoadSource`] so a `Local` row accepts its own
+//! JSON prime but ignores a network response.
 
-use super::api::{PersistMode, RegisterSpec, ScalarFormat};
+use super::api::{LoadSource, PersistMode, RegisterSpec, ScalarFormat};
 use super::registry::FrameworkState;
 
 /// One scalar spec per persist mode, non-trivial default so resets are
@@ -21,9 +26,10 @@ fn spec(id: &'static str, mode: PersistMode) -> RegisterSpec {
         .persist_mode(mode)
 }
 
-const ALL_MODES: [PersistMode; 4] = [
+const ALL_MODES: [PersistMode; 5] = [
     PersistMode::Full,
     PersistMode::SaveOnly,
+    PersistMode::Local,
     PersistMode::None,
     PersistMode::Session,
 ];
@@ -34,14 +40,27 @@ fn persistence_matrix_is_exact() {
     let expected = [
         (PersistMode::Full, true, true, true, false),
         (PersistMode::SaveOnly, true, false, false, false),
+        (PersistMode::Local, false, false, true, false),
         (PersistMode::None, false, false, false, false),
         (PersistMode::Session, false, false, false, true),
     ];
+    assert_eq!(expected.len(), ALL_MODES.len(), "every mode has a row");
     for (mode, save, load, json, session) in expected {
         assert_eq!(mode.saved_to_network(), save, "{mode:?} network save");
         assert_eq!(mode.loaded_from_network(), load, "{mode:?} network load");
         assert_eq!(mode.json_cached(), json, "{mode:?} JSON cache");
         assert_eq!(mode.session_scoped(), session, "{mode:?} session scope");
+        // The per-source load gate is exactly the two columns above.
+        assert_eq!(
+            mode.accepts_load(LoadSource::Network),
+            load,
+            "{mode:?} gate/network"
+        );
+        assert_eq!(
+            mode.accepts_load(LoadSource::JsonPrime),
+            json,
+            "{mode:?} gate/json"
+        );
     }
 }
 
@@ -54,6 +73,7 @@ fn save_snapshot_filter_excludes_session_and_none() {
     for (id, mode) in [
         ("mx_full", PersistMode::Full),
         ("mx_saveonly", PersistMode::SaveOnly),
+        ("mx_local", PersistMode::Local),
         ("mx_none", PersistMode::None),
         ("mx_session", PersistMode::Session),
     ] {
@@ -175,22 +195,24 @@ fn card_in_reset_ignores_invalid_side() {
     assert_eq!(state.get_value("ci_bad_side", 0), Some(500));
 }
 
-/// Every mode keeps a consistent matrix: a mode that loads must also save
-/// (the framework has no load-only concept), and session scoping implies
-/// full exclusion. Guards future variants against nonsensical combinations.
+/// Every mode keeps a consistent matrix: a mode that loads from the network
+/// must also save to it (the framework has no network-load-only concept), a
+/// JSON-cached mode is never session-scoped (the cache would resurrect a
+/// value the card-in reset just cleared), and session scoping implies full
+/// exclusion. Guards future variants against nonsensical combinations.
 #[test]
 fn matrix_invariants_hold_for_all_modes() {
     for mode in ALL_MODES {
         if mode.loaded_from_network() {
             assert!(
                 mode.saved_to_network(),
-                "{mode:?}: load-only is unsupported"
+                "{mode:?}: network load-only is unsupported"
             );
         }
         if mode.json_cached() {
             assert!(
-                mode.loaded_from_network(),
-                "{mode:?}: JSON prime funnels through the load gate"
+                !mode.session_scoped(),
+                "{mode:?}: a JSON-cached mode cannot be session-scoped"
             );
         }
         if mode.session_scoped() {
@@ -200,4 +222,62 @@ fn matrix_invariants_hold_for_all_modes() {
             );
         }
     }
+}
+
+/// `Local` rows: the load gate admits the cabinet's own JSON prime and
+/// rejects a network response carrying the same id (an old server or a
+/// stale profile field must never override what the cabinet cached).
+#[test]
+fn local_rows_accept_json_prime_but_not_network_loads() {
+    let mut state = FrameworkState::default();
+    state
+        .try_register(spec("lo_local", PersistMode::Local))
+        .unwrap();
+    state
+        .try_register(spec("lo_full", PersistMode::Full))
+        .unwrap();
+
+    // Model the facade's load path with a Network source.
+    for id in ["lo_local", "lo_full"] {
+        let idx = state.index_of(id).unwrap();
+        if state.options[idx].persist.accepts_load(LoadSource::Network) {
+            let _ = state.set_value(id, 0, 555);
+        }
+    }
+    assert_eq!(
+        state.get_value("lo_local", 0),
+        Some(100),
+        "network load ignored"
+    );
+    assert_eq!(state.get_value("lo_full", 0), Some(555), "Full unregressed");
+
+    // ... and with the JSON prime.
+    for id in ["lo_local", "lo_full"] {
+        let idx = state.index_of(id).unwrap();
+        if state.options[idx]
+            .persist
+            .accepts_load(LoadSource::JsonPrime)
+        {
+            let _ = state.set_value(id, 1, 333);
+        }
+    }
+    assert_eq!(
+        state.get_value("lo_local", 1),
+        Some(333),
+        "JSON prime applied"
+    );
+    assert_eq!(
+        state.get_value("lo_full", 1),
+        Some(333),
+        "Full still primed"
+    );
+
+    // The JSON writer's filter (`json_persisted`) includes Local.
+    let cached: Vec<&str> = state
+        .options
+        .iter()
+        .filter(|o| o.persist.json_cached())
+        .map(|o| o.id.as_str())
+        .collect();
+    assert_eq!(cached, vec!["lo_local", "lo_full"]);
 }

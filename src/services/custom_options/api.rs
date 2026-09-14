@@ -198,6 +198,19 @@ pub enum ScalarFormat {
         prefix: &'static str,
         display_offset: i32,
     },
+    /// Enum-like scalar: `"{prefix}{value}"` for every value except
+    /// `terminal_value`, which renders `terminal_label` verbatim — e.g.
+    /// prefix `"Level "` + terminal `(11, "Target Score")` renders `5` as
+    /// `"Level 5"` and `11` as `"Target Score"`. The row keeps the scalar
+    /// donor's TEXT value layer, so a discrete selector gets readable labels
+    /// with no per-value chip textures (the Multiplayer Bot's level row).
+    /// Both strings must be plain ASCII and the longest composed string must
+    /// fit the 15-byte SSO buffer (see `SignedUnit`).
+    Labeled {
+        prefix: &'static str,
+        terminal_value: i32,
+        terminal_label: &'static str,
+    },
 }
 
 /// How (and whether) an option's value participates in the persistence
@@ -213,6 +226,7 @@ pub enum ScalarFormat {
 /// |------------|:------------:|:------------:|:--------------------------:|:-------------:|
 /// | `Full`     | yes          | yes          | yes                        | no            |
 /// | `SaveOnly` | yes          | no           | no                         | no            |
+/// | `Local`    | no           | no           | yes                        | no            |
 /// | `None`     | no           | no           | no                         | no            |
 /// | `Session`  | no           | no           | no                         | **yes**       |
 ///
@@ -221,6 +235,11 @@ pub enum ScalarFormat {
 /// the game's native `<customize>` profile load): the DLL still *sends* the
 /// value on save — the direction the game lacks — but never reads it back,
 /// so the game's own load path stays the single source of truth.
+///
+/// `Local` exists for options the backend will never store (the Multiplayer
+/// Bot rows): the cabinet remembers them per side in `mod-config.json` like a
+/// `Full` option, but no `<mod_{id}>` wire field is ever emitted and a
+/// network response carrying one is ignored.
 ///
 /// `Session` exists for practice-session tools (the Training Mode bound
 /// rows): the value must follow the CARD, not the profile — a player carding
@@ -237,6 +256,8 @@ pub enum PersistMode {
     /// Emitted on network save only; skipped by the network load and by the
     /// JSON cache write + prime.
     SaveOnly,
+    /// JSON cache write + prime only; never on the wire in either direction.
+    Local,
     /// No persistence at all. Equivalent to the historical `persist: false`.
     /// NOTE: the in-memory value is NOT reset on card swap — it lives for
     /// the process (the cabinet stays up across sessions). For values that
@@ -248,31 +269,47 @@ pub enum PersistMode {
     Session,
 }
 
+/// Where a loaded option value came from. `resolve_from_load` gates each
+/// source through its own [`PersistMode`] matrix column: a network response
+/// through [`PersistMode::loaded_from_network`], the offline JSON prime
+/// through [`PersistMode::json_cached`] (a value the cabinet wrote itself is
+/// always welcome back).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadSource {
+    /// The `load_receiver` network response (per card swipe).
+    Network,
+    /// The one-shot `mod-config.json` prime after boot.
+    JsonPrime,
+}
+
 impl PersistMode {
     /// Whether the option contributes a `<mod_{id}>` wire field to the
     /// network save. Consulted by `snapshot_for_save`.
     pub fn saved_to_network(self) -> bool {
         match self {
             PersistMode::Full | PersistMode::SaveOnly => true,
-            PersistMode::None | PersistMode::Session => false,
+            PersistMode::Local | PersistMode::None | PersistMode::Session => false,
         }
     }
 
-    /// Whether a loaded value (network response OR the offline JSON prime —
-    /// both funnel through `resolve_from_load`) may be written into the
-    /// per-player cache.
+    /// Whether a value from a NETWORK load response may be written into the
+    /// per-player cache (`resolve_from_load` with [`LoadSource::Network`]).
     pub fn loaded_from_network(self) -> bool {
         match self {
             PersistMode::Full => true,
-            PersistMode::SaveOnly | PersistMode::None | PersistMode::Session => false,
+            PersistMode::SaveOnly
+            | PersistMode::Local
+            | PersistMode::None
+            | PersistMode::Session => false,
         }
     }
 
-    /// Whether the option participates in the offline JSON cache write
-    /// (`mod-config.json`). Consulted by `json_persisted`.
+    /// Whether the option participates in the offline JSON cache — both the
+    /// write (`json_persisted`) and the boot-time prime (`resolve_from_load`
+    /// with [`LoadSource::JsonPrime`]).
     pub fn json_cached(self) -> bool {
         match self {
-            PersistMode::Full => true,
+            PersistMode::Full | PersistMode::Local => true,
             PersistMode::SaveOnly | PersistMode::None | PersistMode::Session => false,
         }
     }
@@ -283,7 +320,18 @@ impl PersistMode {
     pub fn session_scoped(self) -> bool {
         match self {
             PersistMode::Session => true,
-            PersistMode::Full | PersistMode::SaveOnly | PersistMode::None => false,
+            PersistMode::Full | PersistMode::SaveOnly | PersistMode::Local | PersistMode::None => {
+                false
+            }
+        }
+    }
+
+    /// Whether a value arriving from `source` may be applied to the cache —
+    /// the single load-side gate `resolve_from_load` consults.
+    pub fn accepts_load(self, source: LoadSource) -> bool {
+        match source {
+            LoadSource::Network => self.loaded_from_network(),
+            LoadSource::JsonPrime => self.json_cached(),
         }
     }
 }
@@ -734,6 +782,17 @@ pub(crate) fn format_scalar_value(value: i32, format: ScalarFormat) -> Vec<u8> {
             prefix,
             display_offset,
         } => format!("{prefix}{}", value.saturating_add(display_offset)).into_bytes(),
+        ScalarFormat::Labeled {
+            prefix,
+            terminal_value,
+            terminal_label,
+        } => {
+            if value == terminal_value {
+                terminal_label.as_bytes().to_vec()
+            } else {
+                format!("{prefix}{value}").into_bytes()
+            }
+        }
     }
 }
 
@@ -944,5 +1003,38 @@ mod tests {
             ),
             "Char #3"
         );
+        let labeled = ScalarFormat::Labeled {
+            prefix: "Level ",
+            terminal_value: 11,
+            terminal_label: "Target Score",
+        };
+        assert_eq!(f(1, labeled), "Level 1");
+        assert_eq!(f(10, labeled), "Level 10");
+        assert_eq!(f(11, labeled), "Target Score");
+    }
+
+    // ── PersistMode matrix (the in-crate exhaustive table lives in
+    // persist_matrix_tests.rs; this pins the host-mountable subset) ──────
+
+    #[test]
+    fn persist_mode_local_is_json_only() {
+        let m = PersistMode::Local;
+        assert!(!m.saved_to_network());
+        assert!(!m.loaded_from_network());
+        assert!(m.json_cached());
+        assert!(!m.session_scoped());
+        assert!(!m.accepts_load(LoadSource::Network));
+        assert!(m.accepts_load(LoadSource::JsonPrime));
+        // Full accepts both sources; the wire-excluded modes accept neither.
+        assert!(PersistMode::Full.accepts_load(LoadSource::Network));
+        assert!(PersistMode::Full.accepts_load(LoadSource::JsonPrime));
+        for m in [
+            PersistMode::SaveOnly,
+            PersistMode::None,
+            PersistMode::Session,
+        ] {
+            assert!(!m.accepts_load(LoadSource::Network), "{m:?}");
+            assert!(!m.accepts_load(LoadSource::JsonPrime), "{m:?}");
+        }
     }
 }

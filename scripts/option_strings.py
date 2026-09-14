@@ -598,16 +598,19 @@ PREVIEWS = [
         {
             "en": [
                 'Sets how well the computer opponent plays.',
-                '1: A beginner with a real chance of failing. 10: An expert aiming for '
-                'MARVELOUS FULL COMBOS.',
+                'Level 1: A beginner with a real chance of failing. Level 10: An expert '
+                'aiming for MARVELOUS FULL COMBOS.',
+                'TARGET SCORE: replays the ghost of your pacemaker target, step for step.',
             ],
             "ja": [
                 'コンピューター相手の実力を設定します。',
-                '1: 失敗することもある初心者。10: MARVELOUS FULL COMBOを狙う上級者。',
+                'Level 1: 失敗することもある初心者。Level 10: MARVELOUS FULL COMBOを狙う上級者。',
+                'TARGET SCORE: ペースメーカーのターゲットのゴーストを1歩ずつ再現します。',
             ],
             "ko": [
                 '컴퓨터 상대의 실력을 설정합니다.',
-                '1: 실패할 수도 있는 초보자. 10: MARVELOUS FULL COMBO를 노리는 상급자.',
+                'Level 1: 실패할 수도 있는 초보자. Level 10: MARVELOUS FULL COMBO를 노리는 상급자.',
+                'TARGET SCORE: 페이스메이커 타깃의 고스트를 한 스텝씩 재현합니다.',
             ],
         },
     ),

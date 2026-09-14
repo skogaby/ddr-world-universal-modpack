@@ -23,8 +23,46 @@ pub struct Inputs {
     /// The `bot_opponent` option per side (only the ENTERED side's matters —
     /// per-side option values outlive the player).
     pub option_on: [bool; 2],
-    /// The `bot_opponent_level` option per side (raw; clamped on use).
+    /// The `bot_opponent_level` option per side (raw; clamped on use —
+    /// `1..=10` a skill level, [`TARGET_VALUE`] the Target Score replay).
     pub level: [i32; 2],
+}
+
+/// How the bot decides its notes for a song.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotMode {
+    /// The skill model at a level `1..=10`.
+    Level(u8),
+    /// Replay the human's loaded pacemaker ghost (the `Target Score` tier).
+    Target,
+}
+
+impl BotMode {
+    /// Decode a raw option value: clamps into `MIN_LEVEL..=TARGET_VALUE`,
+    /// `TARGET_VALUE` ⇒ [`BotMode::Target`].
+    pub fn from_value(raw: i32) -> BotMode {
+        let v = clamp_value(raw);
+        if v == TARGET_VALUE {
+            BotMode::Target
+        } else {
+            BotMode::Level(v as u8)
+        }
+    }
+
+    /// The option value this mode is stored as.
+    pub fn value(self) -> i32 {
+        match self {
+            BotMode::Level(l) => clamp_level(l as i32) as i32,
+            BotMode::Target => TARGET_VALUE,
+        }
+    }
+
+    /// The level fed to the per-play seed (`TARGET_VALUE` for Target, so a
+    /// Target replay and a Level-10 game of the same chart never share an
+    /// RNG stream).
+    pub fn seed_level(self) -> u8 {
+        self.value() as u8
+    }
 }
 
 /// Why the bot did not engage.
@@ -45,16 +83,24 @@ pub enum Refusal {
 pub struct Plan {
     pub human: usize,
     pub bot: usize,
-    pub level: u8,
+    pub mode: BotMode,
 }
 
-/// Lowest / highest bot level the option and the skill model accept.
+/// Lowest / highest bot level the skill model accepts.
 pub const MIN_LEVEL: u8 = 1;
 pub const MAX_LEVEL: u8 = 10;
+/// The option value one past the levels: the Target Score replay.
+pub const TARGET_VALUE: i32 = MAX_LEVEL as i32 + 1;
 
-/// Clamp a raw option value into `MIN_LEVEL..=MAX_LEVEL`.
+/// Clamp a raw option value into `MIN_LEVEL..=MAX_LEVEL` (a skill level).
 pub fn clamp_level(level: i32) -> u8 {
     level.clamp(MIN_LEVEL as i32, MAX_LEVEL as i32) as u8
+}
+
+/// Clamp a raw option value into the row's full range
+/// `MIN_LEVEL..=TARGET_VALUE` (the load / change-callback clamp).
+pub fn clamp_value(raw: i32) -> i32 {
+    raw.clamp(MIN_LEVEL as i32, TARGET_VALUE)
 }
 
 /// The gate. Unavailable inputs are reported before ordinary refusals so a
@@ -99,7 +145,7 @@ pub fn evaluate(i: &Inputs) -> Result<Plan, Refusal> {
     Ok(Plan {
         human,
         bot: 1 - human,
-        level: clamp_level(i.level[human]),
+        mode: BotMode::from_value(i.level[human]),
     })
 }
 
@@ -129,7 +175,7 @@ mod tests {
             let plan = evaluate(&ok(human)).expect("eligible");
             assert_eq!(plan.human, human);
             assert_eq!(plan.bot, 1 - human);
-            assert_eq!(plan.level, 7);
+            assert_eq!(plan.mode, BotMode::Level(7));
         }
     }
 
@@ -190,19 +236,45 @@ mod tests {
         assert_eq!(clamp_level(-5), 1);
         assert_eq!(clamp_level(11), 10);
         assert_eq!(clamp_level(5), 5);
+        // The row's full range keeps the Target value.
+        assert_eq!(clamp_value(0), 1);
+        assert_eq!(clamp_value(-5), 1);
+        assert_eq!(clamp_value(11), 11);
+        assert_eq!(clamp_value(12), 11);
+        assert_eq!(clamp_value(99), 11);
+        assert_eq!(clamp_value(5), 5);
         let mut i = ok(0);
         i.level = [99, 0];
-        assert_eq!(evaluate(&i).expect("eligible").level, 10);
+        assert_eq!(evaluate(&i).expect("eligible").mode, BotMode::Target);
+        let mut i = ok(0);
+        i.level = [10, 0];
+        assert_eq!(evaluate(&i).expect("eligible").mode, BotMode::Level(10));
         let mut i = ok(1);
         i.level = [99, 0];
-        assert_eq!(evaluate(&i).expect("eligible").level, 1);
+        assert_eq!(evaluate(&i).expect("eligible").mode, BotMode::Level(1));
+    }
+
+    #[test]
+    fn bot_mode_round_trips_its_value() {
+        assert_eq!(BotMode::from_value(11), BotMode::Target);
+        assert_eq!(BotMode::from_value(TARGET_VALUE), BotMode::Target);
+        assert_eq!(BotMode::from_value(10), BotMode::Level(10));
+        assert_eq!(BotMode::from_value(0), BotMode::Level(1));
+        assert_eq!(BotMode::from_value(5), BotMode::Level(5));
+        for v in 1..=11 {
+            assert_eq!(BotMode::from_value(v).value(), v, "value {v}");
+        }
+        assert_eq!(BotMode::Target.value(), TARGET_VALUE);
+        assert_eq!(BotMode::Target.seed_level(), 11);
+        assert_eq!(BotMode::Level(7).seed_level(), 7);
+        assert_eq!(BotMode::Level(99).value(), 10, "out-of-range level clamps");
     }
 
     #[test]
     fn other_sides_level_and_option_are_ignored() {
         let mut i = ok(0);
         i.option_on = [true, true];
-        i.level = [3, 10];
-        assert_eq!(evaluate(&i).expect("eligible").level, 3);
+        i.level = [3, 11];
+        assert_eq!(evaluate(&i).expect("eligible").mode, BotMode::Level(3));
     }
 }

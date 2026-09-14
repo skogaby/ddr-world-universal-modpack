@@ -10,6 +10,15 @@
 //! keeps losing to better notes until the +160 Miss mark) — anything more
 //! means the controller assumption broke on this build.
 //!
+//! **Target Score** (`BotMode::Target`): on the Results rebuild the filler
+//! binds the HUMAN's ghost (`ghost_source::read_human_ghost`, cached for the
+//! song so an in-place reset re-uses it), requires `ghost.len() == results
+//! count`, and builds the planner state with the bytes + the armed
+//! S-Marvelous floor. Any refusal falls back to Level 10 for the song with
+//! ONE WARN naming the reason and a 3 s toast — the impersonation is already
+//! applied at song select, long before the GhostActor exists, so the flip
+//! cannot refuse ahead of time.
+//!
 //! Runs on the game thread inside the judge pre-callback (`Priority::Late`).
 //! Panic-free by construction on the hot path (`catch_unwind` is the backstop);
 //! allocation-free after the first frame of a song (the view vector's capacity
@@ -18,10 +27,15 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use super::eligibility::BotMode;
+use super::ghost_source;
 use super::planner::{self, NoteView, PanelFlags, SongState};
 use super::skill::{self, Curve, Plan, Rng, GRADE_MISS};
+use super::{ghost, GHOST_FALLBACK_LEVEL};
 use crate::core::memory;
+use crate::mods::s_marvelous;
 use crate::services::foot_panel_swap::{BotPanelFlags, Controller, ACTOR_CUR_BEAT};
+use crate::services::toast;
 use crate::types::game_note::{self, result, GameNote};
 use crate::{log_info, log_warn};
 
@@ -32,12 +46,15 @@ const ACTOR_PROBE_END: usize = 0x170;
 /// Sanity cap on the Results vector length (the densest World chart is ~1.5k).
 const MAX_RESULTS: usize = 8192;
 
+/// Toast hold for the no-ghost fallback notice (ms).
+const FALLBACK_TOAST_HOLD_MS: u64 = 3000;
+
 /// One song's bot state for a side.
 struct SongCtx {
     st: SongState,
     rng: Rng,
     curve: Curve,
-    level: u8,
+    mode: BotMode,
     seed: u64,
     views: Vec<NoteView>,
     /// Per view: the game's grade the last time we looked (0xFF unjudged).
@@ -47,12 +64,21 @@ struct SongCtx {
     mismatches: u32,
     /// Judged-note grade tally as the GAME assigned it (0..=3 taps, 5 Miss).
     judged: [u32; 6],
+    /// Target mode: the human's ghost, cached at the first successful read
+    /// (an in-place reset rebuilds the Results but not the ghost).
+    ghost: Option<ghost_source::Ghost>,
+    /// Target mode: the S-Marvelous floor the planner was built with.
+    smarv_floor: i32,
+    /// Target mode: why the song fell back to Level 10 (None = replaying).
+    fallback: Option<&'static str>,
+    /// Whether the fallback WARN/toast fired this song.
+    fallback_announced: bool,
 }
 
 /// Song-end summary for the INFO line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SongSummary {
-    pub level: u8,
+    pub mode: BotMode,
     pub seed: u64,
     /// Planner's own tally (planned grade of every judged note).
     pub planned: [u32; 6],
@@ -60,6 +86,12 @@ pub struct SongSummary {
     pub judged: [u32; 6],
     pub mismatches: u32,
     pub frames: u32,
+    /// Target mode provenance: ghost id + length + per-class histogram.
+    pub ghost: Option<(i64, usize, [u32; ghost::GRADE_CLASSES])>,
+    /// Target mode: taps whose resolved grade differed from the ghost's.
+    pub repro_miss: u32,
+    /// Target mode: the fallback reason when the ghost was unusable.
+    pub fallback: Option<&'static str>,
 }
 
 static CTX: [Mutex<Option<SongCtx>>; 2] = [Mutex::new(None), Mutex::new(None)];
@@ -67,19 +99,29 @@ static WARNED_CONTENTION: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool:
 static WARNED_PANIC: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 static WARNED_UNREADABLE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// Begin a song for `side` at `level` with a fresh RNG.
-pub fn start_song(side: usize, level: u8, seed: u64) {
+/// The skill curve a mode plays with: its level, or — for the Target replay,
+/// whose magnitudes come from the ghost — the Level-10 curve (the side chain
+/// it borrows, and the fallback's curve).
+fn curve_for(mode: BotMode) -> Curve {
+    match mode {
+        BotMode::Level(l) => skill::curve(l),
+        BotMode::Target => skill::curve(GHOST_FALLBACK_LEVEL),
+    }
+}
+
+/// Begin a song for `side` in `mode` with a fresh RNG. The Target replay's
+/// ghost binds lazily at the first frame (the Results count is needed).
+pub fn start_song(side: usize, mode: BotMode, seed: u64) {
     if side >= 2 {
         return;
     }
-    let level = level.clamp(1, 10);
-    let curve = skill::curve(level);
+    let curve = curve_for(mode);
     if let Ok(mut slot) = CTX[side].lock() {
         *slot = Some(SongCtx {
             st: SongState::new(0),
             rng: Rng::new(seed),
             curve,
-            level,
+            mode,
             seed,
             views: Vec::new(),
             last_grade: Vec::new(),
@@ -87,18 +129,29 @@ pub fn start_song(side: usize, level: u8, seed: u64) {
             frames: 0,
             mismatches: 0,
             judged: [0; 6],
+            ghost: None,
+            smarv_floor: 0,
+            fallback: None,
+            fallback_announced: false,
         });
     }
     WARNED_CONTENTION[side].store(false, Ordering::Release);
     WARNED_PANIC[side].store(false, Ordering::Release);
     WARNED_UNREADABLE[side].store(false, Ordering::Release);
-    log_info!(
-        "MultiplayerBot: filler start side={} level={} {} seed={:#x}",
-        side,
-        level,
-        curve.describe(),
-        seed
-    );
+    match mode {
+        BotMode::Level(level) => log_info!(
+            "MultiplayerBot: filler start side={} level={} {} seed={:#x}",
+            side,
+            level,
+            curve.describe(),
+            seed
+        ),
+        BotMode::Target => log_info!(
+            "MultiplayerBot: filler start side={} mode=target (ghost binds at the first frame) seed={:#x}",
+            side,
+            seed
+        ),
+    }
 }
 
 /// Drop the side's song state (the next `start_song` re-rolls).
@@ -118,12 +171,18 @@ pub fn summary(side: usize) -> Option<SongSummary> {
     let guard = CTX[side].lock().ok()?;
     let ctx = guard.as_ref()?;
     Some(SongSummary {
-        level: ctx.level,
+        mode: ctx.mode,
         seed: ctx.seed,
         planned: ctx.st.tally(),
         judged: ctx.judged,
         mismatches: ctx.mismatches,
         frames: ctx.frames,
+        ghost: ctx
+            .ghost
+            .as_ref()
+            .map(|g| (g.id, g.bytes.len(), ghost::histogram(&g.bytes))),
+        repro_miss: ctx.st.repro_miss(),
+        fallback: ctx.fallback,
     })
 }
 
@@ -203,7 +262,7 @@ fn fill_inner(side: usize, actor: *mut u8, music_count: i32, out: &mut BotPanelF
     if ctx.views.len() != count {
         ctx.views.clear();
         ctx.last_grade.clear();
-        ctx.st = SongState::new(count);
+        ctx.st = build_song_state(ctx, side, count);
         ctx.views.reserve(count);
         ctx.last_grade.reserve(count);
         // Walk the raw vector ourselves (`for_each_result` skips null note
@@ -250,6 +309,81 @@ fn fill_inner(side: usize, actor: *mut u8, music_count: i32, out: &mut BotPanelF
     out.was_just_pressed = flags.was_just_pressed;
     out.event_mc = flags.event_mc;
     ctx.frames = ctx.frames.wrapping_add(1);
+}
+
+/// The planner state for a (re)built Results vector of `count` entries: the
+/// skill model for a level, the ghost replay for Target — or, when the ghost
+/// is unusable, the Level-10 skill model with the reason recorded and
+/// announced once per song (WARN + toast).
+fn build_song_state(ctx: &mut SongCtx, side: usize, count: usize) -> SongState {
+    if ctx.mode != BotMode::Target {
+        return SongState::new(count);
+    }
+    if ctx.ghost.is_none() && ctx.fallback.is_none() {
+        match ghost_source::read_human_ghost(side) {
+            Ok(g) => ctx.ghost = Some(g),
+            Err(r) => ctx.fallback = Some(r.reason()),
+        }
+    }
+    // Alignment is checked against EVERY rebuild's count (an in-place reset
+    // rebuilds the same chart, so this only ever trips on the first frame).
+    if let Some(g) = &ctx.ghost {
+        if g.bytes.len() != count && ctx.fallback.is_none() {
+            log_warn!(
+                "MultiplayerBot: target ghost id={} has {} bytes but the chart has {} notes -- indices would misalign",
+                g.id,
+                g.bytes.len(),
+                count
+            );
+            ctx.fallback = Some("len mismatch");
+        }
+    }
+    if let Some(r) = ctx.fallback {
+        if !ctx.fallback_announced {
+            ctx.fallback_announced = true;
+            log_warn!(
+                "MultiplayerBot: no usable target ghost ({}) on side {} -- playing this song at LV{}",
+                r,
+                side,
+                GHOST_FALLBACK_LEVEL
+            );
+            toast::flash_with_hold(
+                format!("NO TARGET GHOST - BOT LV{GHOST_FALLBACK_LEVEL}"),
+                FALLBACK_TOAST_HOLD_MS,
+            );
+        }
+    }
+    match (&ctx.ghost, ctx.fallback) {
+        (Some(g), None) => {
+            // The S-Marv arm happens at play-scene entry, before the first
+            // judge frame; read it at bind time (per-song latch, like the
+            // mod's own consumers).
+            ctx.smarv_floor = if s_marvelous::is_enabled() {
+                s_marvelous::state::armed_window(side)
+            } else {
+                0
+            };
+            if ctx.frames == 0 {
+                let h = ghost::histogram(&g.bytes);
+                log_info!(
+                    "MultiplayerBot: target ghost bound on side {} id={} notes={} smarv_floor={} target=[m={} p={} g={} gd={} miss={} ok={} ng={}]",
+                    side,
+                    g.id,
+                    g.bytes.len(),
+                    ctx.smarv_floor,
+                    h[0],
+                    h[1],
+                    h[2],
+                    h[3],
+                    h[5],
+                    h[6],
+                    h[7]
+                );
+            }
+            SongState::with_ghost(count, g.bytes.clone(), ctx.smarv_floor)
+        }
+        _ => SongState::new(count),
+    }
 }
 
 /// Read one Results entry into a `NoteView` (+ the game's current grade).

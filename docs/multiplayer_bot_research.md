@@ -196,3 +196,84 @@ fires BEFORE the original `createNextSequence`, so the entered byte is set befor
 loaders read it). Play window {26..=30}; 29 is the post-song loader, 30 the `ResultSequence`.
 First scene ∉ window (31 stage-bump wait, 24 select loader, 32 TOTAL RESULTS, 34 EAM exit):
 restore. Pinned by `mods/multiplayer_bot/session.rs` (host-tested) against `types::scenes::scene`.
+
+## 11. Addendum 2026-09-14 — Target Score tier (ghost replay)
+
+The eleventh value of the BOT LEVEL row replays the HUMAN's loaded pacemaker ghost note for
+note. Research pass on gamemdx 20260825 (Ghidra) with per-build checks on 20260224 / 20250805;
+the signature sweep covers 20260721.
+
+### 11.1 The ghost is FINAL before the bot's first judge frame
+
+`GamePlayActor::onUpdate` (`FUN_18005cc70` @20260825) state 2:
+
+```
+18005d186  48 8B 8F F8 01 00 00   MOV  RCX,[RDI+0x1F8]      ; GhostActor*
+18005d18d  48 85 C9               TEST RCX,RCX
+18005d190  74 0D                  JZ   advance
+18005d192  E8 rel32               CALL GhostActor::isReady   ; FUN_1800569b0
+18005d197  84 C0                  TEST AL,AL
+18005d199  0F 84 ...              JZ   keep_waiting          ; stays in state 2
+```
+
+`isReady` = `state[idx] == 2` (state pairs `+0x58 + idx*8`, idx u16 `+0x82`), else a
+`TIMEOUT_GHOST` clock (default `0x7fffffff`). `GhostActor::onUpdate` (`FUN_180056d10`) reaches
+state 2 on download success (decodes the wire string into `+0x98`, raises the pacemaker
+visibility byte `*(+0x88)+0xC0`), on download failure, AND on request failure. The actor
+therefore cannot reach its judging state (4) until the ghost vector has its final shape — the
+Target tier needs no "ghost arrives late" handling.
+
+### 11.2 The GhostActor field is build-dependent — derive it
+
+| build | wait site | `GamePlayActor` field |
+|---|---|---|
+| 20260825 | `0x18005d186` | `+0x1F8` |
+| 20260721 | `0x18005d1f6` | `+0x1F8` |
+| 20260224 | `0x180058dc6` | **`+0x1F0`** |
+| 20250805 | `0x180059d86` | **`+0x1F0`** |
+
+The GamePlayActor layout fork (AGENTS.md's "≥ ~0x208") actually sits at `+0x1F0`. Signature
+`gpa_ghost_actor_probe` = `48 8B 8F ?? ?? 00 00 48 85 C9 74 ?? E8 ?? ?? ?? ?? 84 C0 0F 84`
+(unique on all four); `derive_ghost_actor_probe` publishes the disp32 at match+3 as
+`gpa_ghost_actor_off` ONLY IF the CALL target at match+12 contains, in its first 0x30 bytes,
+`0F B7 81 82 00 00 00 48 8B D9 83 7C C1 58 02 74` (`MOVZX EAX,[RCX+0x82]; MOV RBX,RCX; CMP dword
+[RCX+RAX*8+0x58],2; JZ` — byte-identical on 20250805 and 20260825), which both identifies
+`isReady` and re-attests the state layout the consumer reads. RTTI
+`.?AVGhostActor@dance@sequence@@` → `ghost_actor_vtable` is the runtime identity gate.
+
+### 11.3 Ghost alphabet, alignment, backend
+
+One grade-class byte per Results entry in chart order (the stage record's `+0xB8` stream,
+written by the result commit from the `+0xB0` ring; wire `<ghost>` = `'0'+grade`): 0 Marvelous,
+1 Perfect, 2 Great, 3 Good, 4 Boo (never produced by World's judge), 5 Miss, 6 O.K. (freeze held
+/ shock avoided), 7 N.G. (freeze dropped / shock stepped). Freeze tails and shocks are Results
+entries, so their bytes sit at their own indices. bemani-buddy hands EVERY score a ghost id (own
+PBs via `playerdata_load` `score_str` field 6, rival/world/area/machine via `rivaldata_load`'s
+last field) and `ghostdata_load(id)` returns the stored string — so any selectable target has a
+ghost unless the saving play had none.
+
+### 11.4 Reproduction rules (pure, host-tested: `ghost.rs`, `planner.rs`)
+
+- Tap byte 0–3 ⇒ uniform |offset| inside that grade's inclusive window (Marvelous `[0,17]`,
+  Perfect `[18,34]`, Great `[35,84]`, Good `[85,124]`), side from the skill model's sticky
+  Markov chain; 5 ⇒ Miss; 4 and 7 ⇒ Miss (unreproducible); 6 on a tap ⇒ Marvelous.
+- S-Marvelous exclusion: with the S-Marv mod armed at window `W` on the bot side, Marvelous
+  samples `[W+1, 17]` (`W=16` ⇒ exactly 17). Levels 1–10 untouched.
+- Freeze N.G. (byte 7 at the tail): the planner drops the body hold on the head AND tail
+  entries (both emit it) — the freeze judge (§2 of the gauge/judge RE) resolves N.G. as soon as
+  any body panel was released. Head↔tail link: first later kind-2 entry at
+  `head.beat + max(length)` sharing a body panel (bounded 512 entries).
+- Shock N.G. (byte 7 at a shock): ONE `wasJustPressed` on the first shock panel from
+  `note.mc` (inside the judge's `[mc−34, mc+84]`); `isHeld` stays 0 so the tap judge ignores it.
+- Money score is a pure function of grade counts ⇒ a faithful replay ends on exactly the
+  target's points (`repro_miss` in the restore INFO counts the planner-floor exceptions).
+
+### 11.5 Fallback + persistence
+
+No usable ghost at the first fill (empty / id 0 / failed download / `len ≠ results` / derivation
+missing) ⇒ the song plays at Level 10, one WARN with the reason, 3 s toast `NO TARGET GHOST -
+BOT LV10`; the plate stays `TARGET`. The impersonation is applied at song select — before the
+GhostActor exists — so the flip cannot refuse ahead of time. Both bot rows are
+`PersistMode::Local` (JSON cache in both directions, never on the wire; the load gate is split by
+`LoadSource`), and the level row renders text via `ScalarFormat::Labeled` (`Level 1`…`Level 10`,
+`Target Score`) on the scalar donor — no chip textures.

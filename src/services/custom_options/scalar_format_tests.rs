@@ -84,3 +84,27 @@ fn shipped_prefixes_fit_sso_at_five_digits() {
         );
     }
 }
+
+/// `Labeled`: the enum-like scalar (Multiplayer Bot level row) renders
+/// `"{prefix}{value}"` everywhere except the terminal value, which shows its
+/// label; every shipped string fits the SSO inline buffer.
+#[test]
+fn labeled_prefix_and_terminal() {
+    let f = ScalarFormat::Labeled {
+        prefix: "Level ",
+        terminal_value: 11,
+        terminal_label: "Target Score",
+    };
+    assert_eq!(fmt(1, f), b"Level 1");
+    assert_eq!(fmt(10, f), b"Level 10");
+    assert_eq!(fmt(11, f), b"Target Score");
+    // Out-of-range values (a clamp bug upstream) still render readably.
+    assert_eq!(fmt(12, f), b"Level 12");
+    assert_eq!(fmt(0, f), b"Level 0");
+    for v in 1..=11 {
+        assert!(fmt(v, f).len() <= 15, "value {v} exceeds the SSO budget");
+    }
+    // The overlay's UTF-8 view is the same text.
+    assert_eq!(super::api::format_scalar_value_utf8(11, f), "Target Score");
+    assert_eq!(super::api::format_scalar_value_utf8(7, f), "Level 7");
+}

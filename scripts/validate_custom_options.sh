@@ -27,7 +27,8 @@ note() { echo "[*] $*"; }
 
 MOD_SRC="$REPO_ROOT/src/services/custom_options"
 MODULES=(api.rs observers.rs ordering.rs registry.rs)
-for f in "${MODULES[@]}"; do
+TEST_MODULES=(persist_matrix_tests.rs scalar_format_tests.rs)
+for f in "${MODULES[@]}" "${TEST_MODULES[@]}"; do
   [[ -r "$MOD_SRC/$f" ]] || die "module source missing: src/services/custom_options/$f"
 done
 
@@ -68,9 +69,17 @@ mkdir -p "$TMP/src"
     echo "#[path = \"$MOD_SRC/$f\"]"
     echo "pub mod $name;"
   done
+  # In-crate test-only siblings that reach the mounted modules through
+  # `super::` (they sit beside them at the crate root here too).
+  for f in "${TEST_MODULES[@]}"; do
+    name="${f%.rs}"
+    echo "#[cfg(test)]"
+    echo "#[path = \"$MOD_SRC/$f\"]"
+    echo "mod $name;"
+  done
 } >"$TMP/src/lib.rs"
 
-note "running pure module tests (${MODULES[*]})"
+note "running pure module tests (${MODULES[*]} + ${TEST_MODULES[*]})"
 (cd "$TMP" && cargo test --quiet)
 note "OK"
 

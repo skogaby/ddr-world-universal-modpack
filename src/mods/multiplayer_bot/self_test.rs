@@ -16,6 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use super::eligibility::BotMode;
 use super::{filler, skill};
 use crate::services::{foot_panel_swap, score_guard, stage_records};
 use crate::types::scenes::scene;
@@ -113,7 +114,7 @@ pub fn on_scene_change(_prev: i32, next: i32) {
 
 fn arm(side: usize, level: u8) {
     let seed = skill::seed(qpc(), 0, 0, level);
-    filler::start_song(side, level, seed);
+    filler::start_song(side, BotMode::Level(level), seed);
     if !foot_panel_swap::arm_bot(side, filler::fill) {
         log_warn!(
             "MultiplayerBot: SELF-TEST could not arm the bot controller on side {} (bot objects unavailable?)",
@@ -134,9 +135,9 @@ fn arm(side: usize, level: u8) {
 fn disarm(side: usize) {
     if let Some(s) = filler::summary(side) {
         log_info!(
-            "MultiplayerBot: SELF-TEST tally side={} LV{} seed={:#x} planned marv={} perf={} great={} good={} miss={} | judged marv={} perf={} great={} good={} miss={} other={} | mismatch={} frames={}",
+            "MultiplayerBot: SELF-TEST tally side={} {:?} seed={:#x} planned marv={} perf={} great={} good={} miss={} | judged marv={} perf={} great={} good={} miss={} other={} | mismatch={} frames={}",
             side,
-            s.level,
+            s.mode,
             s.seed,
             s.planned[0],
             s.planned[1],
@@ -168,7 +169,7 @@ pub fn on_song_reset(_t_ms: i32) {
     }
     for side in 0..2 {
         if ARMED[side].load(Ordering::Acquire) {
-            filler::start_song(side, level, skill::seed(qpc(), 0, 0, level));
+            filler::start_song(side, BotMode::Level(level), skill::seed(qpc(), 0, 0, level));
             log_info!(
                 "MultiplayerBot: SELF-TEST re-rolled side {} after song reset",
                 side

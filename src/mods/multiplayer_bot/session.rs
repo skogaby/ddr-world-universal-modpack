@@ -8,6 +8,8 @@
 //! written as literals (no `crate::` imports); `impersonation.rs` pins them
 //! to `types::scenes::scene` with a `const` assertion.
 
+use super::eligibility::BotMode;
+
 /// 0-indexed SONG_SELECT (`types::scenes::scene::SONG_SELECT`).
 pub const SONG_SELECT: i32 = 25;
 /// 0-indexed GAMEPLAY (`scene::GAMEPLAY`).
@@ -59,20 +61,31 @@ pub fn classify(prev: i32, next: i32, active: bool) -> Edge {
     Edge::None
 }
 
-/// `"BOT LV<n>"` as the game's fixed name buffer: NUL-terminated, zero
-/// padded. Every level in `1..=10` fits the 8-character plate (`BOT LV10`
-/// is exactly 8). Out-of-range levels clamp.
-pub fn format_bot_name(level: u8) -> [u8; NAME_LEN] {
-    let level = level.clamp(1, 10);
+/// The name plate of a Target Score replay.
+pub const TARGET_NAME: &[u8] = b"TARGET";
+
+/// The bot's name as the game's fixed name buffer: NUL-terminated, zero
+/// padded. `"BOT LV<n>"` for a level (every level in `1..=10` fits the
+/// 8-character plate — `BOT LV10` is exactly 8; out-of-range levels clamp),
+/// [`TARGET_NAME`] for the Target Score replay.
+pub fn format_bot_name(mode: BotMode) -> [u8; NAME_LEN] {
     let mut out = [0u8; NAME_LEN];
-    let prefix = b"BOT LV";
-    out[..prefix.len()].copy_from_slice(prefix);
-    let mut i = prefix.len();
-    if level >= 10 {
-        out[i] = b'0' + level / 10;
-        i += 1;
+    match mode {
+        BotMode::Target => {
+            out[..TARGET_NAME.len()].copy_from_slice(TARGET_NAME);
+        }
+        BotMode::Level(level) => {
+            let level = level.clamp(1, 10);
+            let prefix = b"BOT LV";
+            out[..prefix.len()].copy_from_slice(prefix);
+            let mut i = prefix.len();
+            if level >= 10 {
+                out[i] = b'0' + level / 10;
+                i += 1;
+            }
+            out[i] = b'0' + level % 10;
+        }
     }
-    out[i] = b'0' + level % 10;
     out
 }
 
@@ -88,22 +101,26 @@ mod tests {
     #[test]
     fn bot_names_fit_eight_chars_plus_nul() {
         for level in 1..=10u8 {
-            let n = format_bot_name(level);
+            let n = format_bot_name(BotMode::Level(level));
             let s = name_str(&n);
             assert_eq!(s, format!("BOT LV{level}"));
             assert!(s.len() <= 8, "level {level}: {s:?}");
             let nul = s.len();
             assert!(n[nul..].iter().all(|&b| b == 0), "zero padded after NUL");
         }
-        assert_eq!(&format_bot_name(1), b"BOT LV1\0\0");
-        assert_eq!(&format_bot_name(10), b"BOT LV10\0");
+        assert_eq!(&format_bot_name(BotMode::Level(1)), b"BOT LV1\0\0");
+        assert_eq!(&format_bot_name(BotMode::Level(10)), b"BOT LV10\0");
+        let t = format_bot_name(BotMode::Target);
+        assert_eq!(name_str(&t), "TARGET");
+        assert!(TARGET_NAME.len() <= 8);
+        assert_eq!(&t, b"TARGET\0\0\0");
     }
 
     #[test]
     fn bot_name_clamps() {
-        assert_eq!(name_str(&format_bot_name(0)), "BOT LV1");
-        assert_eq!(name_str(&format_bot_name(11)), "BOT LV10");
-        assert_eq!(name_str(&format_bot_name(255)), "BOT LV10");
+        assert_eq!(name_str(&format_bot_name(BotMode::Level(0))), "BOT LV1");
+        assert_eq!(name_str(&format_bot_name(BotMode::Level(11))), "BOT LV10");
+        assert_eq!(name_str(&format_bot_name(BotMode::Level(255))), "BOT LV10");
     }
 
     #[test]

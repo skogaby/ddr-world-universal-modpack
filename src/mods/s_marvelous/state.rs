@@ -106,6 +106,13 @@ pub fn is_armed(side: usize) -> bool {
     WINDOW_MS[side & 1].load(Ordering::Relaxed) > 0
 }
 
+/// The side's ARMED window (ms), `0` when the side is not armed. Read by the
+/// Multiplayer Bot's Target Score replay so its ghost Marvelous samples land
+/// strictly OUTSIDE the S-Marvelous tier (`|d| > window`).
+pub fn armed_window(side: usize) -> i32 {
+    WINDOW_MS[side & 1].load(Ordering::Relaxed)
+}
+
 /// Arm a side with the given (already clamped) window at GAMEPLAY entry.
 pub fn arm(side: usize, window_ms: i32) {
     let clamped = clamp_window(window_ms);

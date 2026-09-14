@@ -6,7 +6,8 @@
 //! entered player — chart identity mirrored from the human (`+0x50/+0x54/
 //! +0x5C` and the stage record's `+0x04/+0x08`), the human's lane
 //! `ddr::player::Option` copied with the gauge forced NORMAL, the name plate
-//! `BOT LV<n>`, then `PlayerWork+0x4 = 1` and `GameWork+0x0 = 1`. The game
+//! `BOT LV<n>` (`TARGET` for the Target Score replay), then `PlayerWork+0x4
+//! = 1` and `GameWork+0x0 = 1`. The game
 //! does the rest natively: the GAMEPLAY loader copies `+0x4` into the
 //! `DancePlaySequence` ctor struct and creates a `GamePlayActor` per entered
 //! side; every play-window reader of `GameWork+0x0` is a display selector
@@ -27,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering}
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use super::eligibility::{self, Inputs, Refusal};
+use super::eligibility::{self, BotMode, Inputs, Refusal};
 use super::session::{self, Edge, NAME_LEN};
 use super::{filler, self_test, skill};
 use crate::core::memory;
@@ -96,7 +97,7 @@ struct Snapshot {
 struct Active {
     bot: usize,
     human: usize,
-    level: u8,
+    mode: BotMode,
     snap: Snapshot,
 }
 
@@ -209,7 +210,7 @@ fn gather_inputs() -> Inputs {
         event_mode: stage_records::event_mode(),
         versus: gw.map(|g| unsafe { memory::read_i32(g.add(GW_VERSUS)) }),
         option_on: [super::option_on(0), super::option_on(1)],
-        level: [super::level(0) as i32, super::level(1) as i32],
+        level: [super::level_value(0), super::level_value(1)],
     }
 }
 
@@ -304,7 +305,7 @@ fn resolve_ptrs(plan: &eligibility::Plan) -> Option<Ptrs> {
 
 /// Design §4.5 steps 1–8.
 fn apply(plan: eligibility::Plan) {
-    let (human, bot, level) = (plan.human, plan.bot, plan.level);
+    let (human, bot, mode) = (plan.human, plan.bot, plan.mode);
     // 1. Pointers + probes.
     let Some(p) = resolve_ptrs(&plan) else {
         return;
@@ -376,7 +377,7 @@ fn apply(plan: eligibility::Plan) {
         );
         memory::write_i32(p.opt_b.add(OPT_GAUGE), 0);
         // 6. Name plate.
-        let name = session::format_bot_name(level);
+        let name = session::format_bot_name(mode);
         std::ptr::copy_nonoverlapping(name.as_ptr(), p.pw_b.add(PW_NAME), NAME_LEN);
         // 7. The two load-bearing words.
         memory::write_u8(p.pw_b.add(PW_ENTERED), 1);
@@ -389,8 +390,13 @@ fn apply(plan: eligibility::Plan) {
         log_info!("MultiplayerBot: SE pan byte unavailable -- SEs keep the stock pan");
     }
     // 8. Controller + taint.
-    let seed = skill::seed(self_test::qpc(), song_mcode, song_difficulty, level);
-    filler::start_song(bot, level, seed);
+    let seed = skill::seed(
+        self_test::qpc(),
+        song_mcode,
+        song_difficulty,
+        mode.seed_level(),
+    );
+    filler::start_song(bot, mode, seed);
     if !foot_panel_swap::arm_bot(bot, filler::fill) {
         filler::reset(bot);
         undo(&p, &written);
@@ -405,24 +411,34 @@ fn apply(plan: eligibility::Plan) {
     *lock_state() = State::Active(Active {
         bot,
         human,
-        level,
+        mode,
         snap: written.snap,
     });
     ACTIVE_BOT.store(bot as i32, Ordering::Release);
     SCENE_CHANGES.store(0, Ordering::Release);
     start_watchdog();
 
-    let c = skill::curve(level);
-    log_info!(
-        "MultiplayerBot: side {} impersonated as \"BOT LV{}\" for P{}'s song mcode={} diff={} ({} seed={:#x})",
-        bot,
-        level,
-        human + 1,
-        song_mcode,
-        song_difficulty,
-        c.describe(),
-        seed
-    );
+    match mode {
+        BotMode::Level(level) => log_info!(
+            "MultiplayerBot: side {} impersonated as \"BOT LV{}\" for P{}'s song mcode={} diff={} ({} seed={:#x})",
+            bot,
+            level,
+            human + 1,
+            song_mcode,
+            song_difficulty,
+            skill::curve(level).describe(),
+            seed
+        ),
+        BotMode::Target => log_info!(
+            "MultiplayerBot: side {} impersonated as \"TARGET\" for P{}'s song mcode={} diff={} (replays P{}'s pacemaker ghost; seed={:#x})",
+            bot,
+            human + 1,
+            song_mcode,
+            song_difficulty,
+            human + 1,
+            seed
+        ),
+    }
 }
 
 /// Put back every byte `apply` wrote (failure path only — the normal
@@ -487,9 +503,9 @@ fn restore() {
 
     match filler::summary(a.bot) {
         Some(s) => log_info!(
-            "MultiplayerBot: side {} restored (BOT LV{} seed={:#x}) planned marv={} perf={} great={} good={} miss={} | judged marv={} perf={} great={} good={} miss={} other={} | mismatch={} frames={}",
+            "MultiplayerBot: side {} restored ({} seed={:#x}) planned marv={} perf={} great={} good={} miss={} | judged marv={} perf={} great={} good={} miss={} other={} | mismatch={} frames={}{}",
             a.bot,
-            s.level,
+            describe_mode(a.mode),
             s.seed,
             s.planned[0],
             s.planned[1],
@@ -503,15 +519,39 @@ fn restore() {
             s.judged[5],
             s.judged[4],
             s.mismatches,
-            s.frames
+            s.frames,
+            describe_ghost(&s)
         ),
         None => log_info!(
-            "MultiplayerBot: side {} restored (BOT LV{}) -- no song played",
+            "MultiplayerBot: side {} restored ({}) -- no song played",
             a.bot,
-            a.level
+            describe_mode(a.mode)
         ),
     }
     filler::reset(a.bot);
+}
+
+fn describe_mode(mode: BotMode) -> String {
+    match mode {
+        BotMode::Level(l) => format!("BOT LV{l}"),
+        BotMode::Target => "TARGET".to_string(),
+    }
+}
+
+/// The Target-mode suffix of the restore line: ghost provenance + fidelity,
+/// or the fallback reason. Empty for a level game.
+fn describe_ghost(s: &filler::SongSummary) -> String {
+    if s.mode != BotMode::Target {
+        return String::new();
+    }
+    match (&s.ghost, s.fallback) {
+        (_, Some(reason)) => format!(" | mode=target FALLBACK LV{} ({})", super::GHOST_FALLBACK_LEVEL, reason),
+        (Some((id, len, h)), None) => format!(
+            " | mode=target ghost_id={} ghost_len={} target=[m={} p={} g={} gd={} miss={} ok={} ng={}] repro_miss={}",
+            id, len, h[0], h[1], h[2], h[3], h[5], h[6], h[7], s.repro_miss
+        ),
+        (None, None) => " | mode=target (ghost never bound)".to_string(),
+    }
 }
 
 /// Fresh seed for the same song (GAMEPLAY entry / quick restart / song reset).
@@ -525,8 +565,8 @@ fn reseed(a: &Active, reason: &str) {
         },
         _ => (0, 0),
     };
-    let seed = skill::seed(self_test::qpc(), mcode, difficulty, a.level);
-    filler::start_song(a.bot, a.level, seed);
+    let seed = skill::seed(self_test::qpc(), mcode, difficulty, a.mode.seed_level());
+    filler::start_song(a.bot, a.mode, seed);
     log_info!(
         "MultiplayerBot: side {} re-rolled on {} (seed={:#x})",
         a.bot,

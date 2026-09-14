@@ -236,6 +236,17 @@ impl Rng {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Uniform integer in `0..n` (`0` for `n == 0`). Built on the 53-bit
+    /// `next_f64` so the tiny modulo bias of a raw `% n` never enters the
+    /// grade bands the Target Score sampler draws from.
+    pub fn below(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let v = (self.next_f64() * n as f64) as u32;
+        v.min(n - 1)
+    }
+
     /// Standard normal (Marsaglia polar method).
     pub fn gaussian(&mut self) -> f64 {
         loop {
@@ -285,18 +296,27 @@ impl Form {
         }
     }
 
-    /// The lean for the next note: keep or redraw the side (sticky Markov
-    /// chain), advance the drift one step.
-    fn next_lean(&mut self, rng: &mut Rng, c: &Curve) -> f64 {
+    /// Advance the sticky Markov side chain one note and return the side
+    /// (`+1.0` late / SLOW, `−1.0` early / FAST). The Target Score replay
+    /// uses this alone — its magnitudes come from the ghost's grade band —
+    /// so a replayed song shows the same human-looking FAST/SLOW runs.
+    pub fn next_side(&mut self, rng: &mut Rng, c: &Curve) -> f64 {
         if rng.next_f64() >= c.sign_stickiness {
             self.sign = Self::draw_sign(rng, self.p_late);
         }
+        self.sign
+    }
+
+    /// The lean for the next note: keep or redraw the side (sticky Markov
+    /// chain), advance the drift one step.
+    fn next_lean(&mut self, rng: &mut Rng, c: &Curve) -> f64 {
+        let side = self.next_side(rng, c);
         let innovation = c.drift_ms * (1.0 - DRIFT_RHO * DRIFT_RHO).sqrt();
         self.drift = DRIFT_RHO * self.drift + innovation * rng.gaussian();
         // The drift wanders the MAGNITUDE (how far off the beat), the chain
         // picks the side — so a "tight stretch" stays tight across a side
         // flip, which is what lets a whole song come out all-Marvelous.
-        self.sign * (c.lean_ms + self.drift)
+        side * (c.lean_ms + self.drift)
     }
 }
 
@@ -619,6 +639,25 @@ mod tests {
         for _ in 0..10_000 {
             let f = z.next_f64();
             assert!((0.0..1.0).contains(&f));
+        }
+    }
+
+    #[test]
+    fn below_is_uniform_and_in_range() {
+        let mut rng = Rng::new(3);
+        assert_eq!(rng.below(0), 0);
+        assert_eq!(rng.below(1), 0);
+        let n = 7u32;
+        let mut hist = [0u32; 7];
+        let draws = 700_000;
+        for _ in 0..draws {
+            let v = rng.below(n);
+            assert!(v < n);
+            hist[v as usize] += 1;
+        }
+        for (i, &h) in hist.iter().enumerate() {
+            let share = h as f64 / draws as f64;
+            assert!((share - 1.0 / 7.0).abs() < 0.005, "bucket {i}: {share}");
         }
     }
 

@@ -47,6 +47,7 @@ use crate::core::scanner;
 use crate::core::signatures::SignatureStore;
 use crate::mods::config;
 use crate::services::custom_options;
+use crate::services::custom_options::LoadSource;
 use crate::services::scene_manager;
 use crate::services::score_guard;
 use crate::services::stage_records;
@@ -579,7 +580,7 @@ fn apply_pending_loads() {
             }
         };
         for (id, value) in &load.values {
-            custom_options::resolve_from_load(id, side, *value);
+            custom_options::resolve_from_load(id, side, *value, LoadSource::Network);
         }
         log_info!(
             "custom_options_persistence: deferred load — applied {} option(s) to side {} (ddrcode={})",
@@ -624,7 +625,7 @@ fn json_load_once() {
     }
     let count = values.len();
     for (side, id, wire_value) in values {
-        custom_options::resolve_from_load(&id, side, wire_value);
+        custom_options::resolve_from_load(&id, side, wire_value, LoadSource::JsonPrime);
     }
     log_info!(
         "custom_options_persistence: JSON load — primed {} option value(s) from mod-config.json",

@@ -3,6 +3,8 @@
 //! `src/mods/multiplayer_bot/mod.rs` does in the DLL.
 #[path = "../../../../src/mods/multiplayer_bot/eligibility.rs"]
 pub mod eligibility;
+#[path = "../../../../src/mods/multiplayer_bot/ghost.rs"]
+pub mod ghost;
 #[path = "../../../../src/mods/multiplayer_bot/planner.rs"]
 pub mod planner;
 #[path = "../../../../src/mods/multiplayer_bot/session.rs"]

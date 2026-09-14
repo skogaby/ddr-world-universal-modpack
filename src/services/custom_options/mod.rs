@@ -44,8 +44,8 @@ mod scalar_format_tests;
 
 #[allow(unused_imports)]
 pub use api::{
-    EnumValue, MenuPlacement, OnChangeFn, OptionHandle, PageTag, PersistMode, RegisterError,
-    RegisterSpec, ScalarFormat, ShowWhen, UiKind,
+    EnumValue, LoadSource, MenuPlacement, OnChangeFn, OptionHandle, PageTag, PersistMode,
+    RegisterError, RegisterSpec, ScalarFormat, ShowWhen, UiKind,
 };
 pub use asset_gen::flush_label_atlas;
 #[allow(unused_imports)]
@@ -323,12 +323,14 @@ pub fn set_value(option_id: &str, player_side: u8, value: i32) {
 /// Write a value into an option's per-player cache after a persistence load
 /// (or any other non-user-driven update). Fires the option's change
 /// callback with the new value. No-ops if the id isn't registered, or if the
-/// option's [`PersistMode`] doesn't accept loads
-/// ([`PersistMode::loaded_from_network`]) — this is the single load-side
-/// gate: both the network `load_receiver` and the JSON-prime timer funnel
-/// through here, so `SaveOnly`/`None`/`Session` options are inert on every
-/// load path.
-pub(crate) fn resolve_from_load(option_id: &str, player_side: u8, value: i32) {
+/// option's [`PersistMode`] doesn't accept loads from `source`
+/// ([`PersistMode::accepts_load`]) — this is the single load-side gate: the
+/// network `load_receiver` ([`LoadSource::Network`], gated by
+/// `loaded_from_network`) and the JSON-prime timer ([`LoadSource::JsonPrime`],
+/// gated by `json_cached`) both funnel through here, so `SaveOnly`/`None`/
+/// `Session` options are inert on every load path and `Local` options accept
+/// only what the cabinet itself cached.
+pub(crate) fn resolve_from_load(option_id: &str, player_side: u8, value: i32, source: LoadSource) {
     if !is_available() {
         return;
     }
@@ -339,7 +341,7 @@ pub(crate) fn resolve_from_load(option_id: &str, player_side: u8, value: i32) {
             Some(i) => i,
             None => return,
         };
-        if !state.options[idx].persist.loaded_from_network() {
+        if !state.options[idx].persist.accepts_load(source) {
             return;
         }
         // Apply the option's load_transform (if any) before caching.
@@ -395,7 +397,7 @@ pub fn set_value_silent(option_id: &str, player_side: u8, value: i32) {
 }
 
 /// Whether option `id` participates in the offline JSON cache
-/// ([`PersistMode::json_cached`] — `Full` only). Consulted by the
+/// ([`PersistMode::json_cached`] — `Full` and `Local`). Consulted by the
 /// persistence service's JSON writer so `SaveOnly`/`None`/`Session` options
 /// never enter `mod-config.json`. Unregistered ids return `false`.
 pub(crate) fn json_persisted(option_id: &str) -> bool {

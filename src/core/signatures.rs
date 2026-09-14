@@ -310,6 +310,31 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "4D 69 C0 B8 02 00 00 48 8B 08 49 8D 94 08 ?? ?? 00 00 48 8D 8B 98 00 00 00 E8",
         description: "GhostActor init local-slot copy site — CALL at +25 is the game's vector<u8> copy-assign (derived as ghost_vec_copy).",
     },
+    // ── Multiplayer Bot "Target Score" — the GamePlayActor's GhostActor field ──
+    // `GamePlayActor::onUpdate` state 2 WAITS on its GhostActor before the
+    // actor may advance toward the judging state (20260825 `FUN_18005cc70`
+    // @ `0x18005d186`; 20260224 `0x180058dc6`; 20250805 `0x180059d86`):
+    //
+    //   48 8B 8F d32       MOV  RCX,[RDI+ghost_actor]   ; GamePlayActor+0x1F8 (2026-03+)
+    //   48 85 C9           TEST RCX,RCX                 ;               +0x1F0 (20250805/20260224)
+    //   74 ??              JZ   advance
+    //   E8 rel32           CALL GhostActor::isReady     ; state[idx] == 2 || TIMEOUT_GHOST
+    //   84 C0              TEST AL,AL
+    //   0F 84 ...          JZ   keep_waiting
+    //
+    // The disp32 is the ONLY attested source of the GhostActor field: the
+    // GamePlayActor layout forks at `+0x1F0` (the old builds sit 8 bytes
+    // lower from here on), so `derive_ghost_actor_probe` publishes it as
+    // `gpa_ghost_actor_off` — gated on the CALL target being the isReady
+    // body (its prologue re-attests the GhostActor state layout). Consumer:
+    // multiplayer_bot's ghost_source (the human's ghost vector at
+    // `GhostActor+0x98`, read once per song — no detour). Unique on
+    // 20250805 / 20260224 / 20260825 (Ghidra); 20260721 via the sweep.
+    SignatureDefinition {
+        name: "gpa_ghost_actor_probe",
+        pattern: "48 8B 8F ?? ?? 00 00 48 85 C9 74 ?? E8 ?? ?? ?? ?? 84 C0 0F 84",
+        description: "GamePlayActor::onUpdate state-2 GhostActor wait — disp32 at +3 = the GhostActor field (published as gpa_ghost_actor_off), CALL at +12 = GhostActor::isReady (identity gate).",
+    },
     // The song-end result commit — GamePlayActor vtable +0x28 (20260721
     // `FUN_18005d970`, 20260526 `FUN_18005d180`). Copies the actor's live
     // judge counters / score cluster / grade decision / note + grade + ms
@@ -2320,6 +2345,7 @@ impl SignatureStore {
         self.derive_two_player_bpl();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
+        self.derive_ghost_actor_probe();
     }
 
     /// Derive the bottom-text service's two data addresses from the
@@ -2826,6 +2852,87 @@ impl SignatureStore {
     /// `derive_smarvelous_burst`), or `None`.
     pub fn gpa_judge_effect_off(&self) -> Option<usize> {
         self.published_value("gpa_judge_effect_off")
+    }
+
+    /// Derive `gpa_ghost_actor_off` — the GamePlayActor field holding the
+    /// `sequence::dance::GhostActor*` — from the state-2 wait site
+    /// (`gpa_ghost_actor_probe`: `MOV RCX,[RDI+disp32]; TEST; JZ; CALL
+    /// isReady; TEST AL,AL; JZ`). `+0x1F8` on 20260324+, `+0x1F0` on
+    /// 20250805 / 20260224 — the GamePlayActor layout fork sits at this
+    /// field, so it is never hardcoded. Consumer: multiplayer_bot's
+    /// `ghost_source` (Target Score replays the human's ghost vector).
+    ///
+    /// Identity gate: the CALL at match+12 must land on the `isReady` body,
+    /// whose prologue is byte-identical on every attested build and pins the
+    /// GhostActor state layout the consumer reads:
+    ///
+    ///   0F B7 81 82 00 00 00   MOVZX EAX,[RCX+0x82]           ; state idx
+    ///   48 8B D9               MOV   RBX,RCX
+    ///   83 7C C1 58 02         CMP   dword [RCX+RAX*8+0x58],2  ; ready == 2
+    ///   74                     JZ
+    ///
+    /// The run must appear within the callee's first 0x30 bytes. Anything
+    /// else ⇒ nothing published (the Target tier falls back per song with
+    /// one WARN).
+    fn derive_ghost_actor_probe(&mut self) {
+        const TAG: &str = "gpa_ghost_actor_off";
+        const IS_READY_PROLOGUE: [u8; 16] = [
+            0x0F, 0xB7, 0x81, 0x82, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9, 0x83, 0x7C, 0xC1, 0x58,
+            0x02, 0x74,
+        ];
+        const CALLEE_WINDOW: usize = 0x30;
+        let Some(probe) = self.get_address("gpa_ghost_actor_probe") else {
+            log_warn!("  [-] {} -- gpa_ghost_actor_probe unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let inside = |p: usize, len: usize| {
+            p.wrapping_sub(base) < self.size
+                && p.wrapping_sub(base).saturating_add(len) <= self.size
+        };
+        let probe_addr = probe as usize;
+        if !inside(probe_addr, 21) {
+            log_warn!("  [-] {} -- probe window outside module", TAG);
+            return;
+        }
+        let disp = unsafe { std::ptr::read_unaligned(probe.add(3) as *const i32) };
+        if !(0x100..0x400).contains(&disp) || disp % 8 != 0 {
+            log_warn!(
+                "  [-] {} -- implausible GhostActor field disp 0x{:X}",
+                TAG,
+                disp
+            );
+            return;
+        }
+        let callee = unsafe { decode_call_rel32(probe.add(12)) } as usize;
+        if !inside(callee, CALLEE_WINDOW) {
+            log_warn!(
+                "  [-] {} -- isReady callee +0x{:X} outside module",
+                TAG,
+                callee.wrapping_sub(base)
+            );
+            return;
+        }
+        let body = unsafe { std::slice::from_raw_parts(callee as *const u8, CALLEE_WINDOW) };
+        if !body
+            .windows(IS_READY_PROLOGUE.len())
+            .any(|w| w == IS_READY_PROLOGUE)
+        {
+            log_warn!(
+                "  [-] {} -- CALL target +0x{:X} is not GhostActor::isReady (state-layout prologue absent)",
+                TAG,
+                callee.wrapping_sub(base)
+            );
+            return;
+        }
+        // `publish_value` logs the `(derived) = 0x…` line.
+        self.publish_value(TAG, disp as usize);
+    }
+
+    /// Published GamePlayActor `GhostActor*` field offset (see
+    /// `derive_ghost_actor_probe`), or `None`.
+    pub fn gpa_ghost_actor_off(&self) -> Option<usize> {
+        self.published_value("gpa_ghost_actor_off")
     }
 
     fn derive_song_rate_runtime_sites(&mut self) {
@@ -5786,6 +5893,7 @@ impl SignatureStore {
                 ".?AVNoteResultActor@dance@sequence@@",
                 "note_result_actor_vtable",
             ),
+            (".?AVGhostActor@dance@sequence@@", "ghost_actor_vtable"),
         ] {
             if let Some(vtable) = self.find_vtable_by_rtti(rtti, name) {
                 self.resolved.insert(name.into(), vtable);
