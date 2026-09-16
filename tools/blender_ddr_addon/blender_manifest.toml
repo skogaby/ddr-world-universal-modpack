@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+
+id = "ddr_3d_formats"
+version = "0.2.0"
+name = "DDR 3D Formats (KTMDL / ANM)"
+tagline = "Import/export DanceDanceRevolution .model, .anm, .camanm and whole characters"
+maintainer = "ddr-world-universal-modpack"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+license = ["SPDX:Apache-2.0"]
+
+tags = ["Import-Export", "Animation", "Rigging"]
