@@ -72,6 +72,127 @@ pub struct ShutterActorLayout {
     pub stage_kind: i32,
 }
 
+/// Every engine address and struct offset the Background Dancers 3D scene
+/// service (`services::scene3d`) consumes, derived all-or-nothing by
+/// `SignatureStore::derive_scene3d` (RE record:
+/// `docs/background_dancers_research.md` §1). `scene3d_sites()` returns
+/// `None` unless EVERY field resolved on this build.
+///
+/// Addresses are absolute; offsets are byte offsets from the object named in
+/// the field's doc comment. Nothing here is hardcoded — each value is decoded
+/// from the instruction stream of the World function that reads it.
+#[derive(Clone, Copy, Debug)]
+pub struct Scene3dSites {
+    // ── SceneGraphManager / SceneGraph ──────────────────────────────────
+    /// Global holding the `SceneGraphManager*` (`DAT_1806f2d08`): `*global`
+    /// = mgr, `*(mgr + 0)` = the `SceneGraph` (which IS the root node).
+    pub scene_graph_manager: *const u8,
+    /// mgr: `std::vector<Node*>` deferred-destroy begin (end = +8).
+    pub mgr_destroy_vec_off: usize,
+    /// mgr: i32 avs mutex id (> 0 ⇒ lock live).
+    pub mgr_mutex_off: usize,
+    /// mgr: i32 lock nesting depth (INC/DEC inside the lock).
+    pub mgr_depth_off: usize,
+    /// mgr: f32 playback rate multiplied into the update dt.
+    pub mgr_rate_off: usize,
+    /// IAT slot holding the loader-patched `avs_mutex_lock(i32)` pointer
+    /// (libavs-win64 ordinal 16 — the exact slot the flush calls).
+    pub mutex_lock_iat: *const u8,
+    /// IAT slot holding `avs_mutex_unlock(i32)` (ordinal 17).
+    pub mutex_unlock_iat: *const u8,
+    /// graph: u32 flags, bit0 = enabled (set by DPS step 5).
+    pub graph_flags_off: usize,
+    /// graph: first-child pointer (head-insertion point for our nodes).
+    pub graph_root_child_off: usize,
+    /// graph: u32 misc flags, bit0 ⇒ the visible vector is sorted.
+    pub graph_sort_flag_off: usize,
+    /// graph: camera vector begin (end = +8), `camera_stride` bytes each.
+    pub graph_camera_vec_off: usize,
+    /// node: render-item pointer read by `SceneGraph::update`'s item push.
+    pub node_item_off: usize,
+    /// node: i32 sort key read by the visible-vector std::sort.
+    pub node_sort_key_off: usize,
+    /// `SceneGraph::update` — identity/shape only, never called by the DLL.
+    pub scene_graph_update: *const u8,
+    // ── Camera slot (me::scene::camera::Camera, `camera_stride` bytes) ──
+    pub camera_stride: usize,
+    /// u8 active flag per camera slot.
+    pub camera_active_off: usize,
+    /// f32[16] view matrix (rebuilt by the tick).
+    pub camera_view_off: usize,
+    /// u8 projection-dirty byte polled by the tick.
+    pub camera_proj_dirty_off: usize,
+    pub cam_eye_off: usize,
+    pub cam_target_off: usize,
+    pub cam_up_off: usize,
+    /// f32 `w` (1.0 ⇒ perspective), then l / r / b / t / near / far.
+    pub cam_w_off: usize,
+    pub cam_l_off: usize,
+    pub cam_r_off: usize,
+    pub cam_b_off: usize,
+    pub cam_t_off: usize,
+    pub cam_near_off: usize,
+    pub cam_far_off: usize,
+    /// u8 view-dirty request byte (write 1 after changing eye/target/up).
+    pub cam_view_dirty_off: usize,
+    /// u8 projection-dirty request byte (write 1 after changing the frustum).
+    pub cam_proj_req_off: usize,
+    // ── ResourceManager model registry ──────────────────────────────────
+    /// Global holding the `ResourceManager*` (`DAT_1806f2f68`).
+    pub resource_manager: *const u8,
+    /// rm: i32 avs mutex id guarding the model map (depth at +4).
+    pub rm_model_mutex_off: usize,
+    /// rm: the model `std::map` object (head pointer at +8).
+    pub rm_model_map_off: usize,
+    /// map node: u8 isnil, u32 key (name hash), right child, value, refcount.
+    pub rm_node_nil_off: usize,
+    pub rm_node_key_off: usize,
+    pub rm_node_right_off: usize,
+    pub rm_node_value_off: usize,
+    pub rm_node_refcount_off: usize,
+    // ── Engine texture API ──────────────────────────────────────────────
+    /// `u32 create(w, h, mips, fmt, usage)`.
+    pub texture_create: *const u8,
+    /// `i32 release(u32 handle)` — refcount after, or -1 when stale.
+    pub texture_release: *const u8,
+    // ── 2D background ───────────────────────────────────────────────────
+    /// Global holding the `BgMovieActor*` singleton (`DAT_1806f2d38`).
+    pub bgmovie_actor: *const u8,
+    /// BgMovieActor: `BackgroundFrame*` (shared_ptr object pointer).
+    pub bgframe_off: usize,
+    /// BackgroundFrame: the live `bg_root` CMovieClip (shared_ptr object ptr).
+    pub bg_clip_slot_off: usize,
+    /// The 0x400-slot CMovieClip pool (`DAT_1806f9b20`), stride, count.
+    pub cmovieclip_pool: *const u8,
+    pub cmovieclip_pool_stride: usize,
+    pub cmovieclip_pool_count: usize,
+    // ── gs texture registry (OPTIONAL sub-group, see `Scene3dTextureLookup`) ──
+    /// `None` when `texture_lookup_site` did not derive: the render-item
+    /// builder then keeps the converter's material-texture pointers as-is
+    /// (fail-open — only the re-resolve of not-yet-registered DDS members is
+    /// lost, RE `docs/background_dancers_research.md` §2.1).
+    pub texture_lookup: Option<Scene3dTextureLookup>,
+}
+
+/// The gs texture registry's lookup trio, derived from the model converter's
+/// texture-table fill (`texture_lookup_site`, RE §2.5). Lets the render-item
+/// builder re-resolve material textures the converter resolved to the
+/// DEFAULT texture because the DDS was registered after the `.model`.
+#[derive(Clone, Copy, Debug)]
+pub struct Scene3dTextureLookup {
+    /// `gs::TextureData* fn(u32 gs_hash)` — null on miss. Must be called
+    /// while holding `spin` exactly like the converter does (it lazily
+    /// sorts the registry vector on the first lookup).
+    pub lookup: *const u8,
+    /// Global holding the default `TextureData*` (what the converter
+    /// substitutes on a miss — comparing against it is how "unresolved" is
+    /// recognised without a hash compare).
+    pub default_texture: *const u8,
+    /// The u32 spin flag: `while fetch_add(1) != 0 { SwitchToThread }` …
+    /// `store(0)`.
+    pub spin: *const u8,
+}
+
 /// Decode one `MOV [base+disp32], src` store at `p` whose primary opcode is
 /// `opcode` (0x88 = r/m8,r8; 0x89 = r/m32,r32; 0xC6 = r/m8,imm8; 0xC7 =
 /// r/m32,imm32 — or r/m16,imm16 with `want_66`). Accepts an optional REX
@@ -121,6 +242,167 @@ unsafe fn decode_mem_store_disp32(
         _ => 0,
     };
     Some((i, disp))
+}
+
+/// Decode one scalar-single SSE instruction with a `[base + disp32]` memory
+/// operand at `p`: `F3 [REX] 0F op ModRM(mod=10) disp32`. Returns
+/// `(op, base_register, disp32, length)` — `op` is the second opcode byte
+/// (`0x10` MOVSS load, `0x5C` SUBSS, `0x59` MULSS, …), `base_register`
+/// includes the REX.B extension (1 = RCX, 7 = RDI). Anything else ⇒ `None`.
+///
+/// # Safety
+/// `p..p+10` must be readable.
+unsafe fn decode_sse_scalar_mem(p: *const u8) -> Option<(u8, u8, u32, usize)> {
+    if *p != 0xF3 {
+        return None;
+    }
+    let mut i = 1usize;
+    let mut rex_b = 0u8;
+    if (*p.add(i) & 0xF0) == 0x40 {
+        rex_b = *p.add(i) & 1;
+        i += 1;
+    }
+    if *p.add(i) != 0x0F {
+        return None;
+    }
+    let op = *p.add(i + 1);
+    let modrm = *p.add(i + 2);
+    if (modrm & 0xC0) != 0x80 || (modrm & 7) == 4 {
+        return None; // not mod=10, or a SIB form
+    }
+    let base = (modrm & 7) | (rex_b << 3);
+    let disp = (p.add(i + 3) as *const u32).read_unaligned();
+    Some((op, base, disp, i + 7))
+}
+
+/// Walk `body..body+len` instruction-agnostically (every byte position) and
+/// collect the scalar-SSE memory operands in address order.
+///
+/// # Safety
+/// `body..body+len+10` must be readable.
+unsafe fn scene3d_sse_mem_ops(body: *const u8, len: usize) -> Vec<(usize, u8, u8, u32)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 10 <= len {
+        if let Some((op, base, disp, n)) = decode_sse_scalar_mem(body.add(i)) {
+            out.push((i, op, base, disp));
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Camera fields from the view-rebuild body (`me::scene::camera::Camera`,
+/// World `FUN_180220b80`): `(view_dirty, eye, target, up)`. See
+/// `docs/background_dancers_research.md` §1.7 for the attested shape.
+fn scene3d_camera_view_fields(
+    body: *const u8,
+    len: usize,
+) -> Result<(usize, usize, usize, usize), String> {
+    const RCX: u8 = 1;
+    unsafe {
+        // First `CMP byte [rcx+disp32],0` within the prologue = view-dirty gate.
+        let dirty = scan_pattern(body, 0x40, "80 B9 ?? ?? ?? ?? 00")
+            .map(|r| (r.address.add(2) as *const u32).read_unaligned() as usize)
+            .ok_or("view rebuild: no view-dirty CMP in the prologue")?;
+        // The projection-request byte (dirty+1) and the `0x0101` re-arm store
+        // (dirty+2) must both appear in the body, any base register.
+        let mut saw_req = false;
+        let mut saw_rearm = false;
+        for r in scan_pattern_all(body, len, "80 ?? ?? ?? ?? ?? 00") {
+            let modrm = *r.address.add(1);
+            if (0xB8..=0xBF).contains(&modrm)
+                && (r.address.add(2) as *const u32).read_unaligned() as usize == dirty + 1
+            {
+                saw_req = true;
+            }
+        }
+        for r in scan_pattern_all(body, len, "66 C7 ?? ?? ?? ?? ?? 01 01") {
+            let modrm = *r.address.add(2);
+            if (0x80..=0x87).contains(&modrm)
+                && (r.address.add(3) as *const u32).read_unaligned() as usize == dirty + 2
+            {
+                saw_rearm = true;
+            }
+        }
+        if !saw_req || !saw_rearm {
+            return Err(format!(
+                "view rebuild: dirty byte chain not attested (req {} rearm {})",
+                saw_req, saw_rearm
+            ));
+        }
+        let ops = scene3d_sse_mem_ops(body, len);
+        let eye = ops
+            .iter()
+            .find(|(_, op, base, _)| *op == 0x10 && *base == RCX)
+            .map(|(_, _, _, d)| *d as usize)
+            .ok_or("view rebuild: no MOVSS [rcx+disp32]")?;
+        let target = ops
+            .iter()
+            .find(|(_, op, base, _)| *op == 0x5C && *base == RCX)
+            .map(|(_, _, _, d)| *d as usize)
+            .ok_or("view rebuild: no SUBSS [rcx+disp32]")?;
+        if target != eye + 0xC {
+            return Err(format!(
+                "view rebuild: target 0x{:X} is not eye 0x{:X} + 0xC",
+                target, eye
+            ));
+        }
+        let up = target + 0xC;
+        if !ops
+            .iter()
+            .any(|(_, op, _, d)| *op == 0x10 && *d as usize == up)
+        {
+            return Err(format!(
+                "view rebuild: no MOVSS load of the up vector at 0x{:X}",
+                up
+            ));
+        }
+        if dirty <= up || dirty >= 0x1000 {
+            return Err(format!(
+                "view rebuild: implausible dirty 0x{:X} vs up 0x{:X}",
+                dirty, up
+            ));
+        }
+        Ok((dirty, eye, target, up))
+    }
+}
+
+/// Camera frustum fields from the projection-rebuild body (World
+/// `FUN_1802376e0`): the first seven `MOVSS xmm,[rcx+disp32]` loads in
+/// order = `(w, near, far, l, r, b, t)`.
+fn scene3d_camera_proj_fields(
+    body: *const u8,
+    len: usize,
+) -> Result<(usize, usize, usize, usize, usize, usize, usize), String> {
+    const RCX: u8 = 1;
+    let loads: Vec<usize> = unsafe { scene3d_sse_mem_ops(body, len) }
+        .into_iter()
+        .filter(|(_, op, base, _)| *op == 0x10 && *base == RCX)
+        .map(|(_, _, _, d)| d as usize)
+        .take(7)
+        .collect();
+    if loads.len() != 7 {
+        return Err(format!(
+            "proj rebuild: expected 7 MOVSS [rcx] loads, found {}",
+            loads.len()
+        ));
+    }
+    let (w, near, far, l, r, b, t) = (
+        loads[0], loads[1], loads[2], loads[3], loads[4], loads[5], loads[6],
+    );
+    if far != near + 4 || r != l + 4 || b != r + 4 || t != b + 4 {
+        return Err(format!(
+            "proj rebuild: frustum layout not contiguous (l/r/b/t {:X}/{:X}/{:X}/{:X} near/far {:X}/{:X})",
+            l, r, b, t, near, far
+        ));
+    }
+    if w >= 0x1000 || t >= 0x1000 || far >= 0x1000 {
+        return Err("proj rebuild: implausible field offset".into());
+    }
+    Ok((w, near, far, l, r, b, t))
 }
 
 const SONG_RATE_CLOCK_ANCHOR_PATTERN: &str = "48 63 89 84 00 00 00 48 8D 35 ?? ?? ?? ?? 33 D2 48 8B 0C CE E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 92 48 02 00 00 44 8D 34 18 4C 8D 67 58 41 0F B7 54 24 2A";
@@ -2205,6 +2487,79 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 83 EC 38 48 8B 05 ?? ?? ?? ?? 48 8B 10 80 7A 59 00 0F 85 ?? ?? ?? ?? 85 C9 0F 85 ?? ?? ?? ?? 48 83 7A 70 00 0F 85 ?? ?? ?? ?? 83 7A 04 01 0F 84",
         description: "Entry of the extra-stage grant `void(int arg)` (FUN_1801ddcd0 on 20260825; 0x1801c6970 on 20250805, 0x1801ca7e0 on 20260224): `SUB RSP,38; MOV RAX,[rip+game_work_global]; MOV RDX,[RAX]; CMP byte [RDX+0x59],0 (already granted); JNZ out; TEST ECX,ECX (arg must be 0); JNZ out; CMP qword [RDX+0x70],0 (course); JNZ out; CMP dword [RDX+0x4],1 (double); JZ out` — then `max_stage + 1 == 3` and, for EVERY side with `PlayerWork+0x4 != 0`: `record[0]+0x50 >= 0xF` (AAA), `PlayerWork+0x1710 == 0`, gauge option in {0, 0xC}, `record[0]+0x270 != 7`; on success `GameWork+0x59 = 1`. Called from `ResultSequence::onUpdate` case 0x16 (results window-out) when the stage counter is 0 — INSIDE the Multiplayer Bot's play window, so a low-level bot that did not AAA would block the human's extra stage. Consumer: `multiplayer_bot::extra_stage_guard` detours the MATCH address (nothing read at match+N) and clears the bot side's entered byte around the original while an impersonation is active. Soft consumer (`get_address`): a miss leaves the stock rule + one WARN. GameWork disp32 and the four JCC rel32s wildcarded; unique on all four builds.",
     },
+    // ── Background Dancers (scene3d) ────────────────────────────────────
+    //
+    // Every anchor the 3D scene service needs. All twelve feed ONE
+    // all-or-nothing derivation (`derive_scene3d`, RE record
+    // `docs/background_dancers_research.md` §1.7): a miss or a failed identity
+    // gate un-resolves the whole `scene3d_*` group AND these raw names, so no
+    // consumer can pick up a half-derived layout. Hit counts below are the
+    // attested values on 20250805 / 20260224 / 20260721 / 20260825 / 20260915.
+    SignatureDefinition {
+        name: "sg_enable_bit_site",
+        pattern: "48 8B 05 ?? ?? ?? ?? 48 8B 08 83 49 08 01",
+        description: "`MOV RAX,[rip+SceneGraphManager]; MOV RCX,[RAX]; OR dword [RCX+8],1` — the SceneGraph ENABLE-bit set at `DancePlaySequence::onUpdate` step 5 (FUN_180057e10+0xB4F on 20260825, A3's 0x1046 song-start edge) and its two MatchingDancePlaySequence twins. 3 hits on every build; derive_scene3d requires ALL hits to decode the SAME global (RIP disp32 at match+3 → `scene3d_scene_graph_manager`, the pointer-to-manager global; `*global` = mgr, `*mgr` = graph) and publishes the imm8 at match+12 as `scene3d_graph_flags_off` (0x08, bit0 = enabled).",
+    },
+    SignatureDefinition {
+        name: "sg_manager_tick",
+        pattern: "40 57 48 83 EC 20 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 0F 84 ?? ?? ?? ?? 48 8B C8 48 89 5C 24 30 48 89 74 24 38 E8 ?? ?? ?? ?? 48 8B CF 48 8D 77 08 E8 ?? ?? ?? ?? 80 BF ?? ?? ?? ?? 00 74 ?? 48 8B CF E8",
+        description: "Prologue of the SceneGraphManager per-frame tick (FUN_180023fb0 on 20260825; the DebugRenderJob's run(this=mgr)): `CALL destroy_flush; CALL active_camera; TEST RAX; JZ; CALL view_rebuild(cam); LEA RSI,[RDI+8]; CALL view_rebuild (again); CMP byte [RDI+0x2B3],0; JZ; MOV RCX,RDI; CALL proj_rebuild` then the view/projection memcpy fan-out into the four MODEL passes. derive_scene3d reads: CALL rel32 at match+6 (must land on the `sg_destroy_flush` match), at match+11 (must land on the `sg_active_camera` match), at match+41 (camera view rebuild, FUN_180220b80) and match+70 (camera projection rebuild, FUN_1802376e0 — the two callees the camera field block is decoded from), imm8 at match+52 (`scene3d_camera_view_off` = 0x08) and disp32 at match+60 (`scene3d_camera_proj_dirty_off` = 0x2B3). Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "sg_active_camera",
+        pattern: "48 8B 05 ?? ?? ?? ?? 45 33 C0 4C 8B 10 48 B8 41 20 10 08 04 02 81 40 49 8B 4A ?? 49 2B 4A ?? 48 F7 E9",
+        description: "The active-camera finder (FUN_1800243a0 on 20260825): `MOV RAX,[rip+mgr]; XOR R8D; MOV R10,[RAX] (graph); MOV RAX,0x4081020408102041 (the 1/0x3F8 reciprocal); MOV RCX,[R10+0x40]; SUB RCX,[R10+0x38]; IMUL` — walks the camera vector for the first slot whose active byte is set. derive_scene3d requires the RIP global at match+3 to equal `sg_enable_bit_site`'s and the tick's CALL at match+11 to land here; publishes imm8 at match+30 as `scene3d_graph_camera_vec_off` (0x38; the imm8 at match+26 must be +8), then scans forward for `IMUL RAX,RAX,imm32` (`48 69 C0`) → `scene3d_camera_stride` (0x3F8) and `CMP byte [RAX+RCX+disp32],0` (`80 BC 08`) → `scene3d_camera_active_off` (0x3F4). Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "sg_destroy_flush",
+        pattern: "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 48 89 74 24 58 48 8B E9 48 8D 79 ?? 48 89 7C 24 40 8B 0F 85 C9 7E ?? FF 15 ?? ?? ?? ?? FF 47 ?? 48 8B 5D ?? 48 3B 5D ??",
+        description: "Prologue of the SceneGraphManager deferred-destroy flush (FUN_180024250 on 20260825, `this` = mgr): `LEA RDI,[RCX+0x28] (avs mutex id); MOV ECX,[RDI]; TEST; JLE; CALL [rip+IAT avs_mutex_lock] (libavs-win64 ordinal 16); INC [RDI+4] (depth); MOV RBX,[RBP+8]; CMP RBX,[RBP+0x10] (destroy vector begin/end)`; the body unlinks each queued node's children (link clears only), unlinks it from its parent and calls `(*node->vtable[0])(node, 1)` — OUR node dtor — then `CALL [rip+IAT avs_mutex_unlock]` (ordinal 17). derive_scene3d requires the tick's CALL at +6 to land here; reads imm8 at match+36 (`scene3d_mgr_mutex_off` 0x28), RIP disp32 at match+50 (`scene3d_mutex_lock_iat` — the IAT SLOT, read at call time), imm8 at match+56 (+mutex → `scene3d_mgr_depth_off` 0x2C), imm8 at match+60 (`scene3d_mgr_destroy_vec_off` 0x08; match+64 must be +8); the dtor call shape `48 8B 01 BA 01 00 00 00 FF 10` and exactly one further `FF 15` (→ `scene3d_mutex_unlock_iat`) must follow within 0x180 bytes. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "sg_update_job_run",
+        pattern: "48 83 EC 28 48 85 D2 74 ?? F6 42 08 01 74 ?? 80 3D ?? ?? ?? ?? 00 74 ?? F3 0F 10 0D ?? ?? ?? ?? F3 0F 59 0D ?? ?? ?? ?? EB ?? F3 0F 10 0D ?? ?? ?? ?? F3 0F 59 0D ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B CA F3 0F 59 48 ?? E8",
+        description: "GraphUpdateJob::run(this, graph) (FUN_180024430 on 20260825): `TEST RDX; JZ; TEST byte [RDX+8],1 (graph enabled); JZ; dt = frameDelta × …; MOV RAX,[rip+mgr]; MULSS XMM1,[RAX+0x38] (playback rate); CALL SceneGraph::update(graph, dt)`. derive_scene3d requires the RIP global at match+61 to equal `sg_enable_bit_site`'s, publishes imm8 at match+72 as `scene3d_mgr_rate_off` (0x38) and the CALL target at match+73 as `scene3d_scene_graph_update` (FUN_180214570) — whose prologue must read `40 53 56 57 41 54 41 56 41 57 48 83 EC 48 48 8B 59 ??` (imm8 → `scene3d_graph_root_child_off` 0x18); inside its body the item push `MOV RDX,[RDX+0x78]; CALL` (`48 8B 52 ?? E8`) → `scene3d_node_item_off` and the sort gate `TEST byte [R12+0x28],1` (`41 F6 44 24 ?? 01 74`) → `scene3d_graph_sort_flag_off`, followed by the CALL to the std::sort dispatcher. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "sg_insertion_sort",
+        pattern: "48 8B 3B 48 8B 06 4C 8B C3 44 8B 8F ?? ?? ?? ?? 44 3B 88 ?? ?? ?? ?? 7D",
+        description: "The insertion-sort leaf of `SceneGraph::update`'s visible-node std::sort (FUN_180215830 on 20260825): `MOV RDI,[RBX]; MOV RAX,[RSI]; MOV R8,RBX; MOV R9D,[RDI+0xE8]; CMP R9D,[RAX+0xE8]; JGE` — the comparator reads an i32 at node+0xE8 from EVERY visible node, so the mod-owned node MUST carry a valid sort key there. The match is the comparator LOOP at entry+0x40, not the function entry: derive_scene3d requires a CALL rel32 inside the sort dispatcher (reached from `SceneGraph::update`'s sort gate) whose target lies within 0x100 bytes BEFORE the match, and publishes the disp32 at match+12 (== the one at match+19) as `scene3d_node_sort_key_off`. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "model_registry_release",
+        pattern: "40 55 56 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 8B F9 48 8B 35 ?? ?? ?? ?? 48 8D 9E ?? ?? ?? ?? 48 89 5C 24 68 8B 0B 85 C9 7E ?? FF 15 ?? ?? ?? ?? FF 43 04 48 8D 6E ?? 48 8B 4D 08 48 8B 41 08 80 78 ?? 00 75 ?? 0F 1F 40 00 39 78 ?? 73 ?? 48 8B 40 ?? EB ?? 48 8B C8 48 8B 00 80 78 ?? 00 74",
+        description: "Prologue + red-black-tree walk of a ResourceManager `release(hash)` (FUN_180203b60 = the MODEL registry's on 20260825): `MOV RSI,[rip+ResourceManager]; LEA RBX,[RSI+0x130] (map mutex); … CALL [IAT avs_mutex_lock]; INC [RBX+4]; LEA RBP,[RSI+0x30] (std::map); MOV RCX,[RBP+8] (head); MOV RAX,[RCX+8] (root); CMP byte [RAX+0x39],0 (isnil); CMP [RAX+0x18],EDI (key); MOV RAX,[RAX+0x10] (right) / MOV RAX,[RAX] (left)`. The shape matches the three raw-buffer registries too (3 hits per build); derive_scene3d selects the ONE whose body `LEA RCX,[rip+vftable]` names `agcs::Resource::GpuResource<gs::ModelData>` (RTTI) and whose lock IAT slot equals the scene-graph flush's. Reads: RIP disp32 at match+0x1B (`scene3d_resource_manager`), disp32 at match+0x22 (`scene3d_rm_model_mutex_off` 0x130), imm8 at +0x3D (`scene3d_rm_model_map_off` 0x30), imm8 at +0x48 and +0x63 (`scene3d_rm_node_nil_off` 0x39, must agree), imm8 at +0x52 (`scene3d_rm_node_key_off` 0x18), imm8 at +0x58 (`scene3d_rm_node_right_off` 0x10), then forward `48 8B 77 ??` (`scene3d_rm_node_value_off` 0x28) and `FF 4F ??` (`scene3d_rm_node_refcount_off` 0x30). World deleted A3's lookup-by-hash, so `scene3d::model_registry` walks the tree itself with these offsets under the same mutex.",
+    },
+    SignatureDefinition {
+        name: "texture_create_site",
+        pattern: "BA 20 00 00 00 48 8B ?? 44 8D 4A F5 44 8D 42 E1 B9 00 01 00 00 C7 44 24 20 02 20 00 00 E8",
+        description: "The ArrowPalette factory's dynamic-texture create (FUN_180024d00+0x11 on 20260825): `MOV EDX,0x20; MOV RBX,RCX; LEA R9D,[RDX-0xB] (fmt 0x15); LEA R8D,[RDX-0x1F] (mips 1); MOV ECX,0x100; MOV [RSP+0x20],0x2002 (usage); CALL create` — the engine texture API `u32 create(w, h, mips, fmt, usage)` (FUN_180249c20). derive_scene3d publishes the CALL target at match+29 as `scene3d_texture_create`; bone textures are created as `(4, bone_count, 1, 0x74 A32B32G32R32F, 0x2001)` — WIDTH 4 texels, one bone per ROW (the upload strides `data + i*pitch`; RE docs/background_dancers_research.md §2.8). Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "texture_release",
+        pattern: "40 53 48 83 EC 20 8B D9 B8 01 00 00 00 F0 0F C1 05 ?? ?? ?? ?? 85 C0 74 ?? 0F 1F 80 00 00 00 00 FF 15 ?? ?? ?? ?? 41 BB 01 00 00 00 F0 44 0F C1 1D ?? ?? ?? ?? 45 85 DB 75 ?? 85 DB 74 ?? 48 8B C3 48 C1 E8 11 48 8D 0C 80 48 C1 E1 05 48 03 0D ?? ?? ?? ?? 39 19 75 ?? E8",
+        description: "Engine texture release `i32 release(u32 handle)` (FUN_18024a170 on 20260825 — the World twin of the A3 render-item dtor's bone-texture release): spin on the registry flag (`XADD.LOCK [rip+DAT_1806f1a60]`), slot = `(handle>>17)*0xA0 + [rip+registry]`, `CMP [slot],EBX` (stale-handle guard), `CALL` refcount-decrement/free (FUN_180249570 == A3 FUN_180166560). `8B D9` (by value) excludes the by-pointer twin FUN_1801f4c30 (`8B 19`). derive_scene3d publishes the match as `scene3d_texture_release` and requires its spin-flag global (RIP at match+17) to equal the first `F0 0F C1 05` in the create body. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "texture_lookup_site",
+        pattern: "8B CF E8 ?? ?? ?? ?? 48 85 C0 48 0F 44 05 ?? ?? ?? ?? 33 C9 87 0D ?? ?? ?? ?? 48 89 43 08 FF C6 48 83 C5 50 48 83 C3 10",
+        description: "Tail of the model converter's texture-table fill (FUN_180273e20+0xC7 on 20260825): `MOV ECX,EDI (gs hash); CALL FUN_18026f9e0 (gs texture-registry lookup, TextureData* or null); TEST RAX; CMOVZ RAX,[rip+DAT_1806f3298] (default texture); XOR ECX,ECX; XCHG [rip+DAT_1806f2090],ECX (spin release); MOV [RBX+8],RAX (entry.ptr); INC ESI; ADD RBP,0x50; ADD RBX,0x10`. The lookup's ONLY caller in World — A3's setModel-time re-resolve (FUN_180175b80) has no twin, so a material whose DDS registered after its .model converted holds the default texture forever; scene3d::render_item re-resolves into its own material copies with these three sites. OPTIONAL sub-group of derive_scene3d: publishes `scene3d_texture_lookup` (CALL @+2; its prologue must be `40 53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 8B D9 80 B8 80 00 00 00 00 75 2A`), `scene3d_texture_default` (RIP @+14) and `scene3d_texture_spin` (RIP @+22, must equal both `LOCK XADD [rip]` globals at match-0x23 and match-0x0C). Unique + byte-shape identical on every build; a miss only disables the re-resolve. RE: docs/background_dancers_research.md §2.1/§2.5.",
+    },
+    SignatureDefinition {
+        name: "bgmovie_readiness",
+        pattern: "40 53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 48 8B 58 ?? 48 85 DB 74 ?? 48 8D 8B ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 75 ?? 32 C9 EB ?? 48 8D 8B",
+        description: "`sequence::common::BgMovieActor` readiness (FUN_1800320a0 on 20260825): `MOV RAX,[rip+DAT_1806f2d38] (the BgMovieActor singleton); MOV RBX,[RAX+0x58] (BackgroundFrame); TEST; JZ; LEA RCX,[RBX+0x150]; CALL AnimationLoader::ready; …`. The match IS the function entry (`40 53` = REX-prefixed PUSH RBX — the DPS poll's CALL target is compared against it). derive_scene3d publishes RIP at match+9 as `scene3d_bgmovie_actor` and imm8 at match+16 as `scene3d_bgframe_off` (0x58); the live `bg_root` clip the background hide targets is `*(frame + scene3d_bg_clip_slot_off)`. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "bgmovie_ready_call_site",
+        pattern: "48 83 3D ?? ?? ?? ?? 00 74 ?? E8 ?? ?? ?? ?? 84 C0 0F 84",
+        description: "`CMP qword [rip+global],0; JZ; CALL fn; TEST AL,AL; JZ far` — the DancePlaySequence::onUpdate case-3 readiness poll (`if (BgMovieActor && !FUN_1800320a0()) wait`) among 4 look-alikes per build. Identity only: derive_scene3d requires at least one hit whose CMP global (RIP disp32 at match+3, PLUS ONE — the instruction is 8 bytes) equals `scene3d_bgmovie_actor` AND whose CALL target (match+10) equals the `bgmovie_readiness` match. Nothing else is read.",
+    },
+    SignatureDefinition {
+        name: "bg_root_create_site",
+        pattern: "4C 8D 35 ?? ?? ?? ?? 49 8B FE 0F 1F 40 00 48 8B 17 48 63 C3 48 8D 0C C0 48 C1 E1 06 49 03 CE FF 92 ?? ?? ?? ?? 83 CE FF 84 C0 74 ?? FF C3 48 81 C7 ?? ?? ?? ?? 81 FB ?? ?? ?? ?? 7C",
+        description: "The CMovieClip pool walk inside the `bg_root` creator (FUN_18003e5b0+0x122 on 20260825, reached from the BackgroundFrame's AnimationLoader<int> ReactiveAction): `LEA R14,[rip+DAT_1806f9b20] (0x400 × 0x240-byte CMovieClip pool); loop { CALL [vt+0x138] (slot-free probe); ADD RDI,0x240; CMP EBX,0x400 }`, then `CALL CMovieClip::Create(slot, pkg, \"bg_root\", 0)` and `MOV RCX,[frame_ptr]; ADD RCX,0x140; CALL store_shared_ptr` — the clip slot inside `sequence::BackgroundFrame`. derive_scene3d publishes RIP at match+3 as `scene3d_cmovieclip_pool`, the `48 81 C7 imm32` as `scene3d_cmovieclip_pool_stride` (0x240), the `81 FB imm32` as `scene3d_cmovieclip_pool_count` (0x400), and — in the forward window — the `48 81 C1 imm32` after the create CALL as `scene3d_bg_clip_slot_off` (0x140); the CALL rel32 preceded by `LEA R8,[rip+\"bg_root\"]` must equal the already-derived `cmovieclip_create` (identity gate). Unique on every build.",
+    },
 ];
 
 pub struct SignatureStore {
@@ -2293,6 +2648,7 @@ impl SignatureStore {
         self.find_auto_foot_panel();
         self.find_judge_notes();
         self.find_gameplay_actor_vtable();
+        self.find_dance_play_sequence_vtable();
         self.derive_folder_functor_ctors();
         self.derive_gameplay_obj_addresses();
         self.derive_app_heap_handle();
@@ -2346,6 +2702,9 @@ impl SignatureStore {
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
+        // Consumes `cmovieclip_create` (identity gate of the bg_root site) —
+        // must stay after derive_cmovieclip_create.
+        self.derive_scene3d();
     }
 
     /// Derive the bottom-text service's two data addresses from the
@@ -2449,6 +2808,898 @@ impl SignatureStore {
             log_info!("  [+] bottom_text_slots (derived) @ +0x{:X}", slots_off);
             log_info!("  [+] bottom_text_empty_str (derived) @ +0x{:X}", empty_off);
         }
+    }
+
+    // ── Background Dancers: the `scene3d` group ─────────────────────────
+    //
+    // RE record: docs/background_dancers_research.md §1 (the byte-level spec
+    // every offset below is decoded from). One all-or-nothing derivation over
+    // twelve AOBs: a miss or a failed identity gate publishes NOTHING and also
+    // un-resolves the raw AOB names, so `services::scene3d` either gets the
+    // whole `Scene3dSites` bundle or reports unavailable.
+
+    /// Raw AOB names feeding `derive_scene3d` (un-resolved on any failure).
+    const SCENE3D_RAW: &'static [&'static str] = &[
+        "sg_enable_bit_site",
+        "sg_manager_tick",
+        "sg_active_camera",
+        "sg_destroy_flush",
+        "sg_update_job_run",
+        "sg_insertion_sort",
+        "model_registry_release",
+        "texture_create_site",
+        "texture_release",
+        "bgmovie_readiness",
+        "bgmovie_ready_call_site",
+        "bg_root_create_site",
+    ];
+
+    /// Every name `derive_scene3d` publishes (addresses and values alike).
+    const SCENE3D_PUBLISHED: &'static [&'static str] = &[
+        "scene3d_scene_graph_manager",
+        "scene3d_mgr_destroy_vec_off",
+        "scene3d_mgr_mutex_off",
+        "scene3d_mgr_depth_off",
+        "scene3d_mgr_rate_off",
+        "scene3d_mutex_lock_iat",
+        "scene3d_mutex_unlock_iat",
+        "scene3d_graph_flags_off",
+        "scene3d_graph_root_child_off",
+        "scene3d_graph_sort_flag_off",
+        "scene3d_graph_camera_vec_off",
+        "scene3d_node_item_off",
+        "scene3d_node_sort_key_off",
+        "scene3d_scene_graph_update",
+        "scene3d_camera_stride",
+        "scene3d_camera_active_off",
+        "scene3d_camera_view_off",
+        "scene3d_camera_proj_dirty_off",
+        "scene3d_cam_eye_off",
+        "scene3d_cam_target_off",
+        "scene3d_cam_up_off",
+        "scene3d_cam_w_off",
+        "scene3d_cam_l_off",
+        "scene3d_cam_r_off",
+        "scene3d_cam_b_off",
+        "scene3d_cam_t_off",
+        "scene3d_cam_near_off",
+        "scene3d_cam_far_off",
+        "scene3d_cam_view_dirty_off",
+        "scene3d_cam_proj_req_off",
+        "scene3d_resource_manager",
+        "scene3d_rm_model_mutex_off",
+        "scene3d_rm_model_map_off",
+        "scene3d_rm_node_nil_off",
+        "scene3d_rm_node_key_off",
+        "scene3d_rm_node_right_off",
+        "scene3d_rm_node_value_off",
+        "scene3d_rm_node_refcount_off",
+        "scene3d_texture_create",
+        "scene3d_texture_release",
+        "scene3d_bgmovie_actor",
+        "scene3d_bgframe_off",
+        "scene3d_bg_clip_slot_off",
+        "scene3d_cmovieclip_pool",
+        "scene3d_cmovieclip_pool_stride",
+        "scene3d_cmovieclip_pool_count",
+    ];
+
+    /// Derive the whole `scene3d` group or nothing (see the module comment
+    /// above and `docs/background_dancers_research.md` §1.7 for the per-site
+    /// decode table and identity gates).
+    fn derive_scene3d(&mut self) {
+        match self.scene3d_resolve() {
+            Ok(s) => {
+                let base = self.base as usize;
+                let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+                let mut addr = |name: &str, p: *const u8| {
+                    self.resolved.insert(name.into(), p);
+                    log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+                };
+                addr("scene3d_scene_graph_manager", s.scene_graph_manager);
+                addr("scene3d_mutex_lock_iat", s.mutex_lock_iat);
+                addr("scene3d_mutex_unlock_iat", s.mutex_unlock_iat);
+                addr("scene3d_scene_graph_update", s.scene_graph_update);
+                addr("scene3d_resource_manager", s.resource_manager);
+                addr("scene3d_texture_create", s.texture_create);
+                addr("scene3d_texture_release", s.texture_release);
+                addr("scene3d_bgmovie_actor", s.bgmovie_actor);
+                addr("scene3d_cmovieclip_pool", s.cmovieclip_pool);
+                for (name, v) in [
+                    ("scene3d_mgr_destroy_vec_off", s.mgr_destroy_vec_off),
+                    ("scene3d_mgr_mutex_off", s.mgr_mutex_off),
+                    ("scene3d_mgr_depth_off", s.mgr_depth_off),
+                    ("scene3d_mgr_rate_off", s.mgr_rate_off),
+                    ("scene3d_graph_flags_off", s.graph_flags_off),
+                    ("scene3d_graph_root_child_off", s.graph_root_child_off),
+                    ("scene3d_graph_sort_flag_off", s.graph_sort_flag_off),
+                    ("scene3d_graph_camera_vec_off", s.graph_camera_vec_off),
+                    ("scene3d_node_item_off", s.node_item_off),
+                    ("scene3d_node_sort_key_off", s.node_sort_key_off),
+                    ("scene3d_camera_stride", s.camera_stride),
+                    ("scene3d_camera_active_off", s.camera_active_off),
+                    ("scene3d_camera_view_off", s.camera_view_off),
+                    ("scene3d_camera_proj_dirty_off", s.camera_proj_dirty_off),
+                    ("scene3d_cam_eye_off", s.cam_eye_off),
+                    ("scene3d_cam_target_off", s.cam_target_off),
+                    ("scene3d_cam_up_off", s.cam_up_off),
+                    ("scene3d_cam_w_off", s.cam_w_off),
+                    ("scene3d_cam_l_off", s.cam_l_off),
+                    ("scene3d_cam_r_off", s.cam_r_off),
+                    ("scene3d_cam_b_off", s.cam_b_off),
+                    ("scene3d_cam_t_off", s.cam_t_off),
+                    ("scene3d_cam_near_off", s.cam_near_off),
+                    ("scene3d_cam_far_off", s.cam_far_off),
+                    ("scene3d_cam_view_dirty_off", s.cam_view_dirty_off),
+                    ("scene3d_cam_proj_req_off", s.cam_proj_req_off),
+                    ("scene3d_rm_model_mutex_off", s.rm_model_mutex_off),
+                    ("scene3d_rm_model_map_off", s.rm_model_map_off),
+                    ("scene3d_rm_node_nil_off", s.rm_node_nil_off),
+                    ("scene3d_rm_node_key_off", s.rm_node_key_off),
+                    ("scene3d_rm_node_right_off", s.rm_node_right_off),
+                    ("scene3d_rm_node_value_off", s.rm_node_value_off),
+                    ("scene3d_rm_node_refcount_off", s.rm_node_refcount_off),
+                    ("scene3d_bgframe_off", s.bgframe_off),
+                    ("scene3d_bg_clip_slot_off", s.bg_clip_slot_off),
+                    ("scene3d_cmovieclip_pool_stride", s.cmovieclip_pool_stride),
+                    ("scene3d_cmovieclip_pool_count", s.cmovieclip_pool_count),
+                ] {
+                    self.publish_value(name, v);
+                }
+                // Optional sub-group: the gs texture-registry lookup trio. A
+                // miss here never un-resolves the group — the render-item
+                // builder just keeps the converter's texture pointers.
+                match self.scene3d_resolve_texture_lookup() {
+                    Ok(t) => {
+                        let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+                        for (name, p) in [
+                            ("scene3d_texture_lookup", t.lookup),
+                            ("scene3d_texture_default", t.default_texture),
+                            ("scene3d_texture_spin", t.spin),
+                        ] {
+                            self.resolved.insert(name.into(), p);
+                            log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+                        }
+                    }
+                    Err(reason) => {
+                        for name in Self::SCENE3D_TEXTURE_LOOKUP {
+                            self.resolved.remove(*name);
+                        }
+                        log_warn!(
+                            "  [-] scene3d_texture_lookup (optional) -- {} -- material textures keep the converter's pointers",
+                            reason
+                        );
+                    }
+                }
+            }
+            Err((site, reason)) => {
+                for name in Self::SCENE3D_PUBLISHED
+                    .iter()
+                    .chain(Self::SCENE3D_RAW)
+                    .chain(Self::SCENE3D_TEXTURE_LOOKUP)
+                {
+                    self.resolved.remove(*name);
+                }
+                log_warn!("  [-] scene3d -- {}: {}", site, reason);
+            }
+        }
+    }
+
+    /// The optional texture-lookup trio's published names + its raw AOB.
+    const SCENE3D_TEXTURE_LOOKUP: &'static [&'static str] = &[
+        "texture_lookup_site",
+        "scene3d_texture_lookup",
+        "scene3d_texture_default",
+        "scene3d_texture_spin",
+    ];
+
+    /// Decode `texture_lookup_site` (RE `docs/background_dancers_research.md`
+    /// §2.5): the CALL target (identity-gated by its prologue), the default
+    /// texture global and the spin flag (which must equal both `LOCK XADD`
+    /// globals earlier in the loop body).
+    fn scene3d_resolve_texture_lookup(&self) -> Result<Scene3dTextureLookup, String> {
+        let hits = self.get_all_matches("texture_lookup_site");
+        let site = match hits.len() {
+            1 => hits[0],
+            n => return Err(format!("expected exactly 1 match, found {}", n)),
+        };
+        // The pattern reads back to match-0x23 and forward to match+0x1A.
+        if !self.scene3d_inside(unsafe { site.sub(0x23) }, 0x23 + 0x20) {
+            return Err("match at module edge".into());
+        }
+        // SAFETY: the window was probed inside the module above.
+        // (`decode_rip_relative` takes the address of the DISP32 itself:
+        // CMOVZ `48 0F 44 05 disp32` @+10 → disp @+14; XCHG `87 0D disp32`
+        // @+20 → disp @+22.)
+        unsafe {
+            let lookup = decode_call_rel32(site.add(2));
+            let default_texture = decode_rip_relative(site.add(14));
+            let spin = decode_rip_relative(site.add(22));
+            // `LOCK XADD dword [rip+disp32], r32` = F0 0F C1 05 disp32 (EAX) /
+            // F0 0F C1 15 disp32 (EDX): the RIP target = next instr + disp32.
+            let xadd_target = |p: *const u8, modrm: u8| -> Option<*const u8> {
+                let head = std::slice::from_raw_parts(p, 4);
+                if head != [0xF0, 0x0F, 0xC1, modrm] {
+                    return None;
+                }
+                let disp = (p.add(4) as *const i32).read_unaligned() as isize;
+                Some(p.add(8).offset(disp))
+            };
+            let xadd_a = xadd_target(site.sub(0x23), 0x05)
+                .ok_or_else(|| "LOCK XADD [rip],EAX not found at match-0x23".to_string())?;
+            let xadd_b = xadd_target(site.sub(0x0C), 0x15)
+                .ok_or_else(|| "LOCK XADD [rip],EDX not found at match-0x0C".to_string())?;
+            if xadd_a != spin || xadd_b != spin {
+                return Err("spin-flag globals disagree (XADD vs XCHG)".into());
+            }
+            if !self.scene3d_inside(lookup, 0x40)
+                || !self.scene3d_inside(default_texture, 8)
+                || !self.scene3d_inside(spin, 4)
+            {
+                return Err("decoded site outside module".into());
+            }
+            const LOOKUP_PROLOGUE: &[Option<u8>] = &[
+                Some(0x40),
+                Some(0x53),
+                Some(0x48),
+                Some(0x83),
+                Some(0xEC),
+                Some(0x20),
+                Some(0x48),
+                Some(0x8B),
+                Some(0x05),
+                None,
+                None,
+                None,
+                None,
+                Some(0x8B),
+                Some(0xD9),
+                Some(0x80),
+                Some(0xB8),
+                Some(0x80),
+                Some(0x00),
+                Some(0x00),
+                Some(0x00),
+                Some(0x00),
+                Some(0x75),
+                Some(0x2A),
+            ];
+            let body = std::slice::from_raw_parts(lookup, LOOKUP_PROLOGUE.len());
+            let prologue_ok = LOOKUP_PROLOGUE
+                .iter()
+                .zip(body)
+                .all(|(want, got)| want.is_none_or(|w| w == *got));
+            if !prologue_ok {
+                return Err("CALL target is not the gs texture-registry lookup".into());
+            }
+            Ok(Scene3dTextureLookup {
+                lookup,
+                default_texture,
+                spin,
+            })
+        }
+    }
+
+    /// Read back the `scene3d` bundle; `None` unless every field resolved.
+    pub fn scene3d_sites(&self) -> Option<Scene3dSites> {
+        let a = |n: &str| self.get_address(n);
+        let v = |n: &str| self.published_value(n);
+        Some(Scene3dSites {
+            scene_graph_manager: a("scene3d_scene_graph_manager")?,
+            mgr_destroy_vec_off: v("scene3d_mgr_destroy_vec_off")?,
+            mgr_mutex_off: v("scene3d_mgr_mutex_off")?,
+            mgr_depth_off: v("scene3d_mgr_depth_off")?,
+            mgr_rate_off: v("scene3d_mgr_rate_off")?,
+            mutex_lock_iat: a("scene3d_mutex_lock_iat")?,
+            mutex_unlock_iat: a("scene3d_mutex_unlock_iat")?,
+            graph_flags_off: v("scene3d_graph_flags_off")?,
+            graph_root_child_off: v("scene3d_graph_root_child_off")?,
+            graph_sort_flag_off: v("scene3d_graph_sort_flag_off")?,
+            graph_camera_vec_off: v("scene3d_graph_camera_vec_off")?,
+            node_item_off: v("scene3d_node_item_off")?,
+            node_sort_key_off: v("scene3d_node_sort_key_off")?,
+            scene_graph_update: a("scene3d_scene_graph_update")?,
+            camera_stride: v("scene3d_camera_stride")?,
+            camera_active_off: v("scene3d_camera_active_off")?,
+            camera_view_off: v("scene3d_camera_view_off")?,
+            camera_proj_dirty_off: v("scene3d_camera_proj_dirty_off")?,
+            cam_eye_off: v("scene3d_cam_eye_off")?,
+            cam_target_off: v("scene3d_cam_target_off")?,
+            cam_up_off: v("scene3d_cam_up_off")?,
+            cam_w_off: v("scene3d_cam_w_off")?,
+            cam_l_off: v("scene3d_cam_l_off")?,
+            cam_r_off: v("scene3d_cam_r_off")?,
+            cam_b_off: v("scene3d_cam_b_off")?,
+            cam_t_off: v("scene3d_cam_t_off")?,
+            cam_near_off: v("scene3d_cam_near_off")?,
+            cam_far_off: v("scene3d_cam_far_off")?,
+            cam_view_dirty_off: v("scene3d_cam_view_dirty_off")?,
+            cam_proj_req_off: v("scene3d_cam_proj_req_off")?,
+            resource_manager: a("scene3d_resource_manager")?,
+            rm_model_mutex_off: v("scene3d_rm_model_mutex_off")?,
+            rm_model_map_off: v("scene3d_rm_model_map_off")?,
+            rm_node_nil_off: v("scene3d_rm_node_nil_off")?,
+            rm_node_key_off: v("scene3d_rm_node_key_off")?,
+            rm_node_right_off: v("scene3d_rm_node_right_off")?,
+            rm_node_value_off: v("scene3d_rm_node_value_off")?,
+            rm_node_refcount_off: v("scene3d_rm_node_refcount_off")?,
+            texture_create: a("scene3d_texture_create")?,
+            texture_release: a("scene3d_texture_release")?,
+            bgmovie_actor: a("scene3d_bgmovie_actor")?,
+            bgframe_off: v("scene3d_bgframe_off")?,
+            bg_clip_slot_off: v("scene3d_bg_clip_slot_off")?,
+            cmovieclip_pool: a("scene3d_cmovieclip_pool")?,
+            cmovieclip_pool_stride: v("scene3d_cmovieclip_pool_stride")?,
+            cmovieclip_pool_count: v("scene3d_cmovieclip_pool_count")?,
+            texture_lookup: match (
+                a("scene3d_texture_lookup"),
+                a("scene3d_texture_default"),
+                a("scene3d_texture_spin"),
+            ) {
+                (Some(lookup), Some(default_texture), Some(spin)) => Some(Scene3dTextureLookup {
+                    lookup,
+                    default_texture,
+                    spin,
+                }),
+                _ => None,
+            },
+        })
+    }
+
+    /// The unique match of a `scene3d` AOB, or the failure reason.
+    fn scene3d_unique(&self, name: &'static str) -> Result<*const u8, (&'static str, String)> {
+        let hits = self.get_all_matches(name);
+        match hits.len() {
+            1 => Ok(hits[0]),
+            n => Err((name, format!("expected exactly 1 match, found {}", n))),
+        }
+    }
+
+    /// `p..p+len` lies inside the module.
+    fn scene3d_inside(&self, p: *const u8, len: usize) -> bool {
+        let off = (p as usize).wrapping_sub(self.base as usize);
+        off < self.size && off.saturating_add(len) <= self.size
+    }
+
+    /// The whole group as one fallible computation (nothing is published
+    /// here). Each `Err` names the site and the reason for the boot log.
+    fn scene3d_resolve(&self) -> Result<Scene3dSites, (&'static str, String)> {
+        type Fail = (&'static str, String);
+        let fail = |site: &'static str, why: String| -> Fail { (site, why) };
+        let inside = |p: *const u8, len: usize| self.scene3d_inside(p, len);
+        let rel = |p: *const u8| (p as usize).wrapping_sub(self.base as usize);
+        // Unaligned little-endian readers over module memory.
+        let u8_at = |p: *const u8, off: usize| unsafe { *p.add(off) } as usize;
+        let u32_at = |p: *const u8, off: usize| unsafe {
+            (p.add(off) as *const u32).read_unaligned() as usize
+        };
+        let rip_at = |p: *const u8, off: usize| unsafe { decode_rip_relative(p.add(off)) };
+        let call_at = |p: *const u8, off: usize| unsafe { decode_call_rel32(p.add(off)) };
+        let bytes_eq = |p: *const u8, expect: &[u8]| -> bool {
+            inside(p, expect.len())
+                && unsafe { std::slice::from_raw_parts(p, expect.len()) } == expect
+        };
+
+        // ── A. SceneGraphManager global (every enable-bit site must agree) ──
+        let enable_sites = self.get_all_matches("sg_enable_bit_site");
+        if enable_sites.is_empty() {
+            return Err(fail("sg_enable_bit_site", "pattern not found".into()));
+        }
+        let mut mgr_global: Option<*const u8> = None;
+        let mut graph_flags_off: Option<usize> = None;
+        for site in &enable_sites {
+            if !inside(*site, 16) {
+                return Err(fail("sg_enable_bit_site", "match at module edge".into()));
+            }
+            let g = rip_at(*site, 3);
+            let f = u8_at(*site, 12);
+            if !inside(g, 8) {
+                return Err(fail("sg_enable_bit_site", "global outside module".into()));
+            }
+            match (mgr_global, graph_flags_off) {
+                (None, None) => {
+                    mgr_global = Some(g);
+                    graph_flags_off = Some(f);
+                }
+                (Some(pg), Some(pf)) if pg == g && pf == f => {}
+                _ => {
+                    return Err(fail(
+                        "sg_enable_bit_site",
+                        format!(
+                            "{} sites disagree on the global/flags offset",
+                            enable_sites.len()
+                        ),
+                    ));
+                }
+            }
+        }
+        let scene_graph_manager =
+            mgr_global.ok_or_else(|| fail("sg_enable_bit_site", "no sites".into()))?;
+        let graph_flags_off = graph_flags_off.unwrap_or(0);
+
+        // ── B. Manager tick → flush / active camera / camera rebuilds ──────
+        let tick = self.scene3d_unique("sg_manager_tick")?;
+        if !inside(tick, 0x40) {
+            return Err(fail("sg_manager_tick", "match at module edge".into()));
+        }
+        let flush = self.scene3d_unique("sg_destroy_flush")?;
+        let active_cam = self.scene3d_unique("sg_active_camera")?;
+        if call_at(tick, 6) != flush {
+            return Err(fail(
+                "sg_manager_tick",
+                "CALL@+6 is not the destroy-flush match".into(),
+            ));
+        }
+        if call_at(tick, 11) != active_cam {
+            return Err(fail(
+                "sg_manager_tick",
+                "CALL@+11 is not the active-camera match".into(),
+            ));
+        }
+        let view_rebuild = call_at(tick, 41);
+        let proj_rebuild = call_at(tick, 70);
+        if !inside(view_rebuild, 0x700) || !inside(proj_rebuild, 0x200) {
+            return Err(fail(
+                "sg_manager_tick",
+                "camera rebuild callee outside module".into(),
+            ));
+        }
+        let camera_view_off = u8_at(tick, 52);
+        let camera_proj_dirty_off = u32_at(tick, 60);
+        if camera_proj_dirty_off >= 0x1000 {
+            return Err(fail(
+                "sg_manager_tick",
+                "implausible proj-dirty offset".into(),
+            ));
+        }
+
+        // ── C. Active camera: camera vector offset / stride / active byte ──
+        if !inside(active_cam, 0x80) || rip_at(active_cam, 3) != scene_graph_manager {
+            return Err(fail(
+                "sg_active_camera",
+                "manager global disagrees with the enable sites".into(),
+            ));
+        }
+        let graph_camera_vec_off = u8_at(active_cam, 30);
+        if u8_at(active_cam, 26) != graph_camera_vec_off + 8 {
+            return Err(fail(
+                "sg_active_camera",
+                "camera vector end is not begin+8".into(),
+            ));
+        }
+        let camera_stride = scan_pattern(active_cam, 0x60, "48 69 C0 ?? ?? ?? ??")
+            .map(|r| u32_at(r.address, 3))
+            .ok_or_else(|| fail("sg_active_camera", "no IMUL stride".into()))?;
+        let camera_active_off = scan_pattern(active_cam, 0x60, "80 BC 08 ?? ?? ?? ?? 00")
+            .map(|r| u32_at(r.address, 3))
+            .ok_or_else(|| fail("sg_active_camera", "no active-byte CMP".into()))?;
+        if !(0x200..=0x800).contains(&camera_stride) || camera_active_off + 4 != camera_stride {
+            return Err(fail(
+                "sg_active_camera",
+                format!(
+                    "implausible stride 0x{:X} / active 0x{:X}",
+                    camera_stride, camera_active_off
+                ),
+            ));
+        }
+
+        // ── D. Destroy flush: mutex / depth / vector / IAT slots ───────────
+        if !inside(flush, 0x200) {
+            return Err(fail("sg_destroy_flush", "match at module edge".into()));
+        }
+        let mgr_mutex_off = u8_at(flush, 36);
+        let mutex_lock_iat = rip_at(flush, 50);
+        let mgr_depth_off = mgr_mutex_off + u8_at(flush, 56);
+        let mgr_destroy_vec_off = u8_at(flush, 60);
+        if u8_at(flush, 64) != mgr_destroy_vec_off + 8 {
+            return Err(fail(
+                "sg_destroy_flush",
+                "destroy vector end is not begin+8".into(),
+            ));
+        }
+        if !inside(mutex_lock_iat, 8) {
+            return Err(fail(
+                "sg_destroy_flush",
+                "lock IAT slot outside module".into(),
+            ));
+        }
+        let body = unsafe { flush.add(65) };
+        if scan_pattern(body, 0x180, "48 8B 01 BA 01 00 00 00 FF 10").is_none() {
+            return Err(fail(
+                "sg_destroy_flush",
+                "no `dtor(node, 1)` vcall in the body".into(),
+            ));
+        }
+        let unlocks = scan_pattern_all(body, 0x180, "FF 15 ?? ?? ?? ??");
+        if unlocks.len() != 1 {
+            return Err(fail(
+                "sg_destroy_flush",
+                format!(
+                    "expected exactly 1 unlock CALL [rip], found {}",
+                    unlocks.len()
+                ),
+            ));
+        }
+        let mutex_unlock_iat = rip_at(unlocks[0].address, 2);
+        if !inside(mutex_unlock_iat, 8) || mutex_unlock_iat == mutex_lock_iat {
+            return Err(fail("sg_destroy_flush", "unlock IAT slot invalid".into()));
+        }
+
+        // ── E. Update job → SceneGraph::update layout + sort key ───────────
+        let update_job = self.scene3d_unique("sg_update_job_run")?;
+        if !inside(update_job, 0x50) || rip_at(update_job, 61) != scene_graph_manager {
+            return Err(fail(
+                "sg_update_job_run",
+                "manager global disagrees with the enable sites".into(),
+            ));
+        }
+        let mgr_rate_off = u8_at(update_job, 72);
+        let scene_graph_update = call_at(update_job, 73);
+        const UPDATE_PROLOGUE: [u8; 16] = [
+            0x40, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x48,
+            0x48, 0x8B,
+        ];
+        if !inside(scene_graph_update, 0x400) || !bytes_eq(scene_graph_update, &UPDATE_PROLOGUE) {
+            return Err(fail(
+                "sg_update_job_run",
+                "callee is not SceneGraph::update (prologue)".into(),
+            ));
+        }
+        if u8_at(scene_graph_update, 16) != 0x59 {
+            return Err(fail(
+                "sg_update_job_run",
+                "SceneGraph::update root-child load shape".into(),
+            ));
+        }
+        let graph_root_child_off = u8_at(scene_graph_update, 17);
+        let item_loads = scan_pattern_all(scene_graph_update, 0x400, "48 8B 52 ?? E8");
+        if item_loads.len() != 1 {
+            return Err(fail(
+                "sg_update_job_run",
+                format!(
+                    "expected 1 item-push load in SceneGraph::update, found {}",
+                    item_loads.len()
+                ),
+            ));
+        }
+        let node_item_off = u8_at(item_loads[0].address, 3);
+        let sort_gates = scan_pattern_all(scene_graph_update, 0x400, "41 F6 44 24 ?? 01 74");
+        if sort_gates.len() != 1 {
+            return Err(fail(
+                "sg_update_job_run",
+                format!(
+                    "expected 1 sort gate in SceneGraph::update, found {}",
+                    sort_gates.len()
+                ),
+            ));
+        }
+        let graph_sort_flag_off = u8_at(sort_gates[0].address, 4);
+        let sort_dispatcher = unsafe { scan_first_call_rel32(sort_gates[0].address.add(7), 0x30) }
+            .ok_or_else(|| fail("sg_update_job_run", "no sort CALL after the gate".into()))?;
+        let insertion_sort = self.scene3d_unique("sg_insertion_sort")?;
+        if !inside(insertion_sort, 0x20) || u32_at(insertion_sort, 12) != u32_at(insertion_sort, 19)
+        {
+            return Err(fail(
+                "sg_insertion_sort",
+                "the two key displacements disagree".into(),
+            ));
+        }
+        let node_sort_key_off = u32_at(insertion_sort, 12);
+        // The AOB pins the comparator LOOP (entry+0x40 on 20260825), so the
+        // dispatcher's CALL lands shortly BEFORE the match, not on it.
+        let reached = inside(sort_dispatcher, 0x120)
+            && (0..0x120usize - 5).any(|i| {
+                let p = unsafe { sort_dispatcher.add(i) };
+                if u8_at(p, 0) != 0xE8 {
+                    return false;
+                }
+                let t = call_at(p, 0) as usize;
+                let m = insertion_sort as usize;
+                t <= m && m - t < 0x100
+            });
+        if !reached {
+            return Err(fail(
+                "sg_insertion_sort",
+                "not reached from the update's sort dispatcher".into(),
+            ));
+        }
+
+        // ── F. Camera field block from the two rebuild callees ─────────────
+        let (cam_view_dirty_off, cam_eye_off, cam_target_off, cam_up_off) =
+            scene3d_camera_view_fields(view_rebuild, 0x700)
+                .map_err(|e| fail("sg_manager_tick", e))?;
+        let cam_proj_req_off = cam_view_dirty_off + 1;
+        let (cam_w_off, cam_near_off, cam_far_off, cam_l_off, cam_r_off, cam_b_off, cam_t_off) =
+            scene3d_camera_proj_fields(proj_rebuild, 0x200)
+                .map_err(|e| fail("sg_manager_tick", e))?;
+        for (label, v) in [
+            ("view", camera_view_off),
+            ("eye", cam_eye_off),
+            ("w", cam_w_off),
+            ("far", cam_far_off),
+            ("dirty", camera_proj_dirty_off),
+        ] {
+            if v >= camera_stride {
+                return Err(fail(
+                    "sg_manager_tick",
+                    format!("camera field `{}` past the slot stride", label),
+                ));
+            }
+        }
+
+        // ── G. Model registry: the ONE release whose vtable is GpuResource<ModelData> ──
+        let model_vt = self
+            .find_vtable_by_rtti(
+                ".?AV?$GpuResource@VModelData@gs@@@Resource@agcs@@",
+                "scene3d_model_gpu_resource_vtable",
+            )
+            .ok_or_else(|| {
+                fail(
+                    "model_registry_release",
+                    "GpuResource<ModelData> RTTI vtable not found".into(),
+                )
+            })?;
+        let release_hits = self.get_all_matches("model_registry_release");
+        let mut model_release: Option<*const u8> = None;
+        for hit in &release_hits {
+            if !inside(*hit, 0x100) {
+                continue;
+            }
+            let leas = scan_pattern_all(*hit, 0x100, "48 8D 0D ?? ?? ?? ??");
+            if leas.iter().any(|l| rip_at(l.address, 3) == model_vt) {
+                if model_release.is_some() {
+                    return Err(fail(
+                        "model_registry_release",
+                        "two releases name the ModelData vtable".into(),
+                    ));
+                }
+                model_release = Some(*hit);
+            }
+        }
+        let model_release = model_release.ok_or_else(|| {
+            fail(
+                "model_registry_release",
+                format!(
+                    "none of {} shape hits names the ModelData vtable",
+                    release_hits.len()
+                ),
+            )
+        })?;
+        if !bytes_eq(unsafe { model_release.add(0x31) }, &[0xFF, 0x15])
+            || rip_at(model_release, 0x33) != mutex_lock_iat
+        {
+            return Err(fail(
+                "model_registry_release",
+                "lock IAT slot differs from the scene graph's".into(),
+            ));
+        }
+        let resource_manager = rip_at(model_release, 0x1B);
+        let rm_model_mutex_off = u32_at(model_release, 0x22);
+        let rm_model_map_off = u8_at(model_release, 0x3D);
+        let rm_node_nil_off = u8_at(model_release, 0x48);
+        if u8_at(model_release, 0x63) != rm_node_nil_off {
+            return Err(fail(
+                "model_registry_release",
+                "the two isnil displacements disagree".into(),
+            ));
+        }
+        let rm_node_key_off = u8_at(model_release, 0x52);
+        let rm_node_right_off = u8_at(model_release, 0x58);
+        let tail = unsafe { model_release.add(0x60) };
+        let rm_node_value_off = scan_pattern(tail, 0x60, "48 8B 77 ??")
+            .map(|r| u8_at(r.address, 3))
+            .ok_or_else(|| {
+                fail(
+                    "model_registry_release",
+                    "no value load in the release tail".into(),
+                )
+            })?;
+        let rm_node_refcount_off = scan_pattern(tail, 0x60, "FF 4F ??")
+            .map(|r| u8_at(r.address, 2))
+            .ok_or_else(|| {
+                fail(
+                    "model_registry_release",
+                    "no refcount DEC in the release tail".into(),
+                )
+            })?;
+        if !inside(resource_manager, 8) || rm_model_mutex_off >= 0x1000 {
+            return Err(fail(
+                "model_registry_release",
+                "implausible manager global / mutex offset".into(),
+            ));
+        }
+
+        // ── H. Texture create / release (same registry spin flag) ──────────
+        let create_site = self.scene3d_unique("texture_create_site")?;
+        let texture_create = call_at(create_site, 29);
+        let texture_release = self.scene3d_unique("texture_release")?;
+        if !inside(texture_create, 0x80) || !inside(texture_release, 0x40) {
+            return Err(fail(
+                "texture_create_site",
+                "texture API outside module".into(),
+            ));
+        }
+        let flag_release = rip_at(texture_release, 17);
+        let flag_create = scan_pattern(texture_create, 0x80, "F0 0F C1 05 ?? ?? ?? ??")
+            .map(|r| rip_at(r.address, 4))
+            .ok_or_else(|| {
+                fail(
+                    "texture_create_site",
+                    "no registry spin flag in the create body".into(),
+                )
+            })?;
+        if flag_release != flag_create {
+            return Err(fail(
+                "texture_release",
+                "registry spin flag differs from the create's".into(),
+            ));
+        }
+
+        // ── I. Background objects ──────────────────────────────────────────
+        let readiness = self.scene3d_unique("bgmovie_readiness")?;
+        if !inside(readiness, 0x30) {
+            return Err(fail("bgmovie_readiness", "match at module edge".into()));
+        }
+        let bgmovie_actor = rip_at(readiness, 9);
+        let bgframe_off = u8_at(readiness, 16);
+        if !inside(bgmovie_actor, 8) {
+            return Err(fail("bgmovie_readiness", "global outside module".into()));
+        }
+        // `48 83 3D disp32 imm8` is an 8-byte instruction: the RIP base is one
+        // past the displacement's end.
+        let poll_ok = self
+            .get_all_matches("bgmovie_ready_call_site")
+            .iter()
+            .filter(|s| inside(**s, 0x20))
+            .any(|s| unsafe { rip_at(*s, 3).add(1) } == bgmovie_actor && call_at(*s, 10) == readiness);
+        if !poll_ok {
+            return Err(fail(
+                "bgmovie_ready_call_site",
+                "no DPS poll names both the global and the readiness fn".into(),
+            ));
+        }
+        let cmovieclip_create = self
+            .get_address("cmovieclip_create")
+            .ok_or_else(|| fail("bg_root_create_site", "cmovieclip_create unresolved".into()))?;
+        let bg_site = self.scene3d_unique("bg_root_create_site")?;
+        if !inside(bg_site, 0x100) {
+            return Err(fail("bg_root_create_site", "match at module edge".into()));
+        }
+        let cmovieclip_pool = rip_at(bg_site, 3);
+        let cmovieclip_pool_stride = scan_pattern(bg_site, 0x60, "48 81 C7 ?? ?? ?? ??")
+            .map(|r| u32_at(r.address, 3))
+            .ok_or_else(|| fail("bg_root_create_site", "no pool stride ADD".into()))?;
+        let cmovieclip_pool_count = scan_pattern(bg_site, 0x60, "81 FB ?? ?? ?? ??")
+            .map(|r| u32_at(r.address, 2))
+            .ok_or_else(|| fail("bg_root_create_site", "no pool count CMP".into()))?;
+        // The create CALL: the first `E8` after a `LEA R8,[rip+"bg_root"]`.
+        let mut create_call: Option<*const u8> = None;
+        for lea in scan_pattern_all(bg_site, 0x100, "4C 8D 05 ?? ?? ?? ??") {
+            let s = rip_at(lea.address, 3);
+            if bytes_eq(s, b"bg_root\0") {
+                if let Some(off) = (7..0x18).find(|o| u8_at(lea.address, *o) == 0xE8) {
+                    create_call = Some(unsafe { lea.address.add(off) });
+                    break;
+                }
+            }
+        }
+        let create_call = create_call.ok_or_else(|| {
+            fail(
+                "bg_root_create_site",
+                "no CALL after the \"bg_root\" LEA".into(),
+            )
+        })?;
+        if call_at(create_call, 0) != cmovieclip_create {
+            return Err(fail(
+                "bg_root_create_site",
+                "create CALL is not cmovieclip_create (identity)".into(),
+            ));
+        }
+        let bg_clip_slot_off =
+            scan_pattern(unsafe { create_call.add(5) }, 0x100, "48 81 C1 ?? ?? ?? ??")
+                .map(|r| u32_at(r.address, 3))
+                .ok_or_else(|| {
+                    fail(
+                        "bg_root_create_site",
+                        "no clip-slot ADD after the create".into(),
+                    )
+                })?;
+        if !inside(cmovieclip_pool, cmovieclip_pool_stride)
+            || !(0x100..=0x400).contains(&cmovieclip_pool_stride)
+            || !(0x100..=0x1000).contains(&cmovieclip_pool_count)
+            || !(0x40..=0x400).contains(&bg_clip_slot_off)
+        {
+            return Err(fail(
+                "bg_root_create_site",
+                format!(
+                    "implausible pool @+0x{:X} stride 0x{:X} count 0x{:X} slot 0x{:X}",
+                    rel(cmovieclip_pool),
+                    cmovieclip_pool_stride,
+                    cmovieclip_pool_count,
+                    bg_clip_slot_off
+                ),
+            ));
+        }
+
+        // ── Plausibility of every small offset ─────────────────────────────
+        for (label, v) in [
+            ("graph_flags", graph_flags_off),
+            ("root_child", graph_root_child_off),
+            ("sort_flag", graph_sort_flag_off),
+            ("camera_vec", graph_camera_vec_off),
+            ("node_item", node_item_off),
+            ("node_sort_key", node_sort_key_off),
+            ("mgr_destroy_vec", mgr_destroy_vec_off),
+            ("mgr_mutex", mgr_mutex_off),
+            ("mgr_depth", mgr_depth_off),
+            ("mgr_rate", mgr_rate_off),
+            ("rm_map", rm_model_map_off),
+            ("rm_nil", rm_node_nil_off),
+            ("rm_key", rm_node_key_off),
+            ("rm_right", rm_node_right_off),
+            ("rm_value", rm_node_value_off),
+            ("rm_refcount", rm_node_refcount_off),
+            ("bgframe", bgframe_off),
+        ] {
+            if v >= 0x1000 {
+                return Err(fail(
+                    "scene3d",
+                    format!("implausible offset `{}` = 0x{:X}", label, v),
+                ));
+            }
+        }
+
+        Ok(Scene3dSites {
+            scene_graph_manager,
+            mgr_destroy_vec_off,
+            mgr_mutex_off,
+            mgr_depth_off,
+            mgr_rate_off,
+            mutex_lock_iat,
+            mutex_unlock_iat,
+            graph_flags_off,
+            graph_root_child_off,
+            graph_sort_flag_off,
+            graph_camera_vec_off,
+            node_item_off,
+            node_sort_key_off,
+            scene_graph_update,
+            camera_stride,
+            camera_active_off,
+            camera_view_off,
+            camera_proj_dirty_off,
+            cam_eye_off,
+            cam_target_off,
+            cam_up_off,
+            cam_w_off,
+            cam_l_off,
+            cam_r_off,
+            cam_b_off,
+            cam_t_off,
+            cam_near_off,
+            cam_far_off,
+            cam_view_dirty_off,
+            cam_proj_req_off,
+            resource_manager,
+            rm_model_mutex_off,
+            rm_model_map_off,
+            rm_node_nil_off,
+            rm_node_key_off,
+            rm_node_right_off,
+            rm_node_value_off,
+            rm_node_refcount_off,
+            texture_create,
+            texture_release,
+            bgmovie_actor,
+            bgframe_off,
+            bg_clip_slot_off,
+            cmovieclip_pool,
+            cmovieclip_pool_stride,
+            cmovieclip_pool_count,
+            // Filled in by `derive_scene3d` after the optional sub-derivation;
+            // `scene3d_sites()` reads it back from the published names.
+            texture_lookup: None,
+        })
     }
 
     /// Derive `results_course_gate_global` — the global the PlaydataTab
@@ -3956,6 +5207,11 @@ impl SignatureStore {
         self.resolved.get(name).copied()
     }
 
+    /// The scanned module's base address (for `+0x…` log formatting).
+    pub fn module_base(&self) -> *const u8 {
+        self.base
+    }
+
     pub fn require_address(&self, name: &str) -> *const u8 {
         self.get_address(name)
             .unwrap_or_else(|| panic!("Required signature '{}' was not resolved", name))
@@ -4462,6 +5718,25 @@ impl SignatureStore {
         self.resolved.insert("gameplay_actor_vtable".into(), vtable);
         let offset = unsafe { vtable.offset_from(self.base) as usize };
         log_info!("  [+] gameplay_actor_vtable (RTTI) @ +0x{:X}", offset);
+    }
+
+    /// Find the `sequence::dance::DancePlaySequence` vtable via RTTI — the
+    /// identity gate that tells a LIVE DancePlaySequence apart from any other
+    /// active TransitionSequence child (the scene callbacks fire BEFORE
+    /// `createNextSequence`, so at GAMEPLAY entry the child is still the
+    /// stage-indicator sequence for a few frames; `song_reset::dps_step`
+    /// refuses to read a step out of it). Optional: a miss only disables the
+    /// consumers' DPS-step gates (background dancers stay hidden).
+    fn find_dance_play_sequence_vtable(&mut self) {
+        let rtti_name = ".?AVDancePlaySequence@dance@sequence@@";
+        let vtable = match self.find_vtable_by_rtti(rtti_name, "dance_play_sequence_vtable") {
+            Some(v) => v,
+            None => return,
+        };
+        self.resolved
+            .insert("dance_play_sequence_vtable".into(), vtable);
+        let offset = unsafe { vtable.offset_from(self.base) as usize };
+        log_info!("  [+] dance_play_sequence_vtable (RTTI) @ +0x{:X}", offset);
     }
 
     /// Derive `app_heap_handle` from `app_heap_reserve_anchor`.

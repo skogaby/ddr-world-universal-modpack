@@ -33,6 +33,7 @@ pub mod announcer_mute;
 pub mod anytime_speedmod;
 pub mod assist_tick;
 pub mod autoplay;
+pub mod background_dancers;
 pub mod center_arrows_single;
 pub mod classic_difficulty;
 pub mod config;

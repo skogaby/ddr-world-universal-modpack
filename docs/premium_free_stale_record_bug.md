@@ -176,12 +176,14 @@ A3's "ghost is 0" bug, 1:1.
 Post-original detour on `result_commit`: snapshot `rec+0xB8..0xC0` keyed by
 `(side, rec+0x00, rec+0x08, rec+0x04)`, keep-if-better on `rec+0x10`
 (course mode skipped). Post-original detour on `ghost_actor_init`: when the
-freeze is on, `actor+0x98` is empty (or id < 0) and no network load is in
-flight (`state==0 && id>0`), look the chart up via the freshly prepared
-`record[frozen]` header, copy the cached bytes in via the game's own
-`ghost_vec_copy` (derived from the CALL at `ghost_local_slot_copy_site+25`),
-set state 2 / timer 0 / ready byte — exactly the local-slot branch. Cache is
-session-scoped (cleared at EAM_EXIT / attract). Fail-open.
+freeze is on and the game resolved a LOCAL SLOT (`id < 0`) whose copy left
+`actor+0x98` empty (originally "empty OR id < 0" — see the 2026-09-16
+addendum for why the `id == 0` arm was wrong), look the chart up via the
+freshly prepared `record[frozen]` header, copy the cached bytes in via the
+game's own `ghost_vec_copy` (derived from the CALL at
+`ghost_local_slot_copy_site+25`), set state 2 / timer 0 / ready byte —
+exactly the local-slot branch. Cache is session-scoped (cleared at EAM_EXIT
+/ attract). Fail-open.
 
 Signatures (unique on 20260616/0721/0825; absent on 20250805, which already
 fails `stage_records` closed): `ghost_actor_init`, `ghost_local_slot_copy_site`,
@@ -274,3 +276,59 @@ carries the evidence (WARN lines reach spice2x's log.txt — the level is only
 a tag in the OutputDebugString text). Diag note: the result commit runs after
 the scene id has advanced past GAMEPLAY, so its attract gate is
 `>= SONG_SELECT`, not `== GAMEPLAY`.
+
+---
+
+## Addendum 2026-09-16 — ghost cache resurrected the pacemaker with TARGET OFF
+
+Field report: with Premium Free on, the first play of a song shows no
+pacemaker (correct — the player has TARGET off), but every replay of that
+song — after finishing it OR after backing out of it — shows the pacemaker.
+Bisected by the reporter to the `premium-free` toggle.
+
+### Root cause: the ghost id is the game's TARGET-option verdict
+
+The ghost-id lookup `ghost_actor_init` calls (`FUN_18001dc90` on 20260825,
+`FUN_18001d6c0` on 20250805 — same body, only the `PlayerWork` offsets move)
+is where the player's PACEMAKER TARGET option lives:
+
+```
+if (GameWork+0xD0 == 1 || == 2)      return 0;   // BPL / matching modes
+switch (PlayerWork + <target>) {                  // 0x1328 new / 0x1308 old
+  case 0:      own PB — score-DB (PW+0x178 / +0x188 old) entry+0x10
+               (negative = same-credit LOCAL SLOT, the only id the freeze breaks)
+  case 1..3:   rival slot  PW+<target>+4+(n-1)*4  → network id, 0 when unset
+  case 4..6:   machine / area / world ranking entry → network id
+  default:     return 0;                          // −1 = OFF (PlayerWork reset)
+}
+```
+
+So **`id == 0` means "the game decided there is no pacemaker"** — TARGET
+OFF, no PB in the DB, an unset rival slot, or a battle mode — and the init
+then leaves the vector empty WITHOUT touching the `+0xC0` ready byte. The
+init's three-way `TEST RAX,RAX` structure is identical on 20250805 (the
+`PlayerWork+0x1308` byte the 20250805 hex-edit modpack compared for its
+pacemaker-swap gate is this same field, one layout fork earlier).
+
+The shipped inject rule was `!network_in_flight && (id < 0 || have == 0)`.
+The `have == 0` arm was meant as belt-and-braces for the empty local-slot
+copy, but with TARGET off every song arrives as `id 0 / state 2 / vec 0` and
+that arm is TRUE — first play finds no cache entry (correct by accident),
+every replay of a chart the result commit has since cached injects the PB
+and raises the ready byte. "Backing out" reproduces because the result
+commit runs on the natural fail path too.
+
+### Fix (`ghost_cache.rs`)
+
+Inject iff `id < 0 && have == 0` (the game chose the local slot and the copy
+came back empty), plus an explicit course-mode skip mirroring the store side
+(course mode copies the course record's `+0x2A8` vector, not a stage slot).
+`id == 0` is never touched; `id > 0` (network) never was. The "no injection"
+INFO now names the id-0 reason. Offset-agnostic — the fix reads only the
+game's own id, never the option field.
+
+Validation: `cargo check` clean; cabinet test pending — TARGET OFF: replay a
+PB'd chart under the freeze ⇒ no pacemaker, log shows
+`id=0 ... (no injection needed -- id 0 = game chose no pacemaker ...)`.
+TARGET = MY BEST: replay ⇒ `ghost injected ... id=-1` as before (the
+2026-09-01 case must still hold).

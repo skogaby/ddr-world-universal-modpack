@@ -123,7 +123,10 @@ unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i3
         let rva = addr.wrapping_sub(base);
         format!("INSIDE our DLL (base+0x{rva:X})")
     } else {
-        "in game / other module".to_string()
+        match module_of(addr) {
+            Some((name, rva)) => format!("in {name}+0x{rva:X}"),
+            None => "in game / other module (unmapped)".to_string(),
+        }
     };
     let thread = std::thread::current();
     crash_log(&format!(
@@ -136,6 +139,41 @@ unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i3
         thread.id(),
     ));
     EXCEPTION_CONTINUE_SEARCH
+}
+
+/// Best-effort: the module containing `addr` (file name only) and the
+/// address's offset from its base — so a fault inside `ntdll!memcpy` or a
+/// D3D module is distinguishable from the game's own code. Fixed stack
+/// buffer, no allocation beyond the returned `String` (the filter already
+/// formats a `String`). `None` when the address is not inside any module.
+fn module_of(addr: usize) -> Option<(String, usize)> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GetModuleFileNameA, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+    unsafe {
+        let mut module = HMODULE::default();
+        if GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(addr as *const u16),
+            &mut module,
+        )
+        .is_err()
+            || module.is_invalid()
+        {
+            return None;
+        }
+        let mut buf = [0u8; 260];
+        let n = GetModuleFileNameA(module, &mut buf) as usize;
+        if n == 0 || n >= buf.len() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&buf[..n]).into_owned();
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+        Some((name, addr.wrapping_sub(module.0 as usize)))
+    }
 }
 
 /// Install the unhandled-exception filter and record our DLL's address range.

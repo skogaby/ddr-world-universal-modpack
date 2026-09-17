@@ -25,9 +25,9 @@ use crate::mods::mod_trait::{EarlyContext, Mod, ModContext, ModRegistry};
 use crate::services::{
     afp_patcher, asset_loader, avs_layeredfs, bm2d_api, bm2d_package, bottom_text, cull_window,
     custom_options, custom_options_persistence, game_audio, input_manager, judge_hook,
-    movie_policy, movie_sync, options_scroll, overlay_draw, render_notes_hook, scene_manager,
-    se_bank_synth, series_filter_scroll, song_rate, song_reset, stage_records, texture_resolver,
-    widget_renderer,
+    movie_policy, movie_sync, options_scroll, overlay_draw, render_notes_hook, scene3d,
+    scene_manager, se_bank_synth, series_filter_scroll, song_rate, song_reset, stage_records,
+    texture_resolver, widget_renderer,
 };
 
 #[no_mangle]
@@ -196,6 +196,7 @@ fn init() {
         Box::new(mods::per_song_judgement_offsets::PerSongJudgementOffsetsMod::new()),
         Box::new(mods::s_marvelous::SMarvelousMod::new()),
         Box::new(mods::two_player_bpl_mode::TwoPlayerBplMod::new()),
+        Box::new(mods::background_dancers::BackgroundDancersMod::new()),
         Box::new(mods::smx_hardware::SmxHardwareMod::new()),
         // After assist_tick: its enable registers the tick-alignment
         // listener on the assist-tick mod (order matters only for the log).
@@ -327,6 +328,15 @@ fn init() {
         log_warn!("AssetLoader unavailable -- on-demand preview overlays disabled");
     }
     profiling::tick("asset_loader");
+
+    // 4e3. scene3d — the Background Dancers engine contact points
+    // (FileManager arc registration, ResourceManager model lookup; later the
+    // render-item / scene-node builders). All-or-nothing over the derived
+    // `scene3d_*` group; unavailable ⇒ the mod skips itself.
+    if !scene3d::init(&signatures) {
+        log_warn!("scene3d unavailable -- Background Dancers inactive");
+    }
+    profiling::tick("scene3d");
 
     // 4f. Series filter scroll — hook panel builder for scroll activation
     if bm2d_ok {
@@ -659,7 +669,7 @@ fn init() {
         widget_renderer::run_on_render_thread(move || {
             // Splash screen display
             if let Some(mut title) = widget_renderer::create_text_widget() {
-                title.set_text("DDR World Universal Modpack v1.3");
+                title.set_text("DDR World Universal Modpack v1.4");
                 title.set_position(10.0, 10.0);
                 title.set_scale(1.1, 1.1);
                 title.set_color(1.0, 1.0, 1.0, 1.0);

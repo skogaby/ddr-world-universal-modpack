@@ -1406,3 +1406,76 @@ test could ever expose it.
 - Ghidra: libafp's callback-table thunks (`(*DAT_180245160)(…)`) show up as
   "no callers" until the program is (re)analysed — an empty `get_function_callers`
   on an obviously-used helper means re-run analysis, not that it is dead.
+
+## A game-computed id is a VERDICT, not a data slot: never "repair" its null case (2026-09-16)
+
+The Premium Free ghost cache injected a cached PB ghost whenever the
+`GhostActor`'s vector came back empty — `id < 0 || have == 0`. The `have == 0`
+arm looked like harmless belt-and-braces for the local-slot copy the frozen
+counter breaks. It was not: the ghost-id lookup (`FUN_18001dc90`) is the ONLY
+place the player's PACEMAKER TARGET option is consulted (`switch
+PlayerWork+0x1328`: 0 own PB → local slot / rival / machine → network / −1 OFF
+→ 0), so `id 0 / vec 0` is the game saying "no pacemaker". With TARGET off the
+first play of a song found no cache entry (correct by accident) and every
+replay injected the PB and raised the visibility byte. Two cabinet runs on
+2026-09-01 missed it because the tester's TARGET was on.
+
+**Rules:**
+
+- Before writing a fallback that fires on "the game produced nothing", read
+  the producer and enumerate every reason it returns nothing. If any of those
+  reasons is a player/operator choice, the null case is a decision to respect,
+  not a gap to fill — gate on the game's OWN positive signal (`id < 0` here)
+  and let the null case stay null.
+- Two failure shapes that look identical at the consumer (`vec == 0`) can have
+  opposite meanings; log the discriminating input (the id) in the "no action"
+  line so a field log distinguishes them without another repro round-trip.
+- Cabinet validation only covers the options the tester had set. When a fix
+  keys off a per-player option's OUTPUT, write down which option values were
+  exercised, and re-run the negative case (option OFF) explicitly.
+
+## Decode a crash offset against the CABINET'S build, and buffers the engine may free need its header (2026-09-16)
+
+Two Background Dancers deploys (Step 7 #1/#2) faulted at `gamemdx.dll+0x24178`
+on every close after a song. Read against the Ghidra program (20260825) that
+offset sits inside the SceneGraphManager per-frame tick's camera-copy block,
+which produced a plausible story ("we activate camera slot 0, the tick copies
+into destroyed passes") and a planned fix that would have done nothing — the
+cabinet runs 20260915, where the same offset is `MOV RDI,[RBX-0x20]` in the
+manager SHUTDOWN: the engine freeing the destroy vector's storage through the
+allocation header in front of it. Our mod-installed 256-entry buffer was a
+bare `VirtualAlloc` block (page-aligned ⇒ `begin−0x20` unmapped).
+
+**Rules:**
+
+- A `module+0x…` crash offset is only meaningful against the file that was
+  running. The maintainer's cabinet build is often NOT the Ghidra program —
+  check `log.txt`'s `build timestamp of dll` / md5 against `~/Desktop/
+  ddr_modules` and disassemble THAT image (capstone over the PE; the sweep
+  table in the RE doc gives the per-build function starts). A story that
+  "explains" the offset against the wrong build is worse than no story.
+- Every buffer the engine's `me::` allocator hands out carries
+  `{allocator* @-0x20, raw @-0x18, size @-0x10}` and every engine free walks
+  that header (`FUN_1801de6e0`: lock, free, `--refcount`, unlock, dtor at 0).
+  Anything of OURS that an engine code path may free — a vector's storage we
+  installed, a block we handed to an engine-owned pointer — must carry a fake
+  header pointing at a mod-owned no-op allocator with a refcount that never
+  reaches zero. "The engine never frees it" needs the destructor decompiled,
+  not just the steady-state flush.
+- Before a "deactivate X we activated" fix, confirm stock ever runs without X:
+  camera slot 0 is ACTIVE in stock World (`FUN_180023f10` sets `+0x3F4 = 1`
+  for slot 0), so the tick's copy block runs every stock frame.
+
+## Scene callbacks fire BEFORE `createNextSequence`: the live child is the OLD sequence (2026-09-16)
+
+`scene == GAMEPLAY ∧ live_dps().is_some()` looked like a DancePlaySequence
+gate; for the first frames of scene 28 the TransitionSequence's active child
+is still the stage-indicator sequence, and the SceneGraph enable bit is
+still set from the previous song, so the Background Dancers showed their
+scene at 33–43 ms into the window (before their own nodes were built) on
+every song whose loader scenes took under a frame. `live_dps()` never checked
+the child's TYPE. Rule: any "the DPS is at step N" predicate must verify the
+vtable (`song_reset::dps_step()` via the RTTI `dance_play_sequence_vtable`);
+a scene id plus a non-null child is not an identity. Corollary for per-node
+"show" flags: clear them per OBJECT after that object's first valid publish,
+never once per window on an edge — objects created after the edge miss it.

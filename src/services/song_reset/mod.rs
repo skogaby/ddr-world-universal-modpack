@@ -427,6 +427,10 @@ static SONG_PREPARED: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static BROADCAST: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static FRAME_TICK_GLOBAL: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static GAMEPLAY_ACTOR_VTABLE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+/// `sequence::dance::DancePlaySequence`'s vtable (RTTI, optional) — the
+/// identity gate of [`dps_step`]. Resolved independently of the reset's own
+/// requirements so the step gate works even when the reset service does not.
+static DPS_VTABLE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 /// Percent-family gauge vtables WITHOUT run state beyond the shared
 /// base-class block (Normal, Immortal).
 static PERCENT_GAUGE_VTABLES: [AtomicPtr<u8>; 2] = [
@@ -585,6 +589,14 @@ pub enum AccumulatorPolicy {
 /// probe. Fail-open: missing resolutions leave the service unavailable
 /// (`request_reset` returns `Refused`) without affecting anything else.
 pub fn init(signatures: &SignatureStore) -> bool {
+    // Independent of the reset's own requirements (a step gate, not a
+    // mutation): the DancePlaySequence identity for `dps_step`.
+    match signatures.get_address("dance_play_sequence_vtable") {
+        Some(addr) => DPS_VTABLE.store(addr as *mut u8, Ordering::Release),
+        None => log_warn!(
+            "SongReset: dance_play_sequence_vtable unresolved -- dps_step() unavailable (DPS-step-gated features stay off)"
+        ),
+    }
     let required: [(&str, &AtomicPtr<u8>); 6] = [
         ("song_play_by_bank", &SONG_PLAY),
         ("song_stop_by_handle", &SONG_STOP),
@@ -1284,6 +1296,84 @@ pub(crate) fn live_dps() -> Option<*mut u8> {
         }
         Some(child)
     }
+}
+
+/// [`live_dps`]'s answer as a bool, with every dereference PROBED
+/// (`memory::is_readable`) — for callers off the game thread that may run
+/// while the sequence tree is being torn down (the Background Dancers'
+/// scene-node `visit(4)` on the engine job thread at shutdown, 2026-09-16).
+/// Plain memory reads + two `VirtualQuery`s; no engine calls, no locks.
+pub(crate) fn live_dps_probed() -> bool {
+    let Some(ts) = scene_manager::current_transition_sequence() else {
+        return false;
+    };
+    if !memory::is_readable(ts as *const u8, ACTIVE_CHILD_OFFSET + 8) {
+        return false;
+    }
+    unsafe {
+        let child = memory::read_ptr(ts.add(ACTIVE_CHILD_OFFSET)) as *mut u8;
+        if child.is_null() || !memory::is_readable(child as *const u8, TREE_FLAGS_OFFSET + 4) {
+            return false;
+        }
+        memory::read_u32(child.add(TREE_FLAGS_OFFSET)) & TREE_FLAGS_DEAD_MASK == 0
+    }
+}
+
+/// Whether [`dps_step`] can ever answer (the DancePlaySequence vtable
+/// resolved on this build).
+pub(crate) fn dps_identity_available() -> bool {
+    !DPS_VTABLE.load(Ordering::Acquire).is_null()
+}
+
+/// The `agcs::StackStep` value of the live child ONLY when that child IS a
+/// `DancePlaySequence` (vtable identity) — `None` for any other live child
+/// (the stage-indicator / loader sequences that are still the active child
+/// for the first frames of GAMEPLAY, the results sequence, …), when the
+/// vtable is unresolved, or when the step reads out of range.
+///
+/// DPS steps: 0..=6 pre-song init (READY banner), **5 = the frame the
+/// SceneGraph enable bit is set** ([`DPS_STEP_GRAPH_ENABLE`]), 7 in-song
+/// ([`DPS_STEP_IN_SONG`]), 8/9 the song-end tail. The Background Dancers'
+/// visibility gate is `graph enabled ∧ dps_step() >= 5` (design FR-9):
+/// `scene == GAMEPLAY ∧ live_dps().is_some()` was satisfied by the
+/// pre-`createNextSequence` child at 33–43 ms into the window (2026-09-16
+/// deploy #2 — scenes 26/27 can take under a frame each).
+pub(crate) fn dps_step() -> Option<i32> {
+    let vt = DPS_VTABLE.load(Ordering::Acquire);
+    if vt.is_null() {
+        return None;
+    }
+    let dps = live_dps()?;
+    unsafe {
+        if memory::read_ptr(dps) != vt {
+            return None;
+        }
+        let step = read_step(dps, DPS_STEP_BASE, DPS_STEP_INDEX)?;
+        (0..=15).contains(&step).then_some(step)
+    }
+}
+
+/// The DPS step whose onUpdate sets the SceneGraph enable bit (A3's 0x1046
+/// song-start edge; the `sg_enable_bit_site` signature).
+pub(crate) const DPS_STEP_GRAPH_ENABLE: i32 = 5;
+
+/// The live DancePlaySequence's song BASENAME (the SSQ / dance-bank stem,
+/// e.g. `dind2`; the audio variant suffix at `+0xC8` is NOT appended) and
+/// the DPS pointer it was read from — `None` unless [`dps_step`] answers
+/// (vtable-verified DPS) or the string is unreadable / not ASCII. Callers
+/// key per-song caches on the pointer to notice a fresh DPS (finish-path
+/// quick restart, course stage) with the same or a different basename.
+pub(crate) fn live_dps_basename() -> Option<(usize, String)> {
+    dps_step()?;
+    let dps = live_dps()?;
+    if !memory::is_readable(dps as *const u8, DPS_BASENAME_OFFSET + 0x20) {
+        return None;
+    }
+    let bytes = unsafe { read_msvc_string(dps.add(DPS_BASENAME_OFFSET)) }?;
+    if bytes.is_empty() || bytes.len() > 32 || !bytes.iter().all(|b| b.is_ascii_graphic()) {
+        return None;
+    }
+    Some((dps as usize, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Every GamePlayActor child of `dps` (vtable match).

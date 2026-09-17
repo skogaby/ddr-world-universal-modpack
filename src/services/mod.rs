@@ -141,6 +141,7 @@ pub mod ntdll_state_shim;
 pub mod options_scroll;
 pub mod overlay_draw;
 pub mod render_notes_hook;
+pub mod scene3d;
 pub mod scene_manager;
 pub mod score_guard;
 pub mod se_bank_synth;

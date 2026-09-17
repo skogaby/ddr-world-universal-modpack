@@ -8,6 +8,7 @@
 //! that could be reused for hooking any Windows DLL.
 
 pub mod afp;
+pub mod anm;
 pub mod ap2;
 pub mod arc;
 pub mod crash_handler;

@@ -51,7 +51,7 @@ const LATE_BINDING_MODS: &[&str] = &["folder-expansion", "webui-options"];
 /// (`gameplay-timing-fixes` sat here for its first cabinet build; promoted to
 /// default ON 2026-09-10 once the tester run confirmed it — maintainer
 /// decision.)
-pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "hide-bottom-text"];
+pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "hide-bottom-text", "background-dancers"];
 
 /// Whether a mod is enabled by the config `mods` map (or its default when
 /// the key is absent). The same rule `enable_with_config` applies; exposed so

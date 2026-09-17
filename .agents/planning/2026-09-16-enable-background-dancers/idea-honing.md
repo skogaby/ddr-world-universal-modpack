@@ -1,0 +1,66 @@
+# Idea Honing: Enable Background Dancers
+
+Decision register. `Status` ∈ Proposed | Accepted | Overridden | Assumed (accepted 2026-09-16) | Open.
+
+**Readiness Confirmed 2026-09-16** — maintainer confirmed after Step 4 research + the three pre-design validations (D2 premise, D1a read site, D16 destroy path). No decision Open; assumptions D6a, D16–D21 accepted as recorded.
+Ordered by blast radius (user-visible behaviour and data first; reversible details last).
+`[!]` = the maintainer likely has not considered this one.
+
+| ID | Decision | Why it matters | Recommendation | Status |
+|----|----------|----------------|----------------|--------|
+| D1 [!] | Movie-backed songs | Option A draws 3D UNDER every 2D layer; a fullscreen background movie would cover the dancers | **Maintainer's rule:** per song, if a side's movie size (`Customize+0x30`: 0/1 = fullscreen, 2 = thumbnail "ON", 3 = OFF) is fullscreen, force it to THUMBNAIL (2) for that song so the movie stays visible in its small window over the 3D; thumbnail/off left as-is. In-memory only, restored at window exit, never persisted. No movie suppression | Overridden → Accepted |
+| D1a | Movie-size override mechanics | The field is player-persisted (logout save) and seeded into the VIDEO SIZE row at scene 25 | Write `2` into `Customize+0x30` of EVERY entered side whose value is 0/1 at the first entry into {26,27,28} (before `createNextSequence` builds the DPS — the read site is downstream of DPS init; writing both sides makes "which side governs" moot), remember originals, restore on window exit. Confirm the read timing with the first diagnostic build (thumbnail visible); fallback = move the write to scene-25 exit | Accepted (VERIFIED in Ghidra: read at DPS step 2 via the governing side `GameWork+8`; only value 1 = fullscreen) |
+| D2 [!] | How the 2D AFP gameplay background is made transparent | The customize `background_gameplay` clip is opaque and sits above the 3D | **Hide the REAL clip: per-frame `layer_set_color_raw(layer, 1,1,1,0)` on the live `bg_root` CMovieClip's AFP layer while the song is armed, `(1,1,1,1)` restored on disarm.** Handle = `*(*(BgMovieActor global + 0x58) + 0x140)` read live each frame, validated against the CMovieClip pool bounds/stride (`research/world-background-and-movie.md` §3); fallback = shared `cmovieclip_create` capture of `"bg_root"`. No placeholder arc, no detour, no destroy/release | Accepted (mechanism decided + premise VERIFIED: `+0x140` = `background_<Customize+0x14>` of side `GameWork+8` in gameplay) |
+| D3 | Dancer count | Versus vs solo look; bot sessions | One dancer per entered side (1 solo/doubles, 2 versus); the Multiplayer Bot's phantom side counts as entered (2 dancers vs the bot) | Accepted |
+| D4 | Dancer pool for "random" | 26 rlist rows; A3's no-card pool is only 13 (`unlock_id 0.0`) | Uniform over ALL rows whose body arc exists on disk (ignore unlock ids — it's a mod) | Accepted |
+| D5 | Stage pool for "random" | 34 rows: 7 `dummy00`, duplicate keys (`boom00`×2 differing by `footpanel`, `replicant00..05` six rows) | Exclude `dummy00`; pick a distinct stage KEY uniformly, then one of its rows uniformly (so replicant isn't 6× weighted); require `mapset_<key>.arc` on disk | Accepted |
+| D6 [!] | Choreography source + sequencing + tempo | A3's actual rule was untraced | **A3 rule (RE'd, `research/a3-runtime-rules.md` §1–3):** per dancer a Fisher–Yates-shuffled playlist of the FIXED pool per sex (M: `br01 br02 br03 hh01 hh02 ht01 ht02 ht03 ht04 ja01 ja02 sf01 sf02 sf03`; F: `br01 br02 hh01 hh02 hh03 ht01 ht02 ht03 ja01 ja02 sf01 sf02 sf03`), start at song start, HARD CUT both dancers to the next clip when the most-urgent dancer has < 1.5 s left, cycle forever; NO idle (`ne01_loop` is unused by A3), NO tempo scaling in retail (`MOTION_BPM_DEPENDENCY=FALSE`), nothing drawn before song start. v1 = exactly this; song-specific clips deferred | Accepted (RE-resolved) |
+| D6a | STOP slow-motion (`MOTION_STOP_SLOW=TRUE` in A3: rate 1/12 while chart BPM < 10) | Fidelity detail during chart STOPs | Defer to phase 2 (needs a World per-frame current-BPM source; dancers dance through stops in v1) | Assumed |
+| D7 | Camera source + switching | A3 cue rules were untraced | **A3 stage mode (RE'd, §4):** main list + `_non` list from the stage's rlist row, both shuffled; cycle main on clip finish; FREEZE switching when a dance clip has < 2 s left; on the < 1.5 s cut play `_non[0]` for `1 + U[0,1)` s (then rotate `_non`), resume on the next BEAT boundary. v1 = all of this EXCEPT the beat gate (resume when the hold expires — accepted deviation; beat gate = phase 2 via `core/ssq` tempo). Music mode (song-specific cameras, cue lists, f0/f1/f2) deferred with D6's song-specific clips | Accepted (RE-resolved, beat gate deferred) |
+| D8 | Re-roll granularity | Restarts/loops/course stages | New random pick per song = first entry into the {26,27,28} scene window; quick restart, in-place reset, training loop and course stages keep the same pick | Accepted |
+| D9 | Scenes covered | Attract demo has its own DPS shape | GAMEPLAY (28) only for v1; ATTRACT_DEMO (16) is a stretch item | Accepted |
+| D10 | Song time & sync | Rate/restart/scrub correctness | Animation time = `GamePlayActor+0x178` content-domain count sampled every frame (gated on `first_anchored_frame()`). **Deliberate deviation from A3 (wall-clock dt):** identical at 100 %, and rate/seek/loop/restart come free; the clip + camera schedules are PURE functions of (per-song seed, t) — clip k starts at `Σ_{j<k}(dur_j − 1.5 s)`, camera likewise — so a seek needs no state repair | Accepted |
+| D11 | Data delivery | Licensing; data-update resilience | Read arcs from the stock install, LayeredFS mod-folder override honoured (`find_first_modfile`); ship NO Konami assets; a missing arc drops that candidate; feature inert + one WARN if the stock set is absent | Accepted |
+| D12 | Identity / defaults / config | Config schema, first-run UX | id `background-dancers`, name "Enable Background Dancers", listed in `DEFAULT_OFF_MODS` until cabinet-proven; NO config section; dev-only `DDR_DANCERS_PIN=<stage_key>,<chara_key>` env (developer_mode-gated) for testing | Accepted |
+| D13 | Architecture | The whole feature | Option A hybrid (feasibility §5.1): DLL builds render items + one node type + camera writes; engine does all GPU work. Spike-gated — the plan's first steps ARE the spike; a cabinet ABI failure STOPS this project (Option B = separate PDD) | Accepted |
+| D14 | Visual completeness of v1 | Bald/naked dancers vs A3 parity | Body + parts (`head/hips/chest/face01/forearm` + mirrored right forearm) + `pl_shadow00` + rlist scale; stage parts with `_play_loop.anm` + `:N` priorities. Excluded: face switching, fade-in stipple, `.sanm/.tanm` | Accepted |
+| D15 | Load/release timing | Latency vs. never gating the game | Request arcs on first entry into {26,27,28}; attach nodes only when the model registry reports every model resident (per-frame poll); late-ready dancers pop in — the game is never waited on; release everything when the scene leaves {26,27,28} | Accepted |
+| D16 | Ownership / allocation | Crash class | Items + nodes in mod-owned `memory::alloc_zeroed`; node removal ONLY through the manager's deferred-destroy vector; bone textures via the engine texture API, released by our dtor; arcs via `FileManager::Free`. All engine calls on the render thread; all item/node writes inside `visit` | Assumed (accepted 2026-09-16; VERIFIED: engine calls our dtor(this,1) and never frees items; nodes kept FLAT under the root) |
+| D17 | Visibility before the song | Cosmetic | Match A3: nothing 3D is drawn until song start; nodes attach hidden and are shown (bind pose → clip 0) when the live DPS reaches **step 5** — VERIFIED: World's `DancePlaySequence::onUpdate` (`FUN_180057e10`) case 5 sets the SceneGraph enable bit `*(*DAT_1806f2d08+8) \|= 1`, the exact twin of A3's `0x1046` edge | Accepted (RE-confirmed + verified) |
+| D18 | Fail-open + diagnostics | Debuggability on cabinets | All-or-nothing derivation (`is_active` false + one WARN naming the missing site); per-song failure ⇒ no dancers that song + one WARN; boot INFO listing sites; per-song INFO naming stage/dancer/clip/camera picks | Assumed (accepted 2026-09-16) |
+| D19 | Validation | This repo's test model | `scripts/validate_background_dancers.sh` (evaluator vs `anm_dump.py` fixtures over all stock clips, camera math vs the add-on, rlist parse, selection, `offset_of!` layouts) + `validate_signatures.sh` + `shape_diff.py` over the pass consumers on all four builds; cabinet deploys on Windows AND CrossOver per step | Assumed (accepted 2026-09-16) |
+| D20 | Cross-mod interactions | Regressions | Custom Resolution: none (3D target follows output). Player Perspective / Playfield Styling: none (2D lane). Training/Song Speed: via D10. Bot: via D3. Attract/SMX: none | Assumed (accepted 2026-09-16) |
+| D21 | Dancer placement | Look | **A3 rule (RE'd, §5):** `x = (i − (n−1)/2) · 1.6`, `y = z = 0`, no rotation; stage at the origin; `pl_shadow00` quad at the floor projection (y=0.02) of the {Hips, Spine2, Head, LeftToeBase, RightToeBase} centroid, size `clamp(1+1.5·spread,1,2)·h·shadow_scale` low-passed 0.1; stage colour pair → dancer material param `+0x48` + shadow tint (all stock rows `000000`) | Accepted (RE-resolved) |
+
+## Decision detail
+
+### D1 — Movie-backed songs (maintainer override, 2026-09-16)
+**Question:** What happens on a song that has a background movie?
+**Rule:** Never suppress. Per song and per entered side, read `Customize+0x30` (1 = fullscreen, 2 = thumbnail "ON", 3 = OFF; 0 behaves as fullscreen). If it is fullscreen, write 2 for the duration of the song so the movie plays in its thumbnail window over the 3D scene; thumbnail/OFF are left alone. The write is in-memory only: original value remembered per side, restored when the scene leaves {26,27,28}. The VIDEO SIZE row (`movie_size_customization`) seeds from the field at scene 25 — after the restore — and the logout customize write-back happens at EAM_EXIT — also after the restore — so the player's stored preference is untouched.
+**D1a (research 2026-09-16, `research/world-background-and-movie.md` §2):** the gameplay movie is `sequence::dance::MovieActor`, created by `SceneManageActor::onInitialize` at DPS init — i.e. AFTER the scene-28 callback — so a write at the first entry into {26,27,28} precedes every plausible read. The exact `+0x30` read site was not located (virtual getter); writing BOTH entered sides removes the "which side governs" question. Verified by the first diagnostic build (thumbnail visible).
+
+### D2 — Transparent 2D background (maintainer override, 2026-09-16; mechanism resolved same day)
+**Rule:** Hide the game's real `background_gameplay` clip; do not ship a placeholder arc.
+**Mechanism (see `research/world-background-and-movie.md` §3):** per-frame alpha-0 colour on the live `bg_root` clip's AFP layer, handle read live from `BgMovieActor→BackgroundFrame+0x140`, validated against the CMovieClip pool; fallback = shared `cmovieclip_create` capture. Superseded text follows for the record.
+**Was open:** the mechanism. Candidates: (a) alpha-0 colour write on the live `bg_root` clip via `bm2d_api::layer_set_color_raw`; (b) the clip's visibility flag; (c) skipping the backdrop create for the song. Needs: the backdrop owner global on 20260825 (+ presence on 20250805/20260224/20260721), the clip slot (`owner+0x140` on 20260721), whether anything re-sets colour/visibility per frame, and whether the AFP background is created at all on movie songs.
+
+### D6 — Choreography (resolved by A3 RE, 2026-09-16)
+See `research/a3-runtime-rules.md` §1–3. The three hypotheses in the first register were all wrong: A3 has no
+idle clip, no BPM scaling in retail, and no per-clip re-pick — it shuffles the fixed pool once per dancer and
+hard-cuts to the next clip 1.5 s before the current one ends, both dancers together. `mc_bpm120`,
+`start01/between01` and `ne01_loop` are dead data. v1 reproduces the retail rule exactly.
+
+### D7 — Camera (resolved by A3 RE)
+See `research/a3-runtime-rules.md` §4. `_nonNN` sets are the 1–2 s cut-away shots that mask the dance-clip
+cut; music-mode cue lists/f0/f1/f2 are fully decoded but deferred with song-specific content.
+
+### D10 — Clock (deliberate deviation)
+A3 advances animation by wall-clock dt × graph rate; the port samples the content-domain music count. At 100 %
+the two coincide (rate 1.0); under SONG SPEED the dancers follow the music (A3 never had a rate). Every
+schedule is a pure function of (seed, t) so restarts/scrubs/loops need no state repair.
+
+### D8 — Re-roll granularity
+A quick restart (`finish` fast path: 28→27→28) and an in-place `song_reset` both stay inside the {26,27,28} window, so the arcs stay resident and the pick is kept. Course mode re-enters 28 per stage? — unverified; the rule "new pick on first entry into the window" gives one pick per course if the whole course stays in-window. Acceptable for v1.
+
+### D12 — Identity
+Other mod ids are verb-less (`hide-bottom-text` is the exception). `background-dancers` keeps the id short; the display name is exactly what the maintainer asked for.

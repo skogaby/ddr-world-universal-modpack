@@ -32,7 +32,8 @@
     "s-marvelous": true,
     "split-ssq-auto-discovery": true,
     "custom-resolution": false,
-    "gameplay-timing-fixes": true
+    "gameplay-timing-fixes": true,
+    "background-dancers": false
   },
   "diagnostics": {
     "profiling": false,

@@ -11,6 +11,7 @@ mod_assets/
 **/__pycache__/
 log.txt
 *.arc
+/tests/
 
 # Claude Code
 .claude/settings.local.json

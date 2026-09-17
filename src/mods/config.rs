@@ -396,6 +396,34 @@ pub struct NonNativeOsSupportConfig {
     pub movie_mode: Option<String>,
 }
 
+/// Config for the `background-dancers` mod (`background_dancers` section).
+/// Operator-edited only (read at mod enable; the DLL never writes it back).
+/// Both keys are the two A3 `ConfigBank` switches of the dancer actor's
+/// graph-rate setter; A3 retail shipped `bpm_sync = false`, `stop_slow =
+/// true`. Missing section / keys ⇒ both `true`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct BackgroundDancersConfig {
+    /// `MOTION_BPM_DEPENDENCY`: the dance/camera/stage clock runs at
+    /// `chart BPM / 120` (the clips are authored at 120 BPM — half a second
+    /// of dance per beat), phase-pinned to the chart's measure grid, cuts on
+    /// beats. `false` = real time (A3 retail).
+    #[serde(default = "default_true")]
+    pub bpm_sync: bool,
+    /// `MOTION_STOP_SLOW`: while the chart BPM is below 10 (a STOP) the
+    /// scene runs at 1/12 speed instead of freezing / racing.
+    #[serde(default = "default_true")]
+    pub stop_slow: bool,
+}
+
+impl Default for BackgroundDancersConfig {
+    fn default() -> Self {
+        BackgroundDancersConfig {
+            bpm_sync: true,
+            stop_slow: true,
+        }
+    }
+}
+
 /// Config for the `s-marvelous` mod (`s_marvelous` section). Seeded from
 /// here at mod enable; ALSO live-editable from the overlay menu's
 /// S-MARVELOUS JUDGEMENT section (GLOBAL SETTINGS), which persists the
@@ -699,6 +727,8 @@ pub struct ConfigFile {
     pub resolution: Option<ResolutionConfig>,
     #[serde(default)]
     pub gameplay_timing_fixes: Option<GameplayTimingFixesConfig>,
+    #[serde(default)]
+    pub background_dancers: Option<BackgroundDancersConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -739,6 +769,7 @@ pub fn init() {
                     smx_hardware: None,
                     resolution: None,
                     gameplay_timing_fixes: None,
+                    background_dancers: None,
                 }
             }
         },
@@ -768,6 +799,7 @@ pub fn init() {
                 smx_hardware: None,
                 resolution: None,
                 gameplay_timing_fixes: None,
+                background_dancers: None,
             }
         }
     };

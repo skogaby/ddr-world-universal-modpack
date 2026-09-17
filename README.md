@@ -165,6 +165,7 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
+| **Enable Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the stage/character/motion/camera files World still ships but never opens. Off by default; see below. |
 | **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. On by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
@@ -184,6 +185,14 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |
 | **Non-Native OS Support** | Keeps the game stable under CrossOver/Wine (background-movie handling). |
 | **SMX Hardware and Touchscreen Overlay** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
+
+### Enable Background Dancers
+
+DDR World removed the 3D dancers and stages that every earlier DDR showed behind the arrows — but the game engine still has the whole 3D pipeline, and the stock World install still ships all of A3's stage, character, choreography and camera files. This mod puts them back: on every song a random stage and random dancer(s) (one per player, wearing their hair/face/costume parts, with a floor shadow) dance to the A3 choreography, filmed by the stage's own camera shots that cut away right before each dance change, exactly as A3 sequenced them. Nothing in the game is patched or hooked for rendering — the modpack builds the scene objects and the game's own model passes draw them.
+
+The dancers move in time with the music: the choreography is authored at 120 BPM and plays at half a second per chart beat, locked to the chart's beat grid (cuts land on beats), so it speeds up and slows down with the song's tempo and drops into slow motion through a STOP — the two sequencing options DDR A3 shipped switched off or on, both on here by default (`background_dancers` in `mod-config.json`).
+
+Off by default while it is being proven on cabinets; turn it on from the MODS tab. Songs that have a background movie keep it — the movie is shown in its "sized" thumbnail position for the song (your VIDEO SIZE setting is untouched) so the 3D scene stays visible around it. Anything that cannot be loaded (a missing part, a stage without camera data) simply degrades: the song plays with fewer props or a fixed camera, never without the game.
 
 ## Your Scores Are Safe
 
@@ -217,6 +226,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `music_wheel_song_length` | Position/size of the length readout |
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
+| `background_dancers` | Enable Background Dancers: `bpm_sync` (default `true` — the dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats) and `stop_slow` (default `true` — everything drops to 1/12 speed through a chart STOP, as in DDR A3). Set `bpm_sync` to `false` for the A3 retail real-time dance. Read at boot |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
 | `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–16, default 12), judgement word art (`judgement_color`: `purple_shadow` / `all_purple`), receptor flash on an S-Marvelous hit (`receptor_flash`: `purple` = violet burst, default / `white` = identical to Marvelous) — all also editable in the mod menu. The stock Marvelous word's shimmer is always muted (the old `marvelous_shimmer` key is ignored) |
 | `shader_fixes` | Arrow anti-aliasing toggle (also editable in the mod menu) |

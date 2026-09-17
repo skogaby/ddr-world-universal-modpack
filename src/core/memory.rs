@@ -2,8 +2,9 @@
 
 use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
 use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RESERVE,
-    PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS,
+    VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT,
+    MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_NOACCESS,
+    PAGE_PROTECTION_FLAGS,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -69,6 +70,18 @@ pub fn is_readable(addr: *const u8, len: usize) -> bool {
 /// Allocate a zero-filled RWX memory block.
 pub unsafe fn alloc_zeroed(size: usize) -> *mut u8 {
     VirtualAlloc(None, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as *mut u8
+}
+
+/// Release a block obtained from [`alloc_zeroed`] (the whole reservation —
+/// `VirtualFree(MEM_RELEASE)` takes the base address and size 0). Null is a
+/// no-op. Thread-safe; the caller guarantees nothing still references the
+/// block. Most mod allocations are process-lifetime and never freed — this
+/// exists for per-song objects (scene3d render items / nodes).
+pub unsafe fn free_alloc(base: *mut u8) {
+    if base.is_null() {
+        return;
+    }
+    let _ = VirtualFree(base as *mut _, 0, MEM_RELEASE);
 }
 
 /// Allocate a zero-filled RWX memory block within ±2GB of `near_addr`.
