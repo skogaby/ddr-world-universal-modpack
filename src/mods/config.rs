@@ -271,19 +271,34 @@ fn default_distant_zoom() -> f32 {
 }
 
 /// Config for the `shader-fixes` mod (runtime shader-container synthesis).
-/// `anti_aliasing` is the cabinet-wide ARROW ANTI-ALIASING toggle (also
-/// adjustable from the mod overlay menu; applies on the NEXT LAUNCH — the
-/// containers are synthesized at arc-open time during boot).
+///
+/// * `anti_aliasing` — ARROW ANTI-ALIASING (program 0 of the arrow/judge
+///   containers uses the index-aware AA pixel shaders). Cabinet-wide, mod
+///   menu, next launch.
+/// * `dancer_lighting` / `dancer_outlines` / `lit_models` — LEGACY (the
+///   2026-09-17 experiment builds). The 3D scene's style moved to
+///   `background_dancers.style` / `.outlines` (whole scene, per song); these
+///   are read ONLY as migration sources when those keys are absent and are
+///   never written back.
 #[derive(Deserialize, Clone, Debug)]
 pub struct ShaderFixesConfig {
     #[serde(default = "default_true")]
     pub anti_aliasing: bool,
+    #[serde(default)]
+    pub dancer_lighting: Option<String>,
+    #[serde(default)]
+    pub dancer_outlines: Option<bool>,
+    #[serde(default)]
+    pub lit_models: Option<bool>,
 }
 
 impl Default for ShaderFixesConfig {
     fn default() -> Self {
         Self {
             anti_aliasing: true,
+            dancer_lighting: None,
+            dancer_outlines: None,
+            lit_models: None,
         }
     }
 }
@@ -413,6 +428,39 @@ pub struct BackgroundDancersConfig {
     /// scene runs at 1/12 speed instead of freezing / racing.
     #[serde(default = "default_true")]
     pub stop_slow: bool,
+    /// SCENE STYLE — how the whole 3D scene (stage props AND dancers) is
+    /// shaded: `"stock"` (the game's unlit shaders), `"lit"` (a fixed key
+    /// light, smooth) or `"cel"` (the SAME key light, banded per pixel + rim
+    /// ink). Applied per SONG by re-pointing the render items' material
+    /// copies at the synthesized variant containers; additive glows,
+    /// translucents, the skydome part and the floor shadow always stay stock.
+    /// Absent ⇒ the legacy `shader_fixes.dancer_lighting` / `lit_models`,
+    /// else `lit`. Mod menu (GLOBAL SETTINGS, Background Dancers), next song.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// SCENE OUTLINES — inverted-hull ink outline around every restyled mesh
+    /// (needs a non-stock style). Absent ⇒ the legacy
+    /// `shader_fixes.dancer_outlines`, else `true`. Next song.
+    #[serde(default)]
+    pub outlines: Option<bool>,
+    /// Outline rim width in 720p pixels for the dancers (bodies + parts),
+    /// default 2.0 (clamped 0.5..=6). Constant on screen up to 25 m of camera
+    /// distance. Operator knob, next song.
+    #[serde(default)]
+    pub outline_px: Option<f32>,
+    /// Outline rim width for the stage props, default 1.5 (large flat props
+    /// read heavier than a figure at the same width). Same clamp.
+    #[serde(default)]
+    pub outline_px_stage: Option<f32>,
+}
+
+/// Clamp an outline width to the range the hull VS was tuned for.
+pub fn clamp_outline_px(px: f32) -> f32 {
+    if px.is_finite() {
+        px.clamp(0.5, 6.0)
+    } else {
+        2.0
+    }
 }
 
 impl Default for BackgroundDancersConfig {
@@ -420,7 +468,43 @@ impl Default for BackgroundDancersConfig {
         BackgroundDancersConfig {
             bpm_sync: true,
             stop_slow: true,
+            style: None,
+            outlines: None,
+            outline_px: None,
+            outline_px_stage: None,
         }
+    }
+}
+
+impl BackgroundDancersConfig {
+    /// The effective scene style: `style` when present and parseable, else
+    /// the legacy shader_fixes keys, else `lit`. `Err` carries the
+    /// unparseable spelling so the caller can WARN once.
+    pub fn scene_style(
+        &self,
+        legacy: Option<&ShaderFixesConfig>,
+    ) -> Result<crate::services::avs_layeredfs::shader_layout::SceneStyle, String> {
+        use crate::services::avs_layeredfs::shader_layout::SceneStyle;
+        if let Some(s) = self.style.as_deref() {
+            return SceneStyle::parse(s).ok_or_else(|| s.to_string());
+        }
+        if let Some(sf) = legacy {
+            if let Some(s) = sf.dancer_lighting.as_deref() {
+                return SceneStyle::parse(s).ok_or_else(|| s.to_string());
+            }
+            if sf.lit_models == Some(false) {
+                return Ok(SceneStyle::Stock);
+            }
+        }
+        Ok(SceneStyle::Lit)
+    }
+
+    /// The effective outlines flag (`outlines`, else the legacy
+    /// `shader_fixes.dancer_outlines`, else `true`).
+    pub fn scene_outlines(&self, legacy: Option<&ShaderFixesConfig>) -> bool {
+        self.outlines
+            .or_else(|| legacy.and_then(|sf| sf.dancer_outlines))
+            .unwrap_or(true)
     }
 }
 

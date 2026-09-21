@@ -22,7 +22,7 @@ directory current after each step (resume point).
 - [x] Step 7: Director, session and lifecycle — first fully animated random song — **cabinet PASS 2026-09-16 (deploy #3 with Steps 8–10; RE doc §3.4 for the deploy-#2 findings)**
 - [x] Step 8: Character assembly completeness — parts, mirrored forearm, shadow, stage priorities — **cabinet PASS 2026-09-16 (rinon01 head+chest+both forearms+face, shadows on every dancer)**
 - [x] Step 9: Camera director — A3 stage-mode sequencing with the re-projection — **cabinet PASS 2026-09-16**
-- [x] Step 10: Movie-size override, diagnostics, registration, documentation, final validation — **cabinet PASS 2026-09-16 (movie songs in the thumbnail, random stage + dancer every song); one follow-up built the same day: training REWIND no longer restarts the timeline (clock `t0` never re-latches) — awaiting its confirmation run**
+- [x] Step 10: Movie-size override, diagnostics, registration, documentation, final validation — **cabinet PASS 2026-09-16; post-PASS follow-ups (rewind follows the timeline; BPM sync + STOP slow-motion, default ON — RE doc §3.5) cabinet-CONFIRMED 2026-09-17. FEATURE COMPLETE**
 
 ---
 

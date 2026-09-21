@@ -46,7 +46,10 @@ IMAGE=ddr-shader-build
 SRC_DIR=shaders/src
 OUT_DIR=data_mods/shader_fixes/blobs
 
-# Blob manifest: "<hlsl name>:<profile>:<entry point>:<output blob>".
+# Blob manifest: "<hlsl name>:<profile>:<entry point>:<output blob>[:<defines>]".
+# <defines> is an optional space-separated list of preprocessor symbols
+# (each becomes an fxc `/D SYM` — the SEPARATED form: wine path-translates a
+# joined `/DSYM` argument into nothing).
 # - the two AA pixel shaders (program 0's PS when ANTI-ALIASING is on;
 #   always the PS of the arrow perspective program)
 # - the two perspective vertex shaders (program 1 of arrow/default)
@@ -74,6 +77,34 @@ BLOBS=(
   "themes/theme_blobs:ps_3_0:ps_main:theme_blobs.ps.d3dbc"
   "themes/theme_ps2:ps_3_0:ps_main:theme_ps2.ps.d3dbc"
   "themes/theme_prime_cube:ps_3_0:ps_main:theme_prime_cube.ps.d3dbc"
+  # ── 3D scene style variants (Background Dancers "Scene Style", 2026-09) ──
+  # The synthesis packs, for every model shader NAME the stage/character arcs
+  # use, a `<name>_lit` and a `<name>_cel` container (outline pair at program
+  # 0); the DLL re-points its private material copies at them per session
+  # (docs/background_dancers_research.md §4.6/§4.7). All include
+  # shaders/src/mdl_common.hlsli. Which blob pairs with which name is the
+  # pure table `shader_layout::MODEL_VARIANTS`.
+  # LIT vertex shaders (paired with each name's OWN stock PS):
+  "mdl_lambert:vs_3_0:vs_bg_main:mdl_bg_lambert.vs.d3dbc"                 # gs_model_default PS contract (TEXCOORD0)
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_lambert.vs.d3dbc"
+  "mdl_lambert:vs_3_0:vs_bg_main:mdl_bg_lit_uv3.vs.d3dbc:UV3"             # mdl_* PS contract (TEXCOORD3 + fog)
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_lit_uv3.vs.d3dbc:UV3"
+  "mdl_lambert:vs_3_0:vs_bg_main:mdl_bg_lit_uv3_vc.vs.d3dbc:UV3 VCOLOR"
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_lit_uv3_vc.vs.d3dbc:UV3 VCOLOR"
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_lit_notex_vc.vs.d3dbc:NOTEX VCOLOR"
+  # CEL style (banded light + rim ink, per pixel) — own VS + PS:
+  "mdl_cel:vs_3_0:vs_cel_bg_main:mdl_bg_cel.vs.d3dbc"
+  "mdl_cel:vs_3_0:vs_cel_ch_main:mdl_ch_cel.vs.d3dbc"
+  "mdl_cel:vs_3_0:vs_cel_bg_main:mdl_bg_cel_vc.vs.d3dbc:VCOLOR"
+  "mdl_cel:vs_3_0:vs_cel_ch_main:mdl_ch_cel_vc.vs.d3dbc:VCOLOR"
+  "mdl_cel:ps_3_0:ps_cel_main:mdl_cel.ps.d3dbc"
+  "mdl_cel:ps_3_0:ps_cel_main:mdl_cel_c.ps.d3dbc:CCOLOR"
+  "mdl_cel:ps_3_0:ps_cel_main:mdl_cel_notex.ps.d3dbc:NOTEX CCOLOR"
+  # Inverted-hull OUTLINE pair (program 0 — bound only for bit-31 hull records):
+  "mdl_cel:vs_3_0:vs_outline_bg_main:mdl_bg_outline.vs.d3dbc"
+  "mdl_cel:vs_3_0:vs_outline_ch_main:mdl_ch_outline.vs.d3dbc"
+  "mdl_cel:ps_3_0:ps_outline_main:mdl_outline.ps.d3dbc"
+  "mdl_cel:ps_3_0:ps_outline_main:mdl_outline_notex.ps.d3dbc:NOTEX"
 )
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -97,10 +128,18 @@ if [[ "$BACKEND" == "fxc" ]]; then
         | sed -n 's/.*Shader Compiler \([0-9.]*\).*/\1/p' | head -1 || true)
   [[ "$ver" == "$FXC_VERSION_PIN" ]] \
     || die "fxc version drift: got '$ver', pinned '$FXC_VERSION_PIN'"
-  compile() { # compile <profile> <entry> <hlsl> <out>
+  compile() { # compile <profile> <entry> <hlsl> <out> [defines...]
+    local profile=$1 entry=$2 hlsl=$3 out=$4; shift 4
+    local dargs=()
+    for d in "$@"; do dargs+=(/D "$d"); done
+    # A stale output must never survive a failed compile (a 2026-09-21
+    # `set -u` slip on an empty array did exactly that, silently).
+    rm -f "$out"
+    # (${arr[@]+"${arr[@]}"}: bash 3.2 + `set -u` treats an EMPTY array
+    # expansion as an unbound variable.)
     "$WINE" --bottle "$WINE_BOTTLE" "$FXC_EXE" /nologo \
-        /T "$1" /E "$2" /Fo "$4" "$3" 2>/dev/null | grep -v '^msync:' || true
-    [[ -s "$4" ]] || die "fxc produced no output for $3 ($2)"
+        /T "$profile" /E "$entry" ${dargs[@]+"${dargs[@]}"} /Fo "$out" "$hlsl" 2>/dev/null | grep -v '^msync:' || true
+    [[ -s "$out" ]] || die "fxc produced no output for $hlsl ($entry)"
   }
 else
   command -v docker >/dev/null || die "docker not found (required for the vkd3d fallback)"
@@ -112,9 +151,13 @@ else
   ver=$(docker run --rm "$IMAGE" vkd3d-compiler --version | sed -n 's/.*version \([0-9.]*\).*/\1/p' | head -1)
   [[ "$ver" == "$VKD3D_VERSION_PIN" ]] \
     || die "vkd3d-compiler version drift: got '$ver', pinned '$VKD3D_VERSION_PIN'"
-  compile() { # compile <profile> <entry> <hlsl> <out>
+  compile() { # compile <profile> <entry> <hlsl> <out> [defines...]
+    local profile=$1 entry=$2 hlsl=$3 out=$4; shift 4
+    local dargs=()
+    for d in "$@"; do dargs+=(-D "$d"); done
+    rm -f "$out"
     docker run --rm -v "$PWD":/work -w /work "$IMAGE" \
-      vkd3d-compiler -x hlsl -b d3dbc -e "$2" --profile "$1" "$3" -o "$4"
+      vkd3d-compiler -x hlsl -b d3dbc -e "$entry" --profile "$profile" ${dargs[@]+"${dargs[@]}"} "$hlsl" -o "$out"
   }
 fi
 echo "[*] compiler backend: $BACKEND $ver"
@@ -138,11 +181,12 @@ fi
 mkdir -p "$OUT_DIR"
 
 for spec in "${BLOBS[@]}"; do
-  IFS=':' read -r name profile entry out <<< "$spec"
+  IFS=':' read -r name profile entry out defs <<< "$spec"
   hlsl="$SRC_DIR/$name.hlsl"
   [[ -f "$hlsl" ]] || die "missing $hlsl"
-  echo "[*] $out  ($name.hlsl $entry/$profile)"
-  compile "$profile" "$entry" "$hlsl" "$OUT_DIR/$out"
+  # shellcheck disable=SC2086  # $defs is a deliberate space-separated list
+  echo "[*] $out  ($name.hlsl $entry/$profile${defs:+ /D $defs})"
+  compile "$profile" "$entry" "$hlsl" "$OUT_DIR/$out" ${defs:-}
 done
 
 echo

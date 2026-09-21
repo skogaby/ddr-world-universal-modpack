@@ -172,6 +172,11 @@ pub struct Scene3dSites {
     /// (fail-open — only the re-resolve of not-yet-registered DDS members is
     /// lost, RE `docs/background_dancers_research.md` §2.1).
     pub texture_lookup: Option<Scene3dTextureLookup>,
+    /// `gs::Shader* fn(u32 fnv1_name_hash)` — the shader registry lookup the
+    /// converter resolves material shaders with (null on miss). OPTIONAL
+    /// (`model_shader_select_site`): without it the render items keep the
+    /// converter's shader objects and the whole-scene restyle is off.
+    pub shader_lookup: Option<*const u8>,
 }
 
 /// The gs texture registry's lookup trio, derived from the model converter's
@@ -2546,6 +2551,11 @@ const SIGNATURES: &[SignatureDefinition] = &[
         description: "Tail of the model converter's texture-table fill (FUN_180273e20+0xC7 on 20260825): `MOV ECX,EDI (gs hash); CALL FUN_18026f9e0 (gs texture-registry lookup, TextureData* or null); TEST RAX; CMOVZ RAX,[rip+DAT_1806f3298] (default texture); XOR ECX,ECX; XCHG [rip+DAT_1806f2090],ECX (spin release); MOV [RBX+8],RAX (entry.ptr); INC ESI; ADD RBP,0x50; ADD RBX,0x10`. The lookup's ONLY caller in World — A3's setModel-time re-resolve (FUN_180175b80) has no twin, so a material whose DDS registered after its .model converted holds the default texture forever; scene3d::render_item re-resolves into its own material copies with these three sites. OPTIONAL sub-group of derive_scene3d: publishes `scene3d_texture_lookup` (CALL @+2; its prologue must be `40 53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 8B D9 80 B8 80 00 00 00 00 75 2A`), `scene3d_texture_default` (RIP @+14) and `scene3d_texture_spin` (RIP @+22, must equal both `LOCK XADD [rip]` globals at match-0x23 and match-0x0C). Unique + byte-shape identical on every build; a miss only disables the re-resolve. RE: docs/background_dancers_research.md §2.1/§2.5.",
     },
     SignatureDefinition {
+        name: "model_shader_select_site",
+        pattern: "44 8B D0 41 8B CA E8 ?? ?? ?? ?? 48 85 C0 75 2A 38 43 2C 74 0C 8D 50 19 48 8D 0D ?? ?? ?? ?? EB 0C BA 10 00 00 00 48 8D 0D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ??",
+        description: "The model converter's material→shader selection (FUN_1802745b0+0x81 on 20260825, World twin of A3 FUN_18018af30): `MOV R10D,EAX (FNV-1 of the material's debug-info shader name); MOV ECX,R10D; CALL shader_registry_lookup; TEST RAX; JNZ done; CMP byte [RBX+0x2C],AL (mesh has BLENDWEIGHT); LEA EDX,[RAX+0x19]; LEA RCX,[\"gs_model_skinning_default\"]; JMP; MOV EDX,0x10; LEA RCX,[\"gs_model_default\"]; CALL [rip+hasher]; MOV ECX,EAX; CALL shader_registry_lookup`. OPTIONAL sub-group of derive_scene3d: publishes the CALL target at match+6 as `scene3d_shader_lookup` — `gs::Shader* fn(u32 fnv1_name_hash)` (FUN_18025f8f0: spins the registry flag, binary-searches the sorted object vector on `*(u32*)obj == hash`, null on miss; its prologue must be `40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B D9`) — identity-gated on BOTH CALLs sharing one target and the two LEAs pointing at those exact strings. The DLL's render items re-point their PRIVATE material copies (`mat+0x20` = the object the converter stored here) at synthesized style-variant containers looked up through it — the whole-scene stock/lit/cel switch without a detour (RE docs/background_dancers_research.md §4.7). Unique + byte-shape identical on every build; a miss only disables the restyle.",
+    },
+    SignatureDefinition {
         name: "bgmovie_readiness",
         pattern: "40 53 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 48 8B 58 ?? 48 85 DB 74 ?? 48 8D 8B ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 75 ?? 32 C9 EB ?? 48 8D 8B",
         description: "`sequence::common::BgMovieActor` readiness (FUN_1800320a0 on 20260825): `MOV RAX,[rip+DAT_1806f2d38] (the BgMovieActor singleton); MOV RBX,[RAX+0x58] (BackgroundFrame); TEST; JZ; LEA RCX,[RBX+0x150]; CALL AnimationLoader::ready; …`. The match IS the function entry (`40 53` = REX-prefixed PUSH RBX — the DPS poll's CALL target is compared against it). derive_scene3d publishes RIP at match+9 as `scene3d_bgmovie_actor` and imm8 at match+16 as `scene3d_bgframe_off` (0x58); the live `bg_root` clip the background hide targets is `*(frame + scene3d_bg_clip_slot_off)`. Unique on every build.",
@@ -2971,17 +2981,86 @@ impl SignatureStore {
                         );
                     }
                 }
+                // Optional sub-group: the shader-registry lookup (whole-scene
+                // restyle). A miss only disables the material re-point.
+                match self.scene3d_resolve_shader_lookup() {
+                    Ok(p) => {
+                        self.resolved.insert("scene3d_shader_lookup".into(), p);
+                        log_info!("  [+] scene3d_shader_lookup (derived) @ +0x{:X}", rel(p));
+                    }
+                    Err(reason) => {
+                        for name in Self::SCENE3D_SHADER_LOOKUP {
+                            self.resolved.remove(*name);
+                        }
+                        log_warn!(
+                            "  [-] scene3d_shader_lookup (optional) -- {} -- scene restyle (lit/cel) unavailable",
+                            reason
+                        );
+                    }
+                }
             }
             Err((site, reason)) => {
                 for name in Self::SCENE3D_PUBLISHED
                     .iter()
                     .chain(Self::SCENE3D_RAW)
                     .chain(Self::SCENE3D_TEXTURE_LOOKUP)
+                    .chain(Self::SCENE3D_SHADER_LOOKUP)
                 {
                     self.resolved.remove(*name);
                 }
                 log_warn!("  [-] scene3d -- {}: {}", site, reason);
             }
+        }
+    }
+
+    /// The optional shader-lookup pair's names (raw AOB + published).
+    const SCENE3D_SHADER_LOOKUP: &'static [&'static str] =
+        &["model_shader_select_site", "scene3d_shader_lookup"];
+
+    /// Decode `model_shader_select_site` (RE `docs/background_dancers_research.md`
+    /// §4.7): the shared CALL target of the two registry lookups,
+    /// identity-gated on the two fallback-name LEAs and the callee prologue.
+    fn scene3d_resolve_shader_lookup(&self) -> Result<*const u8, String> {
+        let hits = self.get_all_matches("model_shader_select_site");
+        let site = match hits.len() {
+            1 => hits[0],
+            n => return Err(format!("expected exactly 1 match, found {}", n)),
+        };
+        if !self.scene3d_inside(site, 0x3A) {
+            return Err("match at module edge".into());
+        }
+        // SAFETY: the window was probed inside the module above.
+        unsafe {
+            // CALL rel32 @+6 (E8 @+6 → rel32 @+7) and @+53 (E8 @+53, after
+            // `FF 15 disp32` @+45 and `8B C8` @+51).
+            let call_a = decode_call_rel32(site.add(6));
+            let call_b = decode_call_rel32(site.add(53));
+            if call_a != call_b {
+                return Err("the two registry-lookup CALLs disagree".into());
+            }
+            // LEA RCX,[rip+disp32] @+24 (disp @+27) and @+38 (disp @+41).
+            let skinning = decode_rip_relative(site.add(27));
+            let plain = decode_rip_relative(site.add(41));
+            if !self.scene3d_inside(skinning, 0x1A) || !self.scene3d_inside(plain, 0x11) {
+                return Err("fallback-name LEAs outside module".into());
+            }
+            let s_skin = std::slice::from_raw_parts(skinning, 0x1A);
+            let s_plain = std::slice::from_raw_parts(plain, 0x11);
+            if s_skin != b"gs_model_skinning_default\0" || s_plain != b"gs_model_default\0" {
+                return Err("fallback-name LEAs do not name gs_model_(skinning_)default".into());
+            }
+            if !self.scene3d_inside(call_a, 0x40) {
+                return Err("lookup target outside module".into());
+            }
+            const LOOKUP_PROLOGUE: &[u8] = &[
+                0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF,
+                0xFF, 0x8B, 0xD9,
+            ];
+            let head = std::slice::from_raw_parts(call_a, LOOKUP_PROLOGUE.len());
+            if head != LOOKUP_PROLOGUE {
+                return Err("lookup target prologue mismatch".into());
+            }
+            Ok(call_a)
         }
     }
 
@@ -3143,6 +3222,7 @@ impl SignatureStore {
                 }),
                 _ => None,
             },
+            shader_lookup: a("scene3d_shader_lookup"),
         })
     }
 
@@ -3699,6 +3779,7 @@ impl SignatureStore {
             // Filled in by `derive_scene3d` after the optional sub-derivation;
             // `scene3d_sites()` reads it back from the published names.
             texture_lookup: None,
+            shader_lookup: None,
         })
     }
 

@@ -1,6 +1,6 @@
 # DDR World Universal Modpack
 
-A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, a computer opponent for solo versus play, practice tools, a deterministic sound-card-locked music clock that removes the game's play-to-play timing jitter, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
+A free, open-source mod pack for **DanceDanceRevolution World**. It adds an in-game mod menu, a computer opponent for solo versus play, the 3D background stages and dancers World removed (with optional cel shading), practice tools, a deterministic sound-card-locked music clock that removes the game's play-to-play timing jitter, per-song timing correction, playback speed control, visual customization, quality-of-life fixes, and much more — all rendered through the game's own UI, with no changes to your game files.
 
 Everything ships as a single hook DLL loaded by [spice2x](https://spice2x.github.io/). Install it, press **0** three times on a pinpad, and start toggling.
 
@@ -9,6 +9,7 @@ This modpack is also **datecode-agnostic**! Through memory scanning and pattern 
 ![Header Image 1](screenshots/hero_1.png)
 ![Header Image 2](screenshots/hero_2.png)
 ![Header Image 3](screenshots/hero_3.png)
+![Header Image 3](screenshots/hero_4.png)
 
 ## Compatibility — Read This First
 
@@ -81,6 +82,15 @@ The level is real skill, not a score multiplier. Every arrow the bot hits is jud
 One step past `Level 10` is **TARGET SCORE**: the bot becomes a replay of whatever your pacemaker is pointed at — your own best, a rival's score, the world record — recreated step for step from the ghost data the game already downloaded for that target. Charts with no target score yet fall back to a `Level 10` opponent with a short on-screen notice. Both bot settings are remembered on the cabinet only; they are never sent to or loaded from the server.
 
 ![Versus Bot](screenshots/versus_bot.png)
+
+### Background Dancer Revival
+DDR World removed the 3D dancers and stages every earlier DDR showed behind the arrows — but the engine still has the whole 3D pipeline, and the stock install still ships all of DDR A3's stage, character, choreography and camera files. This mod puts them back: on every song a random stage and random dancer(s) dance the A3 choreography, filmed by the stage's own camera shots that cut right before each dance change, exactly as A3 sequenced them. Nothing in the game is patched or hooked for rendering; the modpack builds the scene objects and the game's own model passes draw them.
+
+And the scene doesn't have to look like 2013. **LIGHTING STYLE** (mod menu, GLOBAL SETTINGS → BACKGROUND DANCERS) shades the whole stage and its dancers under a key light: **STOCK (UNLIT)** is the game's flat look, **SMOOTH SHADING** adds form to arms, faces and props, and **CEL SHADING** turns the same light into three toon bands with rim ink — plus **SCENE OUTLINES**, an inverted-hull ink line around every prop and dancer (the crossed arm in front of a torso gets its own line, not just the silhouette), with separate outline widths for dancers and stage. Glows, light cones, the skydome and the shadow stay as authored. Every one of these applies from the next song — no restart.
+
+![Background Dancers, cel shading with outlines](screenshots/background_dancers.png)
+
+Off by default while it is being proven on cabinets — turn it on from the MODS tab (the shader variants it uses ride the Shader Fixes mod, so keep that on too, and ship the `data_mods/shader_fixes/blobs/` folder with the DLL). Anything that cannot be loaded degrades quietly: fewer props or a fixed camera, never a missing game.
 
 ### Song Playback Speed
 Play any song at **25%–175%** speed, with everything in sync — audio (pitch-preserved, or classic vinyl-style if you prefer), arrows, judging, even the background video if you opt in. Song-select previews follow your speed setting too, so you can dial it in by ear. Practice hard charts slow; push past 100% for a challenge. Scores at non-100% speeds are never submitted, so your records stay honest.
@@ -161,11 +171,11 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Playfield Styling** | Arrow/receptor/lane scale and opacity, per player. |
 | **Overlay Element Styling** | Combo/judgement/pacemaker scale and opacity, per player. |
 | **Center Arrows (1P)** | Centers the playfield during solo play. |
-| **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses). |
+| **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses), plus the lit / cel-shaded / outline shader variants Background Dancers' LIGHTING STYLE picks from. |
 | **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
-| **Enable Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the stage/character/motion/camera files World still ships but never opens. Off by default; see below. |
+| **Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the files World still ships but never opens — with optional smooth or cel-shaded lighting and ink outlines over the whole scene. Off by default; see above. |
 | **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. On by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
@@ -185,14 +195,6 @@ Run the game at something other than its fixed 1280×720: 1080p, 1440p, 4K (or a
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |
 | **Non-Native OS Support** | Keeps the game stable under CrossOver/Wine (background-movie handling). |
 | **SMX Hardware and Touchscreen Overlay** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
-
-### Enable Background Dancers
-
-DDR World removed the 3D dancers and stages that every earlier DDR showed behind the arrows — but the game engine still has the whole 3D pipeline, and the stock World install still ships all of A3's stage, character, choreography and camera files. This mod puts them back: on every song a random stage and random dancer(s) (one per player, wearing their hair/face/costume parts, with a floor shadow) dance to the A3 choreography, filmed by the stage's own camera shots that cut away right before each dance change, exactly as A3 sequenced them. Nothing in the game is patched or hooked for rendering — the modpack builds the scene objects and the game's own model passes draw them.
-
-The dancers move in time with the music: the choreography is authored at 120 BPM and plays at half a second per chart beat, locked to the chart's beat grid (cuts land on beats), so it speeds up and slows down with the song's tempo and drops into slow motion through a STOP — the two sequencing options DDR A3 shipped switched off or on, both on here by default (`background_dancers` in `mod-config.json`).
-
-Off by default while it is being proven on cabinets; turn it on from the MODS tab. Songs that have a background movie keep it — the movie is shown in its "sized" thumbnail position for the song (your VIDEO SIZE setting is untouched) so the 3D scene stays visible around it. Anything that cannot be loaded (a missing part, a stage without camera data) simply degrades: the song plays with fewer props or a fixed camera, never without the game.
 
 ## Your Scores Are Safe
 
@@ -226,10 +228,10 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `music_wheel_song_length` | Position/size of the length readout |
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
-| `background_dancers` | Enable Background Dancers: `bpm_sync` (default `true` — the dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats) and `stop_slow` (default `true` — everything drops to 1/12 speed through a chart STOP, as in DDR A3). Set `bpm_sync` to `false` for the A3 retail real-time dance. Read at boot |
+| `background_dancers` | Background Dancers: `style` (`stock` / `lit` / `cel` — LIGHTING STYLE), `outlines` (SCENE OUTLINES), `outline_px` / `outline_px_stage` (line thickness in 720p px, 0.5–6, defaults 2 / 1.5), `bpm_sync` (default `true` — dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats) and `stop_slow` (default `true` — 1/12 speed through a chart STOP, as in DDR A3). All six are also rows under BACKGROUND DANCERS in the mod menu and apply from the next song |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
 | `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–16, default 12), judgement word art (`judgement_color`: `purple_shadow` / `all_purple`), receptor flash on an S-Marvelous hit (`receptor_flash`: `purple` = violet burst, default / `white` = identical to Marvelous) — all also editable in the mod menu. The stock Marvelous word's shimmer is always muted (the old `marvelous_shimmer` key is ignored) |
-| `shader_fixes` | Arrow anti-aliasing toggle (also editable in the mod menu) |
+| `shader_fixes` | Arrow anti-aliasing toggle (`anti_aliasing`, also editable in the mod menu, next launch). The scene-shader variants Background Dancers uses are synthesized whenever both mods are on; the lighting knobs live under `background_dancers` |
 | `overlay_menu` | Mod-menu theme/opacity (managed by the APPEARANCE tab) |
 | `smx_hardware` | SMX cabinet support: card ids, overlay opacity/scale, light toggles, pad style (most also editable in the mod menu) |
 

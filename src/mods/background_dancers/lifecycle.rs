@@ -143,10 +143,6 @@ pub fn init_tables() -> bool {
     let bd = crate::mods::config::get()
         .and_then(|c| c.background_dancers.clone())
         .unwrap_or_default();
-    TEMPO_OPTS.store(
-        (bd.bpm_sync as u8) | ((bd.stop_slow as u8) << 1),
-        Ordering::Release,
-    );
     log_info!(
         "BackgroundDancers: scene clock -- bpm_sync={} (dance at chart BPM/120, beat-phase pinned) stop_slow={} (1/12 speed below 10 BPM)",
         bd.bpm_sync,
@@ -299,15 +295,9 @@ static RECORDS_WARNED: AtomicBool = AtomicBool::new(false);
 /// item writes from everything else.
 static STATIC_POSES: AtomicBool = AtomicBool::new(false);
 /// The two A3 ConfigBank switches (`background_dancers.{bpm_sync,
-/// stop_slow}`), read at enable. Bits: 1 = bpm_sync, 2 = stop_slow.
-static TEMPO_OPTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
-
+/// stop_slow}`) — live values owned by `style.rs` (mod-menu rows, next song).
 fn tempo_options() -> TempoOptions {
-    let b = TEMPO_OPTS.load(Ordering::Relaxed);
-    TempoOptions {
-        bpm_sync: b & 1 != 0,
-        stop_slow: b & 2 != 0,
-    }
+    super::style::tempo_options()
 }
 
 fn in_song_window(s: i32) -> bool {
@@ -689,11 +679,18 @@ fn drive_live(w: &mut Window) {
                 log_warn!("BackgroundDancers: nothing parsed -- no dancers this song");
                 w.assets = AssetPhase::Abandoned;
             } else {
+                // Scene style + inverted-hull outlines (RE §4.6/§4.7): the
+                // operator's request gated on what the synthesis actually
+                // serves this boot (a bit-31 twin against a stock 4×(0,0,0)
+                // container would just draw the body twice).
+                let eff = super::style::effective();
                 w.session = Some(Session::new(
                     w.pick.clone(),
                     parsed,
                     w.requested_at,
                     tempo_options(),
+                    eff.style,
+                    eff.hulls,
                 ));
             }
         }
@@ -711,15 +708,16 @@ fn drive_live(w: &mut Window) {
                 sess.built_at = Some(Instant::now());
                 if !w.built_logged {
                     w.built_logged = true;
-                    let (st, dn, pt, sh) = sess.built_counts();
+                    let (st, dn, pt, sh, hu) = sess.built_counts();
                     log_info!(
-                        "BackgroundDancers: built {} ms after request -- {} instance(s) attached hidden ({} stage, {} dancer, {} part, {} shadow), {} skipped",
+                        "BackgroundDancers: built {} ms after request -- {} instance(s) attached hidden ({} stage, {} dancer, {} part, {} shadow, {} hull), {} skipped",
                         since_request_ms,
                         sess.built().count(),
                         st,
                         dn,
                         pt,
                         sh,
+                        hu,
                         sess.instances.len() - sess.built().count()
                     );
                 }

@@ -24,11 +24,12 @@ use std::time::Instant;
 use crate::core::anm::pose::{seed_local_trs, Skeleton, Trs};
 use crate::core::anm::{anm as anmfile, b2it, ktmdl, Anm, Mat4};
 use crate::core::arc as arcfile;
+use crate::services::avs_layeredfs::shader_layout::{self, SceneStyle};
 use crate::services::scene3d::frame_board::{self, NO_SLOT};
 use crate::services::scene3d::render_item_layout::{
     scale_translation, IDENTITY, PASS_MASK_DANCER, PASS_MASK_LOWPRIO, PASS_MASK_STAGE,
 };
-use crate::services::scene3d::{arc_set, model_registry, node, render_item, scene_graph};
+use crate::services::scene3d::{arc_set, model_registry, node, render_item, scene_graph, texture};
 use crate::{log_info, log_warn};
 
 use super::director_math::{
@@ -649,6 +650,12 @@ pub enum InstanceKind {
     Part { dancer: usize, part: usize },
     /// The `pl_shadow00` quad under dancer `dancer`.
     Shadow(usize),
+    /// Inverted-hull OUTLINE twin of instance `of` (a `Dancer` or `Part`):
+    /// the same model/resource, every draw record carrying the bit-31
+    /// program selector so the synthesized `mdl_*_lambert` container's
+    /// outline pair (program 0) draws it. Shares `of`'s frame-board slot —
+    /// never published itself (RE §4.6).
+    Hull { of: usize },
 }
 
 impl InstanceKind {
@@ -659,7 +666,29 @@ impl InstanceKind {
             InstanceKind::Dancer(_) => "dancer",
             InstanceKind::Part { .. } => "part",
             InstanceKind::Shadow(_) => "shadow",
+            InstanceKind::Hull { .. } => "hull",
         }
+    }
+
+    /// Hull twins read their body's board slot; everything else owns one.
+    pub fn owns_slot(&self) -> bool {
+        !matches!(self, InstanceKind::Hull { .. })
+    }
+}
+
+/// Whether an instance takes the scene style at all (RE §4.7): never the
+/// floor shadow (a black `mdl_bg_constant` quad — lighting it is nonsense)
+/// and never a stage part whose model is the `_bg` skydome/backdrop (an
+/// inward-facing dome under a directional light gets a gradient across the
+/// sky). Hull twins inherit their body's verdict. Per-material blend-group
+/// exclusions are applied on top by `render_item::restyle_materials`.
+pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
+    match kind {
+        InstanceKind::Shadow(_) => false,
+        InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
+        InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
+        // The twin's model_name is the body's; a Hull of a Hull never exists.
+        InstanceKind::Hull { .. } => !model_name.ends_with("_bg") && model_name != SHADOW_MODEL,
     }
 }
 
@@ -711,6 +740,8 @@ pub struct BuildProgress {
 pub struct Session {
     pub pick: Pick,
     pub parsed: Parsed,
+    /// The scene style every eligible material is re-pointed at (per song).
+    pub style: SceneStyle,
     pub schedule: Option<DanceSchedule>,
     pub instances: Vec<Instance>,
     /// Per dancer: the instance indices of its parts and shadow (the
@@ -732,11 +763,18 @@ pub struct Session {
 }
 
 impl Session {
+    /// `style`: the scene style applied at item build (materials re-pointed
+    /// at the `<name>_<style>` variant containers, RE §4.7). `hulls`: build an
+    /// inverted-hull outline twin for every restyle-eligible instance (SCENE
+    /// OUTLINES on AND a non-stock style AND the synthesized containers carry
+    /// the outline pair — `style::effective()` decides).
     pub fn new(
         pick: Pick,
         parsed: Parsed,
         requested_at: Instant,
         tempo_opts: TempoOptions,
+        style: SceneStyle,
+        hulls: bool,
     ) -> Session {
         let schedule = dance_schedule(&parsed, tempo_opts);
         let camera = camera_schedule(&parsed, pick.seed);
@@ -840,10 +878,12 @@ impl Session {
             }
         }
         let shadow_size = parsed.dancers.iter().map(|d| d.shadow_scale).collect();
-        if instances.len() > frame_board::MAX_INSTANCES {
+        // Slot budget: every instance so far OWNS a board slot (its index).
+        let slot_owners = instances.len();
+        if slot_owners > frame_board::MAX_INSTANCES {
             log_warn!(
                 "BackgroundDancers: {} instances exceed the frame board ({}) -- the tail is skipped",
-                instances.len(),
+                slot_owners,
                 frame_board::MAX_INSTANCES
             );
             for inst in instances.iter_mut().skip(frame_board::MAX_INSTANCES) {
@@ -851,9 +891,47 @@ impl Session {
                 inst.slot = NO_SLOT;
             }
         }
+        // Inverted-hull twins (scene outlines, RE §4.6/§4.7): one per
+        // restyle-eligible instance (dancer bodies, parts, stage props),
+        // reading the body's slot. Never for the shadow or the skydome part
+        // (their materials stay stock, so program 0 of their container is the
+        // body again) — `restyle_allowed` is the same rule the restyle uses.
+        // (Deploy #4 shipped a Dancer|Part-only filter here — a `cargo fmt`
+        // reflow had defeated the edit — so stage props never got twins.)
+        if hulls {
+            let n = instances.len();
+            for of in 0..n {
+                let body = &instances[of];
+                if !restyle_allowed(&body.kind, &body.model_name)
+                    || body.status == InstanceStatus::Skipped
+                {
+                    continue;
+                }
+                let twin = Instance {
+                    kind: InstanceKind::Hull { of },
+                    model_name: body.model_name.clone(),
+                    pass_mask: body.pass_mask,
+                    sort_key: body.sort_key,
+                    slot: body.slot,
+                    mirror: body.mirror,
+                    status: InstanceStatus::Pending,
+                    node: 0,
+                    item: 0,
+                    bone_count: body.bone_count,
+                    material_count: 0,
+                    textures_pending: 0,
+                    attached_at: None,
+                    node_shown: false,
+                    queued: false,
+                    freed: false,
+                };
+                instances.push(twin);
+            }
+        }
         Session {
             pick,
             parsed,
+            style,
             schedule,
             instances,
             children,
@@ -889,15 +967,17 @@ impl Session {
         }
     }
 
-    /// Instance counts by kind (built ones) for the `built` INFO.
-    pub fn built_counts(&self) -> (usize, usize, usize, usize) {
-        let mut c = (0, 0, 0, 0);
+    /// Instance counts by kind (built ones) for the `built` INFO:
+    /// `(stage parts, dancers, parts, shadows, hulls)`.
+    pub fn built_counts(&self) -> (usize, usize, usize, usize, usize) {
+        let mut c = (0, 0, 0, 0, 0);
         for i in self.built() {
             match i.kind {
                 InstanceKind::StagePart(_) => c.0 += 1,
                 InstanceKind::Dancer(_) => c.1 += 1,
                 InstanceKind::Part { .. } => c.2 += 1,
                 InstanceKind::Shadow(_) => c.3 += 1,
+                InstanceKind::Hull { .. } => c.4 += 1,
             }
         }
         c
@@ -926,6 +1006,12 @@ impl Session {
     /// republishes every frame).
     pub fn initial_world(&self, inst: &Instance) -> Mat4 {
         match inst.kind {
+            InstanceKind::Hull { of } => match self.instances.get(of) {
+                Some(body) if !matches!(body.kind, InstanceKind::Hull { .. }) => {
+                    self.initial_world(body)
+                }
+                _ => IDENTITY,
+            },
             InstanceKind::StagePart(_) => IDENTITY,
             InstanceKind::Dancer(i) => self.dancer_body_world(i),
             InstanceKind::Part { dancer, part } => {
@@ -1027,7 +1113,13 @@ impl Session {
                 );
             }
             let world = self.initial_world(&self.instances[idx]);
-            match build_one(&mut self.instances[idx], &view, &world, since_request_ms) {
+            match build_one(
+                &mut self.instances[idx],
+                &view,
+                &world,
+                since_request_ms,
+                self.style,
+            ) {
                 true => progress.built_now += 1,
                 false => progress.skipped_now += 1,
             }
@@ -1043,6 +1135,7 @@ fn build_one(
     view: &model_registry::ResourceView,
     world: &Mat4,
     since_request_ms: u64,
+    style: SceneStyle,
 ) -> bool {
     let item = match render_item::build(view, inst.pass_mask) {
         Ok(i) => i,
@@ -1058,6 +1151,65 @@ fn build_one(
     };
     let ts = item.textures;
     let tex = item.bone_textures();
+    // Whole-scene restyle (RE §4.7): re-point eligible material copies at the
+    // `<name>_<style>` variant objects. Hull twins ALWAYS restyle (their
+    // program 0 is the outline pair) and then hide every record whose
+    // material stayed stock.
+    let allows = restyle_allowed(&inst.kind, &inst.model_name);
+    if style != SceneStyle::Stock && allows {
+        let variant_for = |stock_hash: u32| -> Option<*mut u8> {
+            let v = shader_layout::variant_for_stock_hash(stock_hash)?;
+            let name = shader_layout::variant_container_name(v, style)?;
+            texture::lookup_shader(shader_layout::fnv1_32(&name))
+        };
+        // SAFETY: our own fresh block, not yet attached.
+        let st = unsafe { item.restyle_materials(true, &variant_for) };
+        let is_hull = matches!(inst.kind, InstanceKind::Hull { .. });
+        if is_hull {
+            // Per-kind rim width (the hull VS reads ModelParameters.w): the
+            // twin's model_name is the body's, so a `gm_` prefix = stage prop.
+            let (px_dancer, px_stage) = super::style::outline_widths();
+            let px = if inst.model_name.starts_with("gm_") {
+                px_stage
+            } else {
+                px_dancer
+            };
+            // SAFETY: as above.
+            let (marked, hidden) = unsafe {
+                item.set_outline_width(px);
+                item.mark_hull_records(&st.record_restyled)
+            };
+            log_info!(
+                "BackgroundDancers: {} [hull] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {} px; materials restyled={} kept: blend={} no-variant={}",
+                inst.model_name,
+                marked,
+                hidden,
+                px,
+                st.restyled,
+                st.kept_blend,
+                st.kept_no_variant
+            );
+        } else {
+            log_info!(
+                "BackgroundDancers: {} [{}] style {} -- materials restyled={} kept: blend={} no-variant={}",
+                inst.model_name,
+                inst.kind.tag(),
+                style.key(),
+                st.restyled,
+                st.kept_blend,
+                st.kept_no_variant
+            );
+        }
+    } else if matches!(inst.kind, InstanceKind::Hull { .. }) {
+        // A hull whose body cannot be restyled must not draw at all.
+        // SAFETY: our own fresh block, not yet attached.
+        let (marked, hidden) = unsafe { item.mark_hull_records(&[]) };
+        log_info!(
+            "BackgroundDancers: {} [hull] {} record(s) hidden (no restyle for this instance)",
+            inst.model_name,
+            hidden.max(marked)
+        );
+    }
     log_info!(
         "BackgroundDancers: {} [{}{}] item built at 0x{:X} {} ms after request (mode=0x{:X} bones={} records={} mats={} pals={} skinned={} bone_tex=0x{:X}/0x{:X} textures total={} load={} re={} default={} slot={} pass=0x{:X} sort={})",
         inst.model_name,

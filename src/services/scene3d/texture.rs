@@ -162,3 +162,35 @@ pub fn lookup_gs_texture(hash: u32) -> Option<*const u8> {
         Some(found)
     }
 }
+
+// ── Shader registry lookup (RE §4.7) ────────────────────────────────
+
+/// `gs::Shader* fn(u32 fnv1_name_hash)` — `FUN_18025f8f0`: takes the
+/// registry's own spin flag INSIDE (unlike the texture lookup), lazily sorts
+/// the object vector, binary-searches `*(u32*)obj == hash`; null on miss.
+type ShaderLookupFn = unsafe extern "C" fn(hash: u32) -> *mut u8;
+
+/// Whether the optional shader-registry lookup derived on this build.
+pub fn shader_lookup_available() -> bool {
+    sites().is_some_and(|s| s.shader_lookup.is_some())
+}
+
+/// Resolve a synthesized (or stock) shader container by NAME hash to the
+/// engine's live `gs::Shader*` — what a render item's private material copy
+/// is re-pointed at for the whole-scene restyle. `None` when the lookup did
+/// not derive or the registry has no such container (variant not
+/// synthesized this boot). GAME THREAD ONLY (the engine's spin lock).
+pub fn lookup_shader(name_hash: u32) -> Option<*mut u8> {
+    let p = sites()?.shader_lookup?;
+    // SAFETY: `p` was identity-gated on the callee's prologue by the
+    // derivation (`model_shader_select_site`) and is exactly the function the
+    // model converter calls with the same argument shape.
+    let obj = unsafe {
+        let lookup: ShaderLookupFn = std::mem::transmute(p);
+        lookup(name_hash)
+    };
+    if obj.is_null() || !memory::is_readable(obj, 0x10) {
+        return None;
+    }
+    Some(obj)
+}

@@ -58,6 +58,7 @@ pub mod movie_size;
 pub mod schedule;
 pub mod selection;
 pub mod session;
+pub mod style;
 pub mod tempo;
 pub mod tempo_source;
 
@@ -91,7 +92,9 @@ impl Mod for BackgroundDancersMod {
     }
 
     fn name(&self) -> &str {
-        "Enable Background Dancers"
+        // Also the GLOBAL SETTINGS group header of the mod menu (maintainer:
+        // no "Enable" prefix there).
+        "Background Dancers"
     }
 
     fn description(&self) -> &str {
@@ -122,6 +125,7 @@ impl Mod for BackgroundDancersMod {
             return;
         }
         ENABLED.store(true, Ordering::Release);
+        style::init_from_config();
         if self.scene_cb.is_none() {
             self.scene_cb = Some(scene_manager::on_scene_change(Box::new(|prev, next| {
                 if !ENABLED.load(Ordering::Acquire) {

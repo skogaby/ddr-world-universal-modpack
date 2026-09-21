@@ -1,22 +1,16 @@
 # Progress — Enable Background Dancers
 
-Updated: 2026-09-16 (Steps 1–10 cabinet-PASSED; post-PASS follow-ups: rewind fix + BPM sync / STOP slow-mo)
-Status: ALL 10 STEPS CABINET-PASSED 2026-09-16. Two post-PASS follow-ups are BUILT and await one confirmation
-run (`release/ddr_world_hook.step10-deploy3.dll` = `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`):
-(a) training REWIND no longer restarts the timeline (nothing is latched — scene time is a pure function of
-the music count); (b) maintainer-requested **BPM sync + STOP slow-motion**, both ON by default
-(`background_dancers.{bpm_sync,stop_slow}`): the dancers/stage/camera run at chart BPM/120 (half a second
-of the 120-BPM clips per beat), phase-pinned to the measure grid, cuts on beats, 1/12 speed through STOPs —
-the A3 rate rule (`FUN_18003a1b0`, RE doc §3.5) integrated over the chart's SSQ tempo chunk. Gates: `cargo
-check` (+ `--tests`) / `cargo fmt` / `./build.sh` / harness 102 green / `validate_signatures.sh` ALL GREEN ×5.
-NEXT ACTION: maintainer plays (1) a steady-tempo song and checks the dancers hit the beat (the clips' steps
-land on the chart's beats; at 140 BPM the dance runs ~17 % faster than before), (2) a STOP song (`anan`,
-`aeth`, any chart with a stop) and sees the whole scene drop into slow motion through the stop, (3) one
-training song with REWIND (7) / LOOP — the dancer jumps back, log `music count jumped back … timeline
-follows`, (4) a quick restart (1) — dance restarts from the top. Expected log per song: `tempo map for
-'<basename>' -- N node(s), X BPM at music 0, dance time 0 at Y ms (bpm_sync=true stop_slow=true)` BEFORE
-`visible`, then `playing -- first count -276 ms (dance time …, tempo map: X BPM here, tau=0 at Y ms)`. Then
-the maintainer decides on `DEFAULT_OFF_MODS` and commits.
+Updated: 2026-09-16 (FEATURE COMPLETE — all 10 steps + both post-PASS follow-ups cabinet-PASSED)
+Status: Complete (uncommitted — maintainer commits manually). Steps 1–10 cabinet-PASSED 2026-09-16; the two
+post-PASS follow-ups (rewind follows the timeline; BPM sync + STOP slow-motion ON by default) cabinet-PASSED
+the same night on `release/ddr_world_hook.step10-deploy3.dll` (= `target/x86_64-pc-windows-msvc/release/
+ddr_world_hook.dll`) — maintainer: "everything seems to be working perfectly now". Final gates: `cargo check`
+(+ `--tests`) / `cargo fmt` / `./build.sh` / `validate_background_dancers.sh` 102 green /
+`validate_signatures.sh` ALL GREEN ×5. Open maintainer decisions (not the agent's): whether to drop
+`background-dancers` from `DEFAULT_OFF_MODS`, and the commit. Phase-2 idea logged: lit model shaders
+(see "Deviations & open questions").
+NEXT ACTION: none — feature closed. A future session picking this up should read AGENTS.md's "Enable
+Background Dancers" row + RE doc §3.3–§3.5 first.
 
 Resume protocol: read `implementation/plan.md` (the 10 steps + checklist) → `design/detailed-design.md`
 (§4.2 service API, §5.2/§5.3 layouts) → `docs/background_dancers_research.md` §1 (the Step 1 RE record:
@@ -231,6 +225,9 @@ file. Task files for the current step live under
 - **Cabinet PASS — Steps 7–10 together (2026-09-16, CrossOver, `step10-deploy1`):** see the deploy log entry
   below. All four plan checkboxes ticked. Status: Complete (uncommitted — maintainer commits manually).
 
+- **Post-PASS follow-ups #1 + #2 — cabinet-CONFIRMED 2026-09-17** (`step10-deploy3`). Status: Complete
+  (uncommitted — maintainer commits manually).
+
 - **Post-PASS follow-up #2 (2026-09-16, built, `step10-deploy3`): BPM sync + STOP slow-motion (maintainer
   request).** RE: A3's `FUN_18003a1b0` (RE doc §3.5) — `mgr+0x38 = minBpm < 10 ∧ MOTION_STOP_SLOW ? 1/12 :
   MOTION_BPM_DEPENDENCY ? maxBpm/120 : 1` scaling the WHOLE scene's dt; retail `false`/`true`. Port: pure
@@ -267,6 +264,10 @@ file. Task files for the current step live under
 - Step 7 cabinet run (deploy #3). Owed: a Windows run (rides along).
 
 ## Deploy & test log
+
+- **Post-PASS follow-ups — PASS (2026-09-16, CrossOver, `step10-deploy3`):** maintainer confirmed dancers on
+  the beat at the song tempo, slow motion through STOPs, training rewind/loop moving the timeline back (not
+  restarting), quick restart from the top; "everything seems to be working perfectly now". Feature closed.
 
 - **Steps 7–10 deploy — PASS (2026-09-16, CrossOver, gamemdx 20260915, `step10-deploy1`):** boot: `[+]
   dance_play_sequence_vtable (RTTI) @ +0x360AF8` (= the sweep value), tables ready, 0 WARNs from
@@ -528,6 +529,28 @@ file. Task files for the current step live under
   returned -1` (path/engine refusal), `scene3d: … not found (mod folders or stock)` (resolution).
 
 ## Deviations & open questions
+
+- **Phase-2 idea (maintainer, 2026-09-16, out of the original scope): REAL LIGHTING for the 3D scene.** Every
+  `mdl_*` model shader is unlit (texture × tint; A3 baked its lighting into the textures). Feasible without
+  any new detour through the existing `shader_synthesis` seam (the `shader.arc` boot read the arrow-AA /
+  perspective programs already ride): synthesize lit VS/PS variants of the model containers the stage/dancer
+  materials name, replacing program 0 outright (next-launch, config-gated like arrow AA — no per-pass
+  SetShader rewrite needed since the MODEL passes are engine-driven). BEST SEAM (format doc §3.7): 160 stock
+  materials NAME `mdl_bg_lambert` (90) / `mdl_ch_lambert` (70) — the artists' "lit" tag — but no
+  `.gsp` of that name ships, so the engine's by-name lookup (`FUN_18018af30`, FNV-1 over `shader.arc`) falls
+  back to the unlit `gs_model_*_default`; synthesizing those two containers lights exactly the materials
+  the artists marked and nothing else (`_constant` glows/skydomes stay unlit), with ZERO engine changes.
+  Register map already RE'd: VS c18..c21 WVP, c22 ModelParameters, c23 tint, c24..c26 material params, bone
+  texture s3 (skinning variant); PS s0 texture, s15 stipple, c2/c3..c5. The vertex streams carry
+  `NORMAL:FLOAT3@12`, the skinned VS already applies the bone rows to positions (normals go through the
+  same 3×3; only WVP is bound, so a baked light direction lives in MODEL space — fine for this scene: stage
+  = identity, dancers translate + uniform-scale only). Light
+  direction/colour baked into the shader (fixed key light + high ambient / half-Lambert) needs zero engine
+  cooperation; per-frame adjustable lights would need constant emission into the model pass = a hook. Exclude
+  additive/subtractive materials and the `bg` skydome parts from lighting. Effort: RE the stock model VS/PS
+  register map (matrices, c22 params, c23 tint, c24.. material, bone texture) from World's `shader.arc`
+  containers, one HLSL family via `scripts/build_shaders.sh` (fxc in the bottle), a `shader_synthesis` model
+  branch, one overlay enum row. Not started.
 
 - **Step 5 — A3 bind seed wording (2026-09-16):** the handoff described `FUN_180190a90` as "matrix→quat of
   the row matrix with rows divided by scale"; the decompile shows A3 passes the UNNORMALISED matrix (raw

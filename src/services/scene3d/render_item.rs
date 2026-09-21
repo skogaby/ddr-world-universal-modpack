@@ -133,6 +133,126 @@ impl RenderItem {
         };
         memory::write_u32(f, v);
     }
+
+    /// Per-item outline rim width (720p px) for a HULL twin — `ModelParameters.w`,
+    /// a constant no stock shader reads (`layout::ITEM_OUTLINE_PX`).
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn set_outline_width(&self, px: f32) {
+        memory::write_f32(self.ptr.add(layout::ITEM_OUTLINE_PX), px);
+    }
+
+    /// The per-record material index (into this item's private copies) and
+    /// `REC_FLAGS`, for the restyle eligibility rule.
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    unsafe fn record_material_map(&self) -> (Vec<usize>, Vec<u32>) {
+        let recs = memory::read_ptr(self.ptr.add(layout::ITEM_DRAW_RECORDS)) as *mut u8;
+        let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS)) as usize;
+        let mut idx = Vec::with_capacity(self.counts.draw_records);
+        let mut flags = Vec::with_capacity(self.counts.draw_records);
+        if recs.is_null() || mats == 0 {
+            return (idx, flags);
+        }
+        for i in 0..self.counts.draw_records {
+            let rec = recs.add(i * layout::REC_SIZE);
+            let mat_ptr = memory::read_ptr(rec.add(layout::REC_MATERIAL)) as usize;
+            idx.push(
+                layout::record_material_index(mat_ptr, mats, self.counts.materials)
+                    .unwrap_or(usize::MAX),
+            );
+            flags.push(memory::read_u32(rec.add(layout::REC_FLAGS)));
+        }
+        (idx, flags)
+    }
+
+    /// Whole-scene restyle (RE §4.7): re-point eligible PRIVATE material
+    /// copies at style-variant shader objects. `variant_for(stock_hash)`
+    /// returns the replacement `gs::Shader*` for a material whose current
+    /// object hashes to `stock_hash` (`None` = leave stock). Eligibility =
+    /// `layout::restyle_eligible_materials` (every record using the material
+    /// opaque/alpha-tested, and the instance allows it). Returns
+    /// `(restyled, kept_stock_blend, kept_stock_no_variant)`; the per-record
+    /// `restyled` mask is what a HULL twin needs to hide the records whose
+    /// material stayed stock (their program 0 would be the body again).
+    /// # Safety
+    /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
+    pub unsafe fn restyle_materials(
+        &self,
+        instance_allows: bool,
+        variant_for: &dyn Fn(u32) -> Option<*mut u8>,
+    ) -> RestyleStats {
+        let mut st = RestyleStats::default();
+        let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS)) as *mut u8;
+        if mats.is_null() {
+            return st;
+        }
+        let (rec_mat, rec_flags) = self.record_material_map();
+        let eligible = layout::restyle_eligible_materials(
+            self.counts.materials,
+            &rec_mat,
+            &rec_flags,
+            instance_allows,
+        );
+        let mut restyled_mat = vec![false; self.counts.materials];
+        for (mi, ok) in eligible.iter().enumerate() {
+            let mat = mats.add(mi * layout::MATERIAL_SIZE);
+            let obj_slot = mat.add(layout::MAT_SHADER_OBJ);
+            let obj = memory::read_ptr(obj_slot);
+            if !*ok {
+                st.kept_blend += 1;
+                continue;
+            }
+            if obj.is_null() || !memory::is_readable(obj, layout::SHADER_PROGRAMS + 8) {
+                st.kept_no_variant += 1;
+                continue;
+            }
+            let hash = memory::read_u32(obj.add(layout::SHADER_NAME_HASH));
+            match variant_for(hash) {
+                Some(v) if !v.is_null() => {
+                    memory::write_ptr(obj_slot, v);
+                    restyled_mat[mi] = true;
+                    st.restyled += 1;
+                }
+                _ => st.kept_no_variant += 1,
+            }
+        }
+        st.record_restyled = rec_mat
+            .iter()
+            .map(|&mi| mi < restyled_mat.len() && restyled_mat[mi])
+            .collect();
+        st
+    }
+
+    /// Turn this item into an inverted-hull twin: every draw record gets
+    /// [`layout::REC_HULL_BIT`] (the model pass then binds PROGRAM 0 of the
+    /// material's container — the synthesized outline pair); alpha-blended
+    /// records (`layout::hull_record_flags`) and records whose material was
+    /// NOT restyled (`record_restyled` from [`restyle_materials`]) are hidden.
+    /// Returns `(records marked, records hidden)`.
+    /// # Safety
+    /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
+    pub unsafe fn mark_hull_records(&self, record_restyled: &[bool]) -> (usize, usize) {
+        let recs = memory::read_ptr(self.ptr.add(layout::ITEM_DRAW_RECORDS)) as *mut u8;
+        if recs.is_null() {
+            return (0, 0);
+        }
+        let mut hidden = 0usize;
+        for i in 0..self.counts.draw_records {
+            let f = recs.add(i * layout::REC_SIZE + layout::REC_FLAGS);
+            let mut v = layout::hull_record_flags(memory::read_u32(f));
+            // A record whose material stayed STOCK has no outline pair at
+            // program 0 — its hull draw would be the body drawn again.
+            if !record_restyled.get(i).copied().unwrap_or(false) {
+                v |= layout::REC_HIDDEN_BIT;
+            }
+            if v & layout::REC_HIDDEN_BIT != 0 {
+                hidden += 1;
+            }
+            memory::write_u32(f, v);
+        }
+        (self.counts.draw_records, hidden)
+    }
 }
 
 // ── Raw accessors shared with the node's `visit` (which holds only the
@@ -377,6 +497,19 @@ pub fn build(res: &ResourceView, pass_mask: u32) -> Result<RenderItem, BuildErro
             textures,
         })
     }
+}
+
+/// Outcome of [`RenderItem::restyle_materials`].
+#[derive(Default, Clone, Debug)]
+pub struct RestyleStats {
+    pub restyled: usize,
+    /// Materials kept stock because a record using them is blended (or the
+    /// instance vetoed the restyle).
+    pub kept_blend: usize,
+    /// Materials kept stock because no variant object exists for their shader.
+    pub kept_no_variant: usize,
+    /// Per draw record: its material was restyled.
+    pub record_restyled: Vec<bool>,
 }
 
 /// Re-run the material-texture resolve on a BUILT item (game thread), for

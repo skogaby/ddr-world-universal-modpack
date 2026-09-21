@@ -25,6 +25,11 @@
 pub const ITEM_WORLD: usize = 0x00;
 /// `f32[4]` ModelParameters `{bone_count, 1.0, 0, 0}` → VS c22 / PS c2.
 pub const ITEM_MODEL_PARAMS: usize = 0x40;
+/// `ModelParameters.w` (`item+0x4C`): read by NO stock shader (`.x/.z` = the
+/// bone texture height, `.y` = the stipple threshold), so the DLL uses it as
+/// a per-item constant — the synthesized outline VS reads it as the hull's
+/// rim width in 720p pixels (0 ⇒ the shader's default).
+pub const ITEM_OUTLINE_PX: usize = 0x4C;
 /// `f32[4]` tint, multiplied into every draw record's colour → VS c23.
 pub const ITEM_TINT: usize = 0x50;
 /// `gs::ModelData*` GPU model resource.
@@ -82,8 +87,35 @@ pub const REC_PASS_MASK: usize = 0x2C;
 pub const REC_SIZE: usize = 0x30;
 /// `REC_FLAGS` bit the collector tests to skip a record.
 pub const REC_HIDDEN_BIT: u32 = 0x0800_0000;
-/// The bits of the GPU record's flag word A3 copied into `REC_FLAGS`.
-pub const GPU_REC_FLAG_MASK: u32 = 0xF000_00FF;
+/// `REC_FLAGS` bit the model pass's material bind tests to select PROGRAM 0
+/// of the material's shader container instead of the ordinary stage (2)
+/// (`FUN_1801f63f0` / `FUN_1801f6100`, RE §4.6). The dancers mod's
+/// inverted-hull twin items set it on every record so the synthesized
+/// `mdl_*_lambert` containers' outline pair draws them. Nothing else in the
+/// draw path reads it.
+pub const REC_HULL_BIT: u32 = 0x8000_0000;
+/// `REC_FLAGS` bits the draw-state emitter (`FUN_180261c80`) reads as the
+/// blend group (`& 0xE0`, 0 = opaque); a non-zero group means the mesh is
+/// alpha-blended (usually z-write off) — its hull would darken the mesh
+/// itself, so hulls hide such records.
+pub const REC_BLEND_GROUP_MASK: u32 = 0x0000_00E0;
+/// The bits of the GPU record's flag word A3 copied into `REC_FLAGS`. The
+/// stock top nibble is kept EXCEPT [`REC_HULL_BIT`]: with the outline pair
+/// at program 0 a stock record carrying bit 31 would turn into a hull draw,
+/// so body items clear it and only [`hull_record_flags`] sets it.
+pub const GPU_REC_FLAG_MASK: u32 = 0x7000_00FF;
+
+/// Flags of a HULL item's draw record, from the body record's flags: the
+/// hull bit set; alpha-blended records (non-zero blend group) additionally
+/// hidden (bit 27) — a z-write-off translucent mesh (hair cards, veils)
+/// would be darkened by its own shell in either draw order.
+pub fn hull_record_flags(body_flags: u32) -> u32 {
+    let mut f = body_flags | REC_HULL_BIT;
+    if body_flags & REC_BLEND_GROUP_MASK != 0 {
+        f |= REC_HIDDEN_BIT;
+    }
+    f
+}
 
 // ── GPU resource pieces the builder reads ────────────────────────────
 
@@ -101,6 +133,40 @@ pub const MATERIAL_SIZE: usize = 0x168;
 pub const PALETTE_SIZE: usize = 200;
 /// One `f32[16]`.
 pub const MATRIX_SIZE: usize = 0x40;
+
+// ── Material shader object (RE §4.7) ─────────────────────────────────
+
+/// `gs::Shader*` the converter resolved for the material (`FUN_1802745b0`'s
+/// result stored by `FUN_180274070`); the draw binds
+/// `*(*(obj + SHADER_PROGRAMS) + stage*4)`. Re-pointing this field in an
+/// item's PRIVATE material copy restyles that material for that item.
+pub const MAT_SHADER_OBJ: usize = 0x20;
+/// `gs::Shader`: `u32 name_hash @0` (the GSPW header hash), `u32 program
+/// count @4`, `u32* program handles @8`.
+pub const SHADER_NAME_HASH: usize = 0x00;
+pub const SHADER_PROGRAM_COUNT: usize = 0x04;
+pub const SHADER_PROGRAMS: usize = 0x08;
+
+/// Per-material eligibility for the whole-scene restyle: a material copy is
+/// re-pointed only when EVERY draw record using it is opaque / alpha-tested
+/// (blend group 0 — additive glows and alpha-blended translucents keep their
+/// authored stock look) AND the instance allows it (not the shadow, not the
+/// skydome part). `record_material_idx` maps each record to its material
+/// index; `record_flags` are the records' `REC_FLAGS`.
+pub fn restyle_eligible_materials(
+    material_count: usize,
+    record_material_idx: &[usize],
+    record_flags: &[u32],
+    instance_allows: bool,
+) -> Vec<bool> {
+    let mut ok = vec![instance_allows; material_count];
+    for (mi, flags) in record_material_idx.iter().zip(record_flags.iter()) {
+        if *mi < material_count && flags & REC_BLEND_GROUP_MASK != 0 {
+            ok[*mi] = false;
+        }
+    }
+    ok
+}
 
 // ── Material texture slots (RE §2.1) ─────────────────────────────────
 
@@ -451,5 +517,48 @@ mod tests {
         assert!(entry_resolved(0x1234, Some(0x1234)));
         assert!(!entry_resolved(0x1234, Some(0x9999)));
         assert!(!entry_resolved(0x1234, None));
+    }
+
+    #[test]
+    fn restyle_eligibility_follows_blend_groups_and_instance() {
+        // 3 materials; records: m0 opaque, m1 opaque + additive, m2 opaque.
+        let idx = [0usize, 1, 1, 2];
+        let flags = [0x01u32, 0x00, 0x40, 0x00];
+        assert_eq!(
+            restyle_eligible_materials(3, &idx, &flags, true),
+            vec![true, false, true]
+        );
+        // Instance veto (shadow / skydome) wins for every material.
+        assert_eq!(
+            restyle_eligible_materials(3, &idx, &flags, false),
+            vec![false, false, false]
+        );
+        // Out-of-range material indices are ignored.
+        assert_eq!(
+            restyle_eligible_materials(1, &[5], &[0x20], true),
+            vec![true]
+        );
+    }
+
+    #[test]
+    fn hull_record_flags_select_program_zero_and_hide_blended() {
+        // The bit-31 program selector is never inherited from a stock record.
+        assert_eq!(GPU_REC_FLAG_MASK & REC_HULL_BIT, 0);
+        assert_eq!(GPU_REC_FLAG_MASK & REC_HIDDEN_BIT, 0, "bit 27 is ours too");
+        assert_eq!(GPU_REC_FLAG_MASK & 0xFF, 0xFF, "state bits 0..7 kept");
+        // Opaque body record → hull bit only.
+        let opaque = 0x0000_0001; // two-sided, blend group 0
+        assert_eq!(hull_record_flags(opaque), opaque | REC_HULL_BIT);
+        assert_eq!(hull_record_flags(opaque) & REC_HIDDEN_BIT, 0);
+        // Alpha-blended body record (group 0x20) → hull bit + hidden.
+        let blended = 0x0000_0021;
+        let h = hull_record_flags(blended);
+        assert_eq!(h & REC_HULL_BIT, REC_HULL_BIT);
+        assert_eq!(h & REC_HIDDEN_BIT, REC_HIDDEN_BIT);
+        // The state/blend bits themselves pass through untouched.
+        assert_eq!(h & 0xFF, blended);
+        // Additive (0x40) / subtractive (0x60) groups hide too.
+        assert_ne!(hull_record_flags(0x40) & REC_HIDDEN_BIT, 0);
+        assert_ne!(hull_record_flags(0x60) & REC_HIDDEN_BIT, 0);
     }
 }

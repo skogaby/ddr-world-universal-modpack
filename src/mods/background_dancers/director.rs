@@ -271,6 +271,10 @@ pub fn hide_all(sess: &mut Session) {
         if sess.instances[idx].status != InstanceStatus::Built {
             continue;
         }
+        // Hull twins share their body's slot — the body's publish covers them.
+        if !sess.instances[idx].kind.owns_slot() {
+            continue;
+        }
         let slot = sess.instances[idx].slot;
         let world = sess.initial_world(&sess.instances[idx]);
         let tint = if matches!(sess.instances[idx].kind, InstanceKind::Shadow(_)) {

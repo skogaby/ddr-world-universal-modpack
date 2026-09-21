@@ -1,7 +1,7 @@
 //! Runtime shader-container synthesis — builds the extended
-//! `gs_screencommand_*.gsp` GSPW containers from the game's OWN stock
-//! shader.arc blobs plus the committed mod blobs at
-//! `data_mods/shader_fixes/blobs/*.d3dbc`.
+//! `gs_screencommand_*.gsp` GSPW containers (and the two lit MODEL
+//! containers) from the game's OWN stock shader.arc blobs plus the
+//! committed mod blobs at `data_mods/shader_fixes/blobs/*.d3dbc`.
 //!
 //! Why synthesis instead of committed `.gsp` files: program 0 of every
 //! touched container uses the game's own stock bytecode (no Konami bytecode
@@ -16,6 +16,7 @@
 //! | arrow   | stock VS + (AA ? AA PS : stock PS) | persp VS + AA PS | — | AA or persp |
 //! | judge   | stock VS + (AA ? AA judge PS : stock judge PS) | arrow persp VS + same PS | — | AA or persp |
 //! | default | stock VS + stock PS (bit-identical)| persp VS + stock PS | theme VS + per-theme PS | persp or themes |
+//! | `<material>_lit` / `<material>_cel` × the 9 `shader_layout::MODEL_VARIANTS` | **program 0 = outline VS/PS (hull records only)**; programs 1..3 = the STYLE pair — `_lit`: our lit VS + that name's OWN stock PS, `_cel`: our cel VS + cel PS | — | — | shader-fixes ∧ background-dancers |
 //!
 //! The program-table layout (persp EXACTLY at index 1; the mod-menu theme
 //! programs appended last in every configuration) is the pure, host-tested
@@ -30,10 +31,41 @@
 //! It exists for `screen::JudgeEffectRenderer` (tap hit-burst + freeze-hold
 //! glow at the receptor row), whose pass player_perspective rewrites.
 //!
-//! With AA, perspective, themes all off (or the `shader-fixes` mod disabled
-//! in the `mods` map, or the `shader_fixes` mod folder blocklisted), nothing
-//! is overlaid at all — the game runs literal stock bytecode. A missing
-//! THEME blob degrades only the theme programs (one WARN), never AA/persp.
+//! ## The model style variants (Background Dancers "Scene Style")
+//!
+//! The 3D scene's materials name stock model shaders (`mdl_*_constant*` for
+//! the stages, `mdl_*_lambert` for the dancers — the latter with NO stock
+//! container, so they resolve to the unlit `gs_model_*_default` fallbacks).
+//! For every such NAME (`shader_layout::MODEL_VARIANTS`) this synthesizes
+//! TWO new containers, `<name>_lit` and `<name>_cel`, whenever the
+//! `shader-fixes` and `background-dancers` mods are on — no style decision
+//! at boot at all. The style is applied per SONG by the dancers mod, which
+//! re-points its render items' PRIVATE material copies (`mat+0x20`, the
+//! shader object the converter stored) at the variant looked up through the
+//! engine's own registry (`scene3d_shader_lookup`, RE §4.7) — per record,
+//! so additive glows / translucents / the skydome / the shadow stay stock.
+//! Each variant carries `shader_layout::MODEL_PROGRAM_ENTRIES` (4) program
+//! entries like every stock model container (the model pass binds
+//! `programs[stage]` unchecked: stage 2 for ordinary records, **0 for
+//! records with flag bit 31** = the dancers mod's inverted-hull twins) —
+//! program 0 is the OUTLINE pair (`MODEL_HULL_PROGRAM_INDEX`) when its
+//! blobs resolve, else the style pair again. `_lit` = our lit VS + the
+//! NAME's OWN stock PS sliced from the arc (the lit factor rides COLOR0, so
+//! every stock pixel path — `_c` constant/offset colour, `_notex`, the
+//! fallback's stipple — stays bit-exact); `_cel` = our banded VS/PS pair
+//! (same key light, ramp + rim ink per pixel). Hashes COMPUTED
+//! (`shader_layout::fnv1_32(name)`) — the only computed hashes here.
+//! Missing style blobs drop the whole variant set (one WARN); missing
+//! outline blobs drop only the outline pair (one WARN).
+//! [`variants_available`] / [`outline_programs_available`] tell the dancers
+//! mod what it may re-point at. RE: `docs/background_dancers_research.md`
+//! §4, §4.6, §4.7.
+//!
+//! With AA, perspective, themes off and the dancers mod off (or the
+//! `shader-fixes` mod disabled in the `mods` map, or the `shader_fixes` mod
+//! folder blocklisted), nothing is overlaid at all — the game runs literal stock
+//! bytecode. A missing THEME blob degrades only the theme programs (one
+//! WARN), never AA/persp.
 //!
 //! ## Where it runs
 //!
@@ -55,14 +87,19 @@
 //! Byte-compatible with `scripts/gsp_pack.py pack` (the offline dev tool):
 //! header + program/VS/PS tables at computed offsets, program entries
 //! `{flags@+0, vs_idx@+4, ps_idx@+5}`, blobs 16-aligned in table order. The
-//! FNV-1 name hash is copied from the stock container (never recomputed).
-//! Validate a synthesized file offline with
+//! FNV-1 name hash is copied from the stock container (never recomputed) —
+//! except for the two lit model containers, which have no stock header and
+//! get `shader_layout::fnv1_32(name)` (host-tested against the stock
+//! headers' hashes). Validate a synthesized file offline with
 //! `python3 scripts/gsp_pack.py inspect <file> --expect-name <name>`.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+pub use super::shader_layout::SceneStyle;
 
 use crate::core::arc;
+use crate::mods::mod_trait::mod_enabled_in_config;
 use crate::{log_info, log_warn};
 
 use super::cache_hasher::CACHE_FOLDER;
@@ -111,16 +148,32 @@ fn synth_cache_dir() -> String {
     format!("{}/shader_synthesis", CACHE_FOLDER)
 }
 
-/// The three container names we may synthesize.
+/// The three screencommand container names we may synthesize.
 const ARROW: &str = "gs_screencommand_arrow";
 const JUDGE: &str = "gs_screencommand_judge";
 const DEFAULT: &str = "gs_screencommand_default";
-
 /// Committed mod blob file names (inside `<mod>/blobs/`).
 const BLOB_ARROW_AA_PS: &str = "gs_screencommand_arrow.ps.d3dbc";
 const BLOB_ARROW_PERSP_VS: &str = "gs_screencommand_arrow.vs_persp.d3dbc";
 const BLOB_JUDGE_AA_PS: &str = "gs_screencommand_judge.ps.d3dbc";
 const BLOB_DEFAULT_PERSP_VS: &str = "gs_screencommand_default.vs_persp.d3dbc";
+/// Whether the served model variant containers carry the outline pair at
+/// program 0 / exist at all — published on both synthesis success paths;
+/// the dancers mod re-points materials / builds hull items only when true
+/// (a hull record binding program 0 of a stock 4×(0,0,0) container would
+/// just draw the body twice).
+static VARIANTS: AtomicBool = AtomicBool::new(false);
+static OUTLINE_PROGRAMS: AtomicBool = AtomicBool::new(false);
+
+/// Every `MODEL_VARIANTS` `_lit`/`_cel` container is being served.
+pub fn variants_available() -> bool {
+    VARIANTS.load(Ordering::Acquire)
+}
+
+/// See [`OUTLINE_PROGRAMS`].
+pub fn outline_programs_available() -> bool {
+    OUTLINE_PROGRAMS.load(Ordering::Acquire)
+}
 /// Mod-menu animated-background blobs (overlay-menu rewrite Step 8;
 /// Shadertoy theme pack 2026-08-25): one shared passthrough VS + one PS
 /// per shader-backed theme, appended to the DEFAULT container per
@@ -157,6 +210,11 @@ struct Plan {
     persp: bool,
     /// Mod-menu theme background programs ride the DEFAULT container.
     themes: bool,
+    /// The 3D scene's model style variants (Background Dancers "Scene
+    /// Style"): every `MODEL_VARIANTS` name × {lit, cel}.
+    variants: bool,
+    /// The outline pair rides program 0 of every variant container.
+    outlines: bool,
     /// Blob name → found mod file path.
     blob_paths: Vec<(&'static str, String)>,
 }
@@ -164,11 +222,14 @@ struct Plan {
 /// Read the synthesis plan from config + the mod-folder scan. Returns `None`
 /// when nothing should be synthesized (mod disabled, every feature off, or
 /// required blobs unavailable e.g. blocklisted) — the game then runs stock
-/// shaders. Theme blobs degrade softly: a missing theme blob drops ONLY the
-/// theme programs (one WARN), never the AA/perspective synthesis.
+/// shaders. Theme and lit-model blobs degrade softly: a missing theme blob
+/// drops ONLY the theme programs, a missing lit VS blob ONLY the two lit
+/// containers (one WARN each), never the AA/perspective synthesis.
 fn plan() -> Option<Plan> {
     let cfg = crate::mods::config::get()?;
-    let mod_enabled = |id: &str| cfg.mods.get(id).copied().unwrap_or(true);
+    // Honours `DEFAULT_OFF_MODS` (background-dancers is default-OFF); the
+    // other three ids default ON, so this matches the former local closure.
+    let mod_enabled = |id: &str| mod_enabled_in_config(&cfg.mods, id);
 
     if !mod_enabled("shader-fixes") {
         log_info!("shader_synthesis: shader-fixes mod disabled — stock shaders");
@@ -181,8 +242,15 @@ fn plan() -> Option<Plan> {
         .unwrap_or(true);
     let persp = mod_enabled("player-perspective");
     let mut themes = mod_enabled("mod-menu");
-    if !aa && !persp && !themes {
-        log_info!("shader_synthesis: AA off + perspective off + menu off — stock shaders");
+    // Model style variants only make sense when a scene will draw them —
+    // that is the background-dancers mod. The style itself is a per-song
+    // choice of that mod (never a synthesis input).
+    let mut variants = mod_enabled("background-dancers");
+    let mut outlines = variants;
+    if !aa && !persp && !themes && !variants {
+        log_info!(
+            "shader_synthesis: AA off + perspective off + menu off + dancers off — stock shaders"
+        );
         return None;
     }
 
@@ -236,7 +304,52 @@ fn plan() -> Option<Plan> {
         }
     }
 
-    if !aa && !persp && !themes {
+    // Model variant blobs: soft-degrade resolution too (a DLL-only deploy
+    // that forgot `data_mods/shader_fixes/blobs/` must not cost AA/persp).
+    // A missing STYLE blob drops the whole variant set; a missing OUTLINE
+    // blob drops only the outline pair.
+    if variants {
+        let mut style_found = Vec::new();
+        let mut outline_found = Vec::new();
+        for name in shader_layout::variant_blob_names() {
+            let is_outline = name.contains("outline");
+            match mod_paths::find_first_modfile(&format!("blobs/{}", name)) {
+                Some(p) => {
+                    if is_outline {
+                        outline_found.push((name, p));
+                    } else {
+                        style_found.push((name, p));
+                    }
+                }
+                None if is_outline => {
+                    if outlines {
+                        log_warn!(
+                            "shader_synthesis: outline blob '{}' not found — scene outlines off",
+                            name
+                        );
+                    }
+                    outlines = false;
+                }
+                None => {
+                    log_warn!(
+                        "shader_synthesis: scene-style blob '{}' not found (deploy data_mods/shader_fixes/blobs/ with the DLL) — scene style stock",
+                        name
+                    );
+                    variants = false;
+                    outlines = false;
+                    break;
+                }
+            }
+        }
+        if variants {
+            blob_paths.extend(style_found);
+            if outlines {
+                blob_paths.extend(outline_found);
+            }
+        }
+    }
+
+    if !aa && !persp && !themes && !variants {
         log_info!("shader_synthesis: nothing left to overlay — stock shaders");
         return None;
     }
@@ -244,6 +357,8 @@ fn plan() -> Option<Plan> {
         aa,
         persp,
         themes,
+        variants,
+        outlines,
         blob_paths,
     })
 }
@@ -252,6 +367,8 @@ fn plan() -> Option<Plan> {
 /// `data/arc/shader.arc`. Returns the synthesized overlay entries (empty ⇒
 /// serve stock). `original_path` is the AVS path of the stock arc.
 pub(super) fn synthesize(original_path: &str) -> Vec<SynthEntry> {
+    VARIANTS.store(false, Ordering::Release);
+    OUTLINE_PROGRAMS.store(false, Ordering::Release);
     let entries = synthesize_inner(original_path);
     set_status(if entries.is_empty() {
         SynthStatus::Stock
@@ -286,15 +403,19 @@ fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
             return Vec::new();
         }
     };
-    // "v4": the theme program set changed (Shadertoy theme pack — arrows/
-    // wavefield retired, bubbles + 5 new ports; 3 -> 6 theme programs) —
-    // the version prefix is what invalidates pre-existing caches when the
-    // packing recipe changes for identical config+blob inputs.
+    // "v7": the model containers became per-name style VARIANTS
+    // (`<name>_lit` / `<name>_cel`, 2026-09-21; "v6" = cel + inverted hull
+    // on the by-name lambert containers; "v5" = the lit containers joining
+    // the set) — the version prefix is what invalidates pre-existing caches
+    // when the packing recipe changes for identical config+blob inputs
+    // ("v4" = the Shadertoy theme pack, 3 -> 6 -> 11 theme programs).
     let mut fp = format!(
-        "v4 aa={} persp={} themes={} arc={}",
+        "v7 aa={} persp={} themes={} variants={} outlines={} arc={}",
         plan.aa,
         plan.persp,
         plan.themes,
+        plan.variants,
+        plan.outlines,
         {
             let mut h = 0xcbf2_9ce4_8422_2325u64; // FNV-1a 64 over the arc bytes
             for &b in &stock_bytes {
@@ -329,19 +450,23 @@ fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
             names.len()
         );
         publish_theme_indices(&plan);
+        publish_outline_programs(&plan);
         return entries_for(&names, &dir);
     }
 
     log_info!(
-        "shader_synthesis: synthesizing (aa={}, persp={}, themes={})",
+        "shader_synthesis: synthesizing (aa={}, persp={}, themes={}, scene variants={}, outlines={})",
         plan.aa,
         plan.persp,
-        plan.themes
+        plan.themes,
+        plan.variants,
+        plan.outlines
     );
     match build_all(&plan, &stock_bytes, &dir) {
         Ok(built) => {
             let _ = std::fs::write(&sidecar, fp);
             publish_theme_indices(&plan);
+            publish_outline_programs(&plan);
             entries_for(&built, &dir)
         }
         Err(e) => {
@@ -364,22 +489,46 @@ fn publish_theme_indices(plan: &Plan) {
     }
 }
 
-fn planned_names(plan: &Plan) -> Vec<&'static str> {
-    let planned = shader_layout::planned(plan.aa, plan.persp, plan.themes);
-    let mut v = Vec::new();
-    if planned.arrow {
-        v.push(ARROW);
-    }
-    if planned.judge {
-        v.push(JUDGE);
-    }
-    if planned.default {
-        v.push(DEFAULT);
+/// Publish whether the served model variants exist / carry the outline
+/// pair (both success paths — like the theme indices). Both stay `false`
+/// when the variants are not synthesized at all.
+fn publish_outline_programs(plan: &Plan) {
+    VARIANTS.store(plan.variants, Ordering::Release);
+    OUTLINE_PROGRAMS.store(plan.variants && plan.outlines, Ordering::Release);
+}
+
+/// The 18 variant container names (`<material>_lit` / `<material>_cel`).
+fn variant_names() -> Vec<String> {
+    let mut v = Vec::with_capacity(shader_layout::MODEL_VARIANTS.len() * 2);
+    for m in shader_layout::MODEL_VARIANTS.iter() {
+        for style in [SceneStyle::Lit, SceneStyle::Cel] {
+            if let Some(n) = shader_layout::variant_container_name(m, style) {
+                v.push(n);
+            }
+        }
     }
     v
 }
 
-fn entries_for(names: &[&'static str], dir: &str) -> Vec<SynthEntry> {
+fn planned_names(plan: &Plan) -> Vec<String> {
+    let planned = shader_layout::planned(plan.aa, plan.persp, plan.themes, plan.variants);
+    let mut v: Vec<String> = Vec::new();
+    if planned.arrow {
+        v.push(ARROW.to_string());
+    }
+    if planned.judge {
+        v.push(JUDGE.to_string());
+    }
+    if planned.default {
+        v.push(DEFAULT.to_string());
+    }
+    if planned.model_variants {
+        v.extend(variant_names());
+    }
+    v
+}
+
+fn entries_for(names: &[String], dir: &str) -> Vec<SynthEntry> {
     names
         .iter()
         .map(|n| SynthEntry {
@@ -391,7 +540,7 @@ fn entries_for(names: &[&'static str], dir: &str) -> Vec<SynthEntry> {
 
 // ── Container building ──────────────────────────────────────────────
 
-fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<&'static str>, String> {
+fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<String>, String> {
     let read_blob = |name: &str| -> Result<Vec<u8>, String> {
         let path = plan
             .blob_paths
@@ -430,7 +579,7 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<&'static st
             programs.push((0, 1, (ps_blobs.len() - 1) as u8));
         }
         write_container(dir, ARROW, stock.name_hash, &vs_blobs, &ps_blobs, &programs)?;
-        built.push(ARROW);
+        built.push(ARROW.to_string());
     }
 
     // Judge: prog0 = stock VS + (AA ? AA judge PS : stock judge PS);
@@ -460,7 +609,7 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<&'static st
             programs.push((0, 1, 0));
         }
         write_container(dir, JUDGE, stock.name_hash, &vs_blobs, &ps_blobs, &programs)?;
-        built.push(JUDGE);
+        built.push(JUDGE.to_string());
     }
 
     // Default: prog0 = stock VS + stock PS (bit-identical);
@@ -522,7 +671,72 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<&'static st
             &ps_blobs,
             &programs,
         )?;
-        built.push(DEFAULT);
+        built.push(DEFAULT.to_string());
+    }
+
+    // Model style variants (Scene Style): for every stock model shader
+    // NAME the scene's arcs use, `<name>_lit` (our lit VS + that name's OWN
+    // stock PS sliced from the arc — the lit factor rides COLOR0, so each
+    // stock pixel path stays bit-exact) and `<name>_cel` (our banded VS +
+    // PS); program 0 = the OUTLINE pair when planned (bound only for the
+    // dancers mod's bit-31 hull records — RE §4.6), else the style pair
+    // again (4 identical entries, the stock shape). No stock header exists
+    // for these names, so the hash is COMPUTED (RE §4.7). The dancers mod
+    // re-points its private material copies at them per song.
+    if plan.variants {
+        let programs = shader_layout::model_programs(plan.outlines);
+        let (want_vs, want_ps) = shader_layout::model_table_counts(plan.outlines);
+        // Blobs are shared across names — read each file once.
+        let mut blob_cache: std::collections::HashMap<&'static str, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut donor_cache: std::collections::HashMap<&'static str, Vec<u8>> =
+            std::collections::HashMap::new();
+        for m in shader_layout::MODEL_VARIANTS.iter() {
+            if !donor_cache.contains_key(m.lit_ps_donor) {
+                donor_cache.insert(m.lit_ps_donor, extract_stock(stock_arc, m.lit_ps_donor)?.ps);
+            }
+            let mut needed = vec![m.lit_vs, m.cel_vs, m.cel_ps];
+            if plan.outlines {
+                needed.push(m.outline_vs);
+                needed.push(m.outline_ps);
+            }
+            for b in needed {
+                if !blob_cache.contains_key(b) {
+                    blob_cache.insert(b, read_blob(b)?);
+                }
+            }
+            for style in [SceneStyle::Lit, SceneStyle::Cel] {
+                let Some(name) = shader_layout::variant_container_name(m, style) else {
+                    continue;
+                };
+                let (style_vs, style_ps): (&[u8], &[u8]) = match style {
+                    SceneStyle::Lit => (&blob_cache[m.lit_vs], &donor_cache[m.lit_ps_donor]),
+                    SceneStyle::Cel => (&blob_cache[m.cel_vs], &blob_cache[m.cel_ps]),
+                    SceneStyle::Stock => continue,
+                };
+                let mut vs_blobs: Vec<&[u8]> = vec![style_vs];
+                let mut ps_blobs: Vec<&[u8]> = vec![style_ps];
+                if plan.outlines {
+                    vs_blobs.push(&blob_cache[m.outline_vs]);
+                    ps_blobs.push(&blob_cache[m.outline_ps]);
+                }
+                if vs_blobs.len() != want_vs as usize || ps_blobs.len() != want_ps as usize {
+                    return Err(format!(
+                        "{} blob tables disagree with the model layout",
+                        name
+                    ));
+                }
+                write_container(
+                    dir,
+                    &name,
+                    shader_layout::fnv1_32(&name),
+                    &vs_blobs,
+                    &ps_blobs,
+                    &programs,
+                )?;
+                built.push(name);
+            }
+        }
     }
 
     Ok(built)

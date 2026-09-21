@@ -751,3 +751,245 @@ STOPs (0.17 s each), `aeth` 384/192 with 2 STOPs (TPS 150). Source of the SSQ: t
 (`tempo_source.rs`, std thread). Because `τ` is a pure function of `mc`, training rewinds/loops and in-place
 restarts need no latch at all — `clock.rs` now reports the music count and re-latches nothing (the first
 cut's per-jump origin re-latch made a rewind restart the dance from clip 0).
+
+---
+
+## 4. Phase 2 — lit model shaders for the scene (2026-09-17, World 20260825 + 20260915)
+
+The maintainer's Phase-2 question (progress.md "Deviations → Phase-2 idea"): real lighting for the
+dancers/stage. The seam is the artists' own "lit" tag — the `mdl_*_lambert` material shader NAMES that
+ship in every character model but have no `.gsp` container — so the answer hinged on three RE questions,
+all settled against World itself before any design.
+
+### 4.1 The shader registry is filled from the arc BY EXTENSION and looked up BY HASH — no allowlist
+
+`Application::onBoot` (`FUN_180002060` on 20260825) registers seven `*FileCallback` factories with the
+FileManager (`FUN_1801ffd30`): `ShaderFileCallback` (vtable `0x1802dde98`, RTTI `agcs::ShaderFileCallback`)
+answers extension `"gsp"` (`FUN_1802095f0` strcmp against `DAT_18035a458`) and its slot 4 (`FUN_180209630`)
+creates a `ShaderFileTask` per member → `FUN_1802094b0` wraps the member bytes in an `AsyncRegisterJob` →
+`FUN_1802093e0` → `FUN_18025f700(bytes)` = the shader-registry acquire:
+
+* pop a shader object from the free pool (`DAT_1806f3260 + 0x20..0x28`; capacity = gs config `+0xC4` =
+  **0x100 = 256** objects, `FUN_1801f0920`'s `local_34` — the stock arc uses 36, so two more are nothing);
+* `FUN_18025f190(obj, gspw)` parses the GSPW: `obj+0 = *(u32*)(gspw+4)` (the header's name hash),
+  `obj+4 = program count`, `obj+8 = u32 program-handle array` (one `FUN_1802541a0(vs, vsz, ps, psz)`
+  create per program entry, **identical `{u32 @+0, u8 @+4, u8 @+5}` triples reuse the earlier handle +
+  `FUN_180254370` addref**);
+* push into the sorted `std::vector<obj*>` at `DAT_1806f3260[0..1]`, clear the sorted flag (`+0x64`).
+
+Lookup `FUN_18025f8f0(hash)` → `FUN_18025f470`: lazily `std::sort` (`FUN_18025fca0`) then binary-search on
+`*(u32*)obj == hash`. Nothing in the path knows a shader NAME; identity is purely the header hash of
+whatever `.gsp` members the arc carries. **A brand-new `data/shader/mdl_bg_lambert.gsp` member is
+registered exactly like a stock one.** (20260915: acquire `FUN_180209630`-twin chain identical; registry
+lookup `FUN_18021eb70`, hasher slot `DAT_1806f1850`.)
+
+**Material → shader selection (World twin of A3 `FUN_18018af30`): `FUN_1802745b0` (20260825) /
+`FUN_180233920` (20260915)**, called from the model converter's material pass (`FUN_180274070`) at
+CONVERSION time (when the `.model` member is loaded — always after `shader.arc`): `material+0x14` (shader
+id) → the model's debug-info block (`res+0x70`: id table `+0x10`, string table `+0x08`, count `+0x0C`) →
+shader name string → `(*DAT_1806f2040)(str, len)` → `FUN_18025f8f0(hash)`; **only on a miss** the fallback
+`"gs_model_default"` (0x10 chars) / `"gs_model_skinning_default"` (0x19) keyed on `mesh+0x2C != 0`
+(BLENDWEIGHT in the decl). The hasher `DAT_1806f2040` defaults to `LAB_180260290` (`FUN_18026aad0` leaves
+the config override at `+0xB8` null) whose 10 instructions are **FNV-1 32-bit** (`eax = 0x811C9DC5; for
+each byte: eax *= 0x01000193; eax ^= byte`) — byte-for-byte `scripts/gsp_pack.py::fnv1_32`, the same hash
+`gsp_pack.py pack --name` writes into the header. `fnv1("gs_screencommand_arrow") = 0x9E93AC7B` matches
+the stock header; `fnv1("gs_model_default") = 0x6CD7F817`, `fnv1("mdl_bg_constant") = 0xBDFE3C7B`
+(headers of the World 20260915 arc, `gsp_pack.py inspect --expect-name`).
+
+### 4.2 The model pass indexes `programs[stage]` UNCHECKED — a lit container needs FOUR program entries
+
+`FUN_18026cce0(pass, mat, stage)` (material bind, both model-pass callbacks `FUN_1801f6100` DISTANTVIEW and
+`FUN_1801f63f0` OPACITY/LOWPRIO_TRANS/TRANS) emits command `0xE` with
+`*(u32*)(*(shaderObj+8) + stage*4)` — **no bounds check against `obj+4`**. `stage = *(pass+0x168)`, and
+the callbacks set it per record: `rec+0x28` bit 31 clear ∧ `DAT_1806f2d89 != 0` (set to 1 in
+`FUN_1801f2c30` graphics init, never cleared) ⇒ `FUN_1801f68d0(pass, DAT_1806f1548 == 0 ? 3 : 2)` — World
+inits `DAT_1806f1548 = 1`, so ordinary records bind **program 2**; bit-31 records reset to **program 0**.
+(The debug-view remap `FUN_1801f5c90` reaches 9..0x13, only under `DAT_1806f8244` debug bits.) That is why
+EVERY stock model container (`gs_model_*`, all ten `mdl_*`) carries **4 identical `(0,0,0)` program
+entries** (`gsp_pack.py inspect`: `progs=[(0,0,0)]×4`) — the parser dedupes them to one created program.
+**Rule: a synthesized model container ships 4 identical `(0,0,0)` entries, exactly like stock.** A
+1-program container would read `programs[2]` past the 4-byte handle array.
+
+### 4.3 Register map on World (fxc 9.29 `/dumpbin` of the 20260915 arc) — and World IS bound at c14
+
+The A3-verified map (format doc §3.7) holds; two additions matter for lighting:
+
+| VS reg | Source (World 20260825) | Notes |
+|---|---|---|
+| **c14..c17 `World`** | `FUN_18026ca40(pass, mtx)` per draw: copies the sorted entry's matrix to `pass+0xC0`, computes `WVP = World × VP(pass+0x80)` into `pass+0x100`, then emits **`0xE` (c14, 4 regs) = World** and `0x12` (c18, 4 regs) = WVP | `mdl_bg_constant`/`mdl_ch_constant` VS read `c14` (`_gs_vs_parameter_World`, `o2.xyz = pos·World` TEXCOORD5 — dead: their PS ignores it); `gs_model_*_default` do not. **The Phase-2 idea's "only WVP is bound" was wrong** — a lit VS can transform normals into WORLD space |
+| c18..c21 WVP | same call | row-vector convention: `o0 = v.x·c18 + v.y·c19 + v.z·c20 + c21` |
+| c22 `ModelParameters` | `FUN_180262670`: `0x16` ← `item+0x40` (VS), `FUN_18026c520(…, 2, item+0x40)` (PS c2) | `{bone_count, 1.0, 0, 0}` for the DLL's items |
+| c23 `ModelUnitParameters.m_color` | `0x17` ← sorted-entry colour | per-draw tint |
+| c24.. `parameters` | `FUN_18026cce0`: `0x18` ← `mat+0x18` × `param_count` (VS), `3` (PS) | lambert materials: `param_count = 2` — c24 `m_vTexAnime` = `(1,1,0,0)` on all 158, c25 `vConstatntColor` = `(1,1,1,0)` (135) / `(1,1,1,1)` (23) |
+| s3 `BoneMatrices` | render item bone texture, `create(4, bone_count)` (§2.8) | **u = (row + 0.5)/4 → 0.125 / 0.375 / 0.625 for matrix rows 0/1/2; v = (bone_idx + 0.5)/(c22.x + c22.z)**; `texldl` with LOD 0; `w0 = 1 − v3.x − v3.y − v3.z` for `v2.x`, `v3.xyz` for `v2.yzw`; output component k = `dot(row_k, (pos,1))` (3×4 matrices, `invBind·bone`, MODEL space — then WVP) |
+| c48..c49 `s_ConstantParameters` | (fog `o4.x = pos.w·c49.x − c49.y` in the `mdl_*` VS; no PS reads `dcl_fog`) | dead — not used |
+
+Stock blobs (identical on 20260825/20260915): `gs_model_default` VS 6 instr (`o0 = pos·WVP; o1.xy = uv;
+o2 = c23`), `gs_model_skinning_default` VS 73 instr (the palette skinning above + the same outputs),
+**their PS is byte-identical**: `texld r0, v0, s0; mul_pp oC0, r0, v1;` + the 32×32 stipple
+`texkill(c2.y − tex2D(s15, vPos·(1/32)).y)`. The ten `mdl_*_constant*` PS are 2 instructions
+(`tex × color`, NO stipple) and their VS apply `m_vTexAnime` (`uv·rcp(c24.xy) + c24.zw`) and output
+`dcl_texcoord3 o1` / `dcl_color o3`.
+
+Consequence for the design: because the lit factor multiplies `tint.rgb` linearly, it can be folded
+into the VS's COLOR0 output and the lit containers can pair **our VS with the game's OWN
+`gs_model_default` PS** (sliced from the arc at synthesis like every other container) — alpha, the
+stipple dissolve and the `c2` reads stay bit-exact by construction and no Konami bytecode enters the
+repo. What a lambert surface renders TODAY is exactly that PS behind the `gs_model_*_default` VS.
+
+### 4.4 Which shipped World models name `lambert` — dancers only, never stages
+
+`ktmdl_dump.py` over ALL 141 `mapset_*`/`pl_*` arcs of the World install (289 models, 484 materials):
+
+| Arc class | `mdl_bg_lambert` | `mdl_ch_lambert` | everything else |
+|---|---|---|---|
+| 26 `mapset_*` stages (94 models) | 0 | 0 | 325 (`ch_constant_vc` 217, `bg_constant_vc` 96, `ch_constant_c_vc` 7, `bg_constant` 2, `ch_constant_c`/`bg_constant_c_vc`/`ch_constant_vc_notex` 1 each) |
+| 27 `pl_<key>` bodies | 0 | **68 — every material of all 26 dancer bodies** | `pl_shadow00` = `mdl_bg_constant` (the floor shadow) |
+| 88 `pl_<key>_<part>` parts (head/face/chest/hips/forearm) | **90 — every material of every part** | 0 |
+
+No model mixes lambert and constant materials. Layouts: `mdl_bg_lambert` = layout C (`POSITION@0,
+NORMAL@12, TEXCOORD0 FLOAT16_2@24`, stride 28, no COLOR0), `mdl_ch_lambert` = layout D (`POSITION@0,
+BLENDINDICES UBYTE4@12, BLENDWEIGHT FLOAT3@16, NORMAL@28, TEXCOORD0@40`, no COLOR0). Render modes of the
+lambert meshes: 105 opaque alpha-test-127, 30 alpha-blended (hair/translucent parts, zwrite mixed),
+1 additive — all RENDER STATES from the mesh flags, untouched by a shader that keeps the stock alpha
+output. So "lit models" means, on a cabinet: **every dancer body and every attached part shades with
+the light; the shadow blob and the WHOLE stage (all `constant*`, baked/emissive by authoring) stay
+exactly stock.** The first operator row was therefore named DANCER LIGHTING. (Superseded 2026-09-21 by
+§4.7: the material re-point restyles the stage's `constant*` materials too — LIGHTING STYLE, whole scene.)
+
+### 4.5 Light space
+
+`World` (c14..c16 3×3) makes a WORLD-space light direction available. For this scene the item worlds
+are `body_world = diag(s)·T(x,0,0)` (uniform scale + translation — inverse-transpose ∝ the matrix,
+so `n_w = normalize(n_skinned · World3x3)` is exact), stage parts are identity, and the mirrored right
+forearm's `diag(−1,−1,−1)` inverts the normals along with the point-inverted geometry — which is the
+correct normal for that geometry. The light is a compile-time constant (world +Y up, +Z toward the
+fallback camera `(0,1.6,5) → (0,0.9,0)`): a key from above-front. A per-frame adjustable light would
+need a constant emission into the model pass (a new detour) — out of scope; the stage cameras moving
+around a fixed world light is physically the right behaviour anyway (a fixed rig).
+
+### 4.6 Phase 2b — a second draw per mesh WITHOUT a detour (cel outlines, 2026-09-17)
+
+Inverted-hull outlines need every lambert mesh drawn twice (body, then a black extruded shell). Two
+World facts make that possible with zero engine changes:
+
+* **The bit-31 program selector.** Both model-pass material-bind callbacks (`FUN_1801f6100`
+  DISTANTVIEW, `FUN_1801f63f0` OPACITY/LOWPRIO_TRANS/TRANS) choose the program index per DRAW RECORD:
+  `rec+0x28 & 0x8000_0000 == 0 ∧ DAT_1806f2d89 != 0` ⇒ `stage = DAT_1806f1548 == 0 ? 3 : 2`, else
+  **program 0** (`FUN_1801f68d0(pass, idx)` emits command `0xE` with `handles[idx]`). Every other
+  reader of the record flags ignores bit 31: the collector `FUN_180263430` tests bit 27 (skip),
+  `& 0xE0` (blend group — forced to `0x20` when the entry's tint alpha < 1) and `rec+0x2C & pass
+  filter`; the draw-state emitter `FUN_180261c80(pass, flags)` reads bits 1–4 (`~(f>>k)&1` → render
+  states 0/4/6/8 of command `0x11`) and `& 0xE0` (blend group → commands `0x13`/`0x1F`/`0x21`).
+  The DLL builds its items' record arrays itself (`render_item.rs`, `REC_FLAGS = gpuFlags &
+  0xF000_00FF`), so it owns bit 31: a record with it set binds **program 0 of the material's
+  container**; ordinary records bind program 2. A lit container laid out as `{0: outline VS/PS,
+  1..3: style VS/PS}` therefore draws the same mesh as a body (program 2) or as its hull (program 0)
+  purely by record flag. Because the mask keeps the stock top nibble, body items now CLEAR bit 31
+  (a stock record carrying it would have been invisible with 4 identical programs but would turn
+  into a hull under the new layout); stock containers are unaffected either way.
+* **Records are counted from the RESOURCE.** The collector walks `item+0x70` (the item's private
+  record array) for `*(item+0x60)+0x24` entries (`res+0x24`, the resource's draw-record count) —
+  an item cannot carry more records than its resource has meshes. So the hull is a **second render
+  item** per dancer body / part, built from the same `ResourceView` with its own material/palette
+  copies and bone array, every record bit-31'd. Its node reads the SAME frame-board slot as the
+  body's node (`visit(2)` copies world/tint/bones/hidden from `node.instance` into whichever item
+  the node owns — two nodes on one slot are two readers of a seqlocked snapshot), so the director,
+  the publish path and the slot budget are untouched; only the session's instance list grows
+  (`InstanceKind::Hull { of }`) and the item/node teardown covers it like any other instance. Stage
+  parts and the shadow name `constant` shaders whose stock containers have 4 identical programs — a
+  hull there would be a plain duplicate draw — so hulls exist only for `Dancer`/`Part` instances.
+
+**Runtime seam for a live style switch (not used yet):** `DAT_1806f1548` (u32, set to 1 once in
+`FUN_1801f2c30`; read only by the two bind callbacks + the debug-view remap `FUN_1801f5c90`) selects
+program 2 vs 3 for every ordinary record. A container `{0: outline, 1: lit, 2: lit, 3: cel}` plus a
+DLL write of that one global would switch every dancer between styles at runtime, cabinet-wide (the
+3D background is one scene for both players), without a detour or relaunch. Needs one derivation
+(the `MOV EAX,[rip+DAT_1806f1548]; TEST` pair inside either callback) — deferred until the
+presentation layer settles.
+
+**Outline geometry without cull control.** Render states come from the shared GPU record (cull
+mode included), so the classic "cull front faces" inverted hull is unavailable. The hull VS instead
+offsets each vertex in SCREEN space along the projected normal (constant pixel width, aspect
+16:9 baked — the render size is always 16:9 or the 1280×720 SD render) and pushes its depth back by
+`lerp(PUSH_RIM, PUSH_FACE, facing²)`: grazing (silhouette) vertices barely move in depth so the rim
+survives beyond the body's edge, camera-facing vertices are pushed well behind the body so the
+hull's interior always loses the depth test. Order-independent for z-writing meshes; alpha-blended
+z-write-off meshes (hair/veils) would be darkened by their own hull in either order, so hull records
+whose blend group (`flags & 0xE0`) is non-zero are hidden (bit 27) by default. The projection
+constants the ink/facing terms need (`P00`, `P11`) are recovered in the VS from the two matrices the
+pass DOES bind: `(WVP)3×3 = World3×3 · V3×3 · diag(P00, P11, P22)` for an affine World and a rigid
+View, so `|column j of WVP3×3| / |World row 0| = P_jj` (uniform-scale World — true for every item of
+this scene), `n_view.z = (n · WVP)_w`, `pos_view ∝ (clip.x/P00, clip.y/P11, clip.w)`.
+
+### 4.7 Phase 2c — whole-scene restyle by re-pointing the PRIVATE material copies (2026-09-21)
+
+The stage cannot ride the by-name seam of §4.1: its materials name the ten `mdl_*_constant*` shaders that
+DO ship, and one stage mixes opaque props with additive glows and an inward-facing skydome under the same
+names. The seam that handles all of it is the material record itself:
+
+* `FUN_180274070` (the converter's material pass) writes into each 0x168 material record: `*(u32*)(mat+0x10)
+  = FUN_180275a40(maya_name)` (the MATERIAL identity hash — not the shader's) and **`*(mat+0x20) =
+  FUN_1802745b0(mat, mesh, res)` = the resolved `gs::Shader*`** (§4.1's selection incl. the fallback), then
+  `u16 mat+0x18 = param_count`, params from `mat+0x28`, texture slots. The draw (`FUN_18026cce0(pass,
+  mat+0x10, stage)`) reads the object back from `*(param_2+0x10)` and binds `*(*(obj+8) + stage*4)`; nothing
+  in the draw path reads a shader NAME or re-resolves. The DLL's render items carry PRIVATE copies of those
+  records (`render_item.rs`, plain `memcpy` — §2.2), so **re-pointing `copy+0x20` at another resident shader
+  object restyles that material for that item only**, per record, per instance, at build time — no detour,
+  no per-pass rewrite, and a next-SONG decision instead of next-launch.
+* The object to point at comes from the registry lookup the converter itself uses: `FUN_18025f8f0(u32
+  fnv1_hash) -> gs::Shader*` (§4.1; null on miss; spins the registry flag, lazy sort, binary search on
+  `*(u32*)obj == hash`). New OPTIONAL signature `model_shader_select_site` (unique + byte-shape identical on
+  all five sweep builds; the CALL at match+6 and the one at match+53 must agree, the two `LEA RCX` must name
+  `gs_model_skinning_default` / `gs_model_default`, the callee prologue `40 53 48 83 EC 30 48 C7 44 24 20 FE
+  FF FF FF 8B D9`) → derived `scene3d_shader_lookup` (`+0x2165C0 / +0x2431E0 / +0x2574A0 / +0x25F8F0 /
+  +0x21EB70` on 20250805 / 0224 / 0721 / 0825 / 0915). `gs::Shader = {u32 name_hash @0, u32 program_count
+  @4, u32* program_handles @8}`.
+* Consequence for the container set: the synthesis emits **style VARIANTS under new names** — for each stock
+  model shader name `N` the scene uses, `N_lit` and `N_cel`, each with the outline pair at program 0 — and no
+  longer the by-name `mdl_*_lambert` overrides (which made the style a boot decision). A material copy whose
+  object hashes to `N` (for the dancers' lambert materials: to the FALLBACK `gs_model_(skinning_)default`,
+  since no `mdl_*_lambert` exists) is re-pointed at `lookup(fnv1("N_<style>"))`. Every variant is always
+  synthesized when `shader-fixes ∧ background-dancers` are on; the STYLE lives in the dancers mod
+  (`background_dancers.style` / `.outlines`) and is applied per session.
+* **Stock interpolator contracts the lit variants must reproduce** (fxc `/dumpbin` of the World 20260915
+  containers): every `mdl_*` PS reads UV from **`TEXCOORD3`** (`dcl_texcoord3 v0.xy`) and colour from
+  `COLOR0` — unlike `gs_model_default` (`TEXCOORD0`); `_c` PS: `oC0.rgb = tex·color·c4.rgb + c5.rgb`,
+  `oC0.a = tex.a·color.a`; `_notex` PS: `oC0 = COLOR0` with the VS having applied `(c23·COLOR0)·c25 + c26`
+  (`vConstatntColor`/`vOffsetColor` in the VERTEX shader for that variant); `_vc` VS: `COLOR0 = c23·v_color`.
+  The LIT style therefore pairs a define-driven VS (`UV3`, `VCOLOR`, `NOTEX`) with EACH name's own stock
+  PS sliced from the arc; the CEL style's own PS takes `TEXCOORD0` + `CCOLOR`/`NOTEX`/`STIPPLE` defines.
+* **Which stage materials get restyled (DLL rule, pure + host-tested):** a material copy is re-pointed iff
+  every draw record using it has blend group 0 (`REC_FLAGS & 0xE0 == 0` — opaque/alpha-tested; additive
+  glows and alpha-blended translucents stay stock, exactly as authored), the instance is not the shadow
+  (`pl_shadow00`) and not a stage part whose model name ends in `_bg` (the skydome/backdrop — lighting an
+  inward-facing dome puts a gradient across the sky). Stage-part hulls follow the same eligibility (the
+  skydome's shell would be all front-facing anyway). Names present in the shipped stage/character arcs:
+  `mdl_ch_constant_vc` 217, `mdl_bg_constant_vc` 96, `mdl_ch_constant_c_vc` 7, `mdl_bg_constant` 3 (2 stage
+  + the shadow), `mdl_ch_constant_c` 1, `mdl_bg_constant_c_vc` 1, `mdl_ch_constant_vc_notex` 1, plus the
+  dancers' `mdl_ch_lambert` 68 / `mdl_bg_lambert` 90 — nine names, 18 variant containers (the three unused
+  stock names `mdl_ch_constant`, `mdl_bg_constant_c`, `mdl_bg_constant_vc_notex` get no variant).
+
+**Outline fix (the 2026-09-21 screenshot — no line where an arm crosses the torso).** The first hull hid
+its interior with a facing-dependent DEPTH push (`PUSH_FACE` ≈ 20 mm at 5 m); where an arm rests on the
+chest the parts are 0–20 mm apart, so the arm's shell fell behind the chest and only the whole-figure
+silhouette (nothing behind it) survived. The classic inverted hull avoids this by CULLING the shell's front
+faces; without cull-mode control the outline PS now does the same per pixel — `clip(dot(n_view, pos_view))`
+discards front-facing shell fragments (both vectors interpolated from the VS) — and the depth push shrinks
+to a 1 mm constant in WORLD metres (`Δclip.z = P22·Δ`, `P22 = |WVP column z| / |World row 0|`, the same
+recovery as `P00/P11`). Back-facing shell fragments sit behind the body by its own thickness and poke out 2
+px at every silhouette — including an arm's edge over the chest (the arm's centre is ~3 cm in front of it).
+
+**Deploy #5 (2026-09-21) — stage hulls built but invisible: the distance falloff.** The log proved the
+twins existed (`built … 8 hull`, every `gm_*_<prop> [hull] N record(s) marked bit-31 … restyled=…`) and the
+props' meshes are closed (edge-sharing survey: `gm_club00_speaker` 1–7 % boundary edges, `gm_boom01_dodai`
+0 %, the dancer body 3 %) with well-formed unit normals — so the shell was drawn, just not seen. Cause: the
+rim width was `OUTLINE_PX · saturate(OUTLINE_REF_DIST / w)` with `REF_DIST = 5 m`, i.e. constant 2 px only up
+to 5 m and ∝ 1/w beyond; the A3 stages span ±10–50 m (`gm_boom01_back` x ±30 m, the stock cameras sit
+8–30 m from most props), so a prop at 20 m got 0.5 px — a sub-pixel rim that rasterizes to nothing. The
+dancers (≈ 5 m from every stock shot) were always inside the constant zone. Fix: `OUTLINE_REF_DIST = 25 m`,
+and the rim width is now a PER-ITEM constant: the hull VS reads `ModelParameters.w` (`item+0x4C` — read by no
+stock shader: `.x/.z` feed the bone-texture height, `.y` the stipple), which the DLL sets on each twin
+(`render_item::set_outline_width`) from `background_dancers.outline_px` (dancers, default 2.0) /
+`.outline_px_stage` (props, default 1.5 — large flat props read heavier than a figure); 0 falls back to
+the shader's `OUTLINE_PX`.
