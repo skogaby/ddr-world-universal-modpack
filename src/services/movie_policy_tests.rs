@@ -137,3 +137,46 @@ fn contributors_are_independent_and_song_rate_starts_false() {
     policy.set(MovieSuppressor::NonNativeOs, false);
     assert!(!policy.should_suppress());
 }
+
+#[test]
+fn background_dancers_contributor_fully_suppresses_and_wins_over_fallback() {
+    let policy = MoviePolicy::new();
+    assert!(!policy.is_suppressed(MovieSuppressor::BackgroundDancers));
+    policy.set(MovieSuppressor::BackgroundDancers, true);
+    assert!(policy.should_suppress());
+    let (hr, outcome, calls, state, _) = drive(&policy, 0x1234);
+    assert_eq!(hr, 0);
+    assert_eq!(outcome, CallOutcome::Suppressed);
+    assert_eq!(calls, 0);
+    assert_eq!(state, 3);
+    // Fallback mode never turns it back into a real build.
+    policy.set(MovieSuppressor::NonNativeOs, true);
+    policy.set_fallback(true);
+    assert!(policy.should_suppress());
+    policy.set(MovieSuppressor::BackgroundDancers, false);
+    assert!(!policy.should_suppress());
+    assert!(!policy.is_suppressed(MovieSuppressor::SongRate));
+}
+
+#[test]
+fn last_build_tracks_every_outcome() {
+    use super::movie_policy::LastBuild;
+    let policy = MoviePolicy::new();
+    assert_eq!(policy.last_build(), LastBuild::None);
+    drive(&policy, 0);
+    assert_eq!(policy.last_build(), LastBuild::RealOpened);
+    drive(&policy, VFW_E_CANNOT_RENDER);
+    assert_eq!(policy.last_build(), LastBuild::RealFailed);
+    // A positive partial-success code is not a real open either.
+    drive(&policy, 0x0004_0242);
+    assert_eq!(policy.last_build(), LastBuild::RealFailed);
+    policy.set(MovieSuppressor::NonNativeOs, true);
+    policy.set_fallback(true);
+    drive(&policy, VFW_E_CANNOT_RENDER);
+    assert_eq!(policy.last_build(), LastBuild::FallbackFaked);
+    drive(&policy, 0);
+    assert_eq!(policy.last_build(), LastBuild::RealOpened);
+    policy.set(MovieSuppressor::BackgroundDancers, true);
+    drive(&policy, 0);
+    assert_eq!(policy.last_build(), LastBuild::Suppressed);
+}

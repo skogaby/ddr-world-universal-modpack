@@ -710,7 +710,8 @@ mid-song faulted at `gamemdx.dll+0x24178`. Three independent root causes:
 
 Also observed: a movie song renders mostly black — the 2D alpha-0 hide covers the movie plane too;
 Step 10's `Customize+0x30` thumbnail override is the intended answer (until then movies vanish on
-those songs). `created == released` on every teardown (10..42), teardowns 7–33 ms.
+those songs). **Corrected 2026-09-22 (§7):** the hide never covered it — a FULLSCREEN movie is drawn
+into the 3D target BEFORE the model passes, and the stage geometry painted over it. `created == released` on every teardown (10..42), teardowns 7–33 ms.
 
 ### 3.5 A3's scene-clock rate setter — BPM sync + STOP slow-motion (2026-09-16, `gamemdx_20240402.dll`)
 
@@ -1250,3 +1251,85 @@ are a possible follow-up, not a stage property.
 walk + fingerprint stat (a full read + pack only when stale), per ready arc a 64 KiB prefix read (header
 + cue table + string table sit at the front; the whole file is read only when the string table runs past
 the prefix), per directory the sidecar files.
+
+## 7. Background movies — where World draws a gameplay movie (2026-09-22, 20260825 + 20250805)
+
+Drives the GLOBAL SETTINGS row **Background Movies** (`background_dancers.movie_mode` = `off` /
+`thumbnail` / `fullscreen`, `mods/background_dancers/movie_mode.rs`). The headline: **a FULLSCREEN
+gameplay movie is already drawn UNDER the 3D model passes** — the "movie songs render mostly black"
+observation of §3.4 (deploy #2) was not the 2D hide covering the movie plane, it was the 3D STAGE painted
+over it. So "dancers in front of a fullscreen movie, no stage" (the DDR 5th Mix look) needs no compositor,
+no detour and no new pass: leave the movie fullscreen and do not draw the stage.
+
+### 7.1 The movie actor and its two layers
+
+- `SceneManageActor` (vftable `0x180363408`, RTTI `.?AVSceneManageActor@dance@sequence@@`) is created at
+  DPS step 2 (`FUN_180057e10` → ctor `FUN_18007d480(this, DPS+0xA0 basename, DPS+0xC8 movie path,
+  courseFlag, movie_size, &rect)`) and added as a DIRECT CHILD of the DPS (`FUN_18021f230` = the actor
+  tree's add-child: `child+0x08` parent, `parent+0x18` first child, `child+0x10` next sibling).
+- Its onInitialize `FUN_18007d700` looks the song up (`FUN_1801b3fa0(basename)`, the basename twin of the
+  derived `find_music_by_mcode` = `FUN_1801b3f30`; same entry vector `DAT_1806f2d80`) and, when the entry
+  has a movie (`+0x141 ∉ {5,0}`, or `+0x141 == 5` and `+0x140 ∉ {5,0}`): movie size 1 ⇒ message `0x1011`
+  to the DPS; size ∉ {1,2} ⇒ **return, no MovieActor** (VIDEO SIZE OFF). Otherwise it creates the 0x150-byte
+  `MovieActor` (vftable `0x180363398`, RTTI `.?AVMovieActor@dance@sequence@@`; ctor `FUN_18007c960`) with
+  `+0x148 = (movie_size == 2)` — the THUMBNAIL flag — stores it at `SceneManageActor+0xD8` and adds it as a
+  child. **20250805 has no size-3 early return** (`FUN_1800799f0`: the 0x1011 send, then the MovieActor
+  unconditionally) — so writing VIDEO SIZE OFF alone is not "no movie" on that build; the OFF mode's
+  BuildGraph suppressor is the backstop.
+- `MovieActor::onInitialize` `FUN_18007cc20`: empty path (`+0xD8` std::string size `+0xE8` == 0) ⇒ step 4;
+  else copies the entry's movie offset (`+0x144 → +0x140`), creates the `agcs::Movie` wrapper
+  (`FUN_180216c70(player, path, 4)` → `+0x138`) and registers it into the LAYER TABLE (`FUN_18007cf90`):
+  `entry = *(DAT_1806f2d20 + 8 + slot·0x18)` with **slot 9 for fullscreen, slot 0 when `+0x148` (thumbnail)**
+  (20250805 `FUN_180079280`: identical), `movie+0x0C = 0x7FFFFFFF` (draw priority), tail-appended to the
+  render-list manager's active list (the widget_renderer node shape).
+- StackStep (`+0x58` values / `+0x82` index — the `agcs::Actor` shape): onUpdate `FUN_18007d160` step 0
+  waits for the Movie impl's opened flag (`*(*(+0x138)+0x18)+0x0C`), then state `+0x10 == 1` ⇒ step 1 (ready)
+  else step 4 (no movie); message `0x1044` (the song anchor) 1 → 2; `0x1045` with count ≥ offset ⇒ play,
+  2 → 3. Identical on 20250805 (`FUN_180079450`).
+- `SceneManageActor::onUpdate` `FUN_18007d850` step 0 returns while the MovieActor is at step 0; then, if
+  the MovieActor's step ≠ 4 and movie size == 1, `FUN_180031e70` — resets the BgMovieActor's
+  MoviePlayerFrame and sends `0x1006` (disable) to the BgMovieActor and its children, i.e. the whole
+  `BackgroundFrame` (bg_root) is switched off for a fullscreen movie; otherwise the usual gameplay
+  background context (`+0x2D0/+0x378 = 0`, `+0x128 = 1`, `FUN_180031f60`, `FUN_180031d20`). Its message
+  handler `FUN_18007d970` answers the DPS step-3 readiness poll `0x1001` NOT READY until its own step 2 —
+  so by DPS step 5 (the dancers' visibility edge) the movie is settled.
+
+### 7.2 Where each layer lands in the frame
+
+- Layer table (`DAT_1806f2d20`, 11 × `{override, layer, list_index}`, built by `FUN_18002aab0`; the
+  overlay-draw service's derived `layer_table`): list indices `[1,0,0,0,0,0,3,3,1,4,5]`; entries 7–10 get
+  PRIVATE command lists `DAT_1806f1620[idx]` — entry 7 → 3, 8 → 1, **9 → 4**, 10 → 5 (20250805 same table).
+- The 8 ScreenCommandList viewports (`FUN_1801f6dc0`, names in order FRONT, MIDDLE, BACK, SYSTEM,
+  OFFSCREEN0, OFFSCREEN1, DEBUG_DIALOG, RENDER_CAPTURE; viewport `i` at `DAT_1806f1568 + i·0x18`, command
+  list `i` at `DAT_1806f1620 + i·8`). Render-graph boot `FUN_1801f2c30` (20250805 `FUN_1801da730`, same
+  shape): **RENDER-3D = {prio 0x64 `DAT_1806f2f18+8`, 0x65 OFFSCREEN0, 0x66/0x67/0x68 MODEL passes, 0x6D
+  `DAT_1806f2f18+0x188`}**; RENDER_2D = {0x65 BACK, 0x66 MIDDLE, 0x67 FRONT}; DISPLAY = {0x65, 0x66 SYSTEM}.
+  So layer entry 9 (the fullscreen movie) → command list 4 → **OFFSCREEN0 → RENDER-3D ahead of the MODEL
+  passes**; entry 0 (the thumbnail movie) has no override → the ordinary 2D lists, above the 3D.
+- Depth: the ScreenCommandList viewport's render (`FUN_1801f05c0` → `FUN_180267480`) emits gd tag `0x11`
+  records `id 2 = 0` (ZENABLE false), `id 3 = 0` (ZWRITEENABLE false), `id 0 = 0` (cull none) before the
+  list (gd executor `FUN_18024d650` case `0x11`: `id = (v << 23) >> 24` → 0 CULLMODE, 1 SCISSORTEST,
+  2 ZENABLE, 3 ZWRITEENABLE, 4 ALPHATEST, 5 STENCIL, 6 TWOSIDEDSTENCIL, bit 0 = value); every viewport's
+  setup `FUN_18026cec0` re-enables Z (`id 2 = 1`, `id 3 = 1`) for the next one. The movie quad writes no
+  depth, the RENDER-3D list clear ran before it, so the model passes draw over the movie with a clean
+  Z-buffer — the dancers stand in front of it by construction.
+- The movie draw itself (`agcs::Movie` vftable `0x180389678`, slot 5 → `FUN_180216930`): into the ACTIVE
+  command list (`*(DAT_1806f2fb8 + 0x40 + *(DAT_1806f2fb8+0x68)·8)`): tag 0x12 (the movie texture), tag 8
+  blend, one tag-5 6-vertex quad at the marker rect, tag 8, tag 0x10 — only once a frame was delivered
+  (`+0x4C`), which is why a faked-open player draws nothing.
+
+### 7.3 What the three modes do
+
+| Mode | Window entry (`movie_size::apply`) | Per song |
+|---|---|---|
+| OFF | every movie-showing side (0/1/2) → 3; `MovieSuppressor::BackgroundDancers` set (cleared at window exit) | stage as usual; no MovieActor on 20260224+; 20250805's MovieActor is faked open and draws nothing |
+| THUMBNAIL | 0/1 → 2 (the original rule) | stage as usual; the thumbnail is a 2D layer above the 3D |
+| FULLSCREEN | 2 → 1 (0/1 already fullscreen) | `movie_backdrop::probe` each visible frame: live DPS → SceneManageActor child → MovieActor child → step; step 1–3 ∧ no live suppression ∧ `movie_policy::last_build() == RealOpened` ⇒ **Active**: stage parts (+ their hull twins) and floor shadows published hidden, 2D bg hide disarmed (the game disabled the frame). No MovieActor / step 4 / faked ⇒ stage shown |
+
+The OFF mode's value 3 is exactly what a player with VIDEO SIZE OFF gets (the maintainer's 2026-09-16
+cabinet run: "ON/OFF: no override lines, movie as configured" with dancers). FULLSCREEN falls back to
+THUMBNAIL (one WARN) when the movie-size override or the probe (the two RTTI vtables, the DPS identity
+gate, the BuildGraph hook) is unavailable. Both RTTI names resolve on 20250805 / 20260224 / 20260721 /
+20260825 / 20260915 (`validate_signatures.sh`, 2026-09-22). Correction to §3.4: "the 2D alpha-0 hide
+covers the movie plane too" is wrong — bg_root never covers a fullscreen movie (the game disables it);
+the stage geometry did.

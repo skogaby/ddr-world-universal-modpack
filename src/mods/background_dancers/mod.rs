@@ -16,8 +16,8 @@
 //! At the first entry into the song window {26, 27, 28} ([`lifecycle`]) a
 //! seeded random pick ([`selection`], [`session::Pick`]) chooses one A3
 //! stage row + one dancer per entered side (+ the accessory parts whose
-//! arcs exist), overrides every entered side's fullscreen movie size to the
-//! sized thumbnail for the song ([`movie_size`]), hands the pick's arcs to
+//! arcs exist), applies the Background Movies mode to every entered side's
+//! movie size for the song ([`movie_mode`], [`movie_size`]), hands the pick's arcs to
 //! the engine's FileManager and parses them on one background thread
 //! ([`session::parse_pick`] → `core::anm`: stage `_play_loop`s, dance
 //! clips, the body `.b2it`, the part / shadow bone tables, the stage's
@@ -38,6 +38,22 @@
 //! 2D background transparent for the song. Torn down at window exit
 //! (nodes → destroy vector → dtors → arcs; movie size + hide restored).
 //! `DEFAULT_OFF_MODS`: the maintainer flips the default once cabinet-proven.
+//!
+//! ## Background movies (2026-09-22)
+//!
+//! GLOBAL SETTINGS row "Background Movies" (`background_dancers.movie_mode`,
+//! next song) decides what a song with a background movie does, for every
+//! entered player whose VIDEO SIZE shows one: OFF (VIDEO SIZE OFF for the
+//! song + the shared BuildGraph suppressor; the stage as usual), THUMBNAIL
+//! (the default and the original behaviour: the movie's small window over
+//! the stage) or FULLSCREEN (NO STAGE) — the DDR 5th Mix look. The game
+//! already draws a fullscreen movie into the 3D target ahead of the model
+//! passes, so the last mode only has to leave the movie fullscreen and not
+//! draw the stage: [`movie_backdrop`] probes the live DancePlaySequence's
+//! MovieActor every visible frame, and while its movie really plays the
+//! stage parts and floor shadows are published hidden (the camera director
+//! and the dancers run unchanged). RE: `docs/background_dancers_research.md`
+//! §7.
 //!
 //! ## Player choice (2026-09-21)
 //!
@@ -80,6 +96,8 @@ pub mod director;
 pub mod director_math;
 pub mod instance_plan;
 pub mod lifecycle;
+pub mod movie_backdrop;
+pub mod movie_mode;
 pub mod movie_size;
 pub mod options;
 pub mod outline;
@@ -143,8 +161,10 @@ impl Mod for BackgroundDancersMod {
     }
 
     fn init(&mut self, ctx: &ModContext) -> bool {
-        // Optional: the movie-size override (fail-open without it).
+        // Optional: the movie-size override and the fullscreen-movie probe
+        // behind Background Movies = FULLSCREEN (fail-open without them).
         let _ = movie_size::init(ctx.signatures);
+        let _ = movie_backdrop::init(ctx.signatures);
         scene3d::is_available()
     }
 

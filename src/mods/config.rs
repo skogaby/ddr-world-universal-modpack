@@ -412,10 +412,12 @@ pub struct NonNativeOsSupportConfig {
 }
 
 /// Config for the `background-dancers` mod (`background_dancers` section).
-/// Operator-edited only (read at mod enable; the DLL never writes it back).
-/// Both keys are the two A3 `ConfigBank` switches of the dancer actor's
-/// graph-rate setter; A3 retail shipped `bpm_sync = false`, `stop_slow =
-/// true`. Missing section / keys ⇒ both `true`.
+/// DLL-owned since 2026-09-21: read at mod enable, and every edit of a
+/// Background Dancers row in the mod menu rewrites the WHOLE section from
+/// the live values (`background_dancers::style::persist_section`).
+/// `bpm_sync` / `stop_slow` are the two A3 `ConfigBank` switches of the
+/// dancer actor's graph-rate setter; A3 retail shipped `bpm_sync = false`,
+/// `stop_slow = true`. Missing section / keys ⇒ both `true`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct BackgroundDancersConfig {
     /// `MOTION_BPM_DEPENDENCY`: the dance/camera/stage clock runs at
@@ -477,6 +479,17 @@ pub struct BackgroundDancersConfig {
     /// NEXT LAUNCH. Default `true` (nothing installed ⇒ nothing discovered).
     #[serde(default = "default_true")]
     pub custom_content: bool,
+    /// BACKGROUND MOVIES (2026-09-22): what a song with a background movie
+    /// does while the dancers are on — `"off"` (no movie; the 3D stage as on
+    /// any other song), `"thumbnail"` (default — the movie in its small ON
+    /// window over the 3D stage) or `"fullscreen"` (the DDR 5th Mix look: the
+    /// movie full-screen behind the dancers, the 3D stage and floor shadows
+    /// not drawn). Applies to every entered player whose VIDEO SIZE shows a
+    /// movie (VIDEO SIZE OFF stays off); the player's saved VIDEO SIZE is
+    /// never changed. Absent/unknown ⇒ thumbnail. Mod menu (GLOBAL SETTINGS,
+    /// Background Dancers), next song.
+    #[serde(default)]
+    pub movie_mode: Option<String>,
 }
 
 /// Clamp an outline width to the range the hull VS was tuned for.
@@ -500,6 +513,7 @@ impl Default for BackgroundDancersConfig {
             outline_style: None,
             outline_layer_colors: None,
             custom_content: true,
+            movie_mode: None,
         }
     }
 }

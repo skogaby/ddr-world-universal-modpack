@@ -2,8 +2,14 @@
 //! made transparent for the duration of a 3D scene so the engine's model
 //! passes are what the player sees behind the lane.
 //!
-//! Mechanism (maintainer override: NEVER a placeholder arc, NEVER a movie
-//! suppression): every frame while armed, find the LIVE `bg_root`
+//! Armed only while the stage is what shows behind the lane: behind a
+//! FULLSCREEN movie backdrop (Background Movies = FULLSCREEN, `movie_mode.rs`)
+//! the game disables the whole BackgroundFrame itself and the lifecycle
+//! keeps this disarmed.
+//!
+//! Mechanism (maintainer override: NEVER a placeholder arc; movies are only
+//! ever suppressed when the operator picks Background Movies = OFF): every
+//! frame while armed, find the LIVE `bg_root`
 //! `CMovieClip` through `BgMovieActor (singleton) → BackgroundFrame
 //! (+bgframe_off) → clip slot (+bg_clip_slot_off)`, validate it against the
 //! engine's 0x400-slot CMovieClip pool (inside the pool, on a slot boundary,

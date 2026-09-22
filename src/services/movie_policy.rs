@@ -1,7 +1,15 @@
 //! Shared ownership and contributor policy for `DShowPlayer::BuildGraph`.
+//!
+//! Contributors: `NonNativeOs` (CrossOver/Wine — full suppression or the
+//! try-then-fake fallback mode), `SongRate` (rate-played songs — the
+//! DirectShow clock cannot follow the XACT rate) and `BackgroundDancers`
+//! (the dancers' Background Movies = OFF mode, for the song window only).
+//! The hook also publishes the most recent build's outcome
+//! ([`last_build`]) — the Background Dancers' fullscreen-movie mode hides
+//! the 3D stage only behind a movie that REALLY opened.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[cfg(windows)]
 use crate::core::{hooks, signatures::SignatureStore};
@@ -19,6 +27,59 @@ const PLAYER_STATE_OPENED: u32 = 3;
 pub enum MovieSuppressor {
     NonNativeOs,
     SongRate,
+    /// Background Dancers, Background Movies = OFF: set at song-window
+    /// entry, cleared at exit. Full suppression (never builds), like
+    /// `SongRate`.
+    BackgroundDancers,
+}
+
+/// The most recent `BuildGraph` invocation's result, as far as a consumer
+/// that needs "is a movie actually being drawn" cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastBuild {
+    /// No build observed yet this boot.
+    None,
+    /// The real graph was built and returned `S_OK` — the movie plays.
+    RealOpened,
+    /// The real graph build returned anything but `S_OK` (the game's own
+    /// error handling decides what happens next).
+    RealFailed,
+    /// Never built; the success epilogue was faked (nothing is drawn).
+    Suppressed,
+    /// Fallback mode: the real build failed and success was faked.
+    FallbackFaked,
+}
+
+impl LastBuild {
+    const fn to_u8(self) -> u8 {
+        match self {
+            LastBuild::None => 0,
+            LastBuild::RealOpened => 1,
+            LastBuild::RealFailed => 2,
+            LastBuild::Suppressed => 3,
+            LastBuild::FallbackFaked => 4,
+        }
+    }
+
+    const fn from_u8(v: u8) -> LastBuild {
+        match v {
+            1 => LastBuild::RealOpened,
+            2 => LastBuild::RealFailed,
+            3 => LastBuild::Suppressed,
+            4 => LastBuild::FallbackFaked,
+            _ => LastBuild::None,
+        }
+    }
+
+    /// What one `call` result means for the drawn picture.
+    pub fn of(hr: u32, outcome: CallOutcome) -> LastBuild {
+        match outcome {
+            CallOutcome::Passthrough if hr == 0 => LastBuild::RealOpened,
+            CallOutcome::Passthrough => LastBuild::RealFailed,
+            CallOutcome::Suppressed => LastBuild::Suppressed,
+            CallOutcome::FallbackFaked(_) => LastBuild::FallbackFaked,
+        }
+    }
 }
 
 /// What `MoviePolicy::call` did with one `BuildGraph` invocation.
@@ -45,6 +106,9 @@ pub struct MoviePolicy {
     /// DirectShow clock cannot follow the XACT rate).
     non_native_fallback: AtomicBool,
     song_rate: AtomicBool,
+    background_dancers: AtomicBool,
+    /// `LastBuild` of the most recent `call` (`to_u8`).
+    last_build: AtomicU8,
 }
 
 impl Default for MoviePolicy {
@@ -59,6 +123,8 @@ impl MoviePolicy {
             non_native_os: AtomicBool::new(false),
             non_native_fallback: AtomicBool::new(false),
             song_rate: AtomicBool::new(false),
+            background_dancers: AtomicBool::new(false),
+            last_build: AtomicU8::new(0),
         }
     }
 
@@ -66,6 +132,9 @@ impl MoviePolicy {
         match source {
             MovieSuppressor::NonNativeOs => self.non_native_os.store(suppressed, Ordering::Release),
             MovieSuppressor::SongRate => self.song_rate.store(suppressed, Ordering::Release),
+            MovieSuppressor::BackgroundDancers => {
+                self.background_dancers.store(suppressed, Ordering::Release)
+            }
         }
     }
 
@@ -79,7 +148,14 @@ impl MoviePolicy {
         match source {
             MovieSuppressor::NonNativeOs => self.non_native_os.load(Ordering::Acquire),
             MovieSuppressor::SongRate => self.song_rate.load(Ordering::Acquire),
+            MovieSuppressor::BackgroundDancers => self.background_dancers.load(Ordering::Acquire),
         }
+    }
+
+    /// The most recent `call`'s outcome.
+    #[must_use]
+    pub fn last_build(&self) -> LastBuild {
+        LastBuild::from_u8(self.last_build.load(Ordering::Acquire))
     }
 
     /// True when the next `call` would NOT invoke the original (full
@@ -87,7 +163,8 @@ impl MoviePolicy {
     /// original, so it does not count.
     #[must_use]
     pub fn should_suppress(&self) -> bool {
-        if self.song_rate.load(Ordering::Acquire) {
+        if self.song_rate.load(Ordering::Acquire) || self.background_dancers.load(Ordering::Acquire)
+        {
             return true;
         }
         self.non_native_os.load(Ordering::Acquire)
@@ -111,6 +188,18 @@ impl MoviePolicy {
     /// # Safety
     /// A non-null `this` must point to a live game `DShowPlayer` object.
     pub unsafe fn call(
+        &self,
+        this: *mut c_void,
+        request: *mut c_void,
+        original: impl FnOnce(*mut c_void, *mut c_void) -> u32,
+    ) -> (u32, CallOutcome) {
+        let (hr, outcome) = self.dispatch(this, request, original);
+        self.last_build
+            .store(LastBuild::of(hr, outcome).to_u8(), Ordering::Release);
+        (hr, outcome)
+    }
+
+    unsafe fn dispatch(
         &self,
         this: *mut c_void,
         request: *mut c_void,
@@ -174,6 +263,19 @@ pub fn set_non_native_fallback(fallback: bool) {
 #[must_use]
 pub fn is_suppressed(source: MovieSuppressor) -> bool {
     POLICY.is_suppressed(source)
+}
+
+/// True when the next `BuildGraph` would be fully suppressed (never built).
+#[must_use]
+pub fn should_suppress() -> bool {
+    POLICY.should_suppress()
+}
+
+/// The most recent `BuildGraph`'s outcome (`LastBuild::None` before the
+/// first build, or when the hook is not installed).
+#[must_use]
+pub fn last_build() -> LastBuild {
+    POLICY.last_build()
 }
 
 #[must_use]

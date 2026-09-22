@@ -3,11 +3,12 @@
 //! plus the inverted-hull outlines — on/off, INK or LAYERED style
 //! (`outline.rs`) and their per-kind widths — and the two A3 tempo
 //! switches. Owns the live values the session builder reads
-//! (`effective()`, `hull_plan()`, `outline_widths()`, `tempo_options()`),
-//! the seven overlay rows under the Background Dancers header (the outline
-//! style + width rows are CHILDREN of SCENE OUTLINES — hidden while it is
-//! OFF, `mod_menu::set_row_show_when`), and the WHOLE-section persistence of
-//! `background_dancers`
+//! (`effective()`, `hull_plan()`, `outline_widths()`, `tempo_options()`,
+//! and `movie_mode()` — the Background Movies choice the song window
+//! latches at entry, `movie_mode.rs`), the overlay rows under the
+//! Background Dancers header (the outline style + width rows are CHILDREN of
+//! SCENE OUTLINES — hidden while it is OFF, `mod_menu::set_row_show_when`),
+//! and the WHOLE-section persistence of `background_dancers`
 //! (`save_json_key` replaces the section, so every key is re-emitted from
 //! the live mirrors on each edit).
 //!
@@ -30,6 +31,7 @@ use crate::services::avs_layeredfs::shader_layout::SceneStyle;
 use crate::services::avs_layeredfs::shader_synthesis;
 use crate::{log_info, log_warn};
 
+use super::movie_mode::MovieMode;
 use super::outline::{self, HullPlan, OutlineStyle};
 
 const MOD_ID: &str = "background-dancers";
@@ -41,6 +43,7 @@ const ROW_KEY_PX_STAGE: &str = "background-dancers-outline-px-stage";
 const ROW_KEY_BPM_SYNC: &str = "background-dancers-bpm-sync";
 const ROW_KEY_STOP_SLOW: &str = "background-dancers-stop-slow";
 const ROW_KEY_CUSTOM_CONTENT: &str = "background-dancers-custom-content";
+const ROW_KEY_MOVIE_MODE: &str = "background-dancers-movie-mode";
 /// Rows shown only while SCENE OUTLINES is ON (`set_row_show_when`).
 const OUTLINE_CHILD_ROWS: [&str; 3] = [ROW_KEY_OUTLINE_STYLE, ROW_KEY_PX_DANCER, ROW_KEY_PX_STAGE];
 
@@ -60,6 +63,9 @@ static LIVE_STOP_SLOW: AtomicBool = AtomicBool::new(true);
 /// the value that GOVERNS this boot is the config value `lifecycle::init_tables`
 /// read (the catalog/rows are built once), so a row edit lands next launch.
 static LIVE_CUSTOM_CONTENT: AtomicBool = AtomicBool::new(true);
+/// BACKGROUND MOVIES (`MovieMode::row_value`) — read by the song window at
+/// its entry (next-song knob).
+static LIVE_MOVIE_MODE: AtomicU8 = AtomicU8::new(1); // MovieMode::Thumbnail
 /// Outline rim widths (f32 bits): dancers / stage props.
 static LIVE_PX_DANCER: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0
 static LIVE_PX_STAGE: AtomicU32 = AtomicU32::new(0x3FC0_0000); // 1.5
@@ -90,6 +96,12 @@ pub fn tempo_options() -> super::tempo::TempoOptions {
         bpm_sync: LIVE_BPM_SYNC.load(Ordering::Relaxed),
         stop_slow: LIVE_STOP_SLOW.load(Ordering::Relaxed),
     }
+}
+
+/// The Background Movies mode as of the latest edit (latched by the song
+/// window at its entry).
+pub fn movie_mode() -> MovieMode {
+    MovieMode::from_row_value(LIVE_MOVIE_MODE.load(Ordering::Relaxed) as i32)
 }
 
 /// Nearest row value (hundredths of a px on the 0.25 grid) for a width.
@@ -233,6 +245,18 @@ pub fn init_from_config() {
     LIVE_BPM_SYNC.store(bd.bpm_sync, Ordering::Relaxed);
     LIVE_STOP_SLOW.store(bd.stop_slow, Ordering::Relaxed);
     LIVE_CUSTOM_CONTENT.store(bd.custom_content, Ordering::Relaxed);
+    let movie_mode = match bd.movie_mode.as_deref() {
+        None => MovieMode::DEFAULT,
+        Some(s) => MovieMode::parse(s).unwrap_or_else(|| {
+            log_warn!(
+                "BackgroundDancers: background_dancers.movie_mode = '{}' is not off/thumbnail/fullscreen -- using {}",
+                s,
+                MovieMode::DEFAULT.key()
+            );
+            MovieMode::DEFAULT
+        }),
+    };
+    LIVE_MOVIE_MODE.store(movie_mode.row_value() as u8, Ordering::Relaxed);
     let px_d = config::clamp_outline_px(bd.outline_px.unwrap_or(DEFAULT_OUTLINE_PX_DANCER));
     let px_s = config::clamp_outline_px(bd.outline_px_stage.unwrap_or(DEFAULT_OUTLINE_PX_STAGE));
     LIVE_PX_DANCER.store(px_d.to_bits(), Ordering::Relaxed);
@@ -254,6 +278,10 @@ pub fn init_from_config() {
     if let Ok(mut g) = LIVE_LAYER_PALETTE.lock() {
         *g = palette.clone();
     }
+    log_info!(
+        "BackgroundDancers: background movies -- {} (applies per song)",
+        movie_mode.key()
+    );
     log_info!(
         "BackgroundDancers: scene style -- {} outlines={} style={} (rim px dancers={} stage={}; layered palette={}; variants {}, outline programs {}; applies per song)",
         style.key(),
@@ -286,6 +314,7 @@ pub fn init_from_config() {
             bd.bpm_sync,
             bd.stop_slow,
             bd.custom_content,
+            movie_mode,
         );
     }
 }
@@ -302,6 +331,7 @@ fn persist_section() {
         "outline_px": f32::from_bits(LIVE_PX_DANCER.load(Ordering::Relaxed)),
         "outline_px_stage": f32::from_bits(LIVE_PX_STAGE.load(Ordering::Relaxed)),
         "custom_content": LIVE_CUSTOM_CONTENT.load(Ordering::Relaxed),
+        "movie_mode": movie_mode().key(),
     });
     // Optional key: absent means "default", so it is emitted only when set
     // (the palette is operator-authored and must survive every row edit).
@@ -393,6 +423,17 @@ fn set_custom_content(value: i32) {
     );
 }
 
+fn set_movie_mode(value: i32) {
+    let m = MovieMode::from_row_value(value);
+    LIVE_MOVIE_MODE.store(m.row_value() as u8, Ordering::Relaxed);
+    persist_section();
+    log_info!(
+        "BackgroundDancers: BACKGROUND MOVIES set to {} (applies from the next song)",
+        m.label()
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn register_rows(
     style: SceneStyle,
     outlines: bool,
@@ -402,6 +443,7 @@ fn register_rows(
     bpm_sync: bool,
     stop_slow: bool,
     custom_content: bool,
+    movie_mode: MovieMode,
 ) {
     use crate::mods::mod_menu::{register_enum_row, set_row_show_when, EnumRowSpec};
     let on_off = || (vec![0, 1], vec!["OFF".to_string(), "ON".to_string()]);
@@ -482,6 +524,16 @@ fn register_rows(
         labels: l,
         initial_value: i32::from(stop_slow),
         on_change: Arc::new(set_stop_slow),
+    });
+    register_enum_row(EnumRowSpec {
+        key: ROW_KEY_MOVIE_MODE.to_string(),
+        label: "Background Movies".to_string(),
+        hint: "Songs with a movie: OFF hides it; THUMBNAIL plays it in a small window over the stage; FULLSCREEN plays it behind the dancers in place of the stage (DDR 5th Mix style). Next song.".to_string(),
+        parent_row_key: Some(MOD_ID.to_string()),
+        values: MovieMode::ALL.iter().map(|m| m.row_value()).collect(),
+        labels: MovieMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+        initial_value: movie_mode.row_value(),
+        on_change: Arc::new(set_movie_mode),
     });
     let (v, l) = on_off();
     register_enum_row(EnumRowSpec {

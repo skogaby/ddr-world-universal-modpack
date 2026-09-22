@@ -24,6 +24,7 @@ use crate::services::scene3d::{arc_set, node, render_item, scene_graph, texture}
 use crate::{log_info, log_warn};
 
 use super::director;
+use super::movie_mode::SceneMask;
 use super::session::{parse_pick, ParseOptions, Parsed, Pick, Session};
 
 /// Give up waiting for residency (one WARN) after this long; whatever was
@@ -351,13 +352,14 @@ impl SceneWindow {
     }
 
     /// Publish every built instance's pose for scene time `t` (hidden when
-    /// `!visible`) and drop the node-level "force hidden" of every instance
-    /// that has now been published at least once.
-    pub fn publish(&mut self, t: f32, visible: bool) {
+    /// `!visible`; `mask` hides whole instance kinds on top — see
+    /// `director::produce`) and drop the node-level "force hidden" of every
+    /// instance that has now been published at least once.
+    pub fn publish(&mut self, t: f32, visible: bool, mask: SceneMask) {
         let Some(sess) = self.session.as_mut() else {
             return;
         };
-        director::produce(sess, t, visible);
+        director::produce(sess, t, visible, mask);
         // Every built instance has now been published at least once, so
         // its board slot — hidden bit included — is authoritative: drop
         // the node-level "force hidden" it was attached with. Deploy #2:

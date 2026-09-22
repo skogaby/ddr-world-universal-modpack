@@ -1,9 +1,11 @@
-//! Movie-size override (design §4.3.7): while a background-dancer song
-//! window is open, every entered side whose `Customize + 0x30` movie-size
-//! field selects the FULLSCREEN movie layer (values 0/1) is switched to the
-//! sized "ON" layer (2) so the background movie renders as the thumbnail
-//! marker OVER the 3D scene instead of covering it; the original values are
-//! written back at window exit.
+//! Movie-size override (design §4.3.7, Background Movies 2026-09-22):
+//! while a background-dancer song window is open, every entered side whose
+//! `Customize + 0x30` movie-size field shows a movie is switched to what the
+//! GLOBAL SETTINGS row "Background Movies" asks for (`movie_mode.rs`):
+//! OFF → 3 (the game's own VIDEO SIZE OFF), THUMBNAIL → 2 (the sized "ON"
+//! window over the 3D scene — the original behaviour), FULLSCREEN → 1 (the
+//! movie under the 3D pass, stage hidden per song by `lifecycle.rs`). The
+//! original values are written back at window exit.
 //!
 //! Why a write into the Customize object: the game reads the field once, at
 //! `DancePlaySequence` step 2, through the governing side's movie-size
@@ -11,14 +13,13 @@
 //! that opens the window fires BEFORE `createNextSequence`, so the write
 //! lands before that read; the VIDEO SIZE option row re-seeds from the
 //! field only at SONG_SELECT entry and the logout customize write-back
-//! happens at EAM_EXIT — both after the restore. Maintainer rule: the movie
-//! is never suppressed, only resized.
+//! happens at EAM_EXIT — both after the restore.
 //!
 //! Fail-open: `player_work_table` / `customize_offset` unresolved ⇒ nothing
 //! is written (one INFO at init); a side that is not carded in has no
-//! Customize object and is skipped silently; a field that no longer reads 2
-//! at restore time (the player changed VIDEO SIZE in between — impossible
-//! mid-song, defensive) is left alone.
+//! Customize object and is skipped silently; a field that no longer reads
+//! the value written at restore time (the player changed VIDEO SIZE in
+//! between — impossible mid-song, defensive) is left alone.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -27,20 +28,26 @@ use crate::core::signatures::SignatureStore;
 use crate::log_info;
 use crate::services::stage_records;
 
+use super::movie_mode::{self, MovieMode};
+
 /// `Customize + 0x30` — the movie-size field (shared with
 /// `movie_size_customization.rs`).
 const CUSTOMIZE_MOVIE_SIZE_OFFSET: usize = 0x30;
-/// Values selecting the fullscreen movie layer (0 = unset, 1 = FULLSCREEN).
-const FULLSCREEN_VALUES: [u32; 2] = [0, 1];
-/// The sized "ON" layer.
-const SIZED_ON: u32 = 2;
 
 /// `customize_offset` (0 = unavailable).
 static CUSTOMIZE_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
+/// One side's override: the value found at window entry and the value
+/// written over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub original: u32,
+    pub written: u32,
+}
+
 /// Resolve the shared derivation once (mod init). `false` = the override is
-/// unavailable for this boot (movies stay fullscreen and vanish under the
-/// 2D hide on movie songs).
+/// unavailable for this boot (movies keep the player's VIDEO SIZE; a
+/// fullscreen movie vanishes under the 3D stage).
 pub fn init(signatures: &SignatureStore) -> bool {
     match signatures.get_address("customize_offset") {
         Some(off) if off as usize != 0 => {
@@ -49,7 +56,7 @@ pub fn init(signatures: &SignatureStore) -> bool {
         }
         _ => {
             log_info!(
-                "BackgroundDancers: customize_offset unresolved -- movie-size override unavailable (movie songs keep the fullscreen movie)"
+                "BackgroundDancers: customize_offset unresolved -- movie-size override unavailable (movies keep the player's VIDEO SIZE)"
             );
             false
         }
@@ -75,9 +82,10 @@ fn field_ptr(side: usize) -> Option<*mut u32> {
     Some(p as *mut u32)
 }
 
-/// Window entry: for every entered side reading 0/1, write 2 and remember
-/// the original. Returns what to hand back to [`restore`].
-pub fn apply(entered: [bool; 2]) -> [Option<u32>; 2] {
+/// Window entry: for every entered side whose value `mode` overrides
+/// (`movie_mode::size_override`), write the override and remember both
+/// values. Returns what to hand back to [`restore`].
+pub fn apply(entered: [bool; 2], mode: MovieMode) -> [Option<Saved>; 2] {
     let mut saved = [None, None];
     for side in 0..2 {
         if !entered[side] {
@@ -87,9 +95,12 @@ pub fn apply(entered: [bool; 2]) -> [Option<u32>; 2] {
         // SAFETY: probed readable; the Customize object is game-owned but
         // this field is a plain u32 the game itself rewrites from the menu.
         let v = unsafe { p.read_volatile() };
-        if FULLSCREEN_VALUES.contains(&v) {
-            unsafe { p.write_volatile(SIZED_ON) };
-            saved[side] = Some(v);
+        if let Some(w) = movie_mode::size_override(mode, v) {
+            unsafe { p.write_volatile(w) };
+            saved[side] = Some(Saved {
+                original: v,
+                written: w,
+            });
         }
     }
     saved
@@ -97,38 +108,18 @@ pub fn apply(entered: [bool; 2]) -> [Option<u32>; 2] {
 
 /// Window exit: write the remembered values back where the field still
 /// reads the value we wrote.
-pub fn restore(saved: [Option<u32>; 2]) -> usize {
+pub fn restore(saved: [Option<Saved>; 2]) -> usize {
     let mut restored = 0;
     for side in 0..2 {
-        let Some(v) = saved[side] else { continue };
+        let Some(s) = saved[side] else { continue };
         let Some(p) = field_ptr(side) else { continue };
         // SAFETY: as `apply`.
         unsafe {
-            if p.read_volatile() == SIZED_ON {
-                p.write_volatile(v);
+            if p.read_volatile() == s.written {
+                p.write_volatile(s.original);
                 restored += 1;
             }
         }
     }
     restored
-}
-
-/// Pure value mapping (host-testable): what `apply` would write for a
-/// current field value, if anything.
-pub fn override_for(current: u32) -> Option<u32> {
-    FULLSCREEN_VALUES.contains(&current).then_some(SIZED_ON)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_fullscreen_values_are_overridden() {
-        assert_eq!(override_for(0), Some(2));
-        assert_eq!(override_for(1), Some(2));
-        assert_eq!(override_for(2), None);
-        assert_eq!(override_for(3), None);
-        assert_eq!(override_for(7), None);
-    }
 }

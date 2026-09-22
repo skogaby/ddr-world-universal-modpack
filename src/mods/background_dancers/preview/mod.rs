@@ -45,6 +45,7 @@ use crate::{log_info, log_warn};
 
 use super::catalog::Kind;
 use super::lifecycle;
+use super::movie_mode::SceneMask;
 use super::options;
 use super::scene_window::{self, SceneWindow};
 use super::selection::{seed_from, Rng};
@@ -361,7 +362,7 @@ fn drive_live_window(slot: &mut PreviewSlot, menu_open: bool) {
         }
         w.scene.park_engine_destroyed();
         let t = w.t();
-        w.scene.publish(t, true);
+        w.scene.publish(t, true, SceneMask::ALL);
         if let Some(passes) = slot.passes.as_mut() {
             let f = camera::frustum_for(w, t, slot.aspect);
             camera::apply(&f, passes);

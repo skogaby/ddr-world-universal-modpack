@@ -2786,6 +2786,7 @@ impl SignatureStore {
         self.find_judge_notes();
         self.find_gameplay_actor_vtable();
         self.find_dance_play_sequence_vtable();
+        self.find_movie_backdrop_vtables();
         self.derive_folder_functor_ctors();
         self.derive_gameplay_obj_addresses();
         self.derive_app_heap_handle();
@@ -6609,6 +6610,33 @@ impl SignatureStore {
             .insert("dance_play_sequence_vtable".into(), vtable);
         let offset = unsafe { vtable.offset_from(self.base) as usize };
         log_info!("  [+] dance_play_sequence_vtable (RTTI) @ +0x{:X}", offset);
+    }
+
+    /// Find the `sequence::dance::SceneManageActor` and
+    /// `sequence::dance::MovieActor` vtables via RTTI — the identity gates of
+    /// the Background Dancers' fullscreen-movie probe
+    /// (`background_dancers::movie_backdrop`): the live DancePlaySequence's
+    /// SceneManageActor child (created at DPS step 2) owns the song's
+    /// MovieActor child whenever the song has a movie and VIDEO SIZE shows
+    /// one. Both classes are single-inheritance `agcs::Actor`s on every
+    /// supported build. Optional: a miss only disables the dancers'
+    /// FULLSCREEN (NO STAGE) movie mode (it degrades to THUMBNAIL).
+    /// RE: `docs/background_dancers_research.md` §7.
+    fn find_movie_backdrop_vtables(&mut self) {
+        for (rtti, name) in [
+            (
+                ".?AVSceneManageActor@dance@sequence@@",
+                "scene_manage_actor_vtable",
+            ),
+            (".?AVMovieActor@dance@sequence@@", "movie_actor_vtable"),
+        ] {
+            if let Some(vt) = self.find_vtable_by_rtti(rtti, name) {
+                self.resolved.insert(name.into(), vt);
+                let offset = unsafe { vt.offset_from(self.base) as usize };
+                log_info!("  [+] {} (RTTI) @ +0x{:X}", name, offset);
+            }
+            // find_vtable_by_rtti logs its own [-] on failure.
+        }
     }
 
     /// Derive `app_heap_handle` from `app_heap_reserve_anchor`.

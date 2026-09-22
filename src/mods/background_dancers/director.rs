@@ -20,14 +20,21 @@ use super::director_math::{
     clip_frame, part_world, shadow_step, shadow_target, shadow_world, transform_point, BLACK,
     IDENTITY, WHITE,
 };
+use super::movie_mode::SceneMask;
 use super::schedule::ClipSel;
 use super::session::{Clip, InstanceKind, InstanceStatus, Session};
 
 /// Produce + publish every built instance's frame for song time `t`
 /// (seconds since the song-start edge). `visible = false` publishes the
-/// same poses hidden (the pre-edge / abandoned states).
-pub fn produce(sess: &mut Session, t: f32, visible: bool) {
+/// same poses hidden (the pre-edge / abandoned states). `mask` hides whole
+/// instance kinds on top of that (Background Movies = FULLSCREEN: the stage
+/// parts — and with them their hull twins, which read the part's slot — and
+/// the floor shadows, while a fullscreen movie is the backdrop); the poses
+/// keep advancing underneath so a kind that comes back is already current.
+pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
     let hidden = !visible;
+    let stage_hidden = hidden || !mask.stage;
+    let shadow_hidden = hidden || !mask.shadows;
     let n_dancers = sess.parsed.dancers.len();
 
     // Stage parts.
@@ -71,7 +78,7 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool) {
             slot,
             &world,
             WHITE,
-            hidden,
+            stage_hidden,
             &bones[..bone_count.min(bones.len())],
         );
     }
@@ -189,7 +196,7 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool) {
                         *s = size;
                     }
                     let world = shadow_world(size, transform_point(&body_world, centre));
-                    frame_board::publish(slot, &world, BLACK, hidden, &[IDENTITY]);
+                    frame_board::publish(slot, &world, BLACK, shadow_hidden, &[IDENTITY]);
                 }
                 _ => {}
             }
