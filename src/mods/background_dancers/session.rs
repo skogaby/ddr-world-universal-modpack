@@ -134,6 +134,9 @@ pub struct Parsed {
     pub shadow: Option<Skeleton>,
     /// `None` ⇒ no usable camera set (the fixed fallback camera is used).
     pub cameras: Option<ParsedCameras>,
+    /// The MOVIE camera set (loose `.camanm` files, `movie_camera.rs`) —
+    /// `None` unless the pick carried one and a main clip parsed.
+    pub movie_cameras: Option<ParsedCameras>,
     /// One line per skipped member/instance — logged once by the lifecycle.
     pub warnings: Vec<String>,
     pub elapsed_ms: u64,
@@ -471,19 +474,100 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         }
     };
 
+    // The movie camera set: loose files read straight from disk (never
+    // FileManager-loaded — only this parser reads camera clips).
+    let movie_cameras = if pick.movie_camera_main.is_empty() {
+        None
+    } else {
+        let mut load = |names: &[String]| -> Vec<Clip> {
+            names
+                .iter()
+                .filter_map(|n| {
+                    let path = super::movie_camera::clip_path(n);
+                    let bytes = match std::fs::read(&path) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warnings.push(format!("movie camera {}: {e}", path.display()));
+                            return None;
+                        }
+                    };
+                    match anmfile::parse(&bytes) {
+                        Ok(anm) if anm.camera_slots.iter().any(Option::is_some) => Some(Clip {
+                            name: n.clone(),
+                            bytes: Arc::new(bytes),
+                            anm,
+                        }),
+                        Ok(_) => {
+                            warnings.push(format!("movie camera {n}: no camera chunk"));
+                            None
+                        }
+                        Err(e) => {
+                            warnings.push(format!("movie camera {n}: {e}"));
+                            None
+                        }
+                    }
+                })
+                .collect()
+        };
+        let main = load(&pick.movie_camera_main);
+        let non = load(&pick.movie_camera_non);
+        if main.is_empty() {
+            warnings.push(
+                "no movie camera main clip parsed -- stage cameras behind the movie".to_string(),
+            );
+            None
+        } else {
+            Some(ParsedCameras { main, non })
+        }
+    };
+
     Parsed {
         stage_parts,
         dancers,
         shadow,
         cameras,
+        movie_cameras,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
     }
 }
 
+/// Which camera set a frame is filmed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraSet {
+    /// The stage row's `.camanm` set.
+    Stage,
+    /// The movie camera set (Background Movies = FULLSCREEN, movie live).
+    Movie,
+}
+
+impl CameraSet {
+    pub fn tag(self) -> &'static str {
+        match self {
+            CameraSet::Stage => "stage",
+            CameraSet::Movie => "movie",
+        }
+    }
+}
+
+/// Seed salt of the movie camera schedule (its `_non` hold jitter must not
+/// mirror the stage schedule's).
+const MOVIE_CAMERA_SEED_SALT: u64 = 0x6D6F_7669_6563_616D; // "moviecam"
+
 /// The camera schedule over the parsed camera clips (`None` without one).
 pub fn camera_schedule(parsed: &Parsed, seed: u64) -> Option<CameraSchedule> {
-    let c = parsed.cameras.as_ref()?;
+    schedule_over(parsed.cameras.as_ref()?, seed)
+}
+
+/// The movie camera schedule (`None` without a movie camera set).
+pub fn movie_camera_schedule(parsed: &Parsed, seed: u64) -> Option<CameraSchedule> {
+    schedule_over(
+        parsed.movie_cameras.as_ref()?,
+        seed ^ MOVIE_CAMERA_SEED_SALT,
+    )
+}
+
+fn schedule_over(c: &ParsedCameras, seed: u64) -> Option<CameraSchedule> {
     CameraSchedule::new(
         c.main.iter().map(Clip::clip_ref).collect(),
         c.non.iter().map(Clip::clip_ref).collect(),
@@ -548,6 +632,10 @@ pub struct Session {
     /// The camera event-loop state + the song time it was advanced to;
     /// `None` ⇒ re-simulate from 0 at the next frame (song (re)start).
     pub camera_state: Option<(CameraState, f32)>,
+    /// The movie camera sequencing (None ⇒ the stage cameras film the
+    /// movie backdrop too) and its own event-loop state.
+    pub movie_camera: Option<CameraSchedule>,
+    pub movie_camera_state: Option<(CameraState, f32)>,
     /// Per-frame evaluation scratch (sized once).
     pub scratch: Vec<Trs>,
     pub bones: Vec<Mat4>,
@@ -579,6 +667,7 @@ impl Session {
     ) -> Session {
         let schedule = dance_schedule(&parsed, tempo_opts);
         let camera = camera_schedule(&parsed, pick.seed);
+        let movie_camera = movie_camera_schedule(&parsed, pick.seed);
         let input = PlanInput {
             stage_parts: parsed
                 .stage_parts
@@ -642,6 +731,8 @@ impl Session {
             shadow_size,
             camera,
             camera_state: None,
+            movie_camera,
+            movie_camera_state: None,
             scratch: vec![Trs::IDENTITY; plan.max_bones],
             bones: vec![IDENTITY; plan.max_bones],
             requested_at,
@@ -667,9 +758,22 @@ impl Session {
         self.camera.is_some()
     }
 
-    /// Song (re)start: the camera event loop re-simulates from 0.
+    pub fn has_movie_camera(&self) -> bool {
+        self.movie_camera.is_some()
+    }
+
+    /// Whether `set` can film this session.
+    pub fn has_camera_set(&self, set: CameraSet) -> bool {
+        match set {
+            CameraSet::Stage => self.has_camera(),
+            CameraSet::Movie => self.has_movie_camera(),
+        }
+    }
+
+    /// Song (re)start: both camera event loops re-simulate from 0.
     pub fn reset_camera(&mut self) {
         self.camera_state = None;
+        self.movie_camera_state = None;
     }
 
     /// A3 resets the shadow low-pass at song start: back to the rlist scale.

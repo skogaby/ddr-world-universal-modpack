@@ -22,7 +22,7 @@ use super::director_math::{
 };
 use super::movie_mode::SceneMask;
 use super::schedule::ClipSel;
-use super::session::{Clip, InstanceKind, InstanceStatus, Session};
+use super::session::{CameraSet, Clip, InstanceKind, InstanceStatus, Session};
 
 /// Produce + publish every built instance's frame for song time `t`
 /// (seconds since the song-start edge). `visible = false` publishes the
@@ -205,19 +205,29 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
 }
 
 /// The camera for song time `t` (design §4.3.3/§4.3.4): advance the A3
-/// stage-mode event loop from the last frame (or re-simulate from 0 after a
-/// song (re)start / any backwards jump), then sample the selected `.camanm`
-/// at its local time. `None` without a camera set (the caller keeps the
-/// fixed fallback camera).
-pub fn camera_frame(sess: &mut Session, t: f32) -> Option<scene_graph::CamSample> {
+/// stage-mode event loop of `set` from its last frame (or re-simulate from 0
+/// after a song (re)start / any backwards jump / the first frame this set
+/// films), then sample the selected `.camanm` at its local time. `None`
+/// without that set (the caller keeps / writes the fixed fallback camera).
+pub fn camera_frame(sess: &mut Session, t: f32, set: CameraSet) -> Option<scene_graph::CamSample> {
     let dance = sess.schedule.as_ref()?;
-    let sched = sess.camera.as_ref()?;
-    let st = match sess.camera_state {
+    let (sched, state, cams) = match set {
+        CameraSet::Stage => (
+            sess.camera.as_ref()?,
+            &mut sess.camera_state,
+            sess.parsed.cameras.as_ref()?,
+        ),
+        CameraSet::Movie => (
+            sess.movie_camera.as_ref()?,
+            &mut sess.movie_camera_state,
+            sess.parsed.movie_cameras.as_ref()?,
+        ),
+    };
+    let st = match *state {
         Some((prev, prev_t)) if t >= prev_t => sched.advance(&prev, prev_t, t, dance),
         _ => sched.at(t, dance),
     };
-    sess.camera_state = Some((st, t));
-    let cams = sess.parsed.cameras.as_ref()?;
+    *state = Some((st, t));
     let clip: &Clip = match st.clip {
         ClipSel::Main(i) => cams.main.get(i % cams.main.len().max(1))?,
         ClipSel::Non(i) => {
@@ -248,11 +258,15 @@ pub fn camera_frame(sess: &mut Session, t: f32) -> Option<scene_graph::CamSample
     })
 }
 
-/// The camera timeline over the first `until_s` seconds — one entry per
-/// dance cut: `k@cut: <shot just before> -> <shot at the cut>` (the dev-mode
-/// song-start log).
-pub fn camera_timeline(sess: &Session, until_s: f32) -> String {
-    let (Some(dance), Some(sched)) = (sess.schedule.as_ref(), sess.camera.as_ref()) else {
+/// The camera timeline of `set` over the first `until_s` seconds — one entry
+/// per dance cut: `k@cut: <shot just before> -> <shot at the cut>` (the
+/// dev-mode song-start log).
+pub fn camera_timeline(sess: &Session, until_s: f32, set: CameraSet) -> String {
+    let sched = match set {
+        CameraSet::Stage => sess.camera.as_ref(),
+        CameraSet::Movie => sess.movie_camera.as_ref(),
+    };
+    let (Some(dance), Some(sched)) = (sess.schedule.as_ref(), sched) else {
         return String::from("(no camera schedule)");
     };
     let name = |t: f32| -> String {

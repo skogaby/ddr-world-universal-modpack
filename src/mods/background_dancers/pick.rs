@@ -40,6 +40,12 @@ pub struct Pick {
     /// cycle and the `_non` cut-aways.
     pub camera_main: Vec<String>,
     pub camera_non: Vec<String>,
+    /// The MOVIE camera set (`movie_camera.rs`) split + shuffled like the
+    /// stage's: used instead of the stage cameras while Background Movies =
+    /// FULLSCREEN has a movie as the backdrop. Empty unless the song window
+    /// latched that mode and the folder holds clips for the dancer count.
+    pub movie_camera_main: Vec<String>,
+    pub movie_camera_non: Vec<String>,
     /// Side order: index 0 = the left dancer. May be empty (stage-only).
     pub dancers: Vec<DancerCandidate>,
     /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`).
@@ -61,6 +67,13 @@ impl Pick {
         dancers.resize(self.dancers.len(), PickSource::Random);
         self.source_stage = stage;
         self.source_dancers = dancers;
+        self
+    }
+
+    /// Attach the movie camera lists (already filtered + shuffled).
+    pub fn with_movie_cameras(mut self, main: Vec<String>, non: Vec<String>) -> Pick {
+        self.movie_camera_main = main;
+        self.movie_camera_non = non;
         self
     }
 
@@ -166,14 +179,24 @@ impl Pick {
             ),
             None => format!("stage=none{{{}}} parts=0", self.source_stage.tag()),
         };
+        let movie = if self.movie_camera_main.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " movie-cameras=main:{} non:{}",
+                self.movie_camera_main.len(),
+                self.movie_camera_non.len()
+            )
+        };
         format!(
-            "{} dancers=[{}] clips=[{}] wear=[{}] cameras=main:{} non:{} arcs={} seed=0x{:X}{}",
+            "{} dancers=[{}] clips=[{}] wear=[{}] cameras=main:{} non:{}{} arcs={} seed=0x{:X}{}",
             stage,
             dancers.join(", "),
             clips.join(" | "),
             parts.join(" | "),
             self.camera_main.len(),
             self.camera_non.len(),
+            movie,
             self.arcs().len(),
             self.seed,
             if self.pinned { " (PINNED)" } else { "" }
@@ -253,6 +276,8 @@ pub fn assemble_pick_opt(
         camera_row,
         camera_main,
         camera_non,
+        movie_camera_main: Vec::new(),
+        movie_camera_non: Vec::new(),
         dancers,
         playlists,
         parts,

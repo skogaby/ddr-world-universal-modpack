@@ -43,14 +43,15 @@ use super::background_hide;
 use super::clock::{Clock, ClockEvent};
 use super::director;
 use super::movie_backdrop;
-use super::movie_mode::{self, Backdrop, MovieMode};
+use super::movie_camera;
+use super::movie_mode::{self, Backdrop, MovieMode, SceneMask};
 use super::movie_size;
 use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::selection::{
     apply_pin, dancer_candidates, parse_pin, seed_from, stage_candidates, DancerCandidate,
     PickSource, Pin, Rng, StageCandidate,
 };
-use super::session::{assemble_pick, make_pick, ParseOptions, Pick, Session};
+use super::session::{assemble_pick, make_pick, CameraSet, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
 use super::tempo_source;
 
@@ -292,7 +293,8 @@ struct Window {
     visible_logged: bool,
     playing_logged: u32,
     rewind_logged: bool,
-    camera_written: bool,
+    /// The camera source of the last frame (`None` before the first).
+    camera_source: Option<CamSource>,
     hide_armed: bool,
     static_published: bool,
     /// Background Movies, latched at window entry (what the movie-size
@@ -397,8 +399,9 @@ fn window_movie_mode() -> MovieMode {
 /// Background Movies mode and set the song up for it — every entered side's
 /// movie size per `movie_mode::size_override` (OFF → 3, THUMBNAIL → 2,
 /// FULLSCREEN → 1), plus, for OFF, the shared BuildGraph suppressor (the
-/// backstop for builds where 3 still builds a graph).
-fn apply_movie_mode() {
+/// backstop for builds where 3 still builds a graph). Returns the latched
+/// (effective) mode.
+fn apply_movie_mode() -> MovieMode {
     let requested = super::style::movie_mode();
     let mode = effective_movie_mode(requested);
     WINDOW_MOVIE_MODE.store(mode.row_value() as u8, Ordering::Release);
@@ -416,7 +419,7 @@ fn apply_movie_mode() {
                 ""
             }
         );
-        return;
+        return mode;
     }
     let entered = [
         stage_records::side_entered(0).unwrap_or(false),
@@ -441,6 +444,28 @@ fn apply_movie_mode() {
     if let Ok(mut g) = MOVIE_SIZE_SAVED.lock() {
         *g = saved;
     }
+    mode
+}
+
+/// Background Movies = FULLSCREEN: the movie camera set for `dancers`
+/// dancers (`movie_camera.rs`), split + shuffled like a stage row. Listed
+/// per window (a dozen directory entries) so an operator's edits apply from
+/// the next song. Empty (+ one INFO) when the folder holds no main clip —
+/// the stage cameras then film the movie backdrop too.
+fn movie_camera_lists(rng: &mut Rng, dancers: usize) -> (Vec<String>, Vec<String>) {
+    let stems = movie_camera::list_stems(movie_camera::MOVIE_CAMERA_DIR);
+    let chosen = movie_camera::filter_for(&stems, dancers);
+    let (main, non) = super::selection::camera_lists(rng, &chosen);
+    if main.is_empty() {
+        log_info!(
+            "BackgroundDancers: no movie camera clip for {} dancer(s) in {} ({} file(s)) -- the stage cameras film the movie backdrop",
+            dancers,
+            movie_camera::MOVIE_CAMERA_DIR,
+            stems.len()
+        );
+        return (Vec::new(), Vec::new());
+    }
+    (main, non)
 }
 
 /// Window exit / disable: clear the suppressor and put the remembered movie
@@ -585,8 +610,11 @@ fn window_entry(scene_id: i32) {
     };
     let mut pick = pick;
     pick.seed = seed;
+    if apply_movie_mode() == MovieMode::Fullscreen {
+        let (main, non) = movie_camera_lists(&mut rng, pick.dancers.len());
+        pick = pick.with_movie_cameras(main, non);
+    }
     log_info!("BackgroundDancers: {}", pick.summary());
-    apply_movie_mode();
     widget_renderer::run_on_render_thread(move || request_load(generation, pick));
 }
 
@@ -707,7 +735,7 @@ fn request_load(generation: u64, pick: Pick) {
         visible_logged: false,
         playing_logged: 0,
         rewind_logged: false,
-        camera_written: false,
+        camera_source: None,
         hide_armed: false,
         static_published: false,
         movie_mode: window_movie_mode(),
@@ -794,35 +822,6 @@ fn drive_live(w: &mut Window) {
         return;
     }
 
-    // Fallback fixed camera when the stage row has no usable camera set: the
-    // A3 add-on's cabinet-verified framing (`docs/3d_model_format_research.md`
-    // §6 — eye (0, 1.6, 5.0) m looking at (0, 0.9, 0), in-game hFOV 76.8°)
-    // which put the whole boom00 stage + a dancer at 38 % of the frame in
-    // view. With a camera set the director writes slot 0 every visible frame
-    // (below) and this block never runs.
-    let has_camera = w.scene.session().map_or(false, |s| s.has_camera());
-    if !w.camera_written && !has_camera {
-        w.camera_written = true;
-        let cam = scene_graph::CamSample::perspective(
-            [0.0, 1.6, 5.0],
-            [0.0, 0.9, 0.0],
-            [0.0, 1.0, 0.0],
-            (76.8f32 * 0.5).to_radians().tan(),
-            16.0 / 9.0,
-            0.1,
-            500.0,
-        );
-        if scene_graph::write_camera0(&cam) {
-            log_info!(
-                "BackgroundDancers: camera slot 0 written (fixed fallback camera: eye [0,1.6,5] target [0,0.9,0] hFOV 76.8 -- no camera set for this stage row)"
-            );
-        } else {
-            log_warn!(
-                "BackgroundDancers: camera slot 0 write refused -- the engine's own camera stays (models may be out of frame)"
-            );
-        }
-    }
-
     // A node the ENGINE destroyed outside our teardown: park it (one WARN).
     w.scene.park_engine_destroyed();
 
@@ -898,11 +897,14 @@ fn drive_live(w: &mut Window) {
     }
 
     // Background Movies = FULLSCREEN: is this song's movie the backdrop?
-    // Probed on visible frames only — by DPS step 5 the SceneManageActor has
-    // settled the movie (it answers the step-3 readiness poll only after its
-    // MovieActor left the opening step), and a course's next DPS is hidden
-    // until its own step 5, so a stale answer is never drawn.
-    if visible && w.movie_mode == MovieMode::Fullscreen {
+    // Probed every frame (the probe reads the LIVE DancePlaySequence only —
+    // before its step 2 there is no SceneManageActor yet and the answer is
+    // None), so the camera director switches to the movie set while the
+    // scene is still hidden and the first visible frame is already filmed
+    // by it. By DPS step 5 (the visibility edge) the SceneManageActor has
+    // settled the movie: it answers the step-3 readiness poll only after its
+    // MovieActor left the opening step.
+    if w.movie_mode == MovieMode::Fullscreen {
         let backdrop = movie_backdrop::probe();
         if backdrop != w.backdrop {
             w.backdrop = backdrop;
@@ -962,59 +964,128 @@ fn drive_live(w: &mut Window) {
     if publish {
         w.scene.publish(t, visible, mask);
     }
-    // Camera director: slot 0 every frame (A3 stage mode). Written while
-    // the scene is still hidden too, so the first visible frame already
-    // renders through the right camera (the tick copies the slot into
-    // the passes a frame after the dirty bytes are raised) — harmless:
-    // stock World draws nothing through the MODEL passes.
-    // (The camera lists are only needed for the one-shot INFO.)
-    let camera_lists = if w.camera_written {
-        None
+    camera_tick(w, t, mask);
+
+    w.scene.retry_textures();
+    w.scene.attached_diagnostics();
+}
+
+/// Which camera films a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CamSource {
+    /// A `.camanm` set through the A3 stage-mode director.
+    Set(CameraSet),
+    /// The fixed fallback framing (no usable set for this scene).
+    Fixed,
+}
+
+/// The camera for this frame: the MOVIE set while the scene shows the
+/// dancers alone over a fullscreen movie (and the set parsed), else the
+/// stage row's set, else the fixed fallback.
+fn camera_source(sess: &Session, mask: SceneMask) -> CamSource {
+    if mask == SceneMask::DANCERS_ONLY && sess.has_movie_camera() {
+        CamSource::Set(CameraSet::Movie)
+    } else if sess.has_camera() {
+        CamSource::Set(CameraSet::Stage)
     } else {
+        CamSource::Fixed
+    }
+}
+
+/// The fixed fallback camera: the A3 add-on's cabinet-verified framing
+/// (`docs/3d_model_format_research.md` §6 — eye (0, 1.6, 5.0) m looking at
+/// (0, 0.9, 0), in-game hFOV 76.8°), which put the whole boom00 stage + a
+/// dancer at 38 % of the frame in view.
+fn fixed_camera() -> scene_graph::CamSample {
+    scene_graph::CamSample::perspective(
+        [0.0, 1.6, 5.0],
+        [0.0, 0.9, 0.0],
+        [0.0, 1.0, 0.0],
+        (76.8f32 * 0.5).to_radians().tan(),
+        16.0 / 9.0,
+        0.1,
+        500.0,
+    )
+}
+
+/// Camera director: camera slot 0 every frame from the chosen set (A3
+/// stage mode), or the fixed camera once whenever the source becomes Fixed.
+/// Written while the scene is still hidden too, so the first visible frame
+/// already renders through the right camera (the tick copies the slot into
+/// the passes a frame after the dirty bytes are raised) — harmless: stock
+/// World draws nothing through the MODEL passes. A switch between sets
+/// (a course stage with / without a movie, a movie that failed to open)
+/// starts the other set's event loop where the song clock is — both loops
+/// are pure functions of dance time.
+fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
+    let (camera_main, camera_non, movie_main, movie_non) = {
         let p = w.scene.pick();
-        Some((p.camera_main.clone(), p.camera_non.clone()))
+        (
+            p.camera_main.clone(),
+            p.camera_non.clone(),
+            p.movie_camera_main.clone(),
+            p.movie_camera_non.clone(),
+        )
     };
-    if let Some(sess) = w.scene.session_mut() {
-        if sess.has_camera() {
-            match director::camera_frame(sess, t) {
-                Some(cam) => {
-                    let ok = scene_graph::write_camera0(&cam);
-                    if !w.camera_written {
-                        w.camera_written = true;
-                        if ok {
-                            let (camera_main, camera_non) = camera_lists.unwrap_or_default();
+    let Some(sess) = w.scene.session_mut() else {
+        return;
+    };
+    let source = camera_source(sess, mask);
+    let changed = w.camera_source != Some(source);
+    match source {
+        CamSource::Fixed => {
+            if changed {
+                if scene_graph::write_camera0(&fixed_camera()) {
+                    log_info!(
+                        "BackgroundDancers: camera slot 0 written (fixed fallback camera: eye [0,1.6,5] target [0,0.9,0] hFOV 76.8 -- no camera set for this scene)"
+                    );
+                } else {
+                    log_warn!(
+                        "BackgroundDancers: camera slot 0 write refused -- the engine's own camera stays (models may be out of frame)"
+                    );
+                }
+            }
+        }
+        CamSource::Set(set) => match director::camera_frame(sess, t, set) {
+            Some(cam) => {
+                let ok = scene_graph::write_camera0(&cam);
+                if changed {
+                    if ok {
+                        let (main, non) = match set {
+                            CameraSet::Stage => (&camera_main, &camera_non),
+                            CameraSet::Movie => (&movie_main, &movie_non),
+                        };
+                        log_info!(
+                            "BackgroundDancers: camera director -- {} set main:{:?} non:{:?} (slot 0 written every frame)",
+                            set.tag(),
+                            main,
+                            non
+                        );
+                        if dev_mode() {
                             log_info!(
-                                "BackgroundDancers: camera director -- main:{:?} non:{:?} (slot 0 written every frame)",
-                                camera_main,
-                                camera_non
-                            );
-                            if dev_mode() {
-                                log_info!(
-                                    "BackgroundDancers: camera timeline -- {}",
-                                    director::camera_timeline(sess, 180.0)
-                                );
-                            }
-                        } else {
-                            log_warn!(
-                                "BackgroundDancers: camera slot 0 write refused -- the engine's own camera stays (models may be out of frame)"
+                                "BackgroundDancers: {} camera timeline -- {}",
+                                set.tag(),
+                                director::camera_timeline(sess, 180.0, set)
                             );
                         }
-                    }
-                }
-                None => {
-                    if !w.camera_written {
-                        w.camera_written = true;
+                    } else {
                         log_warn!(
-                            "BackgroundDancers: camera director produced no sample -- fixed camera NOT written either (schedule/clips inconsistent)"
+                            "BackgroundDancers: camera slot 0 write refused -- the engine's own camera stays (models may be out of frame)"
                         );
                     }
                 }
             }
-        }
+            None => {
+                if changed {
+                    log_warn!(
+                        "BackgroundDancers: {} camera director produced no sample -- camera slot 0 not written (schedule/clips inconsistent)",
+                        set.tag()
+                    );
+                }
+            }
+        },
     }
-
-    w.scene.retry_textures();
-    w.scene.attached_diagnostics();
+    w.camera_source = Some(source);
 }
 
 /// Keep the window's tempo map matched to the live DancePlaySequence:

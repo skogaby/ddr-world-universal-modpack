@@ -1333,3 +1333,26 @@ gate, the BuildGraph hook) is unavailable. Both RTTI names resolve on 20250805 /
 20260825 / 20260915 (`validate_signatures.sh`, 2026-09-22). Correction to §3.4: "the 2D alpha-0 hide
 covers the movie plane too" is wrong — bg_root never covers a fullscreen movie (the game disables it);
 the stage geometry did.
+
+### 7.4 The movie camera set (2026-09-22)
+
+Behind a fullscreen movie the stage cameras are the wrong tool: the stock sets frame a room (survey of all
+87 stock `stage_camera.arc` clips: most at 5–17 m, visible height at the dancer 4–12 m, the figure 15–40 %
+of the frame), and the Griffin House set spends three of its four shots behind the dancers (eye `z < 0`;
+the dancers FACE +Z — the bind toes sit at `z = +0.098` relative to the feet) plus one resampled shot whose
+quaternion stream swings through the ceiling. `scripts/gen_movie_cameras.py` authors a set for the
+stage-less scene instead, and `lifecycle::camera_tick` switches the camera director to it while the scene
+mask is DANCERS_ONLY.
+
+Framing limits measured from the stock choreography (every A3 clip of both sexes, the tu01 exception
+excluded, sampled every 15 frames, `pl_emi00` ×0.9 / `pl_afro00` ×1.0): hips travel x ±0.55–0.75 m and
+z −1.1…+1.1 m (the dancers walk towards and away from the camera), the highest point (hands up) reaches
+1.68 / 1.81 m at p99, the head top 1.46 / 1.57 m at p50, and up to ~10 % of the poses face away. Keeping the whole
+figure inside the HUD-safe frame (|x| ≤ 0.94, −0.80 ≤ y ≤ 0.80 NDC) for 96 % of the poses therefore needs a
+visible height of ~2.5 m at the look target with the target at 0.76–0.82 m (not the obvious mid-body 0.9 —
+the feet are what leave the frame first), i.e. the figure reads 55–62 % of the frame height; a medium shot
+(head + hips kept, feet free) is ~1.7 m / target 1.05 m, figure ~85–90 %. The set mixes both (solo: 8 full
++ 4 medium main clips), every main shot within ±80° of the front, upright, in-game hFOV 46–54°. Two-dancer
+variants (`_2p`, dancers at ±0.8 m) need ~2.7–3.3 m and drop the mediums and the deep side angles (the pair
+would line up in depth). The Blender add-on's `load_camanm` (in-game-verified projection) reproduced the
+intended framing on every clip.

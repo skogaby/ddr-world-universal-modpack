@@ -10,6 +10,7 @@ use crate::services::scene3d::viewport_pass::PassSet;
 
 use super::super::catalog::Kind;
 use super::super::director;
+use super::super::session::CameraSet;
 use super::layout::{
     crop_to_aspect, dancer_extents, fallback_extents, Extents, DANCER_EYE, DANCER_FAR, DANCER_NEAR,
     DANCER_TARGET, DANCER_UP, FALLBACK_EYE, FALLBACK_FAR, FALLBACK_NEAR, FALLBACK_TARGET,
@@ -71,7 +72,7 @@ pub fn frustum_for(window: &mut PreviewWindow, t: f32, aspect: f32) -> Frustum {
                 .scene
                 .session_mut()
                 .filter(|s| s.has_camera())
-                .and_then(|sess| director::camera_frame(sess, t));
+                .and_then(|sess| director::camera_frame(sess, t, CameraSet::Stage));
             match sample {
                 Some(cam) => {
                     // The `.camanm` frustum is symmetric and authored at 16:9
