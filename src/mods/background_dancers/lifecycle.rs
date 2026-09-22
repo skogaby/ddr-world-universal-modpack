@@ -71,13 +71,18 @@ struct Tables {
     camera_rows: Vec<(String, Vec<String>)>,
     dancers: Vec<DancerCandidate>,
     pin: Option<Pin>,
+    /// `(key, label)` of every CUSTOM entry (`data_mods/custom_models`) — the catalog
+    /// appends these after the stock block with their folder-derived names.
+    custom_labels: Vec<(String, String)>,
 }
 
 static TABLES: Mutex<Option<Tables>> = Mutex::new(None);
 static TABLES_READY: AtomicBool = AtomicBool::new(false);
 
 /// Load the four `startup.arc` rlists, build the candidate tables (arc
-/// existence through the LayeredFS-aware resolver), read the developer pin.
+/// existence through the LayeredFS-aware resolver), append the custom
+/// dancers/stages discovered under `data_mods/custom_models` when
+/// `background_dancers.custom_content` is on, read the developer pin.
 /// `false` + WARN when nothing can be shown.
 pub fn init_tables() -> bool {
     let Some(data) = arc_set::read_bytes(STARTUP_ARC) else {
@@ -116,7 +121,6 @@ pub fn init_tables() -> bool {
     let exists = |arc: &str| arc_set::resolve_path(&format!("data/arc/{arc}")).is_some();
     let stages = stage_candidates(&map_rows, exists);
     let dancers = dancer_candidates(&chara_rows, exists);
-    let distinct = super::selection::distinct_stage_keys(&stages).len();
     if stages.is_empty() || dancers.is_empty() {
         log_warn!(
             "BackgroundDancers: no {} candidate (mapset_*/pl_* arcs missing from the install) -- mod inactive",
@@ -124,6 +128,51 @@ pub fn init_tables() -> bool {
         );
         return false;
     }
+    let bd = crate::mods::config::get()
+        .and_then(|c| c.background_dancers.clone())
+        .unwrap_or_default();
+    // Custom dancers / stages from `data_mods/custom_models` (design
+    // 2026-09-22): appended AFTER the stock rows so stock row indices and
+    // option values never move; the stage camera rows stay row-parallel.
+    let (stages, camera_rows, dancers, custom_labels) = if bd.custom_content {
+        let default_camera_row = stages
+            .first()
+            .and_then(|s| camera_rows.get(s.row))
+            .map(|(_, f)| f.clone())
+            .unwrap_or_default();
+        let stock = super::custom_content::StockContext {
+            stage_keys: stages.iter().map(|s| s.key.clone()).collect(),
+            dancer_keys: dancers.iter().map(|d| d.key.clone()).collect(),
+            next_stage_row: map_rows.len(),
+            next_dancer_row: chara_rows.len(),
+            default_camera_row,
+        };
+        let plan = super::custom_scan::discover_and_mount(&stock);
+        let mut stages = stages;
+        let mut dancers = dancers;
+        let mut camera_rows = camera_rows;
+        for (row, names) in plan.camera_rows {
+            if camera_rows.len() <= row {
+                camera_rows.resize(row + 1, (String::new(), Vec::new()));
+            }
+            let key = plan
+                .stages
+                .iter()
+                .find(|s| s.row == row)
+                .map(|s| s.key.clone())
+                .unwrap_or_default();
+            camera_rows[row] = (key, names);
+        }
+        stages.extend(plan.stages);
+        dancers.extend(plan.dancers);
+        (stages, camera_rows, dancers, plan.labels)
+    } else {
+        log_info!(
+            "BackgroundDancers: custom content OFF -- data_mods/custom_models is not scanned"
+        );
+        (stages, camera_rows, dancers, Vec::new())
+    };
+    let distinct = super::selection::distinct_stage_keys(&stages).len();
     let pin = read_pin();
     let dev_mode = crate::mods::config::get()
         .and_then(|c| c.layeredfs.as_ref())
@@ -131,9 +180,6 @@ pub fn init_tables() -> bool {
         .unwrap_or(false);
     let static_poses = dev_mode && std::env::var_os("DDR_DANCERS_STATIC").is_some();
     STATIC_POSES.store(static_poses, Ordering::Release);
-    let bd = crate::mods::config::get()
-        .and_then(|c| c.background_dancers.clone())
-        .unwrap_or_default();
     log_info!(
         "BackgroundDancers: scene clock -- bpm_sync={} (dance at chart BPM/120, beat-phase pinned) stop_slow={} (1/12 speed below 10 BPM)",
         bd.bpm_sync,
@@ -145,11 +191,12 @@ pub fn init_tables() -> bool {
         );
     }
     log_info!(
-        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows{}",
+        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows, {} custom{}",
         stages.len(),
         distinct,
         dancers.len(),
         camera_rows.len(),
+        custom_labels.len(),
         match &pin {
             Some(p) => format!(" (DDR_DANCERS_PIN honoured: {:?})", p),
             None => String::new(),
@@ -161,6 +208,7 @@ pub fn init_tables() -> bool {
             camera_rows,
             dancers,
             pin,
+            custom_labels,
         });
     }
     TABLES_READY.store(true, Ordering::Release);
@@ -169,6 +217,16 @@ pub fn init_tables() -> bool {
 
 pub fn tables_ready() -> bool {
     TABLES_READY.load(Ordering::Acquire)
+}
+
+/// `(key, label)` of the custom (`data_mods/custom_models`) entries in the tables — empty
+/// with the toggle off or nothing installed.
+pub(super) fn custom_labels_snapshot() -> Vec<(String, String)> {
+    TABLES
+        .lock()
+        .ok()
+        .and_then(|t| t.as_ref().map(|t| t.custom_labels.clone()))
+        .unwrap_or_default()
 }
 
 /// A copy of the candidate tables `(stages, camera_rows, dancers)` for the

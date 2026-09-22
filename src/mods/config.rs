@@ -467,6 +467,16 @@ pub struct BackgroundDancersConfig {
     /// verbatim by the row edits' whole-section write; not row-editable.
     #[serde(default)]
     pub outline_layer_colors: Option<Vec<[f32; 3]>>,
+    /// CUSTOM DANCERS & STAGES (2026-09-22): also discover community dancers
+    /// and stages from the ONE custom-models base
+    /// (`data_mods/custom_models/dancers/<Friendly Name>/pl_<key>.arc`,
+    /// `data_mods/custom_models/stages/<Friendly Name>/mapset_<key>.arc`,
+    /// optional sidecar rlists beside them) and treat them like the stock A3
+    /// content: random picks, the two option rows, the live previews. The
+    /// catalog and the rows are built once at enable, so this applies at the
+    /// NEXT LAUNCH. Default `true` (nothing installed ⇒ nothing discovered).
+    #[serde(default = "default_true")]
+    pub custom_content: bool,
 }
 
 /// Clamp an outline width to the range the hull VS was tuned for.
@@ -489,6 +499,7 @@ impl Default for BackgroundDancersConfig {
             outline_px_stage: None,
             outline_style: None,
             outline_layer_colors: None,
+            custom_content: true,
         }
     }
 }

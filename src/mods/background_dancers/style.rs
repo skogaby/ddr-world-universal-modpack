@@ -40,6 +40,7 @@ const ROW_KEY_PX_DANCER: &str = "background-dancers-outline-px";
 const ROW_KEY_PX_STAGE: &str = "background-dancers-outline-px-stage";
 const ROW_KEY_BPM_SYNC: &str = "background-dancers-bpm-sync";
 const ROW_KEY_STOP_SLOW: &str = "background-dancers-stop-slow";
+const ROW_KEY_CUSTOM_CONTENT: &str = "background-dancers-custom-content";
 /// Rows shown only while SCENE OUTLINES is ON (`set_row_show_when`).
 const OUTLINE_CHILD_ROWS: [&str; 3] = [ROW_KEY_OUTLINE_STYLE, ROW_KEY_PX_DANCER, ROW_KEY_PX_STAGE];
 
@@ -55,6 +56,10 @@ static LIVE_OUTLINES: AtomicBool = AtomicBool::new(true);
 static LIVE_OUTLINE_STYLE: AtomicU8 = AtomicU8::new(0); // OutlineStyle::row_value
 static LIVE_BPM_SYNC: AtomicBool = AtomicBool::new(true);
 static LIVE_STOP_SLOW: AtomicBool = AtomicBool::new(true);
+/// CUSTOM DANCERS & STAGES as of the latest edit — persistence mirror only:
+/// the value that GOVERNS this boot is the config value `lifecycle::init_tables`
+/// read (the catalog/rows are built once), so a row edit lands next launch.
+static LIVE_CUSTOM_CONTENT: AtomicBool = AtomicBool::new(true);
 /// Outline rim widths (f32 bits): dancers / stage props.
 static LIVE_PX_DANCER: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0
 static LIVE_PX_STAGE: AtomicU32 = AtomicU32::new(0x3FC0_0000); // 1.5
@@ -227,6 +232,7 @@ pub fn init_from_config() {
     LIVE_OUTLINE_STYLE.store(outline_style.row_value() as u8, Ordering::Relaxed);
     LIVE_BPM_SYNC.store(bd.bpm_sync, Ordering::Relaxed);
     LIVE_STOP_SLOW.store(bd.stop_slow, Ordering::Relaxed);
+    LIVE_CUSTOM_CONTENT.store(bd.custom_content, Ordering::Relaxed);
     let px_d = config::clamp_outline_px(bd.outline_px.unwrap_or(DEFAULT_OUTLINE_PX_DANCER));
     let px_s = config::clamp_outline_px(bd.outline_px_stage.unwrap_or(DEFAULT_OUTLINE_PX_STAGE));
     LIVE_PX_DANCER.store(px_d.to_bits(), Ordering::Relaxed);
@@ -279,6 +285,7 @@ pub fn init_from_config() {
             px_s,
             bd.bpm_sync,
             bd.stop_slow,
+            bd.custom_content,
         );
     }
 }
@@ -294,6 +301,7 @@ fn persist_section() {
         "outline_style": outline_style().key(),
         "outline_px": f32::from_bits(LIVE_PX_DANCER.load(Ordering::Relaxed)),
         "outline_px_stage": f32::from_bits(LIVE_PX_STAGE.load(Ordering::Relaxed)),
+        "custom_content": LIVE_CUSTOM_CONTENT.load(Ordering::Relaxed),
     });
     // Optional key: absent means "default", so it is emitted only when set
     // (the palette is operator-authored and must survive every row edit).
@@ -375,6 +383,16 @@ fn set_stop_slow(value: i32) {
     );
 }
 
+fn set_custom_content(value: i32) {
+    let on = value != 0;
+    LIVE_CUSTOM_CONTENT.store(on, Ordering::Relaxed);
+    persist_section();
+    log_info!(
+        "BackgroundDancers: CUSTOM DANCERS & STAGES set to {} (the catalog is built at launch -- applies at the next launch)",
+        if on { "ON" } else { "OFF" }
+    );
+}
+
 fn register_rows(
     style: SceneStyle,
     outlines: bool,
@@ -383,6 +401,7 @@ fn register_rows(
     px_stage: f32,
     bpm_sync: bool,
     stop_slow: bool,
+    custom_content: bool,
 ) {
     use crate::mods::mod_menu::{register_enum_row, set_row_show_when, EnumRowSpec};
     let on_off = || (vec![0, 1], vec!["OFF".to_string(), "ON".to_string()]);
@@ -463,6 +482,17 @@ fn register_rows(
         labels: l,
         initial_value: i32::from(stop_slow),
         on_change: Arc::new(set_stop_slow),
+    });
+    let (v, l) = on_off();
+    register_enum_row(EnumRowSpec {
+        key: ROW_KEY_CUSTOM_CONTENT.to_string(),
+        label: "Custom Dancers & Stages".to_string(),
+        hint: "Also use community dancers/stages from data_mods/custom_models/dancers and /stages (folder name = display name) beside the stock ones. Next launch.".to_string(),
+        parent_row_key: Some(MOD_ID.to_string()),
+        values: v,
+        labels: l,
+        initial_value: i32::from(custom_content),
+        on_change: Arc::new(set_custom_content),
     });
     // The three outline detail rows are CHILDREN of SCENE OUTLINES: hidden
     // while it is OFF (their values persist unchanged underneath).

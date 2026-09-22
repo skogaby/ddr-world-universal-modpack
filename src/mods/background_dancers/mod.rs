@@ -49,6 +49,18 @@
 //! random (`selection::resolve_choice`); the per-song INFO names each
 //! element's source.
 //!
+//! ## Custom dancers & stages (2026-09-22)
+//!
+//! With `background_dancers.custom_content` on (GLOBAL SETTINGS row "Custom
+//! Dancers & Stages", default ON, next launch) the tables also carry the
+//! community content under the ONE custom-models base
+//! (`data_mods/custom_models/dancers/<Friendly Name>/pl_<key>.arc`,
+//! `data_mods/custom_models/stages/<Friendly Name>/mapset_<key>.arc`, optional
+//! sidecar rlists beside them — [`custom_content`] plans, [`custom_scan`]
+//! walks + mounts through `scene3d::arc_set`). They take part in random
+//! picks, the two rows (labelled by their folder name) and the previews
+//! exactly like the stock rows; the stock block of the catalog never moves.
+//!
 //! ## Degradation
 //!
 //! `required_signatures` names the `scene3d` group's anchor; the group is
@@ -62,6 +74,8 @@
 pub mod background_hide;
 pub mod catalog;
 pub mod clock;
+pub mod custom_content;
+pub mod custom_scan;
 pub mod director;
 pub mod director_math;
 pub mod instance_plan;
@@ -145,11 +159,15 @@ impl Mod for BackgroundDancersMod {
         ENABLED.store(true, Ordering::Release);
         style::init_from_config();
         // The BACKGROUND DANCER / BACKGROUND STAGE rows (options.rs) over the
-        // catalog derived from the tables; fail-open (absent rows ⇒ random
-        // picks, one WARN inside).
+        // catalog derived from the tables (stock block first, then the custom
+        // data_mods entries under their folder names); fail-open (absent rows
+        // ⇒ random picks, one WARN inside).
         match lifecycle::tables_snapshot() {
             Some((stages, _camera_rows, dancers)) => {
-                options::register(catalog::build_catalog(&stages, &dancers));
+                let custom = lifecycle::custom_labels_snapshot();
+                options::register(catalog::build_catalog_with_custom(
+                    &stages, &dancers, &custom,
+                ));
             }
             None => log_warn!("BackgroundDancers: tables unreadable -- option rows not registered"),
         }

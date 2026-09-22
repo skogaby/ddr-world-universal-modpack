@@ -1166,3 +1166,83 @@ half-tangent 0.32. Time base = wall clock from the first built frame. Passes ena
 menu is closed. Teardown on focus loss / modal close / leaving scene 25 (the graph stays enabled through
 scenes 26/27, so it completes while the gameplay window loads). Dev knob `DDR_DANCERS_VIEWPORT_SMOKE`
 (developer_mode): a violet colour+depth clear over the P1 box for 3 s at every song-select entry.
+
+## 6. Custom dancers & stages from `data_mods` (2026-09-22)
+
+No new RE — the loader, the formats and the row/preview machinery are all the ones above; what this
+section records is the DATA contract a custom model must meet, derived from what the engine and the
+mod actually read. Everything lives under ONE base, `data_mods/custom_models/{dancers,stages}/`
+(maintainer call: no per-character mod folders — one mechanism, one base).
+
+**Where the key lives.** The stock rlist key is the arc stem AND the model directory/file stem inside
+the arc (`pl_peter00.arc` → `data/chara/pl_peter00/pl_peter00.model`; `mapset_griffin00.arc` →
+`data/map/gm_griffin00_room/gm_griffin00_room.model`). The engine's `ModelFileCallback` registers each
+converted model under its FILE STEM's FNV-1 hash (`pure::fnv1_name_hash`, §1.5), and the DLL asks the
+ResourceManager for `pl_<key>` / `gm_<key>_<part>` by that name — so the key of a custom arc is
+NON-NEGOTIABLE: it is whatever the add-on exported, and the discovery reads it off the FILENAME and
+verifies the members carry the same stem (`custom_content::body_model_present` /
+`stage_parts_from_members`). The human-readable name is therefore free: the arc's parent FOLDER
+(`Peter Griffin/`), ASCII upper-cased, ≤ 15 bytes (the scalar row's SSO budget, §4.2 of the options
+design). A flat arc falls back to the stock key rule with `_` → space.
+
+**What the A3 proof of concept needed that World does not.** On A3 the game itself walked
+`chara_resources.rlist` / `map_resources.rlist` from `startup.arc`, so adding `peter00` / `griffin00`
+meant repacking `startup.arc` with the rows (`peter00 → [pl, M, A, 1.0, 0.8, 0.0]` at chara row 1,
+`griffin00 → [000000, 000000, room, footpanel]` at map row 34 with the `boom00` camera set on camera row
+34). On World the DLL is the only reader of those lists, so the rows are optional SIDECARS beside the
+arc — the same three filenames, binary MRL0 or a `.rlist.txt` twin — and the defaults reproduce the A3
+rows without them: dancer `M, A, 1.0, 0.8` (the modal stock male row), stage parts = every
+`gm_<key>_<part>.model` member of the arc (Peter's room: `footpanel`, `room` — no `:N` priorities, so
+both draw in the opaque pass with the default sort), camera set = the arc's own `*.camanm` members if
+any, else stock camera row 0 (`boom00`'s `st001_*` set — exactly what the A3 test assigned). The `_g`
+arc (`mapset_<key>_g.arc`, the gold-cabinet lesson-demo variant) is ignored: the World mod loads
+`mapset_<key>.arc` only.
+
+**Folders, not arcs (maintainer 2026-09-22).** Users never pack an arc: a model is a FOLDER
+(`pl_<key>/`, `mapset_<key>/`) holding the add-on's flat export, or a literally unpacked arc. The scanner
+maps every file to the member path the engine expects (`custom_content::folder_member_path` — body/part
+files → `data/chara/<folder>/<rel>`, stage files → `data/map/<rel>`, a stage's `*.camanm` → 
+`data/camera/<key>/<basename>`, anything already under `data/` verbatim) and packs the folder with
+`core::arc::ArcArchive` (uncompressed, 64-byte aligned — the LayeredFS `arc_handler` repack shape, which
+the engine's FileManager has read since the first mod arcs) into
+`data_mods/_cache/custom_models/<name>-<fnv1a8(source path)>.arc`, behind a `CacheHasher` fingerprint of
+the member paths + source mtimes (a later boot only stats). The engine never learns the difference: a
+mount points the logical `data/arc/pl_<key>.arc` at the cache arc. The 2.2 + 4.6 MB PoC pack costs one
+~50 ms pack on the first boot and two `stat` sweeps afterwards.
+
+**How the arcs reach the engine.** `scene3d::arc_set` grew a MOUNT registry (`mount(game_rel, fs_path)`):
+`resolve()` checks it before the LayeredFS override and the stock file, and reports a mount as
+`Resolved::ModOverride`, so `load()` hands the FileManager the filesystem path (the same path the
+LayeredFS override case already used — the FileManager opens through the CRT, §4.2.1 of the design) and
+`read_bytes()` / `resolve_path()` (the parse thread, `parts_present`) see the same file. Nothing
+downstream of `Pick::arcs_for` changed. Mounts never shadow stock: the planner refuses a key that exists
+in the stock tables or an earlier folder (one WARN), so the stock candidates are byte-identical with the
+toggle on or off.
+
+**Row indices.** Custom stages get `row = len(map_resources) + i` with their camera row placed at the
+same index (the row-parallel invariant `assemble_pick_opt` relies on: `camera_rows.get(stage.row)`);
+custom dancers `row = len(chara_resources) + i`. The catalog keeps the stock block first (sorted by key,
+unchanged) and appends the custom block sorted by label, so a cached option value keeps meaning the
+same stock entry, and with the toggle OFF a custom value clamps to RANDOM at load.
+
+**Camera clips of a custom stage — and why the first cabinet test filmed the house from outside.**
+`parse_pick` looks each camera name up in the STAGE arc first (any `<name>.camanm` member, any directory)
+and only then in `camera/stage_camera.arc`'s `long/<name[..5]>/<name>.camanm` layout, so a stage ships
+its own shots. The A3 PoC could not: A3's lesson demo ran the stage under the SONG camera set
+(`camera_music_lesa.arc` — `lesa` = the lesson song's mcode; one 6238-frame `music_lesa.camanm` with the
+four shots baked in as hard cuts, `examples/stage_camera.py`), a mode the World mod does not have (stage
+mode only — a LIST of short clips, stock 360–450 frames each, main clips cycled, `_non` clips cut away at
+dance changes, `schedule::CameraSchedule`). Without a stage set the planner borrowed `boom00`'s
+`st001_*` shots, whose 3–5 m orbit lands in the living-room walls. `scripts/split_camanm.py` converts the
+song-camera authoring into stage clips: `--shot name:F0-F1` slices the long clip, re-times the shot to
+`--frames` (450 = the stock cadence) by game-equivalent sampling (`anm_dump.sample_track`: linear on
+translation/FOV, slerp on the rotation quaternion; the single-key near/far/aspect slots copied), writes
+through `write_anm` and re-parses the output to verify every sample (max error 1.5e-5 on the Griffin
+shots). The four resulting `griffin_st01..04.camanm` live in the stage folder's `camera/`; a `_non`
+suffix would make one a cut-away. Song-camera sets (`camera_music_*.arc`) stay unread — per-song cameras
+are a possible follow-up, not a stage property.
+
+**Discovery cost.** The scan runs once at enable on the enabling thread: per model folder a directory
+walk + fingerprint stat (a full read + pack only when stale), per ready arc a 64 KiB prefix read (header
++ cue table + string table sit at the front; the whole file is read only when the string table runs past
+the prefix), per directory the sidecar files.

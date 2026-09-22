@@ -12,16 +12,61 @@
 //! mod file's filesystem path (the AVS layer is not involved — the FileManager
 //! opens through the CRT).
 //!
+//! **Mounts** (2026-09-22): the Background Dancers mod's custom-content
+//! discovery registers arcs that exist under NO game path at all
+//! (`data_mods/custom_models/dancers/<Name>/pl_<key>.arc`) under the logical
+//! `data/arc/pl_<key>.arc` the rest of the pipeline speaks. [`mount`] binds
+//! a logical game path to a filesystem path; [`resolve`] consults the mounts
+//! FIRST and reports them as [`Resolved::ModOverride`] (the engine gets the
+//! filesystem path, the parse thread reads the same file). Mounts never
+//! shadow a stock file by design — the discovery refuses keys that collide
+//! with the stock tables — and are process-lifetime (built once at enable).
+//!
 //! Engine calls ([`load`], [`free`]) are GAME-THREAD ONLY. [`resolve_path`]
 //! and [`read_bytes`] are thread-agnostic.
 
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::log_warn;
 use crate::services::avs_layeredfs::mod_paths;
 
 pub use super::pure::{data_relative, resolve_with, Resolved};
+
+/// Logical game path (lower-cased, `data/`-relative) → filesystem path.
+static MOUNTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Bind a logical arc path (`data/arc/pl_peter00.arc`) to a file on disk.
+/// A later mount of the same logical path replaces the earlier one.
+pub fn mount(game_rel: &str, fs_path: &str) {
+    let key = data_relative(game_rel).to_ascii_lowercase();
+    let Ok(mut m) = MOUNTS.lock() else { return };
+    if let Some(slot) = m.iter_mut().find(|(k, _)| *k == key) {
+        slot.1 = fs_path.to_string();
+    } else {
+        m.push((key, fs_path.to_string()));
+    }
+}
+
+/// Drop every mount (a re-discovery rebuilds them).
+pub fn unmount_all() {
+    if let Ok(mut m) = MOUNTS.lock() {
+        m.clear();
+    }
+}
+
+/// Number of live mounts (diagnostics).
+pub fn mount_count() -> usize {
+    MOUNTS.lock().map(|m| m.len()).unwrap_or(0)
+}
+
+/// The filesystem path a logical arc path is mounted at, if any.
+pub fn mounted_path(game_rel: &str) -> Option<String> {
+    let key = data_relative(game_rel).to_ascii_lowercase();
+    let m = MOUNTS.lock().ok()?;
+    m.iter().find(|(k, _)| *k == key).map(|(_, p)| p.clone())
+}
 
 /// A set of loaded arcs: `(logical game path, FileManager handle)` per
 /// successfully loaded file. Not `Clone`: exactly-once release by type.
@@ -44,15 +89,18 @@ impl ArcSet {
 }
 
 /// Resolve a game-relative arc path (`data/arc/pl_emi00.arc`) to the file
-/// that will actually be read: a LayeredFS mod-folder override if one exists,
-/// else the stock file under the game folder. `None` when neither exists.
+/// that will actually be read: a custom-content mount, else a LayeredFS
+/// mod-folder override if one exists, else the stock file under the game
+/// folder. `None` when none exists.
 pub fn resolve_path(game_rel: &str) -> Option<String> {
     resolve(game_rel).map(|r| r.path().to_string())
 }
 
-/// [`resolve_path`] keeping the override/stock distinction.
+/// [`resolve_path`] keeping the override/stock distinction (a mount reports
+/// as an override — the engine must be handed its filesystem path).
 pub fn resolve(game_rel: &str) -> Option<Resolved> {
-    let mod_override = mod_paths::find_first_modfile(data_relative(game_rel));
+    let mod_override =
+        mounted_path(game_rel).or_else(|| mod_paths::find_first_modfile(data_relative(game_rel)));
     resolve_with(game_rel, mod_override.as_deref(), Path::new("."), |p| {
         p.is_file()
     })

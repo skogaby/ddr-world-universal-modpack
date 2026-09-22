@@ -137,10 +137,67 @@ fn label_keys(keys: Vec<String>) -> Vec<CatalogEntry> {
 /// (`boom00` / `monitor00` each have two rlist rows; `dummy00` never reaches
 /// the candidates). Both sorted by key so a family's variants sit together.
 pub fn build_catalog(stages: &[StageCandidate], dancers: &[DancerCandidate]) -> Catalog {
-    Catalog {
-        dancers: label_keys(sorted_distinct(dancers.iter().map(|d| d.key.clone()))),
-        stages: label_keys(sorted_distinct(stages.iter().map(|s| s.key.clone()))),
-    }
+    build_catalog_with_custom(stages, dancers, &[])
+}
+
+/// [`build_catalog`] plus the CUSTOM entries (design 2026-09-22 D8): the
+/// stock block first — every candidate key NOT in `custom`, labelled by the
+/// key rule and sorted by key exactly as before, so stock row values never
+/// move when custom content is added or the toggle flips — then the custom
+/// entries whose key IS a candidate of that kind, carrying their explicit
+/// `(key, label)` (folder / key-rule name from `custom_content`), sorted by
+/// label then key. A custom label is fitted to [`MAX_LABEL_BYTES`] here too
+/// (the planner already did; defensive).
+pub fn build_catalog_with_custom(
+    stages: &[StageCandidate],
+    dancers: &[DancerCandidate],
+    custom: &[(String, String)],
+) -> Catalog {
+    let is_custom = |key: &str| custom.iter().any(|(k, _)| k == key);
+    let stock_dancers = label_keys(sorted_distinct(
+        dancers
+            .iter()
+            .filter(|d| !is_custom(&d.key))
+            .map(|d| d.key.clone()),
+    ));
+    let stock_stages = label_keys(sorted_distinct(
+        stages
+            .iter()
+            .filter(|s| !is_custom(&s.key))
+            .map(|s| s.key.clone()),
+    ));
+    let custom_block = |present: &dyn Fn(&str) -> bool| -> Vec<CatalogEntry> {
+        let mut v: Vec<CatalogEntry> = custom
+            .iter()
+            .filter(|(k, _)| present(k))
+            .map(|(k, l)| {
+                let mut label = l.clone();
+                if label.len() > MAX_LABEL_BYTES {
+                    let mut cut = MAX_LABEL_BYTES;
+                    while !label.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    label.truncate(cut);
+                }
+                CatalogEntry {
+                    key: k.clone(),
+                    label,
+                }
+            })
+            .collect();
+        v.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key)));
+        v.dedup_by(|a, b| a.key == b.key);
+        v
+    };
+    let mut out = Catalog {
+        dancers: stock_dancers,
+        stages: stock_stages,
+    };
+    out.dancers
+        .extend(custom_block(&|k| dancers.iter().any(|d| d.key == k)));
+    out.stages
+        .extend(custom_block(&|k| stages.iter().any(|s| s.key == k)));
+    out
 }
 
 /// Load-side clamp for a cached row value: `0..=count` passes through, any
@@ -339,5 +396,60 @@ mod tests {
         assert_eq!(clamp_to_catalog(3, 0), RANDOM);
         assert_eq!(clamp_to_catalog(i32::MAX, 25), RANDOM);
         assert_eq!(clamp_to_catalog(i32::MIN, 25), RANDOM);
+    }
+
+    #[test]
+    fn custom_entries_append_after_the_untouched_stock_block() {
+        let mut stages = stage_candidates(&real_map_rows(), |_| true);
+        let mut dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let stock = build_catalog(&stages, &dancers);
+        // Two custom dancers (folder names deliberately out of key order) and
+        // one custom stage, as the planner would append them.
+        dancers.extend(dancer_candidates(
+            &[
+                (
+                    "peter00".to_string(),
+                    ["pl", "M", "A", "1.0", "0.8", "0.0"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                ),
+                (
+                    "aaa00".to_string(),
+                    ["pl", "F", "A", "0.9", "0.75", "0.0"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                ),
+            ],
+            |_| true,
+        ));
+        stages.push(StageCandidate {
+            key: "griffin00".to_string(),
+            row: 34,
+            parts: vec![("room".to_string(), None)],
+        });
+        let custom = vec![
+            ("peter00".to_string(), "PETER GRIFFIN".to_string()),
+            ("aaa00".to_string(), "ZED".to_string()),
+            ("griffin00".to_string(), "GRIFFIN HOUSE".to_string()),
+            // A label for a key that is NOT a candidate is dropped.
+            ("ghost00".to_string(), "GHOST".to_string()),
+        ];
+        let cat = build_catalog_with_custom(&stages, &dancers, &custom);
+        // Stock block byte-identical and first.
+        assert_eq!(&cat.dancers[..26], &stock.dancers[..]);
+        assert_eq!(&cat.stages[..25], &stock.stages[..]);
+        // Custom block after it, sorted by LABEL (not key).
+        assert_eq!(cat.count(Kind::Dancer), 28);
+        assert_eq!(cat.label(Kind::Dancer, 27), Some("PETER GRIFFIN"));
+        assert_eq!(cat.key(Kind::Dancer, 27), Some("peter00"));
+        assert_eq!(cat.label(Kind::Dancer, 28), Some("ZED"));
+        assert_eq!(cat.key(Kind::Dancer, 28), Some("aaa00"));
+        assert_eq!(cat.count(Kind::Stage), 26);
+        assert_eq!(cat.label(Kind::Stage, 26), Some("GRIFFIN HOUSE"));
+        assert_eq!(cat.key(Kind::Stage, 26), Some("griffin00"));
+        // Stock values still clamp the same way with custom content OFF.
+        assert_eq!(clamp_to_catalog(27, stock.count(Kind::Dancer)), RANDOM);
     }
 }

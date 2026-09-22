@@ -211,7 +211,9 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
     let mut stage_parts = Vec::new();
     let mut dancers = Vec::new();
 
-    // Stage parts.
+    // Stage parts. The reader stays open: a custom stage may carry its own
+    // `.camanm` clips (design 2026-09-22 D9), looked up there first.
+    let mut stage_reader: Option<ArcReader> = None;
     if let Some(stage) = pick.stage.as_ref() {
         let stage_arc = format!("data/arc/{}", stage.arc_name());
         match ArcReader::open(&stage_arc) {
@@ -248,6 +250,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                         loop_clip,
                     });
                 }
+                stage_reader = Some(reader);
             }
         }
     }
@@ -402,7 +405,10 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
     };
 
     // Stage camera sets (none without a stage — a dancer-only scene keeps
-    // its caller's fixed camera silently).
+    // its caller's fixed camera silently). Each name is looked up in the
+    // stage's OWN arc first (any `<name>.camanm` member — custom stages ship
+    // their cameras that way), then in the stock `camera/stage_camera.arc`
+    // under the `long/<name[..5]>/` layout.
     let cameras = match pick.stage.as_ref() {
         None => None,
         Some(stage) if pick.camera_main.is_empty() => {
@@ -412,30 +418,57 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             ));
             None
         }
-        Some(_) => match ArcReader::open(STAGE_CAMERA_ARC) {
-            None => {
-                warnings.push(format!("{STAGE_CAMERA_ARC}: unreadable -- fixed camera"));
-                None
-            }
-            Some(reader) => {
-                let mut load = |names: &[String]| -> Vec<Clip> {
-                    names
-                        .iter()
-                        .filter_map(|n| {
-                            parse_clip(&reader, &camanm_member_path(n), n, &mut warnings)
-                        })
-                        .collect()
-                };
-                let main = load(&pick.camera_main);
-                let non = load(&pick.camera_non);
-                if main.is_empty() {
-                    warnings.push("no main camera clip parsed -- fixed camera".to_string());
-                    None
-                } else {
-                    Some(ParsedCameras { main, non })
+        Some(_) => {
+            let own_member = |name: &str| -> Option<String> {
+                let reader = stage_reader.as_ref()?;
+                let file = format!("{name}.camanm");
+                reader
+                    .entries
+                    .iter()
+                    .find(|e| e.path.rsplit('/').next() == Some(file.as_str()))
+                    .map(|e| e.path.clone())
+            };
+            let needs_stock = pick
+                .camera_main
+                .iter()
+                .chain(pick.camera_non.iter())
+                .any(|n| own_member(n).is_none());
+            let stock_reader = if needs_stock {
+                let r = ArcReader::open(STAGE_CAMERA_ARC);
+                if r.is_none() {
+                    warnings.push(format!(
+                        "{STAGE_CAMERA_ARC}: unreadable -- stock camera names unavailable"
+                    ));
                 }
+                r
+            } else {
+                None
+            };
+            let mut load = |names: &[String]| -> Vec<Clip> {
+                names
+                    .iter()
+                    .filter_map(|n| match own_member(n) {
+                        Some(member) => {
+                            parse_clip(stage_reader.as_ref()?, &member, n, &mut warnings)
+                        }
+                        None => parse_clip(
+                            stock_reader.as_ref()?,
+                            &camanm_member_path(n),
+                            n,
+                            &mut warnings,
+                        ),
+                    })
+                    .collect()
+            };
+            let main = load(&pick.camera_main);
+            let non = load(&pick.camera_non);
+            if main.is_empty() {
+                warnings.push("no main camera clip parsed -- fixed camera".to_string());
+                None
+            } else {
+                Some(ParsedCameras { main, non })
             }
-        },
+        }
     };
 
     Parsed {

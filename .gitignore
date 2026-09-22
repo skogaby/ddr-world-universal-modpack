@@ -11,6 +11,9 @@ mod_assets/
 **/__pycache__/
 log.txt
 *.arc
+# The one place arcs ARE repo content: the Background Dancers custom
+# dancer/stage packs (add-on-authored models, never Konami data).
+!/data_mods/custom_models/**/*.arc
 /tests/
 
 # Claude Code
