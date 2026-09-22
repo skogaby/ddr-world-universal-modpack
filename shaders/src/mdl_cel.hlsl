@@ -29,6 +29,20 @@
 // the first hull used a facing-dependent depth push of up to ~20 mm, which
 // lost to a chest 0–20 mm behind a crossed arm; RE §4.7).
 //
+// Outline COLOUR = COLOR0 (c23 = the collector's `record colour × item
+// tint`) verbatim — the DLL owns it. It writes the layer colour into every
+// hull record's own colour at build (`render_item::set_record_colors`; the
+// frame board republishes only the item TINT per frame, which stays the
+// body's white), so ONE outline pair serves every layer of the LAYERED style
+// (black, then red, then blue — `background_dancers/outline.rs`): the layers
+// are separate hull items, each as wide again as the base width, and the
+// z-test stacks them
+// (a narrower hull's back-facing shell fragment comes from a vertex nearer
+// the silhouette — shallower on the far side — than a wider hull's at the
+// same pixel, so the narrowest is always on top, in any draw order). The
+// ink default lives DLL-side (`outline::INK_RGB` = 0.03 grey, the same value
+// the first hull baked in here as OUTLINE_RGB × a white tint).
+//
 // Variant defines (scripts/build_shaders.sh `/D`):
 //   VCOLOR  (VS) multiply COLOR0 into the tint — the `_vc` stage shapes
 //   CCOLOR  (PS) `rgb = rgb·c4.rgb + c5.rgb` — the `_c` shapes (PS c3..c5 =
@@ -69,7 +83,8 @@
 // sub-pixel rim — invisible — RE §4.7).
 #define OUTLINE_REF_DIST 25.0
 #define OUTLINE_PUSH_M   0.001  // constant depth margin, WORLD metres (z-fight guard only)
-#define OUTLINE_RGB      0.03   // outline colour (× tint)
+// (No colour constant: the outline colour is COLOR0, written per hull item by
+// the DLL — see the header comment.)
 
 // ═══════════════════════════ CEL STYLE ═══════════════════════════════════
 
@@ -249,8 +264,8 @@ float4 ps_outline_main(OutlineVSOut i, float2 vpos : VPOS) : COLOR
     float alpha = i.col.a;
 #else
     // Texture alpha keeps cutout shapes (hair cards) through the stock
-    // alpha test; colour is the (tinted) outline colour.
+    // alpha test; colour is the DLL-written layer colour (COLOR0).
     float alpha = tex2D(Material, i.uv).a * i.col.a;
 #endif
-    return float4(OUTLINE_RGB * i.col.rgb, alpha);
+    return float4(i.col.rgb, alpha);
 }

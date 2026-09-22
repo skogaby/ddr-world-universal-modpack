@@ -61,6 +61,10 @@ pub struct MenuRow {
     pub indent: u8,
     /// `Some((owning_mod_id, 1))` — see the struct docs.
     pub visible_when: Option<(String, i32)>,
+    /// `Some((parent_row_key, value))` — a CHILD row, shown only while that
+    /// contributed row (same owner) is shown and holds `value`. Set through
+    /// [`set_row_show_when`]; `None` = always shown while the owner is on.
+    pub show_when: Option<(String, i32)>,
     /// Change callback driving the owning mod.
     pub on_change: Option<RowChangeCallback>,
 }
@@ -128,6 +132,7 @@ pub fn register_scalar_row(spec: ScalarRowSpec) {
         },
         indent: 1,
         visible_when: spec.parent_row_key.map(|p| (p, 1)),
+        show_when: None,
         on_change: Some(spec.on_change),
     };
     insert_contributed(row);
@@ -150,6 +155,7 @@ pub fn register_enum_row(spec: EnumRowSpec) {
         },
         indent: 1,
         visible_when: spec.parent_row_key.map(|p| (p, 1)),
+        show_when: None,
         on_change: Some(spec.on_change),
     };
     insert_contributed(row);
@@ -160,9 +166,33 @@ fn insert_contributed(row: MenuRow) {
         return;
     };
     if let Some(existing) = state.contributed_rows.iter_mut().find(|r| r.key == row.key) {
+        // Re-registration keeps a previously declared parent (the specs
+        // carry none — `set_row_show_when` is a separate, additive call).
+        let show_when = existing.show_when.take();
         *existing = row;
+        existing.show_when = show_when;
     } else {
         state.contributed_rows.push(row);
+    }
+}
+
+/// Make contributed row `key` a CHILD of contributed row `parent_key`: on
+/// the GLOBAL SETTINGS tab it is shown only while the parent is shown and
+/// its current value equals `value` (a Boolean parent: `1` = ON) — the
+/// contributed-row analogue of the framework's `ShowWhen::Equals`. Both rows
+/// must be registered by the SAME mod (children are resolved within the
+/// owner's group); a missing parent hides the child. The relation survives
+/// idempotent re-registration of either row. Hidden children keep their
+/// stored value and callbacks — only the display omits them; the tab lists
+/// rebuild on every edit, so toggling the parent shows/hides them at once.
+/// Additive to the frozen spec API (no spec field): call it right after
+/// registering the child.
+pub fn set_row_show_when(key: &str, parent_key: &str, value: i32) {
+    let Ok(mut state) = MOD_MENU_STATE.lock() else {
+        return;
+    };
+    if let Some(row) = state.contributed_rows.iter_mut().find(|r| r.key == key) {
+        row.show_when = Some((parent_key.to_string(), value));
     }
 }
 

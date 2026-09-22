@@ -29,8 +29,8 @@ pub(crate) mod theme;
 
 #[allow(unused_imports)]
 pub use rows::{
-    register_enum_row, register_scalar_row, remove_rows_for, EntriesCallback, EnumRowSpec, MenuRow,
-    RowChangeCallback, RowKind, ScalarRowSpec, ToggleCallback,
+    register_enum_row, register_scalar_row, remove_rows_for, set_row_show_when, EntriesCallback,
+    EnumRowSpec, MenuRow, RowChangeCallback, RowKind, ScalarRowSpec, ToggleCallback,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};

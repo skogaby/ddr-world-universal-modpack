@@ -36,6 +36,7 @@ use super::director_math::{
     body_world, part_world, shadow_target, shadow_world, transform_point, BLACK, SHADOW_FLOOR_Y,
     WHITE,
 };
+use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
 use super::selection::{
     camanm_member_path, camera_lists, clip_member_path, dancer_x, part_attach_bone, pick_dancers,
@@ -650,12 +651,14 @@ pub enum InstanceKind {
     Part { dancer: usize, part: usize },
     /// The `pl_shadow00` quad under dancer `dancer`.
     Shadow(usize),
-    /// Inverted-hull OUTLINE twin of instance `of` (a `Dancer` or `Part`):
-    /// the same model/resource, every draw record carrying the bit-31
-    /// program selector so the synthesized `mdl_*_lambert` container's
+    /// Inverted-hull OUTLINE twin of instance `of` (a `Dancer`, `Part` or
+    /// `StagePart`): the same model/resource, every draw record carrying the
+    /// bit-31 program selector so the synthesized variant container's
     /// outline pair (program 0) draws it. Shares `of`'s frame-board slot —
-    /// never published itself (RE §4.6).
-    Hull { of: usize },
+    /// never published itself (RE §4.6). `layer` indexes the session's
+    /// [`HullPlan`]: INK has one layer; LAYERED stacks one hull per palette
+    /// colour, each a band wider (`outline.rs`).
+    Hull { of: usize, layer: usize },
 }
 
 impl InstanceKind {
@@ -742,6 +745,10 @@ pub struct Session {
     pub parsed: Parsed,
     /// The scene style every eligible material is re-pointed at (per song).
     pub style: SceneStyle,
+    /// The outline layers built for every restyle-eligible instance (empty =
+    /// no hulls; INK = one grey layer; LAYERED = one hull per palette
+    /// colour, one band wider each — `outline.rs`). Frozen per song.
+    pub hulls: HullPlan,
     pub schedule: Option<DanceSchedule>,
     pub instances: Vec<Instance>,
     /// Per dancer: the instance indices of its parts and shadow (the
@@ -764,17 +771,18 @@ pub struct Session {
 
 impl Session {
     /// `style`: the scene style applied at item build (materials re-pointed
-    /// at the `<name>_<style>` variant containers, RE §4.7). `hulls`: build an
-    /// inverted-hull outline twin for every restyle-eligible instance (SCENE
-    /// OUTLINES on AND a non-stock style AND the synthesized containers carry
-    /// the outline pair — `style::effective()` decides).
+    /// at the `<name>_<style>` variant containers, RE §4.7). `hulls`: the
+    /// inverted-hull outline layers to build for every restyle-eligible
+    /// instance — empty when SCENE OUTLINES is off, the style is stock or the
+    /// synthesized containers lack the outline pair (`style::hull_plan`
+    /// decides); INK = one layer, LAYERED = one hull per palette colour.
     pub fn new(
         pick: Pick,
         parsed: Parsed,
         requested_at: Instant,
         tempo_opts: TempoOptions,
         style: SceneStyle,
-        hulls: bool,
+        hulls: HullPlan,
     ) -> Session {
         let schedule = dance_schedule(&parsed, tempo_opts);
         let camera = camera_schedule(&parsed, pick.seed);
@@ -892,13 +900,16 @@ impl Session {
             }
         }
         // Inverted-hull twins (scene outlines, RE §4.6/§4.7): one per
-        // restyle-eligible instance (dancer bodies, parts, stage props),
-        // reading the body's slot. Never for the shadow or the skydome part
-        // (their materials stay stock, so program 0 of their container is the
-        // body again) — `restyle_allowed` is the same rule the restyle uses.
+        // restyle-eligible instance (dancer bodies, parts, stage props) PER
+        // LAYER of the plan, each reading the body's slot. Never for the
+        // shadow or the skydome part (their materials stay stock, so program
+        // 0 of their container is the body again) — `restyle_allowed` is the
+        // same rule the restyle uses. Layer order within a body does not
+        // matter for the look (the z-test stacks them); layers are grouped
+        // per body so the build/teardown log reads body-by-body.
         // (Deploy #4 shipped a Dancer|Part-only filter here — a `cargo fmt`
         // reflow had defeated the edit — so stage props never got twins.)
-        if hulls {
+        if !hulls.is_none() {
             let n = instances.len();
             for of in 0..n {
                 let body = &instances[of];
@@ -907,31 +918,41 @@ impl Session {
                 {
                     continue;
                 }
-                let twin = Instance {
-                    kind: InstanceKind::Hull { of },
-                    model_name: body.model_name.clone(),
-                    pass_mask: body.pass_mask,
-                    sort_key: body.sort_key,
-                    slot: body.slot,
-                    mirror: body.mirror,
-                    status: InstanceStatus::Pending,
-                    node: 0,
-                    item: 0,
-                    bone_count: body.bone_count,
-                    material_count: 0,
-                    textures_pending: 0,
-                    attached_at: None,
-                    node_shown: false,
-                    queued: false,
-                    freed: false,
-                };
-                instances.push(twin);
+                let (model_name, pass_mask, sort_key, slot, mirror, bone_count) = (
+                    body.model_name.clone(),
+                    body.pass_mask,
+                    body.sort_key,
+                    body.slot,
+                    body.mirror,
+                    body.bone_count,
+                );
+                for layer in 0..hulls.layers.len() {
+                    instances.push(Instance {
+                        kind: InstanceKind::Hull { of, layer },
+                        model_name: model_name.clone(),
+                        pass_mask,
+                        sort_key,
+                        slot,
+                        mirror,
+                        status: InstanceStatus::Pending,
+                        node: 0,
+                        item: 0,
+                        bone_count,
+                        material_count: 0,
+                        textures_pending: 0,
+                        attached_at: None,
+                        node_shown: false,
+                        queued: false,
+                        freed: false,
+                    });
+                }
             }
         }
         Session {
             pick,
             parsed,
             style,
+            hulls,
             schedule,
             instances,
             children,
@@ -1006,7 +1027,7 @@ impl Session {
     /// republishes every frame).
     pub fn initial_world(&self, inst: &Instance) -> Mat4 {
         match inst.kind {
-            InstanceKind::Hull { of } => match self.instances.get(of) {
+            InstanceKind::Hull { of, .. } => match self.instances.get(of) {
                 Some(body) if !matches!(body.kind, InstanceKind::Hull { .. }) => {
                     self.initial_world(body)
                 }
@@ -1119,6 +1140,7 @@ impl Session {
                 &world,
                 since_request_ms,
                 self.style,
+                &self.hulls,
             ) {
                 true => progress.built_now += 1,
                 false => progress.skipped_now += 1,
@@ -1129,13 +1151,15 @@ impl Session {
 }
 
 /// Build one instance's item + node and attach it hidden. `false` = skipped
-/// (one WARN logged, status set).
+/// (one WARN logged, status set). `hulls` = the session's outline plan (a
+/// `Hull { layer }` instance takes its colour + width step from it).
 fn build_one(
     inst: &mut Instance,
     view: &model_registry::ResourceView,
     world: &Mat4,
     since_request_ms: u64,
     style: SceneStyle,
+    hulls: &HullPlan,
 ) -> bool {
     let item = match render_item::build(view, inst.pass_mask) {
         Ok(i) => i,
@@ -1164,24 +1188,42 @@ fn build_one(
         };
         // SAFETY: our own fresh block, not yet attached.
         let st = unsafe { item.restyle_materials(true, &variant_for) };
-        let is_hull = matches!(inst.kind, InstanceKind::Hull { .. });
-        if is_hull {
+        if let InstanceKind::Hull { layer, .. } = inst.kind {
             // Per-kind rim width (the hull VS reads ModelParameters.w): the
             // twin's model_name is the body's, so a `gm_` prefix = stage prop.
+            // The layer's colour rides the records (collector → c23 → the
+            // outline PS emits it verbatim); its width is the base plus
+            // `step` bands (`outline.rs`). A layer index outside the plan
+            // can only come from a plan/instances mismatch — draw nothing.
             let (px_dancer, px_stage) = super::style::outline_widths();
-            let px = if inst.model_name.starts_with("gm_") {
+            let base = if inst.model_name.starts_with("gm_") {
                 px_stage
             } else {
                 px_dancer
             };
+            let Some(spec) = hulls.layers.get(layer) else {
+                log_warn!(
+                    "BackgroundDancers: {} [hull L{}] has no layer in the plan ({} layer(s)) -- item freed, skipped this song",
+                    inst.model_name,
+                    layer,
+                    hulls.layers.len()
+                );
+                render_item::free(item);
+                inst.status = InstanceStatus::Skipped;
+                return false;
+            };
+            let px = hulls.width(base, spec.step);
             // SAFETY: as above.
             let (marked, hidden) = unsafe {
                 item.set_outline_width(px);
+                item.set_record_colors(spec.rgba);
                 item.mark_hull_records(&st.record_restyled)
             };
             log_info!(
-                "BackgroundDancers: {} [hull] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {} px; materials restyled={} kept: blend={} no-variant={}",
+                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {:.2} px; materials restyled={} kept: blend={} no-variant={}",
                 inst.model_name,
+                layer,
+                outline::hex(spec.rgba),
                 marked,
                 hidden,
                 px,

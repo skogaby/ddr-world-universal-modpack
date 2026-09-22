@@ -682,15 +682,17 @@ fn drive_live(w: &mut Window) {
                 // Scene style + inverted-hull outlines (RE §4.6/§4.7): the
                 // operator's request gated on what the synthesis actually
                 // serves this boot (a bit-31 twin against a stock 4×(0,0,0)
-                // container would just draw the body twice).
+                // container would just draw the body twice). The hull plan
+                // (INK / LAYERED colours + width bands) is frozen per song.
                 let eff = super::style::effective();
+                let hulls = super::style::hull_plan(&eff);
                 w.session = Some(Session::new(
                     w.pick.clone(),
                     parsed,
                     w.requested_at,
                     tempo_options(),
                     eff.style,
-                    eff.hulls,
+                    hulls,
                 ));
             }
         }

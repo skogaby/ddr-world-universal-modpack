@@ -452,6 +452,21 @@ pub struct BackgroundDancersConfig {
     /// read heavier than a figure at the same width). Same clamp.
     #[serde(default)]
     pub outline_px_stage: Option<f32>,
+    /// OUTLINE STYLE (experimental, 2026-09-21): `"ink"` (default — one
+    /// black stroke) or `"layered"` — the DDR World UI text look: several
+    /// strokes stacked, narrowest on top (black, then red, then blue by
+    /// default), each a separate hull as wide again as the kind's outline
+    /// width (2/4/6 px on dancers, 1.5/3/4.5 on props). Absent/unknown ⇒
+    /// ink. Next song.
+    #[serde(default)]
+    pub outline_style: Option<String>,
+    /// LAYERED only: operator palette override, innermost first, `[r, g, b]`
+    /// in 0..=1, 1..=4 entries (each entry = one extra draw of every
+    /// outlined mesh). Absent ⇒ black / red / blue
+    /// (`background_dancers::outline::DEFAULT_LAYERED_RGB`). Re-emitted
+    /// verbatim by the row edits' whole-section write; not row-editable.
+    #[serde(default)]
+    pub outline_layer_colors: Option<Vec<[f32; 3]>>,
 }
 
 /// Clamp an outline width to the range the hull VS was tuned for.
@@ -472,6 +487,8 @@ impl Default for BackgroundDancersConfig {
             outlines: None,
             outline_px: None,
             outline_px_stage: None,
+            outline_style: None,
+            outline_layer_colors: None,
         }
     }
 }

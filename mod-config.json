@@ -370,5 +370,13 @@
     "widget_offset_x": 5,
     "widget_offset_y": 0,
     "widget_scale_percent": 80
+  },
+  "background_dancers": {
+    "bpm_sync": false,
+    "outline_px": 2.0,
+    "outline_px_stage": 1.5,
+    "outlines": true,
+    "stop_slow": false,
+    "style": "cel"
   }
 }

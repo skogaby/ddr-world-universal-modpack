@@ -55,6 +55,7 @@ pub mod director;
 pub mod director_math;
 pub mod lifecycle;
 pub mod movie_size;
+pub mod outline;
 pub mod schedule;
 pub mod selection;
 pub mod session;

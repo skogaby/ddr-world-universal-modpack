@@ -103,6 +103,20 @@ pub enum RowKind {
     Header,
 }
 
+impl RowKind {
+    /// The row's current raw value as the change callbacks see it (bool →
+    /// 0/1, scalar → value, enum → `values[index]`); `None` for a header or
+    /// an enum whose index is out of range.
+    pub fn current_value(&self) -> Option<i32> {
+        match self {
+            RowKind::Boolean { value } => Some(i32::from(*value)),
+            RowKind::Scalar { value, .. } => Some(*value),
+            RowKind::Enum { index, values, .. } => values.get(*index).copied(),
+            RowKind::Header => None,
+        }
+    }
+}
+
 /// Where a row came from — decides which edit path the impure layer drives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RowSource {
@@ -159,6 +173,31 @@ pub struct ContributedSnap {
     /// The registering mod's id (the old `parent_row_key`); `None` = unowned
     /// (renders at the tail of GLOBAL SETTINGS without a group header).
     pub owning_mod_id: Option<String>,
+    /// `Some((parent_row_key, value))` = a CHILD row, shown only while the
+    /// contributed row `parent_row_key` (same owner) is itself shown and its
+    /// current value equals `value` (a Boolean parent: 1 = ON) — the
+    /// contributed-row analogue of the framework's `ShowWhen::Equals`.
+    pub show_when: Option<(String, i32)>,
+}
+
+/// Bound on `show_when` chains (a child of a child …); deeper — or cyclic —
+/// registrations resolve to hidden rather than recurse forever.
+const SHOW_WHEN_MAX_DEPTH: usize = 8;
+
+/// Whether contributed row `c` is shown given its group `all` (the rows of
+/// the same owner): unconditional rows always; a child row iff its parent is
+/// in the group, is itself shown, and holds the required value.
+fn contributed_shown(c: &ContributedSnap, all: &[&ContributedSnap], depth: usize) -> bool {
+    let Some((parent_key, want)) = c.show_when.as_ref() else {
+        return true;
+    };
+    if depth >= SHOW_WHEN_MAX_DEPTH {
+        return false;
+    }
+    let Some(parent) = all.iter().find(|p| p.key == *parent_key) else {
+        return false;
+    };
+    parent.kind.current_value() == Some(*want) && contributed_shown(parent, all, depth + 1)
 }
 
 // ── Tab builders ────────────────────────────────────────────────────
@@ -202,11 +241,15 @@ pub fn build_global_tab(entries: &[ModEntrySnap], contributed: &[ContributedSnap
             source: RowSource::Contributed,
             greyed: false,
         });
-        for c in owned {
+        for c in owned.iter().filter(|c| contributed_shown(c, &owned, 0)) {
             rows.push(contributed_row(c));
         }
     }
-    for c in contributed.iter().filter(|c| c.owning_mod_id.is_none()) {
+    let unowned: Vec<&ContributedSnap> = contributed
+        .iter()
+        .filter(|c| c.owning_mod_id.is_none())
+        .collect();
+    for c in unowned.iter().filter(|c| contributed_shown(c, &unowned, 0)) {
         rows.push(contributed_row(c));
     }
     rows
@@ -734,7 +777,20 @@ mod tests {
                 formatted: None,
             },
             owning_mod_id: owner.map(str::to_string),
+            show_when: None,
         }
+    }
+
+    fn bool_contrib(key: &str, owner: &str, on: bool) -> ContributedSnap {
+        ContributedSnap {
+            kind: RowKind::Boolean { value: on },
+            ..contrib(key, Some(owner))
+        }
+    }
+
+    fn child_of(mut c: ContributedSnap, parent: &str, value: i32) -> ContributedSnap {
+        c.show_when = Some((parent.to_string(), value));
+        c
     }
 
     fn header(key: &str) -> Row {
@@ -803,6 +859,111 @@ mod tests {
         assert_eq!(rows[0].label, "FPS");
         assert!(!rows[0].selectable());
         assert_eq!(rows[4].description, "orphan hint");
+    }
+
+    #[test]
+    fn global_tab_hides_children_of_an_off_parent() {
+        let entries = mods(&[("bd", true)]);
+        let keys_for = |on: bool| -> Vec<String> {
+            let contributed = vec![
+                contrib("style", Some("bd")),
+                bool_contrib("outlines", "bd", on),
+                child_of(contrib("outline_style", Some("bd")), "outlines", 1),
+                child_of(contrib("outline_px", Some("bd")), "outlines", 1),
+                contrib("bpm_sync", Some("bd")),
+            ];
+            build_global_tab(&entries, &contributed)
+                .into_iter()
+                .map(|r| r.key)
+                .collect()
+        };
+        // ON: children in registration order, between the parent and the
+        // rows that follow.
+        assert_eq!(
+            keys_for(true),
+            vec![
+                "__header_bd",
+                "style",
+                "outlines",
+                "outline_style",
+                "outline_px",
+                "bpm_sync"
+            ]
+        );
+        // OFF: children omitted, everything else untouched.
+        assert_eq!(
+            keys_for(false),
+            vec!["__header_bd", "style", "outlines", "bpm_sync"]
+        );
+    }
+
+    #[test]
+    fn global_tab_show_when_edge_cases() {
+        let entries = mods(&[("a", true), ("b", true)]);
+        // Enum parent: compared by raw value, not index.
+        let mut enum_parent = contrib("mode", Some("a"));
+        enum_parent.kind = RowKind::Enum {
+            index: 1,
+            values: vec![10, 20, 30],
+            labels: vec!["x".into(), "y".into(), "z".into()],
+        };
+        let contributed = vec![
+            enum_parent,
+            child_of(contrib("on_20", Some("a")), "mode", 20),
+            child_of(contrib("on_30", Some("a")), "mode", 30),
+            // Grandchild: shown only while its parent is shown AND matches.
+            child_of(contrib("grand", Some("a")), "on_20", 0),
+            // Parent in ANOTHER owner's group → never shown.
+            child_of(contrib("cross", Some("b")), "mode", 20),
+            // Missing parent → hidden.
+            child_of(contrib("orphan_child", Some("b")), "nope", 1),
+            // A cycle resolves to hidden, not a stack overflow.
+            child_of(contrib("c1", Some("b")), "c2", 0),
+            child_of(contrib("c2", Some("b")), "c1", 0),
+            contrib("plain_b", Some("b")),
+        ];
+        let rows = build_global_tab(&entries, &contributed);
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "__header_a",
+                "mode",
+                "on_20",
+                "grand",
+                "__header_b",
+                "plain_b"
+            ]
+        );
+        // Unowned rows evaluate against the unowned group.
+        let mut off = contrib("gate", None);
+        off.kind = RowKind::Boolean { value: false };
+        let rows = build_global_tab(
+            &entries,
+            &[off, child_of(contrib("gated", None), "gate", 1)],
+        );
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, vec!["gate"]);
+    }
+
+    #[test]
+    fn row_kind_current_value() {
+        assert_eq!(RowKind::Boolean { value: true }.current_value(), Some(1));
+        assert_eq!(RowKind::Boolean { value: false }.current_value(), Some(0));
+        assert_eq!(contrib("s", None).kind.current_value(), Some(0));
+        let e = RowKind::Enum {
+            index: 2,
+            values: vec![5, 6, 7],
+            labels: vec![String::new(); 3],
+        };
+        assert_eq!(e.current_value(), Some(7));
+        let bad = RowKind::Enum {
+            index: 9,
+            values: vec![5],
+            labels: vec![String::new()],
+        };
+        assert_eq!(bad.current_value(), None);
+        assert_eq!(RowKind::Header.current_value(), None);
     }
 
     #[test]

@@ -993,3 +993,40 @@ stock shader: `.x/.z` feed the bone-texture height, `.y` the stipple), which the
 (`render_item::set_outline_width`) from `background_dancers.outline_px` (dancers, default 2.0) /
 `.outline_px_stage` (props, default 1.5 — large flat props read heavier than a figure); 0 falls back to
 the shader's `OUTLINE_PX`.
+
+### 4.8 Layered (DDR World text-style) outlines — colour per hull, stacking by z-test (2026-09-21, experimental)
+
+The World UI's headline text is drawn with several strokes stacked — black nearest the glyph, then red,
+then blue. The same look on the 3D scene needs two things the single hull lacked: a per-hull COLOUR and a
+way to stack several rims with the narrowest on top. Neither needed a new detour or shader constant:
+
+* **Colour rides the draw RECORD, not the tint.** The frame board republishes only the item's TINT
+  (`item+0x50`) every `visit(2)`, and a hull node reads its BODY's slot — so a tint written at build is
+  overwritten with the body's white on the first update. The per-record colour word (`rec+0x00`, 1.0
+  white at build, §2.4) is never touched by the board; the collector multiplies `rec.color × tint` into
+  the sorted entry and the draw uploads the product as VS c23. `render_item::set_record_colors` writes
+  the layer colour into every record of a hull twin once, at build, and the outline PS now emits COLOR0
+  VERBATIM (the first build's `OUTLINE_RGB (0.03) × tint` became a DLL-side default:
+  `outline::INK_RGB = 0.03` grey, so INK is pixel-identical). Alpha stays 1.0 — the collector forces the
+  blend group to 0x20 for an entry whose colour alpha is below 1 (§4.6). One outline pair (program 0)
+  therefore serves every colour; nothing in `shader_layout`/`shader_synthesis` changed except the two
+  outline PS blobs (`mdl_outline[_notex].ps.d3dbc`, in the `v7` fingerprint ⇒ the cache re-synthesizes).
+  Mismatch behaviour: new DLL + OLD blobs ⇒ ink stays black (0.03·0.03), the coloured layers come out very
+  dark; old DLL + NEW blobs ⇒ white outlines (the old DLL leaves the records white). Deploy both.
+* **Stacking is the z-test's.** Each layer is its own hull ITEM (records are counted from the resource,
+  §4.6, so one item is one draw per mesh), rim = `(k + 1) × base` (`outline::HullPlan::width`; `base` =
+  the kind's ink width — equal strokes like the text: 2/4/6 px on dancers, 1.5/3/4.5 on props before the
+  §4.7 distance falloff, which scales every layer alike; a separate band knob was tried and retired the
+  same day). At a screen pixel inside a stroke both the narrow and the wide hull's BACK-facing shells
+  survive the PS's emulated front cull; the narrow hull's fragment comes from a vertex nearer the
+  silhouette (the screen offset is `+k·base` along the projected normal, so the wide hull samples the mesh
+  further onto its far side), i.e. shallower in view depth — so the narrowest layer always wins the depth
+  test, in any draw order, without touching the 1 mm push. Concave regions and thin limbs over a body can
+  still interleave (the same limits as the single hull); it is an experiment.
+* Plumbing: `InstanceKind::Hull { of, layer }`, `Session.hulls: outline::HullPlan` (frozen per song from
+  `style::hull_plan(&effective())`), `build_one` looks the layer up for width + colour and logs
+  `[hull L<k> #rrggbb] … rim N px`. Config `outline_style` (`ink` default / `layered`) and
+  `outline_layer_colors` (operator palette override, 1..=4 `[r,g,b]` entries — each layer is a full extra
+  draw of every outlined mesh, hence the cap); one row, OUTLINE STYLE, under the Background Dancers
+  header. Pure layer math host-tested in `background_dancers/outline.rs`
+  (`validate_background_dancers.sh`).

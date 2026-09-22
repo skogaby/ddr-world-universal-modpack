@@ -60,6 +60,7 @@ pub(super) fn rebuild_tabs(state: &mut ModMenuState) {
             hint: r.hint.clone(),
             kind: convert_kind(&r.kind),
             owning_mod_id: r.visible_when.as_ref().map(|(parent, _)| parent.clone()),
+            show_when: r.show_when.clone(),
         })
         .collect();
 

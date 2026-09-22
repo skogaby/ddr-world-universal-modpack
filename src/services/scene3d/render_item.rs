@@ -142,6 +142,29 @@ impl RenderItem {
         memory::write_f32(self.ptr.add(layout::ITEM_OUTLINE_PX), px);
     }
 
+    /// Write `rgba` into EVERY draw record's own colour (`REC_COLOR`, 1.0
+    /// white at build). The collector multiplies it into the item tint per
+    /// frame and uploads the product as VS c23 — the outline PS emits that
+    /// colour verbatim, so this is how a HULL twin gets its layer colour
+    /// (the frame board republishes only the TINT, never the records, so the
+    /// value written here holds for the item's life). Keep alpha at 1.0: the
+    /// collector forces an entry with colour alpha < 1 into blend group 0x20.
+    /// # Safety
+    /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
+    pub unsafe fn set_record_colors(&self, rgba: [f32; 4]) {
+        let recs = memory::read_ptr(self.ptr.add(layout::ITEM_DRAW_RECORDS)) as *mut u8;
+        if recs.is_null() {
+            return;
+        }
+        for i in 0..self.counts.draw_records {
+            std::ptr::copy_nonoverlapping(
+                rgba.as_ptr() as *const u8,
+                recs.add(i * layout::REC_SIZE + layout::REC_COLOR),
+                16,
+            );
+        }
+    }
+
     /// The per-record material index (into this item's private copies) and
     /// `REC_FLAGS`, for the restyle eligibility rule.
     /// # Safety
