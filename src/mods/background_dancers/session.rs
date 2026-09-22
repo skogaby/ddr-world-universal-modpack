@@ -36,11 +36,13 @@ use super::director_math::{
     body_world, part_world, shadow_target, shadow_world, transform_point, BLACK, SHADOW_FLOOR_Y,
     WHITE,
 };
+use super::instance_plan::{
+    plan_instances, DancerSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
+};
 use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
 use super::selection::{
-    camanm_member_path, camera_lists, clip_member_path, dancer_x, part_attach_bone, pick_dancers,
-    pick_stage, playlist, DancerCandidate, Rng, Sex, StageCandidate, GROUND_BONES, HIPS_BONE,
+    camanm_member_path, clip_member_path, part_attach_bone, Sex, GROUND_BONES, HIPS_BONE,
     MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
 };
 use super::tempo::{TempoOptions, BEAT_TAU};
@@ -54,180 +56,10 @@ pub const STAGE_CAMERA_ARC: &str = "data/arc/camera/stage_camera.arc";
 pub const TEXTURE_WAIT_TIMEOUT_MS: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
-// Pick
+// Pick (pure — `pick.rs`; re-exported so every consumer keeps its path)
 // ---------------------------------------------------------------------------
 
-/// What one song window shows. Immutable once made.
-#[derive(Debug, Clone)]
-pub struct Pick {
-    pub seed: u64,
-    pub stage: StageCandidate,
-    /// `stage_camera_resources.rlist` fields of the stage's ROW.
-    pub camera_row: Vec<String>,
-    /// The row's camera names split + shuffled (A3 stage mode): the main
-    /// cycle and the `_non` cut-aways.
-    pub camera_main: Vec<String>,
-    pub camera_non: Vec<String>,
-    /// Side order: index 0 = the left dancer.
-    pub dancers: Vec<DancerCandidate>,
-    /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`).
-    pub playlists: Vec<Vec<String>>,
-    /// Per dancer: the accessory parts whose arc exists (`head00`, …).
-    pub parts: Vec<Vec<String>>,
-    /// Selection came from `DDR_DANCERS_PIN`.
-    pub pinned: bool,
-}
-
-impl Pick {
-    /// Game-relative arc paths, deduplicated, in load order (stage first).
-    pub fn arcs(&self) -> Vec<String> {
-        let mut out: Vec<String> = vec![format!("data/arc/{}", self.stage.arc_name())];
-        for d in &self.dancers {
-            let a = format!("data/arc/{}", d.body_arc_name());
-            if !out.contains(&a) {
-                out.push(a);
-            }
-        }
-        for d in &self.dancers {
-            let a = format!("data/arc/{}.arc", d.sex.arc_stem());
-            if !out.contains(&a) {
-                out.push(a);
-            }
-        }
-        for (i, d) in self.dancers.iter().enumerate() {
-            for part in self.parts.get(i).into_iter().flatten() {
-                let a = format!("data/arc/{}", d.part_arc_name(part));
-                if !out.contains(&a) {
-                    out.push(a);
-                }
-            }
-        }
-        if !self.dancers.is_empty() {
-            let a = format!("data/arc/{SHADOW_ARC}");
-            if !out.contains(&a) {
-                out.push(a);
-            }
-        }
-        out
-    }
-
-    /// The one-line per-song INFO.
-    pub fn summary(&self) -> String {
-        let n = self.dancers.len();
-        let dancers: Vec<String> = self
-            .dancers
-            .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                format!(
-                    "{}({}) x={:+.1}",
-                    d.key,
-                    match d.sex {
-                        Sex::Male => "M",
-                        Sex::Female => "F",
-                    },
-                    dancer_x(i, n)
-                )
-            })
-            .collect();
-        let clips: Vec<String> = self
-            .playlists
-            .iter()
-            .map(|p| {
-                p.iter()
-                    .take(3)
-                    .map(|c| c.rsplit('_').nth(1).unwrap_or(c).to_string())
-                    .collect::<Vec<_>>()
-                    .join(">")
-            })
-            .collect();
-        let parts: Vec<String> = self
-            .parts
-            .iter()
-            .map(|p| {
-                p.iter()
-                    .map(|n| n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string())
-                    .collect::<Vec<_>>()
-                    .join("+")
-            })
-            .collect();
-        format!(
-            "stage={}[{}] parts={} dancers=[{}] clips=[{}] wear=[{}] cameras=main:{} non:{} arcs={} seed=0x{:X}{}",
-            self.stage.key,
-            self.stage.row,
-            self.stage.parts.len(),
-            dancers.join(", "),
-            clips.join(" | "),
-            parts.join(" | "),
-            self.camera_main.len(),
-            self.camera_non.len(),
-            self.arcs().len(),
-            self.seed,
-            if self.pinned { " (PINNED)" } else { "" }
-        )
-    }
-}
-
-/// Random pick for `n` dancers. `camera_rows` = the row-parallel
-/// `stage_camera_resources.rlist` (missing row ⇒ no camera set, Step 9
-/// falls back to the fixed camera). `None` when there is no stage or no
-/// dancer candidate.
-pub fn make_pick(
-    rng: &mut Rng,
-    stages: &[StageCandidate],
-    camera_rows: &[(String, Vec<String>)],
-    dancers: &[DancerCandidate],
-    n: usize,
-    arc_exists: impl Fn(&str) -> bool,
-) -> Option<Pick> {
-    let stage = pick_stage(rng, stages)?.clone();
-    let picked = pick_dancers(rng, dancers, n.max(1));
-    if picked.is_empty() {
-        return None;
-    }
-    Some(assemble_pick(
-        rng,
-        stage,
-        camera_rows,
-        picked,
-        false,
-        arc_exists,
-    ))
-}
-
-/// Finish a pick whose stage/dancers are already chosen (random or pinned):
-/// camera row + playlists + the part arcs that exist (`arc_exists` takes an
-/// arc file name like `pl_emi00_face01.arc`).
-pub fn assemble_pick(
-    rng: &mut Rng,
-    stage: StageCandidate,
-    camera_rows: &[(String, Vec<String>)],
-    dancers: Vec<DancerCandidate>,
-    pinned: bool,
-    arc_exists: impl Fn(&str) -> bool,
-) -> Pick {
-    let camera_row = camera_rows
-        .get(stage.row)
-        .map(|(_, f)| f.clone())
-        .unwrap_or_default();
-    let playlists = dancers.iter().map(|d| playlist(rng, d.sex)).collect();
-    let parts = dancers
-        .iter()
-        .map(|d| d.parts_present(&arc_exists))
-        .collect();
-    let (camera_main, camera_non) = camera_lists(rng, &camera_row);
-    Pick {
-        seed: 0,
-        stage,
-        camera_row,
-        camera_main,
-        camera_non,
-        dancers,
-        playlists,
-        parts,
-        pinned,
-    }
-}
+pub use super::pick::{assemble_pick, make_pick, ParseOptions, Pick};
 
 // ---------------------------------------------------------------------------
 // Parsed bundle (background thread)
@@ -371,45 +203,51 @@ fn parse_skeleton(
 }
 
 /// Read + parse everything the pick needs. Blocking; no engine calls.
-pub fn parse_pick(pick: &Pick) -> Parsed {
+/// `opts.shadow == false` (previews) never opens `pl_shadow00.arc`; a
+/// `stage: None` pick parses no stage and no camera set (no warning either).
+pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
     let started = Instant::now();
     let mut warnings = Vec::new();
     let mut stage_parts = Vec::new();
     let mut dancers = Vec::new();
 
     // Stage parts.
-    let stage_arc = format!("data/arc/{}", pick.stage.arc_name());
-    match ArcReader::open(&stage_arc) {
-        None => warnings.push(format!("{stage_arc}: unreadable -- no stage this song")),
-        Some(reader) => {
-            for (part, priority) in &pick.stage.parts {
-                let model_name = format!("gm_{}_{}", pick.stage.key, part);
-                let dir = format!("data/map/{model_name}");
-                let Some(skeleton) =
-                    parse_skeleton(&reader, &format!("{dir}/{model_name}.model"), &mut warnings)
-                else {
-                    continue;
-                };
-                let loop_member = format!("{dir}/{model_name}_play_loop.anm");
-                let loop_clip = if reader.entries.iter().any(|e| e.path == loop_member) {
-                    parse_clip(
+    if let Some(stage) = pick.stage.as_ref() {
+        let stage_arc = format!("data/arc/{}", stage.arc_name());
+        match ArcReader::open(&stage_arc) {
+            None => warnings.push(format!("{stage_arc}: unreadable -- no stage this song")),
+            Some(reader) => {
+                for (part, priority) in &stage.parts {
+                    let model_name = format!("gm_{}_{}", stage.key, part);
+                    let dir = format!("data/map/{model_name}");
+                    let Some(skeleton) = parse_skeleton(
                         &reader,
-                        &loop_member,
-                        &format!("{model_name}_play_loop"),
+                        &format!("{dir}/{model_name}.model"),
                         &mut warnings,
-                    )
-                } else {
-                    None
-                };
-                let seed = seed_local_trs(&skeleton);
-                stage_parts.push(ParsedStagePart {
-                    part: part.clone(),
-                    priority: *priority,
-                    model_name,
-                    skeleton,
-                    seed,
-                    loop_clip,
-                });
+                    ) else {
+                        continue;
+                    };
+                    let loop_member = format!("{dir}/{model_name}_play_loop.anm");
+                    let loop_clip = if reader.entries.iter().any(|e| e.path == loop_member) {
+                        parse_clip(
+                            &reader,
+                            &loop_member,
+                            &format!("{model_name}_play_loop"),
+                            &mut warnings,
+                        )
+                    } else {
+                        None
+                    };
+                    let seed = seed_local_trs(&skeleton);
+                    stage_parts.push(ParsedStagePart {
+                        part: part.clone(),
+                        priority: *priority,
+                        model_name,
+                        skeleton,
+                        seed,
+                        loop_clip,
+                    });
+                }
             }
         }
     }
@@ -545,8 +383,8 @@ pub fn parse_pick(pick: &Pick) -> Parsed {
         });
     }
 
-    // The shared floor-shadow quad (rigid, one bone).
-    let shadow = if dancers.iter().any(|d| !d.ground.is_empty()) {
+    // The shared floor-shadow quad (rigid, one bone) — gameplay only.
+    let shadow = if opts.shadow && dancers.iter().any(|d| !d.ground.is_empty()) {
         let arc = format!("data/arc/{SHADOW_ARC}");
         match ArcReader::open(&arc) {
             Some(reader) => parse_skeleton(
@@ -563,15 +401,18 @@ pub fn parse_pick(pick: &Pick) -> Parsed {
         None
     };
 
-    // Stage camera sets.
-    let cameras = if pick.camera_main.is_empty() {
-        warnings.push(format!(
-            "stage {} row {} has no camera set -- fixed camera",
-            pick.stage.key, pick.stage.row
-        ));
-        None
-    } else {
-        match ArcReader::open(STAGE_CAMERA_ARC) {
+    // Stage camera sets (none without a stage — a dancer-only scene keeps
+    // its caller's fixed camera silently).
+    let cameras = match pick.stage.as_ref() {
+        None => None,
+        Some(stage) if pick.camera_main.is_empty() => {
+            warnings.push(format!(
+                "stage {} row {} has no camera set -- fixed camera",
+                stage.key, stage.row
+            ));
+            None
+        }
+        Some(_) => match ArcReader::open(STAGE_CAMERA_ARC) {
             None => {
                 warnings.push(format!("{STAGE_CAMERA_ARC}: unreadable -- fixed camera"));
                 None
@@ -594,7 +435,7 @@ pub fn parse_pick(pick: &Pick) -> Parsed {
                     Some(ParsedCameras { main, non })
                 }
             }
-        }
+        },
     };
 
     Parsed {
@@ -640,98 +481,10 @@ pub fn dance_schedule(parsed: &Parsed, opts: TempoOptions) -> Option<DanceSchedu
 // Instances (game thread)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstanceKind {
-    /// Index into `Parsed::stage_parts`.
-    StagePart(usize),
-    /// Index into `Parsed::dancers` (= side order).
-    Dancer(usize),
-    /// `Parsed::dancers[dancer].parts[part]` — a rigid part following one
-    /// body bone.
-    Part { dancer: usize, part: usize },
-    /// The `pl_shadow00` quad under dancer `dancer`.
-    Shadow(usize),
-    /// Inverted-hull OUTLINE twin of instance `of` (a `Dancer`, `Part` or
-    /// `StagePart`): the same model/resource, every draw record carrying the
-    /// bit-31 program selector so the synthesized variant container's
-    /// outline pair (program 0) draws it. Shares `of`'s frame-board slot —
-    /// never published itself (RE §4.6). `layer` indexes the session's
-    /// [`HullPlan`]: INK has one layer; LAYERED stacks one hull per palette
-    /// colour, each a band wider (`outline.rs`).
-    Hull { of: usize, layer: usize },
-}
+pub use super::instance_plan::{restyle_allowed, Instance, InstanceKind, InstanceStatus};
 
-impl InstanceKind {
-    /// Short tag for the built/skipped log lines.
-    pub fn tag(&self) -> &'static str {
-        match self {
-            InstanceKind::StagePart(_) => "stage",
-            InstanceKind::Dancer(_) => "dancer",
-            InstanceKind::Part { .. } => "part",
-            InstanceKind::Shadow(_) => "shadow",
-            InstanceKind::Hull { .. } => "hull",
-        }
-    }
-
-    /// Hull twins read their body's board slot; everything else owns one.
-    pub fn owns_slot(&self) -> bool {
-        !matches!(self, InstanceKind::Hull { .. })
-    }
-}
-
-/// Whether an instance takes the scene style at all (RE §4.7): never the
-/// floor shadow (a black `mdl_bg_constant` quad — lighting it is nonsense)
-/// and never a stage part whose model is the `_bg` skydome/backdrop (an
-/// inward-facing dome under a directional light gets a gradient across the
-/// sky). Hull twins inherit their body's verdict. Per-material blend-group
-/// exclusions are applied on top by `render_item::restyle_materials`.
-pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
-    match kind {
-        InstanceKind::Shadow(_) => false,
-        InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
-        InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
-        // The twin's model_name is the body's; a Hull of a Hull never exists.
-        InstanceKind::Hull { .. } => !model_name.ends_with("_bg") && model_name != SHADOW_MODEL,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstanceStatus {
-    /// Waiting for residency / textures.
-    Pending,
-    /// Item + node attached (hidden until the director shows it).
-    Built,
-    /// Gave up on this instance for the song (one WARN was logged).
-    Skipped,
-}
-
-pub struct Instance {
-    pub kind: InstanceKind,
-    pub model_name: String,
-    pub pass_mask: u32,
-    pub sort_key: i32,
-    /// Frame-board slot (== index in `Session::instances`).
-    pub slot: u32,
-    /// Log tag: the mirrored right-forearm copy.
-    pub mirror: bool,
-    pub status: InstanceStatus,
-    /// `*mut SceneNode` as usize (Send).
-    pub node: usize,
-    /// The item pointer the node owns (list scan / retry / diagnostics).
-    pub item: usize,
-    pub bone_count: usize,
-    pub material_count: usize,
-    /// Texture-table entries still on the default texture (retry while > 0).
-    pub textures_pending: usize,
-    pub attached_at: Option<Instant>,
-    /// The node-level "force hidden" it was attached with has been dropped
-    /// (after the instance's first frame-board publish — the board's own
-    /// hidden bit is the visibility control from then on).
-    pub node_shown: bool,
-    /// Teardown bookkeeping (the spike's `Slot` fields).
-    pub queued: bool,
-    pub freed: bool,
-}
+// The pure planner's "no slot" sentinel must be the frame board's.
+const _: () = assert!(super::instance_plan::NO_SLOT == NO_SLOT);
 
 pub struct BuildProgress {
     pub built_now: usize,
@@ -776,6 +529,11 @@ impl Session {
     /// instance — empty when SCENE OUTLINES is off, the style is stock or the
     /// synthesized containers lack the outline pair (`style::hull_plan`
     /// decides); INK = one layer, LAYERED = one hull per palette colour.
+    /// `slot_base`: the first frame-board slot (gameplay 0; P1 previews 0,
+    /// P2 previews 16 — design §5.3); the owner budget is what remains of
+    /// the board above it. `item_pass_mask`: `Some(bit)` stamps every
+    /// instance with that node-mask bit (a preview's private pass clones),
+    /// `None` keeps the stock stage / lowprio / dancer masks.
     pub fn new(
         pick: Pick,
         parsed: Parsed,
@@ -783,187 +541,89 @@ impl Session {
         tempo_opts: TempoOptions,
         style: SceneStyle,
         hulls: HullPlan,
+        slot_base: u32,
+        item_pass_mask: Option<u32>,
     ) -> Session {
         let schedule = dance_schedule(&parsed, tempo_opts);
         let camera = camera_schedule(&parsed, pick.seed);
-        let mut instances = Vec::new();
-        let mut max_bones = 1usize;
-        for (i, p) in parsed.stage_parts.iter().enumerate() {
-            let (pass_mask, sort_key) = match p.priority {
-                Some(prio) => (PASS_MASK_LOWPRIO, prio),
-                None => (PASS_MASK_STAGE, 0),
-            };
-            max_bones = max_bones.max(p.skeleton.bone_count());
-            instances.push(Instance {
-                kind: InstanceKind::StagePart(i),
-                model_name: p.model_name.clone(),
-                pass_mask,
-                sort_key,
-                slot: instances.len() as u32,
-                mirror: false,
-                status: InstanceStatus::Pending,
-                node: 0,
-                item: 0,
-                bone_count: p.skeleton.bone_count(),
-                material_count: 0,
-                textures_pending: 0,
-                attached_at: None,
-                node_shown: false,
-                queued: false,
-                freed: false,
-            });
-        }
-        for (i, d) in parsed.dancers.iter().enumerate() {
-            max_bones = max_bones.max(d.skeleton.bone_count());
-            instances.push(Instance {
-                kind: InstanceKind::Dancer(i),
-                model_name: d.model_name.clone(),
-                pass_mask: PASS_MASK_DANCER,
-                sort_key: 0,
-                slot: instances.len() as u32,
-                mirror: false,
-                status: InstanceStatus::Pending,
-                node: 0,
-                item: 0,
-                bone_count: d.skeleton.bone_count(),
-                material_count: 0,
-                textures_pending: 0,
-                attached_at: None,
-                node_shown: false,
-                queued: false,
-                freed: false,
-            });
-        }
-        // Build order (design §4.3.5): stage parts, dancers, parts, shadows.
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); parsed.dancers.len()];
-        for (i, d) in parsed.dancers.iter().enumerate() {
-            for (k, p) in d.parts.iter().enumerate() {
-                children[i].push(instances.len());
-                instances.push(Instance {
-                    kind: InstanceKind::Part { dancer: i, part: k },
+        let input = PlanInput {
+            stage_parts: parsed
+                .stage_parts
+                .iter()
+                .map(|p| StagePartSpec {
                     model_name: p.model_name.clone(),
-                    pass_mask: PASS_MASK_DANCER,
-                    sort_key: 0,
-                    slot: instances.len() as u32,
-                    mirror: p.mirror,
-                    status: InstanceStatus::Pending,
-                    node: 0,
-                    item: 0,
+                    priority: p.priority,
                     bone_count: p.skeleton.bone_count(),
-                    material_count: 0,
-                    textures_pending: 0,
-                    attached_at: None,
-                    node_shown: false,
-                    queued: false,
-                    freed: false,
-                });
-            }
-        }
-        if let Some(shadow) = parsed.shadow.as_ref() {
-            for (i, d) in parsed.dancers.iter().enumerate() {
-                if d.ground.is_empty() {
-                    continue;
-                }
-                children[i].push(instances.len());
-                instances.push(Instance {
-                    kind: InstanceKind::Shadow(i),
-                    model_name: SHADOW_MODEL.to_string(),
-                    pass_mask: PASS_MASK_DANCER,
-                    sort_key: 0,
-                    slot: instances.len() as u32,
-                    mirror: false,
-                    status: InstanceStatus::Pending,
-                    node: 0,
-                    item: 0,
-                    bone_count: shadow.bone_count(),
-                    material_count: 0,
-                    textures_pending: 0,
-                    attached_at: None,
-                    node_shown: false,
-                    queued: false,
-                    freed: false,
-                });
-            }
-        }
-        let shadow_size = parsed.dancers.iter().map(|d| d.shadow_scale).collect();
-        // Slot budget: every instance so far OWNS a board slot (its index).
-        let slot_owners = instances.len();
-        if slot_owners > frame_board::MAX_INSTANCES {
+                })
+                .collect(),
+            dancers: parsed
+                .dancers
+                .iter()
+                .map(|d| DancerSpec {
+                    model_name: d.model_name.clone(),
+                    bone_count: d.skeleton.bone_count(),
+                    parts: d
+                        .parts
+                        .iter()
+                        .map(|p| PartSpec {
+                            model_name: p.model_name.clone(),
+                            mirror: p.mirror,
+                            bone_count: p.skeleton.bone_count(),
+                        })
+                        .collect(),
+                    has_ground: !d.ground.is_empty(),
+                })
+                .collect(),
+            shadow_bone_count: parsed.shadow.as_ref().map(|s| s.bone_count()),
+            shadow_model: SHADOW_MODEL.to_string(),
+        };
+        let slot_budget = frame_board::MAX_INSTANCES.saturating_sub(slot_base as usize);
+        let plan = plan_instances(
+            &input,
+            PassMasks {
+                stage: PASS_MASK_STAGE,
+                lowprio: PASS_MASK_LOWPRIO,
+                dancer: PASS_MASK_DANCER,
+            },
+            slot_base,
+            slot_budget,
+            hulls.layers.len(),
+            item_pass_mask,
+        );
+        if plan.truncated > 0 {
             log_warn!(
                 "BackgroundDancers: {} instances exceed the frame board ({}) -- the tail is skipped",
-                slot_owners,
-                frame_board::MAX_INSTANCES
+                plan.instances.iter().filter(|i| i.kind.owns_slot()).count(),
+                slot_budget
             );
-            for inst in instances.iter_mut().skip(frame_board::MAX_INSTANCES) {
-                inst.status = InstanceStatus::Skipped;
-                inst.slot = NO_SLOT;
-            }
         }
-        // Inverted-hull twins (scene outlines, RE §4.6/§4.7): one per
-        // restyle-eligible instance (dancer bodies, parts, stage props) PER
-        // LAYER of the plan, each reading the body's slot. Never for the
-        // shadow or the skydome part (their materials stay stock, so program
-        // 0 of their container is the body again) — `restyle_allowed` is the
-        // same rule the restyle uses. Layer order within a body does not
-        // matter for the look (the z-test stacks them); layers are grouped
-        // per body so the build/teardown log reads body-by-body.
-        // (Deploy #4 shipped a Dancer|Part-only filter here — a `cargo fmt`
-        // reflow had defeated the edit — so stage props never got twins.)
-        if !hulls.is_none() {
-            let n = instances.len();
-            for of in 0..n {
-                let body = &instances[of];
-                if !restyle_allowed(&body.kind, &body.model_name)
-                    || body.status == InstanceStatus::Skipped
-                {
-                    continue;
-                }
-                let (model_name, pass_mask, sort_key, slot, mirror, bone_count) = (
-                    body.model_name.clone(),
-                    body.pass_mask,
-                    body.sort_key,
-                    body.slot,
-                    body.mirror,
-                    body.bone_count,
-                );
-                for layer in 0..hulls.layers.len() {
-                    instances.push(Instance {
-                        kind: InstanceKind::Hull { of, layer },
-                        model_name: model_name.clone(),
-                        pass_mask,
-                        sort_key,
-                        slot,
-                        mirror,
-                        status: InstanceStatus::Pending,
-                        node: 0,
-                        item: 0,
-                        bone_count,
-                        material_count: 0,
-                        textures_pending: 0,
-                        attached_at: None,
-                        node_shown: false,
-                        queued: false,
-                        freed: false,
-                    });
-                }
-            }
-        }
+        let shadow_size = parsed.dancers.iter().map(|d| d.shadow_scale).collect();
         Session {
             pick,
             parsed,
             style,
             hulls,
             schedule,
-            instances,
-            children,
+            instances: plan.instances,
+            children: plan.children,
             shadow_size,
             camera,
             camera_state: None,
-            scratch: vec![Trs::IDENTITY; max_bones],
-            bones: vec![IDENTITY; max_bones],
+            scratch: vec![Trs::IDENTITY; plan.max_bones],
+            bones: vec![IDENTITY; plan.max_bones],
             requested_at,
             built_at: None,
         }
+    }
+
+    /// Install `fallback` as the dance schedule when the parse produced none
+    /// (a stage-only scene has no dancers): the camera event loop needs cut
+    /// times — `schedule::synthetic_schedule` supplies them.
+    pub fn with_schedule(mut self, fallback: DanceSchedule) -> Session {
+        if self.schedule.is_none() {
+            self.schedule = Some(fallback);
+        }
+        self
     }
 
     pub fn dancer_count(&self) -> usize {

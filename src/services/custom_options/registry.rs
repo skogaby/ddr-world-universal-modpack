@@ -490,7 +490,7 @@ fn overlay_row(state: &FrameworkState, idx: usize, side: u8) -> OverlayRowInfo {
             max: *max,
             step_fine: *step_fine,
             step_coarse: *step_coarse,
-            formatted: format_scalar_value_utf8(value, *format),
+            formatted: format_scalar_value_utf8(&opt.id, value, *format),
         },
     };
 
@@ -709,13 +709,16 @@ mod overlay_snapshot_tests {
         );
         assert_eq!(
             formatted,
-            &format_scalar_value_utf8(90, ScalarFormat::Unit { unit: "%" })
+            &format_scalar_value_utf8("speed", 90, ScalarFormat::Unit { unit: "%" })
         );
         assert_eq!(formatted, "90%");
     }
 
     #[test]
     fn formatted_parity_across_all_variants() {
+        fn labeler(id: &str, value: i32) -> Option<String> {
+            (id == "s" && value == 2).then(|| "two".to_string())
+        }
         let cases: Vec<(ScalarFormat, i32)> = vec![
             (ScalarFormat::Integer, 490),
             (ScalarFormat::FixedPoint { decimals: 2 }, 150),
@@ -730,6 +733,8 @@ mod overlay_snapshot_tests {
                 },
                 2,
             ),
+            // Dynamic: the snapshot must hand the labeler the ROW'S id.
+            (ScalarFormat::Dynamic(labeler), 2),
         ];
         for (format, value) in cases {
             let mut state = FrameworkState::default();
@@ -743,10 +748,21 @@ mod overlay_snapshot_tests {
             };
             assert_eq!(
                 formatted,
-                &format_scalar_value_utf8(value, format),
+                &format_scalar_value_utf8("s", value, format),
                 "{format:?}"
             );
         }
+        // The Dynamic case above resolved through the labeler, not the fallback.
+        let mut state = FrameworkState::default();
+        register(
+            &mut state,
+            RegisterSpec::scalar("s", 0, 5, 1, ScalarFormat::Dynamic(labeler)).default_value(2),
+        );
+        let rows = snapshot(&state, 0);
+        let OverlayRowKind::Scalar { formatted, .. } = &rows[0].kind else {
+            panic!("expected scalar");
+        };
+        assert_eq!(formatted, "two");
     }
 
     // ── Display strings / visibility ─────────────────────────────────

@@ -151,6 +151,15 @@ impl EnumValue {
     }
 }
 
+/// Owner-supplied value-text provider for [`ScalarFormat::Dynamic`]. Called
+/// with the row's option id and the current value on every value push (the
+/// in-game text layer) and every overlay snapshot. Returns `None` to fall
+/// back to the plain integer text. Contract: return ≤ 15 bytes of
+/// ASCII/SJIS (the row's SSO budget — see [`format_scalar_value`]); never
+/// block, allocate heavily, or panic (it runs on the render thread inside
+/// the row renderer).
+pub type DynamicLabelFn = fn(option_id: &str, value: i32) -> Option<String>;
+
 /// Display formatter for scalar rows.
 #[derive(Debug, Clone, Copy)]
 pub enum ScalarFormat {
@@ -211,6 +220,13 @@ pub enum ScalarFormat {
         terminal_value: i32,
         terminal_label: &'static str,
     },
+    /// Per-value text from the owning mod (`RANDOM` / `EMI #2` / `BOOM #3` …
+    /// — the Background Dancer / Stage rows, whose names come from a
+    /// runtime-discovered catalog). The labeler receives the option id so
+    /// one function can serve several rows; `None` renders the plain integer.
+    /// Every string it returns must fit the 15-byte SSO buffer (see
+    /// `SignedUnit`) — the framework does not truncate.
+    Dynamic(DynamicLabelFn),
 }
 
 /// How (and whether) an option's value participates in the persistence
@@ -741,10 +757,12 @@ pub(crate) fn prettify_texture_suffix(name: &str) -> String {
 /// uses for scroll speed (e.g. `decimals=2`: `150` → `"1.50"`).
 /// Offset-integer renders `value + display_offset` — display-only; the
 /// stored value is untouched. Signed-unit replicates the stock timing rows
-/// (see the variant's doc above). Lives here (beside [`ScalarFormat`])
-/// so both menus — the in-game rows and the overlay snapshot — render
-/// values through the same function.
-pub(crate) fn format_scalar_value(value: i32, format: ScalarFormat) -> Vec<u8> {
+/// (see the variant's doc above). `option_id` is consulted only by
+/// [`ScalarFormat::Dynamic`] (the owner's labeler dispatches on it); every
+/// other variant ignores it. Lives here (beside [`ScalarFormat`]) so both
+/// menus — the in-game rows and the overlay snapshot — render values through
+/// the same function.
+pub(crate) fn format_scalar_value(option_id: &str, value: i32, format: ScalarFormat) -> Vec<u8> {
     match format {
         ScalarFormat::Integer => value.to_string().into_bytes(),
         ScalarFormat::OffsetInteger { display_offset } => value
@@ -793,6 +811,9 @@ pub(crate) fn format_scalar_value(value: i32, format: ScalarFormat) -> Vec<u8> {
                 format!("{prefix}{value}").into_bytes()
             }
         }
+        ScalarFormat::Dynamic(labeler) => labeler(option_id, value)
+            .unwrap_or_else(|| value.to_string())
+            .into_bytes(),
     }
 }
 
@@ -800,7 +821,11 @@ pub(crate) fn format_scalar_value(value: i32, format: ScalarFormat) -> Vec<u8> {
 /// overlay snapshot): identical text, with `SignedUnit`'s Shift-JIS `±`
 /// zero-case pair mapped to the UTF-8 `"±"` glyph. Both menus therefore
 /// render every scalar value identically modulo that one encoding hop.
-pub(crate) fn format_scalar_value_utf8(value: i32, format: ScalarFormat) -> String {
+pub(crate) fn format_scalar_value_utf8(
+    option_id: &str,
+    value: i32,
+    format: ScalarFormat,
+) -> String {
     // Only SignedUnit's zero case emits non-UTF-8 bytes (the SJIS ± pair) —
     // handle it explicitly; everything else is plain ASCII.
     if let ScalarFormat::SignedUnit { unit } = format {
@@ -808,7 +833,7 @@ pub(crate) fn format_scalar_value_utf8(value: i32, format: ScalarFormat) -> Stri
             return format!("±0{unit}");
         }
     }
-    String::from_utf8(format_scalar_value(value, format)).unwrap_or_default()
+    String::from_utf8(format_scalar_value(option_id, value, format)).unwrap_or_default()
 }
 
 fn default_on_change_noop(_side: u8, _value: i32) {}
@@ -970,20 +995,20 @@ mod tests {
     fn format_scalar_value_moved_parity_spot_checks() {
         // The exhaustive byte pins live in scalar_format_tests.rs (in-crate);
         // these spot-check the moved fn end-to-end in the host harness.
-        assert_eq!(format_scalar_value(490, ScalarFormat::Integer), b"490");
+        assert_eq!(format_scalar_value("x", 490, ScalarFormat::Integer), b"490");
         assert_eq!(
-            format_scalar_value(150, ScalarFormat::FixedPoint { decimals: 2 }),
+            format_scalar_value("x", 150, ScalarFormat::FixedPoint { decimals: 2 }),
             b"1.50"
         );
         assert_eq!(
-            format_scalar_value(0, ScalarFormat::SignedUnit { unit: "ms" }),
+            format_scalar_value("x", 0, ScalarFormat::SignedUnit { unit: "ms" }),
             vec![0x81u8, 0x7D, b'0', b'm', b's']
         );
     }
 
     #[test]
     fn format_scalar_value_utf8_all_variants() {
-        let f = format_scalar_value_utf8;
+        let f = |v, fm| format_scalar_value_utf8("x", v, fm);
         assert_eq!(f(490, ScalarFormat::Integer), "490");
         assert_eq!(f(150, ScalarFormat::FixedPoint { decimals: 2 }), "1.50");
         assert_eq!(f(2, ScalarFormat::OffsetInteger { display_offset: 1 }), "3");
@@ -1011,6 +1036,14 @@ mod tests {
         assert_eq!(f(1, labeled), "Level 1");
         assert_eq!(f(10, labeled), "Level 10");
         assert_eq!(f(11, labeled), "Target Score");
+        // Dynamic: the owner's labeler, keyed on the id; None ⇒ integer.
+        fn labeler(id: &str, value: i32) -> Option<String> {
+            (id == "x" && value == 1).then(|| "ONE".to_string())
+        }
+        let dynamic = ScalarFormat::Dynamic(labeler);
+        assert_eq!(f(1, dynamic), "ONE");
+        assert_eq!(f(2, dynamic), "2");
+        assert_eq!(format_scalar_value_utf8("y", 1, dynamic), "1");
     }
 
     // ── PersistMode matrix (the in-crate exhaustive table lives in

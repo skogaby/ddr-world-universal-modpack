@@ -31,6 +31,7 @@
 //! service reports unavailable and every consumer stays inert.
 
 pub mod arc_set;
+pub mod camera_math;
 pub mod frame_board;
 pub mod model_registry;
 pub mod node;
@@ -40,6 +41,8 @@ pub mod render_item;
 pub mod render_item_layout;
 pub mod scene_graph;
 pub mod texture;
+pub mod viewport_pass;
+pub mod viewport_pass_layout;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -114,6 +117,26 @@ pub fn init(signatures: &SignatureStore) -> bool {
         rel(sites.bgmovie_actor),
         rel(sites.cmovieclip_pool)
     );
+    match &sites.viewport {
+        Some(v) => log_info!(
+            "scene3d viewport pass: available (display=+0x{:X} render2d@+0x{:X} attach/detach=+0x{:X}/+0x{:X} pass size 0x{:X} sub 0x{:X} rect 0x{:X} flags 0x{:X} proj/view 0x{:X}/0x{:X} filter 0x{:X} gd_write 0x{:X})",
+            rel(v.display),
+            v.render2d_list_off,
+            rel(v.attach),
+            rel(v.detach),
+            v.pass_size,
+            v.sub_off,
+            v.pass_rect_off,
+            v.pass_flags_off,
+            v.pass_proj_off,
+            v.pass_view_off,
+            v.pass_filter_off,
+            v.gd_write_off
+        ),
+        None => log_warn!(
+            "scene3d viewport pass: unavailable (derive_scene3d viewport sub-group missing) -- 3D option previews off"
+        ),
+    }
     true
 }
 

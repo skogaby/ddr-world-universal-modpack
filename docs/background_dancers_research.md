@@ -1030,3 +1030,139 @@ way to stack several rims with the narrowest on top. Neither needed a new detour
   draw of every outlined mesh, hence the cap); one row, OUTLINE STYLE, under the Background Dancers
   header. Pure layer math host-tested in `background_dancers/outline.rs`
   (`validate_background_dancers.sh`).
+
+## 5. Viewport passes / RENDER_2D compositing — the options-menu previews (2026-09-21, `gamemdx_20260825.dll`)
+
+The BACKGROUND DANCER / BACKGROUND STAGE option rows preview their pick LIVE inside the options modal's
+preview box. The 3D of §1–§4 is the frame FLOOR (the MODEL passes render into RENDER-3D before every 2D
+layer), so a preview needs a way to draw 3D ABOVE the modal, clipped to a 170×150 box, without touching
+the stock passes or camera slot 0. The mechanism (`services/scene3d/viewport_pass.rs`, design
+`.agents/planning/2026-09-21-background-dancers-selection-options/design/detailed-design.md` §3.1/§4.5;
+Ghidra evidence `research/preview-compositing.md`) is **mod-owned byte-clones of the engine's MODEL pass
+objects attached into the RENDER_2D target list with their own D3D viewport rect and camera matrices**.
+Cabinet-proven 2026-09-21 by a colour-clear smoke (a solid rectangle exactly over the box, above the UI).
+
+### 5.1 Target lists and the render dispatch
+
+* Display object `DAT_1806f2ef0`; target lists at `display+0x08` OFFSCREEN1, `+0x28` RENDER-3D, `+0x30`
+  AFTER-RENDER-3D, **`+0x38` RENDER_2D**, `+0x40` DISPLAY, `+0x48` PRESENT (render-graph boot
+  `FUN_1801f2c30`). A target list (ctor `FUN_180266660`) is a plain `std::vector<{viewport*, u32 prio}>`
+  at `+0x00/+0x08/+0x10` (16-byte elements), clear flags `+0x20` / rgba `+0x24` / z `+0x28` / stencil
+  `+0x2C`, its target surface at `+0x38` (u16 dims at `+0x14/+0x16` — the display back buffer for
+  RENDER_2D, output-sized under custom resolution), flags `+0x40` (bit0 disabled, bit1 clear-at-start).
+* **Attach `FUN_1802666c0(list, viewport, prio)`** fills the viewport rect from the target dims only when
+  it is all zero, then `push_back` + `std::sort` by prio (ascending). **Detach `FUN_1802667d0(list,
+  viewport)`** erases. Neither is an intrusive list — a mod-allocated viewport is a first-class member.
+* Stock RENDER_2D contents: the three AFP layer-list viewports (FRONT/MIDDLE/BACK — every AFP layer incl.
+  the options modal and the mod-menu widget layer) at prios `0x65/0x66/0x67`. A viewport at `≥ 0x68` draws
+  AFTER all of them; the SYSTEM text list still draws later in DISPLAY. Ours: P1 `0x68/0x69/0x6A`
+  (clear / OPACITY clone / TRANS clone), P2 `0x6B/0x6C/0x6D`.
+* Frame end `FUN_18026af10` → per list `FUN_180272600`: the optional list Clear, then per viewport with
+  flags bit0 clear: a `0x100039` marker record + a job `{rec, viewport, list}` for the render worker
+  `FUN_180272d30`, which calls **`FUN_18026cec0(ctx, viewport+8 /*rect*/, list)`** — D3D `SetViewport(x,
+  y, w, h, minZ, maxZ)` from THE VIEWPORT'S OWN RECT, then, iff `viewport+0x1C & 2 == 0` (outer `+0x54`
+  bit1), uploads THE VIEWPORT'S OWN proj (`+0x28` = outer `+0x58`) / view (`+0x68` = outer `+0x98`) as VS
+  c0..3 / c4..7 / c8..11 view×proj / c12 camera position / c14..17 identity / c18..21 wvp plus a default
+  render-state block — then `vp->vft[0](vp, ctx)`, then the `0x4003a` terminator. So each pass renders with
+  its own rect AND its own matrices; camera slot 0 is not involved.
+* Thread safety: the dispatch spins on the workers at the end of `FUN_18026af10`, so game-thread writes
+  from `input_manager::on_frame` (mid-frame) never race a worker. Attach/detach are game-thread-only
+  there; a detached object outlives its frame (`viewport_pass::reap()` frees ≥ 2 frames later — called
+  ONCE per frame from `background_dancers/mod.rs`).
+
+### 5.2 The MODEL pass object (0xF8) and the clone recipe
+
+Ctor `FUN_1801f6510`: `+0x08..+0x20` four render callbacks (shared by OPACITY/LOWPRIO/TRANS), `+0x28`
+sort mode (OPACITY 0x15, LOWPRIO 0x12, TRANS 0x1A, DISTANT 0x10), **`+0x2C` node-mask FILTER** (OPACITY
+0x56, LOWPRIO 0x10, TRANS 0x46, DISTANT 0x01 ⇒ bits `0x08`, `0x20`, `0x80` FREE), `+0x30` the
+`gs::Renders::Model::Viewport<Render>` vftable (slot 0 render `FUN_1801f68a0`, slot 1 dtor), `+0x38..+0x44`
+rect, `+0x48/+0x4C` minZ/maxZ, `+0x50` name hash, **`+0x54` flags (bit0 DISABLED — the dispatcher skips
+it; bit1 skip the camera upload)**, `+0x58` proj, `+0x98` view, `+0xE0` self back-pointer (render reads
+`viewport+0xB0`), `+0xE8` render-item list (`*(graph+0x30)`, shared), `+0xF0` callback block. The
+SceneGraphManager tick (`FUN_180023fb0`) memcpys camera slot 0 into the FOUR STOCK passes only — a clone is
+never touched by the engine after construction.
+
+Clone: `alloc_zeroed(0xF8)`, `memcpy` from the live stock pass (probed + identity-gated: `+0x30 ==
+vftable`, `+0xE0 == self`, filter `∈ {0x56, 0x46}`), then `+0xE0 = clone`, `+0x38.. = box rect (RT px)`,
+`+0x2C = 0x08 (P1) / 0x20 (P2)`, `+0x54 = 0`; `+0x58/+0x98` written every frame by the owner; attach
+`clone+0x30`. The render entry `FUN_1802606d0(outer, ctx, items)` is pass-agnostic: it collects over the
+whole shared item list with `outer+0x2C` as the filter (`item+0xB0 & filter`) + a clip-space AABB cull
+against the WORKER CTX's view×proj (= this pass's matrices), so a clone draws exactly the items stamped
+with its private bit, correctly culled for its own camera. Preview scene nodes stamp their items with the
+side's bit (`Session::new(.., item_pass_mask = Some(bit))` → `node.item_pass_mask`, re-stamped every
+`visit(4)`), so the stock passes never draw them.
+
+### 5.3 The mod-owned ClearViewport and the gd Clear record
+
+Only the target list clears (once, at list start). A preview needs its own depth clear (the AFP quads
+under it may have written depth) and — design choice — a colour backdrop. `viewport_pass_layout::ClearViewport`
+(0x40, `#[repr(C)]`, offsets pinned by `const` asserts) reproduces the engine's `gs::Viewport::Base`
+header `{vtable, +8 rect, +0x18 minZ, +0x1C maxZ, +0x20 name, +0x24 flags = 2 (skip camera upload)}` and
+carries the payload `{clear_flags, color, z, stencil}`. Its 2-slot RWX vtable's slot 0 (render worker,
+`node_visit` rules: no engine API / alloc / lock / log, `catch_unwind`) appends ONE record at
+`*(workerCtx+0x218)`: **`{u16 tag 0, u16 size 0x14, u32 D3DCLEAR flags (1 target | 2 zbuffer | 4
+stencil), u32 D3DCOLOR, f32 z = 1.0, u32 stencil}`** — the exact shape `FUN_180272600` emits for the
+list Clear — and advances the pointer by 0x14. D3D9 `Clear(0, NULL, …)` clears the CURRENT viewport,
+which the worker set to our rect one call earlier. **The colour is a D3DCOLOR `0xAARRGGBB`**: the first
+smoke shipped `0xFF20A0FF` meaning to be violet and the cabinet showed AZURE (R 0x20 G 0xA0 B 0xFF) —
+which is how the record's ARGB consumption was confirmed. The previews use `0xFF0C0C14`.
+
+### 5.4 Camera matrices (`scene3d/camera_math.rs`, pure)
+
+The passes consume the camera's `+0x08` VIEW (`FUN_180220b80` = `D3DXMatrixLookAtRH`, row-major, ROW
+vectors: `f = normalize(eye − target)`, `s = normalize(up × f)`, `u = normalize(f × s)`, rows `(s.x,
+u.x, f.x, 0) (s.y, u.y, f.y, 0) (s.z, u.z, f.z, 0) (−eye·s, −eye·u, −eye·f, 1)`) and `+0x1C8` PROJ
+(`FUN_1802376e0`, `w > 0`: `[0][0] = 2w/(r−l)`, `[1][1] = 2w/(t−b)`, `[2][0] = (r+l)/(r−l)`, `[2][1] =
+(t+b)/(t−b)`, `[2][2] = −far/(far−near)`, `[2][3] = −1`, `[3][2] = −far·near/(far−near)`; depth in
+`[0, 1]`). `cam+0x88` is a second GL-range projection for the frustum planes — unused by the passes.
+`CamSample::frustum()` → `camera_math::view_proj` → `PassSet::set_camera` writes the clones directly.
+
+### 5.5 What the graph does NOT do
+
+`SceneGraph::update FUN_180214570` pass 4 pushes EVERY visible node's item onto the item list; pass 5
+only calls `visit(5)` per active camera and its result gates child recursion — **the item list is not
+culled there**. Record culling happens in the collector against the PASS's matrices (§5.2). Hence a clone
+with its own view/proj culls correctly and camera slot 0 needs no write for a preview (FR-13).
+
+### 5.6 Correction: 2D-list tag `0x10` is SetTexture, not a model draw
+
+The feasibility doc's "Option C" (drive model draws through ScreenCommandList tag-0x10 records) is
+closed: walker `FUN_18026a040` case `0x10` → `FUN_180269600` → `FUN_18026cc00(ctx, stage, texObj)` emits gd
+tag 8 SetTexture from a `{TextureData*, f32[4]}` object; `0x11` = SetTexture by id, `0x12` = gd 0xA with a
+u64, `0x17` = gd 0xD SetRenderTarget. No model-draw record exists in the 2D list.
+
+### 5.7 Signatures (`scene3d_resolve_viewport`, OPTIONAL all-or-nothing sub-group of `Scene3dSites`)
+
+Nine AOBs, published as `scene3d_vp_*` (8 addresses + 25 values), swept ALL GREEN on 20250805 / 20260224 /
+20260721 / 20260825 / 20260915 with every decoded value equal to the table above; `shape_diff.py` clean:
+`render_graph_boot_attach` (display global, RENDER-3D offset, attach fn, the three pass globals + `+0x30`
+sub-object; prios `0x66/0x67/0x68` attested), `render_graph_2d_attach` (the RENDER_2D list offset `0x38`),
+`viewport_detach` (anchored on the preceding `ADD RDX,imm32` block; the MODEL detach blocks start at
+`+30 + 27k`), `model_pass_ctor` (0xF8 alloc; self/items/callbacks/name/filter/sort offsets; the vftable
+identity gate), `model_pass_enable_tail` (hits TWICE by design — pass ctor tail + SceneGraphManager ctor;
+both must agree; the DISTANTVIEW global for the live free-bit check), `scene_manager_camera_copy`
+(proj/view offsets cross-checked against `camera_view_off`), `viewport_setup_rect` (rect `+8` / flags
+`+0x24` inside the sub-object; the bit1 semantics), `worker_gd_write` (`+0x218`; `0x4003a` attested),
+`target_list_clear` (`0x140000` store + the four payload copies; target `+0x38`, dims `+0x14/+0x16`).
+Never in any `required_signatures`: a miss ⇒ `viewport_pass::is_available() == false`, the rows keep
+working, the box shows the RANDOM badge / chrome only. `is_available()` also reads the four live stock
+filters and refuses when a private bit is taken.
+
+### 5.8 The preview scene shape
+
+`background_dancers/preview/`: per side a `PreviewSlot` — `state::SlotState` (focus / wanted / 150 ms
+settle re-armed on value CHANGE / live), a `PassSet` created lazily (kept attached, DISABLED when nothing
+is live), a `scene_window::SceneWindow` (the gameplay window's load → parse → residency-gated build →
+publish → three-phase teardown, extracted in Step 4) over a stage-only (`Pick::stage_only`, no dancers,
+synthetic 9 s dance schedule for the camera cuts) or dancer-only (`Pick::dancer_only`, no stage, no shadow —
+`ParseOptions::PREVIEW`) pick, `Session::new(.., TempoOptions::REAL_TIME, style::effective().style,
+HullPlan::none(), slot_base = 0 (P1) / 16 (P2), Some(0x08 / 0x20))`. Box = the row template's green
+marker (`(191, 11, 170, 150)`) at the panel origin `(185, 463)` / `(742, 463)`, mapped to render-target
+pixels by the RENDER_2D target's dims. Camera: the stage's `.camanm` director sample with its VERTICAL
+half-tangent kept and the horizontal set to `t × box_aspect` (a centre crop of the 16:9 frame — design §4.7
+amendment: the box is 170×150), the cropped gameplay fallback `(0, 1.6, 5) → (0, 0.9, 0)` hFOV 76.8° when
+the row has no camera set, or the fixed dancer camera `(0, 1.05, 3.4) → (0, 0.95, 0)`, vertical
+half-tangent 0.32. Time base = wall clock from the first built frame. Passes enabled iff built ∧ the 0-0-0
+menu is closed. Teardown on focus loss / modal close / leaving scene 25 (the graph stays enabled through
+scenes 26/27, so it completes while the gameplay window loads). Dev knob `DDR_DANCERS_VIEWPORT_SMOKE`
+(developer_mode): a violet colour+depth clear over the P1 box for 3 s at every song-select entry.

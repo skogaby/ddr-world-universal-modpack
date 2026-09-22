@@ -1953,7 +1953,7 @@ fn push_scalar_value_text(row: *mut u8) {
             // never reach this path (their render never calls it).
             UiKind::Enum { .. } | UiKind::Header => return,
         };
-        format_scalar_value(current, format)
+        format_scalar_value(&opt.id, current, format)
     };
 
     // Build an SSO std::string holding the formatted text and pass it

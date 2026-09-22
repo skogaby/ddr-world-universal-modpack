@@ -163,6 +163,16 @@
         "in_game": true
       },
       {
+        "id": "background_dancer",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "background_stage",
+        "overlay": false,
+        "in_game": true
+      },
+      {
         "id": "header_training_options",
         "overlay": true,
         "in_game": true
@@ -293,8 +303,14 @@
         "in_game": true
       }
     ],
-    "p1": {},
-    "p2": {}
+    "p1": {
+      "background_dancer": 0,
+      "background_stage": 0
+    },
+    "p2": {
+      "background_dancer": 0,
+      "background_stage": 0
+    }
   },
   "timing_offsets": {
     "sound_offset": 87,
@@ -375,6 +391,7 @@
     "bpm_sync": false,
     "outline_px": 2.0,
     "outline_px_stage": 1.5,
+    "outline_style": "ink",
     "outlines": true,
     "stop_slow": false,
     "style": "cel"

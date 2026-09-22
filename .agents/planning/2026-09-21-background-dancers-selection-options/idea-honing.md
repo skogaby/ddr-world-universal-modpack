@@ -1,0 +1,33 @@
+# Idea Honing — Background Dancer / Stage selection options
+
+Decision register. Status ∈ Proposed / Accepted / Overridden / Assumed / Open.
+Ordered by blast radius (user-visible behaviour and interfaces first).
+
+Register accepted wholesale by the maintainer 2026-09-21 (D1–D7 Accepted, D8–D12/D15 Assumed
+and endorsed). D13/D14 were Open pending the Step 4 Ghidra research and are now resolved
+(see `research/preview-compositing.md`).
+
+| ID | Decision | Why it matters | Recommendation | Status |
+|---|---|---|---|---|
+| D1 | Row kind + value labels | Framework has no per-value-name scalar format today | Two `custom_options` SCALAR rows (`background_dancer`, `background_stage`) rendered through a NEW `ScalarFormat::Dynamic(fn)` labeler; value 0 = `RANDOM`, 1..N = name derived from the rlist key (= arc stem): `UPPER(alpha part)` + ` #k` (k = digits+1) only when the base has > 1 variant — `EMI #1/#2/#3`, `RAGE #1/#2`, `BOOM #1..#7`, `REPLICANT #1..#6`, `CLUB`, `CRYSTALDIUM`. All ≤ 15 bytes (SSO budget). List sorted by key so variants sit together | Accepted 2026-09-21 |
+| D2 | Value semantics + persistence | What survives reboot / what goes on the wire | Value = index into the sorted candidate list (0 = RANDOM). `PersistMode::Local` (JSON cache `custom_options.p1/p2`, never on the wire — no backend columns). `load_transform` clamps out-of-range to RANDOM (list may change when data changes). Stage list = DISTINCT keys (duplicate rows collapsed, picked uniformly at song time like `pick_stage`) | Accepted 2026-09-21 |
+| D3 | Mirroring | One stage per cabinet, one dancer per player | `background_stage` mirrored via `versus_mirror` (P1 seeds at song select, last writer wins); `background_dancer` per side, dancer *i* ← side *i*'s value (bot side uses its own cached value) | Accepted 2026-09-21 |
+| D4 | Gameplay application | Where the choice takes effect | At `window_entry`: stage value ≠ 0 ⇒ uniform over that key's rows; dancer value ≠ 0 ⇒ that key; RANDOM ⇒ today's random path. Seed stays random (playlists, camera shuffles). Dev `DDR_DANCERS_PIN` keeps precedence in developer mode. Applies to the next song | Accepted 2026-09-21 |
+| D5 | **Preview compositing mechanism** (you may not have considered) | The stock 3D passes are the frame floor under every 2D layer — invisible at song select; Option C ("tag-0x10 model draw") is DISPROVED (it is SetTexture-by-object) | Mod-owned CLONES of the MODEL:OPACITY + MODEL:TRANS pass objects (0xF8 bytes, memcpy + own rect) attached to the RENDER_2D target list (`display+0x38`) at priority ≥ 0x68 via the game's own `push+sort` attach (`FUN_1802666c0`); the pass's OWN D3D viewport rect (`+0x38..+0x44`) = the preview box, so clipping + projection mapping are free; view/proj written per frame straight into the clone (`+0x98/+0x58`) — camera slot 0 untouched; preview items tagged with the unused node-mask bits `0x08` (P1) / `0x20` (P2), clone filters match ⇒ stock passes never draw them, both sides can preview at once with their own cameras. Fail-open: any derivation missing ⇒ rows work, box shows static chrome only | Accepted 2026-09-21 |
+| D6 | Preview content | What the player sees | STAGE row: the stage alone (all parts incl. skydome), `_play_loop` animations, its OWN camera choreography (`stage_camera_resources` main/`_non` lists via `CameraSchedule`, decoupled from a dance schedule). DANCER row: the dancer + parts, no stage, no shadow, fixed frontal ¾ "viewer" camera framing the full body, one random clip from its sex pool per preview session. RANDOM value: static chrome art only (no 3D) | Accepted 2026-09-21 |
+| D7 | Preview lifecycle | Load cost, teardown safety | Driven by `on_preview_request` (focus) + `on_menu_close` + a scene-exit backstop; value edits debounce 150 ms then tear down + reload; wall-clock time base (`TempoOptions::REAL_TIME`); torn down BEFORE leaving scene 25 (teardown needs the graph enabled); hidden while `mod_menu::is_open()`; reuses `Session` build/teardown verbatim with `Pick.stage`/dancers made optional | Accepted 2026-09-21 |
+| D8 | Style in previews | Consistency vs slot budget | Apply the same lighting style (`style::effective()`) as gameplay; SKIP outline hulls in previews (frame-board 32-slot budget with two simultaneous previews; cheaper) | Assumed |
+| D9 | Overlay-menu exclusion + placement | Requirement | `.in_game_only()` at registration AND `overlay:false` in the shipped `option_menu_settings`; inserted after `arrow_opacity` in the order DANCER, STAGE | Assumed |
+| D10 | Mod-enabled gating | Requirement | Rows registered in `BackgroundDancersMod::enable()` after `init_tables()`, `set_option_available(false)` in `disable()`. Framework-wide caveat: a LIVE enable gets row textures next launch (atlas flushed once at boot) — one INFO | Assumed |
+| D11 | Textures/strings | Pipeline | `option_strings.py` LABELS en/ja/ko for both ids, one `TemplateSpec` each with a large 16:9 green marker (target rect) + RANDOM art, fallback `PreviewSpec`; `generate_chrome` widened from `pub(super)` (or a sibling in a shared module) | Assumed |
+| D12 | Dancer-preview camera | Look | Static: eye ≈ (0, 1.1, 3.2) → target (0, 0.9, 0), hFOV chosen to frame 1.8 m in the box aspect; no orbit in v1 | Assumed |
+| D13 | Depth in the 2D stack | Correctness of D5 | RESOLVED (research/preview-compositing.md §5): a mod-owned "clear" viewport object attached just below the clones emits one gd Clear record (`{tag 0, size 0x14, flags, rgba, z=1.0, stencil}` at `workerCtx+0x218`) — D3D9 `Clear` with no rects clears the CURRENT viewport, which the worker has just set to our box. Depth-only (flags 2) for the stage preview; depth+colour (flags 3, dark backdrop) for the dancer preview. Included unconditionally, so whether AFP quads write depth is moot | Accepted 2026-09-21 |
+| D14 | Frustum cull vs camera slot 0 | Correctness of D5 | RESOLVED (research §4): pass 5 only calls `visit(5)` per active camera and never edits the item list; record culling happens in the collector against the PASS's own view×proj. No mitigation — camera slot 0 is not written during previews | Accepted 2026-09-21 |
+| D15 | Interaction with movie-size / background-hide / tempo | Scope | Previews touch none of them (no `Customize+0x30` write, no `bg_root` alpha, no tempo map) | Assumed |
+
+## Readiness Confirmed 2026-09-21
+
+Maintainer confirmed readiness for design after the Step 4 research (`research/orientation.md`,
+`research/preview-compositing.md`). Assumptions carried into the design: RENDER_2D has a depth
+buffer bound; gd tag 0 is a plain viewport-scoped D3D9 Clear; stage-only camera choreography runs
+on a synthetic fixed-segment dance schedule; the preview marker rect is 16:9.

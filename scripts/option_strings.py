@@ -257,6 +257,16 @@ LABELS = {
         "ja": 'タイムライン表示位置',
         "ko": '타임라인 표시 위치',
     },
+    "background_dancer": {
+        "en": 'BACKGROUND DANCER',
+        "ja": '背景ダンサー',
+        "ko": '배경 댄서',
+    },
+    "background_stage": {
+        "en": 'BACKGROUND STAGE',
+        "ja": '背景ステージ',
+        "ko": '배경 스테이지',
+    },
 }
 
 # ── Group-heading labels (seop_item_header_*) ────────────────────────────
@@ -1429,6 +1439,72 @@ TEMPLATES = {
                 '플레이 중 레인 커버',
                 '일러스트를 변경합니다',
                 '(더블 플레이용).',
+            ],
+        },
+    ),
+    # Background Dancers option rows (2026-09-21): the green marker fills the
+    # RIGHT column — it is where the LIVE 3D preview renders (the DLL reads
+    # the rect at runtime; a cropped view, not 16:9 — maintainer decision).
+    # An empty line is a paragraph gap.
+    "background_dancer": TemplateSpec(
+        "background_dancer",
+        [(191, 11, 170, 150, (0, 255, 0, 255))],
+        {
+            "en": [
+                "The 3D dancer shown",
+                "behind your lane.",
+                "",
+                "RANDOM picks a",
+                "different one",
+                "every song.",
+            ],
+            "ja": [
+                'レーンの後ろに表示',
+                'される3Dダンサー。',
+                '',
+                'RANDOMは曲ごとに',
+                'ランダムに選びます。',
+            ],
+            "ko": [
+                '레인 뒤에 표시되는',
+                '3D 댄서입니다.',
+                '',
+                'RANDOM은 곡마다',
+                '다른 댄서를 고릅니다.',
+            ],
+        },
+    ),
+    "background_stage": TemplateSpec(
+        "background_stage",
+        [(191, 11, 170, 150, (0, 255, 0, 255))],
+        {
+            "en": [
+                "The 3D stage shown",
+                "behind your lane.",
+                "Shared by both",
+                "players.",
+                "",
+                "RANDOM picks a",
+                "different one",
+                "every song.",
+            ],
+            "ja": [
+                'レーンの後ろに表示',
+                'される3Dステージ。',
+                '両プレイヤーで共通。',
+                '',
+                'RANDOMは曲ごとに',
+                'ランダムに選びます。',
+            ],
+            "ko": [
+                '레인 뒤에 표시되는',
+                '3D 스테이지입니다.',
+                '두 플레이어가',
+                '공유합니다.',
+                '',
+                'RANDOM은 곡마다',
+                '다른 스테이지를',
+                '고릅니다.',
             ],
         },
     ),

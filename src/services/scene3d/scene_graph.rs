@@ -322,6 +322,23 @@ pub struct CamSample {
 }
 
 impl CamSample {
+    /// The pure `camera_math` view of this sample (`w = 1`) — what the
+    /// viewport-pass compositor turns into a clone's view/proj.
+    pub fn frustum(&self) -> super::camera_math::Frustum {
+        super::camera_math::Frustum {
+            eye: self.eye,
+            target: self.target,
+            up: self.up,
+            w: 1.0,
+            l: self.l,
+            r: self.r,
+            b: self.b,
+            t: self.t,
+            near: self.near,
+            far: self.far,
+        }
+    }
+
     /// Symmetric perspective: `half_tangent_x` = half the horizontal extent
     /// per unit depth, `aspect` = width / height.
     pub fn perspective(

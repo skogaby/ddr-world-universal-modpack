@@ -4,7 +4,11 @@
 //! director call, and the teardown at window exit — the Step 3/4 spike's
 //! cabinet-proven teardown state machine (disable + hide → item list drops
 //! every item for 2 frames → queue destroys → dtors → node blocks → arcs;
-//! 5 s caps ⇒ leak + WARN) generalised over a [`Session`].
+//! 5 s caps ⇒ leak + WARN) generalised over a [`Session`]. Since 2026-09-21
+//! the load / build / teardown machinery itself lives in
+//! [`scene_window::SceneWindow`] (shared with the options previews); this
+//! file is the GAMEPLAY wrapper — pick, clock, tempo map, 2D hide, movie
+//! size, camera slot 0.
 //!
 //! Visibility + clock (FR-8/FR-9), evaluated every frame from live state
 //! rather than a phase ladder so quick restarts (fresh DPS), in-place
@@ -24,13 +28,12 @@
 //! engine. Every path is panic-free.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::anm::rlist;
 use crate::core::arc as arcfile;
-use crate::services::scene3d::node_layout::SceneNode;
-use crate::services::scene3d::{arc_set, frame_board, node, render_item, scene_graph, texture};
+use crate::services::scene3d::{arc_set, frame_board, scene_graph};
 use crate::services::{song_reset, stage_records, widget_renderer};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
@@ -39,27 +42,15 @@ use super::background_hide;
 use super::clock::{Clock, ClockEvent};
 use super::director;
 use super::movie_size;
+use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::selection::{
-    apply_pin, dancer_candidates, parse_pin, seed_from, stage_candidates, DancerCandidate, Pin,
-    Rng, StageCandidate,
+    apply_pin, dancer_candidates, parse_pin, seed_from, stage_candidates, DancerCandidate,
+    PickSource, Pin, Rng, StageCandidate,
 };
-use super::session::{assemble_pick, make_pick, parse_pick, Parsed, Pick, Session};
+use super::session::{assemble_pick, make_pick, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
 use super::tempo_source;
 
-/// Give up waiting for residency (one WARN) after this long; whatever was
-/// built keeps running (FR-13).
-const RESIDENCY_TIMEOUT_MS: u64 = 20_000;
-/// Teardown: how long to wait for the engine per phase before leaking.
-const TEARDOWN_TIMEOUT_MS: u64 = 5_000;
-/// Consecutive frames every item must be absent from the engine's list
-/// before the destroys are queued (covers the intra-frame job ordering).
-const UNLISTED_FRAMES_REQUIRED: u32 = 2;
-/// Frames after the first attach for the "not collected yet" checkpoint.
-const NOT_COLLECTED_DIAG_FRAMES: u32 = 180;
-const NOT_COLLECTED_WARN_FRAMES: u32 = 900;
-/// Per-frame texture retry gives up (one WARN) after this many frames.
-const TEXTURE_RETRY_FRAMES: u32 = 20 * 60;
 /// The music count the scene is posed at before the run anchors (a few
 /// frames between the DPS step-5 edge and the `0x1044` anchor): close to
 /// the first anchored count (≈ −276 ms — the anchor is future-dated by the
@@ -180,6 +171,19 @@ pub fn tables_ready() -> bool {
     TABLES_READY.load(Ordering::Acquire)
 }
 
+/// A copy of the candidate tables `(stages, camera_rows, dancers)` for the
+/// option-row catalog and the preview scene builder; `None` before
+/// [`init_tables`] succeeded.
+pub(super) fn tables_snapshot() -> Option<(
+    Vec<StageCandidate>,
+    Vec<(String, Vec<String>)>,
+    Vec<DancerCandidate>,
+)> {
+    let tables = TABLES.lock().ok()?;
+    let t = tables.as_ref()?;
+    Some((t.stages.clone(), t.camera_rows.clone(), t.dancers.clone()))
+}
+
 /// `layeredfs.developer_mode` (the dev-only log gate).
 fn dev_mode() -> bool {
     crate::mods::config::get()
@@ -209,39 +213,12 @@ fn read_pin() -> Option<Pin> {
 // Window state
 // ---------------------------------------------------------------------------
 
-/// Where the window's assets are.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AssetPhase {
-    /// Arcs requested, parse thread running / models not all resident.
-    Requested,
-    /// Every instance built or skipped.
-    Built,
-    /// Residency timeout: no more building this song.
-    Abandoned,
-}
-
-/// The spike's teardown phases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScenePhase {
-    /// Nodes live (or none built yet).
-    Live,
-    /// Nodes disabled; waiting for the engine's item list to drop them all.
-    Detaching,
-    /// Destroys queued; waiting for every dtor.
-    Destroying,
-    /// Torn down; only the arcs may remain.
-    Done,
-}
-
+/// The gameplay window: the shared [`SceneWindow`] (assets, session,
+/// teardown) plus what only a song needs — the music-count clock, the tempo
+/// map, the one-shot logs, the camera / hide / static-pose latches.
 struct Window {
     generation: u64,
-    pick: Pick,
-    arcs: Option<arc_set::ArcSet>,
-    parse_rx: Arc<Mutex<Option<Parsed>>>,
-    session: Option<Session>,
-    requested_at: Instant,
-    assets: AssetPhase,
-    scene: ScenePhase,
+    scene: SceneWindow,
     clock: Clock,
     /// The live song's tempo map (dance time from the music count) and the
     /// DPS instance / basename it belongs to; `None` ⇒ real time.
@@ -251,29 +228,20 @@ struct Window {
     tempo_rx: Option<tempo_source::TempoSlot>,
     tempo_failed_logged: bool,
     // one-shot logs
-    warnings_logged: bool,
-    built_logged: bool,
     visible_logged: bool,
     playing_logged: u32,
     rewind_logged: bool,
     camera_written: bool,
     hide_armed: bool,
     static_published: bool,
-    frames_since_attach: u32,
-    first_frame_logged: bool,
-    collected_logged: bool,
-    // teardown
-    teardown_started: Option<Instant>,
-    unlisted_frames: u32,
-    queue_retries: u32,
 }
 
 struct State {
     generation: u64,
     live: Option<Window>,
-    /// A previous window still tearing down when a new one opened (only
-    /// ever driven to its end).
-    orphan: Option<Window>,
+    /// A previous window's scene still tearing down when a new one opened
+    /// (only ever driven to its end).
+    orphan: Option<SceneWindow>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -365,15 +333,23 @@ fn restore_movie_size() {
     }
 }
 
-/// Entered sides (FR-3: the bot's phantom side counts). `None` when the
-/// record layout is unavailable.
-fn entered_sides() -> Option<usize> {
+/// Entered sides in side order (FR-3: the bot's phantom side counts) — the
+/// dancer index *i* is the *i*-th entered side. `None` when the record
+/// layout is unavailable.
+fn entered_side_list() -> Option<Vec<u8>> {
     let a = stage_records::side_entered(0);
     let b = stage_records::side_entered(1);
     if a.is_none() && b.is_none() {
         return None;
     }
-    Some(a.unwrap_or(false) as usize + b.unwrap_or(false) as usize)
+    let mut sides = Vec::with_capacity(2);
+    if a.unwrap_or(false) {
+        sides.push(0);
+    }
+    if b.unwrap_or(false) {
+        sides.push(1);
+    }
+    Some(sides)
 }
 
 fn seed_now(scene_id: i32, generation: u64) -> u64 {
@@ -389,8 +365,8 @@ fn window_entry(scene_id: i32) {
     if !tables_ready() {
         return;
     }
-    let n = match entered_sides() {
-        Some(n) => n,
+    let sides = match entered_side_list() {
+        Some(s) => s,
         None => {
             if !RECORDS_WARNED.swap(true, Ordering::AcqRel) {
                 log_warn!(
@@ -400,6 +376,7 @@ fn window_entry(scene_id: i32) {
             return;
         }
     };
+    let n = sides.len();
     if n == 0 {
         return;
     }
@@ -416,25 +393,33 @@ fn window_entry(scene_id: i32) {
     let pick = {
         let Ok(tables) = TABLES.lock() else { return };
         let Some(t) = tables.as_ref() else { return };
+        // 1. Developer pin (developer_mode) wins.
         let pinned = t.pin.as_ref().and_then(|p| {
             let (stage, dancers) = apply_pin(p, &t.stages, &t.dancers, n)?;
+            let stage_src = if stage.is_some() {
+                PickSource::Pin
+            } else {
+                PickSource::Random
+            };
             let stage = match stage {
                 Some(s) => s,
                 None => super::selection::pick_stage(&mut rng, &t.stages)?.clone(),
+            };
+            let dancer_src = if dancers.is_empty() {
+                PickSource::Random
+            } else {
+                PickSource::Pin
             };
             let dancers = if dancers.is_empty() {
                 super::selection::pick_dancers(&mut rng, &t.dancers, n)
             } else {
                 dancers
             };
-            Some(assemble_pick(
-                &mut rng,
-                stage,
-                &t.camera_rows,
-                dancers,
-                true,
-                &arc_exists,
-            ))
+            let count = dancers.len();
+            Some(
+                assemble_pick(&mut rng, stage, &t.camera_rows, dancers, true, &arc_exists)
+                    .with_sources(stage_src, vec![dancer_src; count]),
+            )
         });
         match pinned {
             Some(p) => p,
@@ -444,19 +429,26 @@ fn window_entry(scene_id: i32) {
                         "BackgroundDancers: DDR_DANCERS_PIN names an unknown stage/dancer -- random pick"
                     );
                 }
-                match make_pick(
-                    &mut rng,
-                    &t.stages,
-                    &t.camera_rows,
-                    &t.dancers,
-                    n,
-                    &arc_exists,
-                ) {
+                // 2. The BACKGROUND DANCER / BACKGROUND STAGE rows.
+                match option_pick(&mut rng, t, &sides, &arc_exists) {
                     Some(p) => p,
-                    None => {
-                        log_warn!("BackgroundDancers: no pick possible -- no dancers this song");
-                        return;
-                    }
+                    // 3. Plain random.
+                    None => match make_pick(
+                        &mut rng,
+                        &t.stages,
+                        &t.camera_rows,
+                        &t.dancers,
+                        n,
+                        &arc_exists,
+                    ) {
+                        Some(p) => p,
+                        None => {
+                            log_warn!(
+                                "BackgroundDancers: no pick possible -- no dancers this song"
+                            );
+                            return;
+                        }
+                    },
                 }
             }
         }
@@ -468,100 +460,126 @@ fn window_entry(scene_id: i32) {
     widget_renderer::run_on_render_thread(move || request_load(generation, pick));
 }
 
+/// The option rows' pick (design §4.3 / FR-6): the first entered side's
+/// BACKGROUND STAGE (mirrored in versus, so both sides agree) and each
+/// entered side's BACKGROUND DANCER for that side's dancer index. `None`
+/// when every element is RANDOM (the plain random path then runs). A key the
+/// catalog no longer covers (data drift between the cached value and the
+/// install) ⇒ one WARN naming it, that element falls back to RANDOM.
+fn option_pick(
+    rng: &mut Rng,
+    t: &Tables,
+    sides: &[u8],
+    arc_exists: &dyn Fn(&str) -> bool,
+) -> Option<Pick> {
+    let mut stage_key = sides.first().and_then(|&s| super::options::stage_choice(s));
+    let mut dancer_keys: Vec<Option<String>> = sides
+        .iter()
+        .map(|&s| super::options::dancer_choice(s))
+        .collect();
+    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+        return None;
+    }
+    // Drop unknown keys up front (resolve_choice refuses the whole request
+    // on any unknown key, so validate element by element).
+    if let Some(k) = stage_key.as_deref() {
+        if !t.stages.iter().any(|s| s.key == k) {
+            log_warn!(
+                "BackgroundDancers: BACKGROUND STAGE names unknown stage {:?} -- RANDOM for this song",
+                k
+            );
+            stage_key = None;
+        }
+    }
+    for (i, key) in dancer_keys.iter_mut().enumerate() {
+        if let Some(k) = key.as_deref() {
+            if !t.dancers.iter().any(|d| d.key == k) {
+                log_warn!(
+                    "BackgroundDancers: BACKGROUND DANCER (P{}) names unknown dancer {:?} -- RANDOM for this song",
+                    sides.get(i).map(|s| s + 1).unwrap_or(0),
+                    k
+                );
+                *key = None;
+            }
+        }
+    }
+    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+        return None;
+    }
+    let stage_src = if stage_key.is_some() {
+        PickSource::Option
+    } else {
+        PickSource::Random
+    };
+    let dancer_src: Vec<PickSource> = dancer_keys
+        .iter()
+        .map(|k| {
+            if k.is_some() {
+                PickSource::Option
+            } else {
+                PickSource::Random
+            }
+        })
+        .collect();
+    let refs: Vec<Option<&str>> = dancer_keys.iter().map(Option::as_deref).collect();
+    let (stage, dancers) =
+        super::selection::resolve_choice(rng, &t.stages, &t.dancers, stage_key.as_deref(), &refs)?;
+    Some(
+        assemble_pick(rng, stage, &t.camera_rows, dancers, false, arc_exists)
+            .with_sources(stage_src, dancer_src),
+    )
+}
+
 /// Game thread: hand the arcs to the FileManager and start the parse thread.
 fn request_load(generation: u64, pick: Pick) {
-    let arcs = pick.arcs();
-    let arc_refs: Vec<&str> = arcs.iter().map(String::as_str).collect();
-    let set = arc_set::load(&arc_refs);
-    let loaded = set.len();
+    let loaded = scene_window::load_arcs(&pick, &ParseOptions::GAMEPLAY);
     let Ok(mut st) = STATE.lock() else {
-        arc_set::free(set);
+        loaded.free();
         return;
     };
     if st.generation != generation || !IN_WINDOW.load(Ordering::Acquire) {
         // The window closed before we ran: release immediately.
-        arc_set::free(set);
+        loaded.free();
         return;
     }
     // A previous window still tearing down? Park it as the orphan so its
     // dtor poll continues and its arcs are freed at the right time.
     if let Some(prev) = st.live.take() {
-        if prev.scene != ScenePhase::Done {
+        if prev.scene.scene() != ScenePhase::Done {
             log_warn!(
                 "BackgroundDancers: new window while the previous scene is still {:?} -- parking it",
-                prev.scene
+                prev.scene.scene()
             );
             if let Some(old) = st.orphan.take() {
                 log_warn!("BackgroundDancers: dropping an older orphan (arcs leaked)");
-                if let Some(a) = old.arcs {
-                    std::mem::forget(a);
-                }
+                old.forget_arcs();
             }
-            st.orphan = Some(prev);
-        } else if let Some(a) = prev.arcs {
-            arc_set::free(a);
+            st.orphan = Some(prev.scene);
+        } else {
+            prev.scene.finish_silent();
         }
-    }
-    let parse_rx: Arc<Mutex<Option<Parsed>>> = Arc::new(Mutex::new(None));
-    if loaded > 0 {
-        let rx = Arc::clone(&parse_rx);
-        let pick_for_thread = pick.clone();
-        let spawned = std::thread::Builder::new()
-            .name("bg-dancers-parse".into())
-            .spawn(move || {
-                let parsed = parse_pick(&pick_for_thread);
-                if let Ok(mut slot) = rx.lock() {
-                    *slot = Some(parsed);
-                }
-            });
-        if spawned.is_err() {
-            log_warn!(
-                "BackgroundDancers: parse thread could not be spawned -- no dancers this song"
-            );
-        }
-        log_info!(
-            "BackgroundDancers: FileManager::Load accepted {} of {} arcs -- parsing + polling residency",
-            loaded,
-            arcs.len()
-        );
-    } else {
-        log_warn!(
-            "BackgroundDancers: no arc loaded (see the scene3d WARNs above) -- no dancers this song"
-        );
     }
     st.live = Some(Window {
         generation,
-        pick,
-        arcs: Some(set),
-        parse_rx,
-        session: None,
-        requested_at: Instant::now(),
-        assets: if loaded > 0 {
-            AssetPhase::Requested
-        } else {
-            AssetPhase::Abandoned
-        },
-        scene: ScenePhase::Live,
+        scene: SceneWindow::start(
+            "BackgroundDancers",
+            "this song",
+            pick,
+            loaded,
+            ParseOptions::GAMEPLAY,
+        ),
         clock: Clock::new(),
         tempo: None,
         tempo_dps: 0,
         tempo_basename: String::new(),
         tempo_rx: None,
         tempo_failed_logged: false,
-        warnings_logged: false,
-        built_logged: false,
         visible_logged: false,
         playing_logged: 0,
         rewind_logged: false,
         camera_written: false,
         hide_armed: false,
         static_published: false,
-        frames_since_attach: 0,
-        first_frame_logged: false,
-        collected_logged: false,
-        teardown_started: None,
-        unlisted_frames: 0,
-        queue_retries: 0,
     });
     ACTIVE.store(true, Ordering::Release);
 }
@@ -575,45 +593,9 @@ fn begin_teardown(window_gen: u64) {
     }
     background_hide::disarm();
     let Some(w) = st.live.as_mut() else { return };
-    if w.scene != ScenePhase::Live {
-        return;
+    if w.scene.begin_teardown("song-window exit") {
+        ACTIVE.store(true, Ordering::Release);
     }
-    let built: Vec<usize> = w
-        .session
-        .as_ref()
-        .map(|s| s.built().map(|i| i.node).collect())
-        .unwrap_or_default();
-    if built.is_empty() {
-        w.scene = ScenePhase::Done;
-        if let Some(set) = w.arcs.take() {
-            let n = set.len();
-            arc_set::free(set);
-            log_info!(
-                "BackgroundDancers: {} arc handle(s) freed at song-window exit (no nodes)",
-                n
-            );
-        }
-        return;
-    }
-    if let Some(sess) = w.session.as_mut() {
-        director::hide_all(sess);
-    }
-    for n in built {
-        let n = n as *mut SceneNode;
-        // SAFETY: attached, dtor not run (scene Live).
-        unsafe {
-            node::set_enabled(n, false);
-            node::set_hidden(n, true);
-        }
-    }
-    w.scene = ScenePhase::Detaching;
-    w.teardown_started = Some(Instant::now());
-    w.unlisted_frames = 0;
-    log_info!(
-        "BackgroundDancers: song-window exit -- {} node(s) disabled, waiting for the engine's item list to drop them",
-        w.session.as_ref().map(|s| s.built().count()).unwrap_or(0)
-    );
-    ACTIVE.store(true, Ordering::Release);
 }
 
 /// Per-frame driver (game thread). O(1) when idle.
@@ -625,26 +607,26 @@ pub fn on_frame() {
     let mut live_done = false;
     let mut orphan_done = false;
     if let Some(w) = st.live.as_mut() {
-        if w.scene == ScenePhase::Live {
+        if w.scene.scene() == ScenePhase::Live {
             drive_live(w);
         }
-        if drive_teardown(w, "scene") {
+        if w.scene.drive_teardown("scene") {
             live_done = true;
         }
     }
     if let Some(o) = st.orphan.as_mut() {
-        if drive_teardown(o, "orphan scene") {
+        if o.drive_teardown("orphan scene") {
             orphan_done = true;
         }
     }
     if live_done {
         if let Some(w) = st.live.take() {
-            finish_window(w, "");
+            w.scene.finish("");
         }
     }
     if orphan_done {
         if let Some(o) = st.orphan.take() {
-            finish_window(o, "orphan window's ");
+            o.finish("orphan window's ");
         }
     }
     if st.live.is_none() && st.orphan.is_none() {
@@ -654,112 +636,30 @@ pub fn on_frame() {
 
 /// Requested → Built/Abandoned + the visibility/clock/director step.
 fn drive_live(w: &mut Window) {
-    let since_request_ms = w.requested_at.elapsed().as_millis() as u64;
+    let since_request_ms = w.scene.since_request_ms();
 
-    // Parse result → session (once).
-    if w.session.is_none() && w.assets == AssetPhase::Requested {
-        let parsed = w.parse_rx.lock().ok().and_then(|mut g| g.take());
-        if let Some(parsed) = parsed {
-            if !w.warnings_logged {
-                w.warnings_logged = true;
-                for warn in &parsed.warnings {
-                    log_warn!("BackgroundDancers: parse: {}", warn);
-                }
-            }
-            log_info!(
-                "BackgroundDancers: parsed in {} ms -- {} stage part(s), {} dancer(s) with {:?} clip(s), {:?} part(s), shadow={}",
-                parsed.elapsed_ms,
-                parsed.stage_parts.len(),
-                parsed.dancers.len(),
-                parsed.dancers.iter().map(|d| d.clips.len()).collect::<Vec<_>>(),
-                parsed.dancers.iter().map(|d| d.parts.len()).collect::<Vec<_>>(),
-                parsed.shadow.is_some()
-            );
-            if parsed.stage_parts.is_empty() && parsed.dancers.is_empty() {
-                log_warn!("BackgroundDancers: nothing parsed -- no dancers this song");
-                w.assets = AssetPhase::Abandoned;
-            } else {
-                // Scene style + inverted-hull outlines (RE §4.6/§4.7): the
-                // operator's request gated on what the synthesis actually
-                // serves this boot (a bit-31 twin against a stock 4×(0,0,0)
-                // container would just draw the body twice). The hull plan
-                // (INK / LAYERED colours + width bands) is frozen per song.
-                let eff = super::style::effective();
-                let hulls = super::style::hull_plan(&eff);
-                w.session = Some(Session::new(
-                    w.pick.clone(),
-                    parsed,
-                    w.requested_at,
-                    tempo_options(),
-                    eff.style,
-                    hulls,
-                ));
-            }
-        }
-    }
-
-    // Build what is resident.
-    if w.assets == AssetPhase::Requested {
-        if let Some(sess) = w.session.as_mut() {
-            let progress = sess.build_pending(since_request_ms);
-            if progress.built_now > 0 && w.frames_since_attach == 0 {
-                w.frames_since_attach = 1;
-            }
-            if sess.all_settled() {
-                w.assets = AssetPhase::Built;
-                sess.built_at = Some(Instant::now());
-                if !w.built_logged {
-                    w.built_logged = true;
-                    let (st, dn, pt, sh, hu) = sess.built_counts();
-                    log_info!(
-                        "BackgroundDancers: built {} ms after request -- {} instance(s) attached hidden ({} stage, {} dancer, {} part, {} shadow, {} hull), {} skipped",
-                        since_request_ms,
-                        sess.built().count(),
-                        st,
-                        dn,
-                        pt,
-                        sh,
-                        hu,
-                        sess.instances.len() - sess.built().count()
-                    );
-                }
-            }
-        }
-        if w.assets == AssetPhase::Requested && since_request_ms > RESIDENCY_TIMEOUT_MS {
-            w.assets = AssetPhase::Abandoned;
-            let pending: Vec<String> = w
-                .session
-                .as_ref()
-                .map(|s| {
-                    s.instances
-                        .iter()
-                        .filter(|i| i.status == super::session::InstanceStatus::Pending)
-                        .map(|i| i.model_name.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            log_warn!(
-                "BackgroundDancers: residency timeout after {} ms -- still missing {:?}{}; whatever was built keeps running",
-                since_request_ms,
-                pending,
-                if w.session.is_none() {
-                    " (parse thread never delivered)"
-                } else {
-                    ""
-                }
-            );
-        }
-    }
-
-    let has_built = w
-        .session
-        .as_ref()
-        .map_or(false, |s| s.built().next().is_some());
+    // Parse result → session (once), build what is resident, residency
+    // timeout — the shared machinery; the session's style / outline plan is
+    // decided here, when the parse lands: the operator's request gated on
+    // what the synthesis actually serves this boot (a bit-31 twin against a
+    // stock 4×(0,0,0) container would just draw the body twice). The hull
+    // plan (INK / LAYERED colours + width bands) is frozen per song.
+    let has_built = w.scene.drive_assets(|pick, parsed, requested_at| {
+        let eff = super::style::effective();
+        let hulls = super::style::hull_plan(&eff);
+        Session::new(
+            pick.clone(),
+            parsed,
+            requested_at,
+            tempo_options(),
+            eff.style,
+            hulls,
+            0,
+            None,
+        )
+    });
     if !has_built {
         return;
-    }
-    if w.frames_since_attach > 0 {
-        w.frames_since_attach = w.frames_since_attach.saturating_add(1);
     }
 
     // Fallback fixed camera when the stage row has no usable camera set: the
@@ -768,7 +668,7 @@ fn drive_live(w: &mut Window) {
     // which put the whole boom00 stage + a dancer at 38 % of the frame in
     // view. With a camera set the director writes slot 0 every visible frame
     // (below) and this block never runs.
-    let has_camera = w.session.as_ref().map_or(false, |s| s.has_camera());
+    let has_camera = w.scene.session().map_or(false, |s| s.has_camera());
     if !w.camera_written && !has_camera {
         w.camera_written = true;
         let cam = scene_graph::CamSample::perspective(
@@ -791,25 +691,8 @@ fn drive_live(w: &mut Window) {
         }
     }
 
-    // A node the ENGINE destroyed outside our teardown (dtor ran without a
-    // queued destroy): stop touching it, leak its block, say so once.
-    if let Some(sess) = w.session.as_mut() {
-        for inst in sess.built_mut() {
-            if inst.queued || inst.freed {
-                continue;
-            }
-            // SAFETY: the node block is ours until `free_node_block`.
-            if unsafe { node::is_destroyed(inst.node as *mut SceneNode) } {
-                inst.queued = true;
-                inst.freed = true; // block deliberately leaked (still linked?)
-                log_warn!(
-                    "BackgroundDancers: {} node 0x{:X} was destroyed by the ENGINE outside our teardown (its item is freed) -- instance parked, node block leaked",
-                    inst.model_name,
-                    inst.node
-                );
-            }
-        }
-    }
+    // A node the ENGINE destroyed outside our teardown: park it (one WARN).
+    w.scene.park_engine_destroyed();
 
     tempo_tick(w);
 
@@ -843,7 +726,7 @@ fn drive_live(w: &mut Window) {
         ClockEvent::Latched { mc } => {
             // A3 resets the shadow low-pass at every song start; the camera
             // event loop re-simulates from 0.
-            if let Some(sess) = w.session.as_mut() {
+            if let Some(sess) = w.scene.session_mut() {
                 sess.reset_shadow();
                 sess.reset_camera();
             }
@@ -901,37 +784,33 @@ fn drive_live(w: &mut Window) {
             if w.tempo.is_some() { "ready" } else { "absent -- real time" }
         );
     }
-    if let Some(sess) = w.session.as_mut() {
-        let publish = if STATIC_POSES.load(Ordering::Relaxed) {
-            // Bisect mode: exactly one publish once visible.
-            if visible && !w.static_published {
-                w.static_published = true;
-                true
-            } else {
-                !visible && !w.static_published
-            }
-        } else {
+    let publish = if STATIC_POSES.load(Ordering::Relaxed) {
+        // Bisect mode: exactly one publish once visible.
+        if visible && !w.static_published {
+            w.static_published = true;
             true
-        };
-        if publish {
-            director::produce(sess, t, visible);
-            // Every built instance has now been published at least once, so
-            // its board slot — hidden bit included — is authoritative: drop
-            // the node-level "force hidden" it was attached with. Deploy #2:
-            // the flag was cleared only on the ONE frame `visible` first
-            // became true, so every node built after that frame (the dancer
-            // is always the last) stayed hidden for the whole song.
-            for inst in sess.built_mut().filter(|i| !i.queued && !i.node_shown) {
-                inst.node_shown = true;
-                // SAFETY: attached, dtor not run (scene Live).
-                unsafe { node::set_hidden(inst.node as *mut SceneNode, false) };
-            }
+        } else {
+            !visible && !w.static_published
         }
-        // Camera director: slot 0 every frame (A3 stage mode). Written while
-        // the scene is still hidden too, so the first visible frame already
-        // renders through the right camera (the tick copies the slot into
-        // the passes a frame after the dirty bytes are raised) — harmless:
-        // stock World draws nothing through the MODEL passes.
+    } else {
+        true
+    };
+    if publish {
+        w.scene.publish(t, visible);
+    }
+    // Camera director: slot 0 every frame (A3 stage mode). Written while
+    // the scene is still hidden too, so the first visible frame already
+    // renders through the right camera (the tick copies the slot into
+    // the passes a frame after the dirty bytes are raised) — harmless:
+    // stock World draws nothing through the MODEL passes.
+    // (The camera lists are only needed for the one-shot INFO.)
+    let camera_lists = if w.camera_written {
+        None
+    } else {
+        let p = w.scene.pick();
+        Some((p.camera_main.clone(), p.camera_non.clone()))
+    };
+    if let Some(sess) = w.scene.session_mut() {
         if sess.has_camera() {
             match director::camera_frame(sess, t) {
                 Some(cam) => {
@@ -939,10 +818,11 @@ fn drive_live(w: &mut Window) {
                     if !w.camera_written {
                         w.camera_written = true;
                         if ok {
+                            let (camera_main, camera_non) = camera_lists.unwrap_or_default();
                             log_info!(
                                 "BackgroundDancers: camera director -- main:{:?} non:{:?} (slot 0 written every frame)",
-                                w.pick.camera_main,
-                                w.pick.camera_non
+                                camera_main,
+                                camera_non
                             );
                             if dev_mode() {
                                 log_info!(
@@ -969,8 +849,8 @@ fn drive_live(w: &mut Window) {
         }
     }
 
-    retry_textures(w);
-    attached_diagnostics(w);
+    w.scene.retry_textures();
+    w.scene.attached_diagnostics();
 }
 
 /// Keep the window's tempo map matched to the live DancePlaySequence:
@@ -1024,243 +904,6 @@ fn tempo_tick(w: &mut Window) {
     }
 }
 
-/// Per-frame texture re-resolve for instances built before their DDS
-/// registered.
-fn retry_textures(w: &mut Window) {
-    let frames = w.frames_since_attach;
-    let Some(sess) = w.session.as_mut() else {
-        return;
-    };
-    for inst in sess.built_mut() {
-        if inst.textures_pending == 0 {
-            continue;
-        }
-        // SAFETY: attached, dtor not run (scene Live).
-        let ts = unsafe {
-            render_item::retry_texture_resolve(inst.item as *mut u8, inst.material_count)
-        };
-        if ts.still_default < inst.textures_pending {
-            log_info!(
-                "BackgroundDancers: {} material textures re-resolved {} ms after attach (total={} load={} re={} default={})",
-                inst.model_name,
-                inst.attached_at.map(|a| a.elapsed().as_millis()).unwrap_or(0),
-                ts.total,
-                ts.resolved_at_load,
-                ts.re_resolved,
-                ts.still_default
-            );
-        }
-        inst.textures_pending = ts.still_default;
-        if inst.textures_pending > 0 && frames >= TEXTURE_RETRY_FRAMES {
-            log_warn!(
-                "BackgroundDancers: {} -- {} material texture(s) STILL unregistered after {} frames -- stays untextured this song",
-                inst.model_name,
-                inst.textures_pending,
-                frames
-            );
-            inst.textures_pending = 0;
-        }
-    }
-}
-
-/// The "did the engine take our nodes" lines (Step 3 shapes).
-fn attached_diagnostics(w: &mut Window) {
-    let Some(stats) = scene_graph::graph_stats() else {
-        return;
-    };
-    let wanted = w.session.as_ref().map(|s| s.built().count()).unwrap_or(0);
-    if !w.first_frame_logged && w.frames_since_attach >= 2 {
-        w.first_frame_logged = true;
-        log_info!(
-            "BackgroundDancers: first frame after attach -- graph enabled={} visible-nodes={} items={} records={} (nodes attached so far: {})",
-            stats.enabled,
-            stats.visible,
-            stats.items,
-            stats.records,
-            wanted
-        );
-    }
-    if !w.collected_logged && stats.items > 0 {
-        w.collected_logged = true;
-        log_info!(
-            "BackgroundDancers: items collected by SceneGraph::update {} ms after request -- graph enabled={} visible-nodes={} items={} records={} (nodes attached: {})",
-            w.requested_at.elapsed().as_millis(),
-            stats.enabled,
-            stats.visible,
-            stats.items,
-            stats.records,
-            wanted
-        );
-    }
-    if !w.collected_logged
-        && (w.frames_since_attach == NOT_COLLECTED_DIAG_FRAMES
-            || w.frames_since_attach == NOT_COLLECTED_WARN_FRAMES)
-    {
-        let anomaly = stats.enabled || w.frames_since_attach == NOT_COLLECTED_WARN_FRAMES;
-        let msg = format!(
-            "BackgroundDancers: items not collected {} frames after attach -- graph enabled={} visible-nodes={} items={} (enabled=false ⇒ DPS has not reached step 5; enabled=true & visible=0 ⇒ pass-4 gate/visit; visible>0 & items=0 ⇒ item push)",
-            w.frames_since_attach, stats.enabled, stats.visible, stats.items
-        );
-        if anomaly {
-            log_warn!("{}", msg);
-        } else {
-            log_info!("{}", msg);
-        }
-    }
-}
-
-/// Advance a window's teardown by one frame. `true` = the window is finished
-/// (caller frees/leaks the arcs via `finish_window`).
-fn drive_teardown(w: &mut Window, label: &str) -> bool {
-    match w.scene {
-        ScenePhase::Live => false,
-        ScenePhase::Done => true,
-        ScenePhase::Detaching => {
-            let elapsed = w
-                .teardown_started
-                .map(|t| t.elapsed().as_millis() as u64)
-                .unwrap_or(0);
-            let Some(sess) = w.session.as_mut() else {
-                w.scene = ScenePhase::Done;
-                return true;
-            };
-            let any_listed = sess
-                .built()
-                .filter(|i| !i.queued)
-                .any(|i| scene_graph::item_listed(i.item as *const u8) != Some(false));
-            if any_listed {
-                w.unlisted_frames = 0;
-            } else {
-                w.unlisted_frames += 1;
-            }
-            if w.unlisted_frames >= UNLISTED_FRAMES_REQUIRED {
-                let mut pending = 0;
-                for inst in sess.built_mut() {
-                    if inst.queued {
-                        continue;
-                    }
-                    // (The frame-board slot is NOT cleared here: a new
-                    // window may already own it, and a stale slot is harmless
-                    // — its node is disabled, a new node stays hidden through
-                    // its own node flag until the director publishes.)
-                    if scene_graph::queue_destroy(inst.node as *mut SceneNode) {
-                        inst.queued = true;
-                    } else {
-                        pending += 1;
-                    }
-                }
-                if pending == 0 {
-                    w.scene = ScenePhase::Destroying;
-                    log_info!(
-                        "BackgroundDancers: {} -- {} destroy(s) queued {} ms after window exit (items unlisted for {} frames)",
-                        label,
-                        sess.built().count(),
-                        elapsed,
-                        w.unlisted_frames
-                    );
-                    return false;
-                }
-                w.queue_retries += 1;
-                if w.queue_retries == 60 {
-                    log_warn!(
-                        "BackgroundDancers: queue_destroy refused 60 frames in a row for {} node(s) -- still retrying",
-                        pending
-                    );
-                }
-                if elapsed > TEARDOWN_TIMEOUT_MS {
-                    log_warn!(
-                        "BackgroundDancers: {} -- {} node(s) could not be queued for destroy within {} ms -- leaking them (disabled), freeing the arcs",
-                        label,
-                        pending,
-                        elapsed
-                    );
-                    w.scene = ScenePhase::Done;
-                    return true;
-                }
-                return false;
-            }
-            if elapsed > TEARDOWN_TIMEOUT_MS {
-                log_warn!(
-                    "BackgroundDancers: {} -- an item is still referenced by the engine's item list {} ms after window exit -- leaking nodes+items+arcs (graph disabled with a stale list?)",
-                    label,
-                    elapsed
-                );
-                // Leak the arcs too: an item may still be read.
-                if let Some(a) = w.arcs.take() {
-                    std::mem::forget(a);
-                }
-                w.scene = ScenePhase::Done;
-                return true;
-            }
-            false
-        }
-        ScenePhase::Destroying => {
-            let elapsed = w
-                .teardown_started
-                .map(|t| t.elapsed().as_millis() as u64)
-                .unwrap_or(0);
-            let Some(sess) = w.session.as_mut() else {
-                w.scene = ScenePhase::Done;
-                return true;
-            };
-            let mut remaining = 0;
-            for inst in sess.built_mut() {
-                if inst.freed {
-                    continue;
-                }
-                let n = inst.node as *mut SceneNode;
-                // SAFETY: the node block is ours until `free_node_block`.
-                if unsafe { node::is_destroyed(n) } {
-                    unsafe { node::free_node_block(n) };
-                    inst.freed = true;
-                } else {
-                    remaining += 1;
-                }
-            }
-            if remaining == 0 {
-                log_info!(
-                    "BackgroundDancers: {} -- all {} node(s) destroyed by the engine flush {} ms after window exit -- node blocks freed",
-                    label,
-                    sess.built().count(),
-                    elapsed
-                );
-                w.scene = ScenePhase::Done;
-                return true;
-            }
-            if elapsed > TEARDOWN_TIMEOUT_MS {
-                log_warn!(
-                    "BackgroundDancers: {} -- {} dtor(s) not observed {} ms after window exit -- leaking those nodes+items, freeing the arcs (items are unlisted)",
-                    label,
-                    remaining,
-                    elapsed
-                );
-                w.scene = ScenePhase::Done;
-                return true;
-            }
-            false
-        }
-    }
-}
-
-/// Free a finished window's arcs (unless the teardown leaked them) and log
-/// the texture balance.
-fn finish_window(w: Window, label: &str) {
-    match w.arcs {
-        Some(set) => {
-            let n = set.len();
-            arc_set::free(set);
-            log_info!(
-                "BackgroundDancers: {}{} arc handle(s) freed after the scene teardown; scene3d textures: {}",
-                label,
-                n,
-                texture::balance()
-            );
-        }
-        None => {}
-    }
-    // The parse thread's result (if it still lands) is dropped with `w`.
-}
-
 /// Mod disable: neutralise any live scene. The frame callback that drives a
 /// teardown to completion is gone once the mod is disabled, so attached
 /// nodes are DISABLED + hidden and then leaked with their items and arcs
@@ -1280,33 +923,14 @@ fn neutralise_on_disable(window_gen: u64) {
     }
     background_hide::disarm();
     let mut leaked = false;
-    for w in st.live.take().into_iter().chain(st.orphan.take()) {
-        if w.scene == ScenePhase::Live {
-            if let Some(sess) = w.session.as_ref() {
-                for inst in sess.built() {
-                    let n = inst.node as *mut SceneNode;
-                    // SAFETY: attached, dtor not run.
-                    unsafe {
-                        node::set_enabled(n, false);
-                        node::set_hidden(n, true);
-                    }
-                }
-            }
-        }
-        let had_nodes = w
-            .session
-            .as_ref()
-            .map_or(false, |s| s.built().next().is_some());
-        if w.scene != ScenePhase::Done && had_nodes {
-            // Nodes stay linked (disabled) in the engine tree with their
-            // items; the arcs must outlive them.
-            leaked = true;
-            if let Some(a) = w.arcs {
-                std::mem::forget(a);
-            }
-        } else if let Some(a) = w.arcs {
-            arc_set::free(a);
-        }
+    for scene in st
+        .live
+        .take()
+        .map(|w| w.scene)
+        .into_iter()
+        .chain(st.orphan.take())
+    {
+        leaked |= scene.neutralise();
     }
     frame_board::clear_all();
     if leaked {

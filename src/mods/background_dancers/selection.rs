@@ -455,18 +455,132 @@ pub fn apply_pin(
     Some((stage, picked))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// Option-row choices
+// ---------------------------------------------------------------------------
 
-    fn rows(v: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+/// Where one element of a song's pick came from — rendered per element in
+/// the per-song `Pick::summary()` INFO (`{random}` / `{option}` / `{pin}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickSource {
+    /// The plain random path.
+    #[default]
+    Random,
+    /// The BACKGROUND DANCER / BACKGROUND STAGE option row.
+    Option,
+    /// The developer `DDR_DANCERS_PIN`.
+    Pin,
+}
+
+impl PickSource {
+    pub fn tag(self) -> &'static str {
+        match self {
+            PickSource::Random => "random",
+            PickSource::Option => "option",
+            PickSource::Pin => "pin",
+        }
+    }
+}
+
+/// Resolve the BACKGROUND STAGE / BACKGROUND DANCER row choices into
+/// candidates (design §4.3). `stage_key = Some(k)` ⇒ uniform over the rows
+/// with key `k` (a stage with two rlist rows shows either, like
+/// [`pick_stage`]'s second draw); `None` ⇒ [`pick_stage`]. `dancer_keys[i]`
+/// (one per entered side, in entered order) `Some(k)` ⇒ that candidate,
+/// `None` ⇒ one uniform pick. An unknown key anywhere ⇒ `None` (the caller
+/// WARNs and retries with that element cleared); empty `dancer_keys` or empty
+/// tables ⇒ `None`. With every element `None` the draws are exactly
+/// `pick_stage` followed by `pick_dancers`, so RANDOM reproduces the plain
+/// random path under the same seed.
+pub fn resolve_choice(
+    rng: &mut Rng,
+    stages: &[StageCandidate],
+    dancers: &[DancerCandidate],
+    stage_key: Option<&str>,
+    dancer_keys: &[Option<&str>],
+) -> Option<(StageCandidate, Vec<DancerCandidate>)> {
+    if dancer_keys.is_empty() || dancers.is_empty() {
+        return None;
+    }
+    let stage = match stage_key {
+        Some(key) => {
+            let rows: Vec<&StageCandidate> = stages.iter().filter(|s| s.key == key).collect();
+            if rows.is_empty() {
+                return None;
+            }
+            let i = rng.below(rows.len() as u32) as usize;
+            (*rows.get(i)?).clone()
+        }
+        None => pick_stage(rng, stages)?.clone(),
+    };
+    let mut picked = Vec::with_capacity(dancer_keys.len());
+    for key in dancer_keys {
+        match key {
+            Some(k) => picked.push(dancers.iter().find(|d| &d.key == k)?.clone()),
+            None => picked.push(dancers[rng.below(dancers.len() as u32) as usize].clone()),
+        }
+    }
+    Some((stage, picked))
+}
+
+/// Test fixtures shared with the sibling pure modules (`catalog.rs` mounts
+/// beside this file in the host harness and reaches them via
+/// `super::selection::fixtures`).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    /// `(key, fields)` rows from short tuples.
+    pub(crate) fn rows(v: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
         v.iter()
             .map(|(k, f)| (k.to_string(), f.iter().map(|s| s.to_string()).collect()))
             .collect()
     }
 
+    /// The 26 stock `chara_resources.rlist` rows (World data, rlist order):
+    /// `[pl, sex, class, model_scale, shadow_scale, unlock_id]`.
+    pub(crate) fn real_chara_rows() -> Vec<(String, Vec<String>)> {
+        const KEYS: [(&str, &str); 26] = [
+            ("yuni00", "F"),
+            ("rage00", "M"),
+            ("afro00", "M"),
+            ("jenny00", "F"),
+            ("emi01", "F"),
+            ("babylon00", "M"),
+            ("gus00", "M"),
+            ("ruby00", "F"),
+            ("alice00", "F"),
+            ("julio00", "M"),
+            ("bonnie00", "F"),
+            ("zero00", "M"),
+            ("rinon00", "F"),
+            ("emi02", "F"),
+            ("alice01", "F"),
+            ("rinon02", "F"),
+            ("yuni02", "F"),
+            ("rinon01", "F"),
+            ("concent00", "M"),
+            ("zukin00", "F"),
+            ("pix00", "M"),
+            ("emi00", "F"),
+            ("yuni01", "F"),
+            ("rage01", "M"),
+            ("afro01", "M"),
+            ("jenny01", "F"),
+        ];
+        KEYS.iter()
+            .map(|(k, sex)| {
+                (
+                    k.to_string(),
+                    ["pl", sex, "A", "1.0", "0.8", "0.0"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// The real World `map_resources.rlist` key/part multiset (34 rows).
-    fn real_map_rows() -> Vec<(String, Vec<String>)> {
+    pub(crate) fn real_map_rows() -> Vec<(String, Vec<String>)> {
         fn p<'a>(parts: &[&'a str]) -> Vec<&'a str> {
             let mut v = vec!["000000", "000000"];
             v.extend_from_slice(parts);
@@ -626,6 +740,12 @@ mod tests {
             .map(|(k, f)| (k.to_string(), f.into_iter().map(String::from).collect()))
             .collect()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{real_chara_rows, real_map_rows, rows};
+    use super::*;
 
     #[test]
     fn rng_basics() {
@@ -922,5 +1042,66 @@ mod tests {
         // unknown keys refuse
         assert!(apply_pin(&parse_pin("nope").unwrap(), &stages, &dancers, 1).is_none());
         assert!(apply_pin(&parse_pin("boom00,nobody").unwrap(), &stages, &dancers, 1).is_none());
+    }
+
+    #[test]
+    fn resolve_choice_rules() {
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        assert_eq!(dancers.len(), 26);
+
+        // A chosen stage key ⇒ only that key's rows, every row reachable.
+        let mut rows_seen = [false; 2];
+        let mut d1_keys = std::collections::HashSet::new();
+        for seed in 1..=2000u64 {
+            let mut rng = Rng::new(seed);
+            let (stage, picked) = resolve_choice(
+                &mut rng,
+                &stages,
+                &dancers,
+                Some("boom00"),
+                &[Some("emi01"), None],
+            )
+            .expect("resolvable");
+            assert_eq!(stage.key, "boom00");
+            rows_seen[if stage.row == 0 { 0 } else { 1 }] = true;
+            assert_eq!(picked.len(), 2);
+            assert_eq!(picked[0].key, "emi01", "chosen dancer per slot");
+            d1_keys.insert(picked[1].key.clone());
+        }
+        assert!(rows_seen[0] && rows_seen[1], "both boom00 rows drawn");
+        assert!(d1_keys.len() > 5, "the RANDOM slot varies: {d1_keys:?}");
+
+        // Unknown keys anywhere ⇒ None (the caller clears + retries).
+        let mut rng = Rng::new(3);
+        assert!(resolve_choice(&mut rng, &stages, &dancers, Some("nope"), &[None]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[Some("nobody")]).is_none());
+        assert!(
+            resolve_choice(&mut rng, &stages, &dancers, None, &[None, Some("nobody")]).is_none()
+        );
+        // Degenerate inputs.
+        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &[], None, &[None]).is_none());
+        assert!(resolve_choice(&mut rng, &[], &dancers, None, &[None]).is_none());
+
+        // All-RANDOM reproduces the plain random path under the same seed.
+        for seed in 1..=200u64 {
+            let mut a = Rng::new(seed);
+            let mut b = Rng::new(seed);
+            let (stage, picked) =
+                resolve_choice(&mut a, &stages, &dancers, None, &[None, None]).unwrap();
+            let want_stage = pick_stage(&mut b, &stages).unwrap().clone();
+            let want_dancers = pick_dancers(&mut b, &dancers, 2);
+            assert_eq!(stage, want_stage);
+            assert_eq!(picked, want_dancers);
+        }
+
+        // Stage chosen, dancer RANDOM: the dancer draw still follows the
+        // stage's single row draw.
+        let mut rng = Rng::new(9);
+        let (stage, picked) =
+            resolve_choice(&mut rng, &stages, &dancers, Some("club00"), &[None]).unwrap();
+        assert_eq!(stage.key, "club00");
+        assert_eq!(picked.len(), 1);
     }
 }

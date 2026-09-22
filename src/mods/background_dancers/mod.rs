@@ -39,6 +39,16 @@
 //! (nodes → destroy vector → dtors → arcs; movie size + hide restored).
 //! `DEFAULT_OFF_MODS`: the maintainer flips the default once cabinet-proven.
 //!
+//! ## Player choice (2026-09-21)
+//!
+//! Two in-game option rows under PLAYFIELD STYLING OPTIONS — BACKGROUND
+//! DANCER (per player) and BACKGROUND STAGE (cabinet-wide, mirrored in
+//! versus) — let a player pick a specific dancer / stage instead of RANDOM
+//! ([`options`] over the sorted, labelled [`catalog`]; local persistence
+//! only). The pick order at window entry is developer pin → option rows →
+//! random (`selection::resolve_choice`); the per-song INFO names each
+//! element's source.
+//!
 //! ## Degradation
 //!
 //! `required_signatures` names the `scene3d` group's anchor; the group is
@@ -50,18 +60,25 @@
 //! and the tables loaded), never "something rendered this boot".
 
 pub mod background_hide;
+pub mod catalog;
 pub mod clock;
 pub mod director;
 pub mod director_math;
+pub mod instance_plan;
 pub mod lifecycle;
 pub mod movie_size;
+pub mod options;
 pub mod outline;
+pub mod pick;
+pub mod preview;
+pub mod scene_window;
 pub mod schedule;
 pub mod selection;
 pub mod session;
 pub mod style;
 pub mod tempo;
 pub mod tempo_source;
+pub mod viewport_smoke;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -127,12 +144,28 @@ impl Mod for BackgroundDancersMod {
         }
         ENABLED.store(true, Ordering::Release);
         style::init_from_config();
+        // The BACKGROUND DANCER / BACKGROUND STAGE rows (options.rs) over the
+        // catalog derived from the tables; fail-open (absent rows ⇒ random
+        // picks, one WARN inside).
+        match lifecycle::tables_snapshot() {
+            Some((stages, _camera_rows, dancers)) => {
+                options::register(catalog::build_catalog(&stages, &dancers));
+            }
+            None => log_warn!("BackgroundDancers: tables unreadable -- option rows not registered"),
+        }
+        // The live 3D previews behind the two rows (fail-open without the
+        // compositor).
+        preview::init();
+        // Dev-mode compositor smoke (`DDR_DANCERS_VIEWPORT_SMOKE`).
+        viewport_smoke::init_from_env();
         if self.scene_cb.is_none() {
             self.scene_cb = Some(scene_manager::on_scene_change(Box::new(|prev, next| {
                 if !ENABLED.load(Ordering::Acquire) {
                     return;
                 }
                 lifecycle::on_scene_change(prev, next);
+                preview::on_scene_change(prev, next);
+                viewport_smoke::on_scene_change(prev, next);
             })));
         }
         if self.frame_cb.is_none() {
@@ -142,6 +175,11 @@ impl Mod for BackgroundDancersMod {
                 }
                 background_hide::on_frame();
                 lifecycle::on_frame();
+                preview::on_frame();
+                viewport_smoke::on_frame();
+                // The ONE per-frame reaper call for every viewport-pass
+                // owner in this mod (frees detached sets after 2 frames).
+                scene3d::viewport_pass::reap();
             })));
         }
         log_info!("BackgroundDancers: enabled -- random A3 stage + dancers every song");
@@ -155,6 +193,11 @@ impl Mod for BackgroundDancersMod {
         if let Some(id) = self.scene_cb.take() {
             scene_manager::remove_callback(id);
         }
+        // Hide the option rows (values + persistence stay; a re-enable
+        // re-arms them) and stop mirroring the stage row.
+        options::set_available(false);
+        preview::shutdown();
+        viewport_smoke::shutdown();
         // Restore the 2D background first (its alpha is a write into a
         // game-owned layer), then neutralise any live scene.
         background_hide::disarm();

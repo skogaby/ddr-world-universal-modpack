@@ -10,8 +10,10 @@
 use super::api::format_scalar_value;
 use super::api::ScalarFormat;
 
+/// Every pre-existing variant ignores the option id; the pins below pass a
+/// placeholder so the byte assertions stay id-agnostic.
 fn fmt(value: i32, format: ScalarFormat) -> Vec<u8> {
-    format_scalar_value(value, format)
+    format_scalar_value("any", value, format)
 }
 
 #[test]
@@ -105,6 +107,42 @@ fn labeled_prefix_and_terminal() {
         assert!(fmt(v, f).len() <= 15, "value {v} exceeds the SSO budget");
     }
     // The overlay's UTF-8 view is the same text.
-    assert_eq!(super::api::format_scalar_value_utf8(11, f), "Target Score");
-    assert_eq!(super::api::format_scalar_value_utf8(7, f), "Level 7");
+    assert_eq!(
+        super::api::format_scalar_value_utf8("any", 11, f),
+        "Target Score"
+    );
+    assert_eq!(super::api::format_scalar_value_utf8("any", 7, f), "Level 7");
+}
+
+/// `Dynamic`: the owner-supplied labeler (the Background Dancer / Stage
+/// rows' catalog names) renders per-value text keyed on the OPTION ID, and a
+/// `None` falls back to the plain integer so a catalog hole never blanks the
+/// row.
+#[test]
+fn dynamic_labeler_and_fallback() {
+    fn labeler(id: &str, value: i32) -> Option<String> {
+        match (id, value) {
+            (_, 0) => Some("RANDOM".to_string()),
+            ("background_dancer", 2) => Some("EMI #2".to_string()),
+            ("background_stage", 2) => Some("BOOM #3".to_string()),
+            _ => None,
+        }
+    }
+    let f = ScalarFormat::Dynamic(labeler);
+    assert_eq!(format_scalar_value("background_dancer", 0, f), b"RANDOM");
+    assert_eq!(format_scalar_value("background_dancer", 2, f), b"EMI #2");
+    // Id dispatch: the same value names a different entry on the other row.
+    assert_eq!(format_scalar_value("background_stage", 2, f), b"BOOM #3");
+    // `None` ⇒ the integer text (an out-of-catalog value stays readable).
+    assert_eq!(format_scalar_value("background_dancer", 99, f), b"99");
+    assert_eq!(format_scalar_value("unknown_row", 2, f), b"2");
+    // The overlay's UTF-8 view is the same text.
+    assert_eq!(
+        super::api::format_scalar_value_utf8("background_stage", 2, f),
+        "BOOM #3"
+    );
+    assert_eq!(
+        super::api::format_scalar_value_utf8("background_dancer", 99, f),
+        "99"
+    );
 }

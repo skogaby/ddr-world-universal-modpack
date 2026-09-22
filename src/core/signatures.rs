@@ -177,6 +177,81 @@ pub struct Scene3dSites {
     /// (`model_shader_select_site`): without it the render items keep the
     /// converter's shader objects and the whole-scene restyle is off.
     pub shader_lookup: Option<*const u8>,
+    /// The viewport-pass compositor's sites (the Background Dancers option
+    /// PREVIEWS). OPTIONAL (`scene3d_resolve_viewport`, nine AOBs,
+    /// all-or-nothing): `None` ⇒ the option rows work, no live 3D preview.
+    pub viewport: Option<Scene3dViewportSites>,
+}
+
+/// Everything `scene3d::viewport_pass` needs to attach mod-owned clones of
+/// the MODEL passes (+ a clear viewport) into the RENDER_2D target list with
+/// their own D3D viewport rect and camera matrices (design §4.5 / research
+/// `preview-compositing.md`). Offsets are bytes from the object named in the
+/// field's doc; every value is decoded from the engine's own instruction
+/// stream (`derive_scene3d`'s viewport sub-group) and cross-checked across
+/// the nine sites.
+#[derive(Clone, Copy, Debug)]
+pub struct Scene3dViewportSites {
+    /// Global holding the display object pointer (`DAT_1806f2ef0`).
+    pub display: *const u8,
+    /// display: the RENDER_2D target list pointer (`+0x38`) — the list the
+    /// clones attach to (its viewports draw after every AFP layer).
+    pub render2d_list_off: usize,
+    /// display: the RENDER-3D target list pointer (`+0x28`, informational —
+    /// where the stock passes live).
+    pub render3d_list_off: usize,
+    /// `void attach(list, viewport, u32 prio)` — push + sort (`FUN_1802666c0`).
+    pub attach: *const u8,
+    /// `void detach(list, viewport)` — erase (`FUN_1802667d0`).
+    pub detach: *const u8,
+    /// target list: u32 flags (bit0 disabled, bit1 clear-at-start).
+    pub list_flags_off: usize,
+    /// target list: the target surface pointer (u16 dims at
+    /// `target_w_off` / `target_h_off`) — the render-target pixel size.
+    pub list_target_off: usize,
+    pub target_w_off: usize,
+    pub target_h_off: usize,
+    /// The four stock pass globals in ctor order: DISTANTVIEW, OPACITY,
+    /// LOWPRIO_TRANS, TRANS (`*global` = the 0xF8-byte pass object).
+    pub pass_globals: [*const u8; 4],
+    /// Pass object size (0xF8) — the clone's allocation.
+    pub pass_size: usize,
+    /// pass: the `gs::Renders::Model::Viewport<Render>` sub-object (the
+    /// pointer the engine attaches / calls; `+0x30`).
+    pub sub_off: usize,
+    /// Its vftable (slot 0 = render(viewport, workerCtx), slot 1 = dtor) —
+    /// the identity gate before cloning a stock pass.
+    pub pass_vftable: *const u8,
+    /// pass: u32 sort mode (`+0x28`), u32 node-mask FILTER (`+0x2C`).
+    pub pass_sort_off: usize,
+    pub pass_filter_off: usize,
+    /// pass: i32 rect `{x, y, w, h}` (`+0x38`), f32 minZ / maxZ.
+    pub pass_rect_off: usize,
+    pub pass_minz_off: usize,
+    pub pass_maxz_off: usize,
+    /// pass: u32 name hash (`+0x50`), u32 flags (`+0x54`: bit0 DISABLED,
+    /// bit1 skip camera upload).
+    pub pass_name_off: usize,
+    pub pass_flags_off: usize,
+    /// pass: f32[16] projection (`+0x58`) and view (`+0x98`) — uploaded by
+    /// the worker before the render callback iff flags bit1 is clear.
+    pub pass_proj_off: usize,
+    pub pass_view_off: usize,
+    /// pass: self back-pointer (`+0xE0`), render-item list (`+0xE8`),
+    /// callback block (`+0xF0`).
+    pub pass_self_off: usize,
+    pub pass_items_off: usize,
+    pub pass_callbacks_off: usize,
+    /// Viewport sub-object: the rect (`+8`) and flags (`+0x24`) the worker /
+    /// dispatcher read (== `pass_rect_off − sub_off`, `pass_flags_off − sub_off`).
+    pub vp_rect_off: usize,
+    pub vp_flags_off: usize,
+    /// Render worker ctx: the gd write pointer (`+0x218`) a render callback
+    /// appends records at.
+    pub gd_write_off: usize,
+    /// The gd Clear record header (`0x00140000` = tag 0, size 0x14) and size.
+    pub clear_tag: u32,
+    pub clear_record_size: usize,
 }
 
 /// The gs texture registry's lookup trio, derived from the model converter's
@@ -2570,6 +2645,58 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "4C 8D 35 ?? ?? ?? ?? 49 8B FE 0F 1F 40 00 48 8B 17 48 63 C3 48 8D 0C C0 48 C1 E1 06 49 03 CE FF 92 ?? ?? ?? ?? 83 CE FF 84 C0 74 ?? FF C3 48 81 C7 ?? ?? ?? ?? 81 FB ?? ?? ?? ?? 7C",
         description: "The CMovieClip pool walk inside the `bg_root` creator (FUN_18003e5b0+0x122 on 20260825, reached from the BackgroundFrame's AnimationLoader<int> ReactiveAction): `LEA R14,[rip+DAT_1806f9b20] (0x400 × 0x240-byte CMovieClip pool); loop { CALL [vt+0x138] (slot-free probe); ADD RDI,0x240; CMP EBX,0x400 }`, then `CALL CMovieClip::Create(slot, pkg, \"bg_root\", 0)` and `MOV RCX,[frame_ptr]; ADD RCX,0x140; CALL store_shared_ptr` — the clip slot inside `sequence::BackgroundFrame`. derive_scene3d publishes RIP at match+3 as `scene3d_cmovieclip_pool`, the `48 81 C7 imm32` as `scene3d_cmovieclip_pool_stride` (0x240), the `81 FB imm32` as `scene3d_cmovieclip_pool_count` (0x400), and — in the forward window — the `48 81 C1 imm32` after the create CALL as `scene3d_bg_clip_slot_off` (0x140); the CALL rel32 preceded by `LEA R8,[rip+\"bg_root\"]` must equal the already-derived `cmovieclip_create` (identity gate). Unique on every build.",
     },
+    // ── Background Dancers option PREVIEWS: the `scene3d_viewport` OPTIONAL
+    // sub-group (design .agents/planning/2026-09-21-background-dancers-
+    // selection-options §4.5/§4.9; research/preview-compositing.md). Nine AOBs
+    // decoded all-or-nothing by `scene3d_resolve_viewport`; a miss leaves
+    // `Scene3dSites.viewport == None` (rows work, no live 3D preview). NEVER in
+    // any `required_signatures`. Every consumer reads `match+N` — sweep with
+    // shape_diff.py.
+    SignatureDefinition {
+        name: "render_graph_boot_attach",
+        pattern: "48 8B 15 ?? ?? ?? ?? 48 83 C2 ?? 41 B8 66 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8 ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 83 C2 ?? 41 B8 67 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8 ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 83 C2 ?? 41 B8 68 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8",
+        description: "Render-graph boot (FUN_1801f2c30+0x2E5 on 20260825): the three MODEL pass attaches `MOV RDX,[rip+pass]; ADD RDX,0x30 (Viewport sub-object); MOV R8D,0x66/0x67/0x68 (priority); MOV RCX,[rip+display]; MOV RCX,[RCX+0x28] (RENDER-3D target list); CALL attach(list, viewport, prio)` for OPACITY / LOWPRIO_TRANS / TRANS. scene3d_resolve_viewport reads per 33-byte block: RIP at +3 (`scene3d_vp_pass_opacity/lowprio/trans` globals), imm8 at +10 (`scene3d_vp_sub_off` 0x30 — all three must agree), RIP at +20 (`scene3d_vp_display` — all must agree), imm8 at +27 (the RENDER-3D list offset, informational), CALL at +28 (`scene3d_vp_attach`, FUN_1802666c0 — all must agree; its body `48 89 5C 24 08 57 48 83 EC 30 48 8B FA 48 8B D9 48 85 D2 74 06 4C 8D 4A ?? EB 03 45 33 C9 48 8B 41 ?? …` yields `scene3d_vp_rect_off` (LEA disp8, 8), `scene3d_vp_list_target_off` (0x38) and the u16 dims `scene3d_vp_target_w_off/h_off` (0x14/0x16) from the two MOVZX word loads). Unique on every build (the 2D-list attaches use a different shape).",
+    },
+    SignatureDefinition {
+        name: "render_graph_2d_attach",
+        pattern: "41 B8 65 00 00 00 48 8B 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8 ?? ?? ?? ?? 41 B8 66 00 00 00 48 8B 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8 ?? ?? ?? ?? 41 B8 67 00 00 00 48 8B 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 49 ?? E8",
+        description: "Render-graph boot (FUN_1801f2c30+0x3AA on 20260825): the three 2D-layer-list attaches into RENDER_2D — `MOV R8D,0x65/0x66/0x67; MOV RDX,[rip+2D list viewport]; MOV RCX,[rip+display]; MOV RCX,[RCX+0x38] (RENDER_2D target list); CALL attach`. scene3d_resolve_viewport reads per 29-byte block: RIP at +16 (display — must equal `render_graph_boot_attach`'s), imm8 at +23 (`scene3d_vp_render2d_list_off` 0x38 — all three must agree AND differ from the RENDER-3D offset) and CALL at +24 (must equal the attach fn). The DLL attaches its pass clones + clear viewport into THIS list at priorities ≥ 0x68 so they draw above every AFP layer. The RENDER-3D list's own 0x65 attach is a single block (followed by an `ADD RDX,0x188` shape), so the two-block run is unique on every build.",
+    },
+    SignatureDefinition {
+        name: "viewport_detach",
+        pattern: "48 8B 0D ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 8B 49 ?? 48 81 C2 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 8B 49 ?? 48 83 C2 ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 8B 49 ?? 48 83 C2 ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 48 8B 49 ?? 48 83 C2 ?? E8",
+        description: "Render-graph shutdown (FUN_1801f30b0+0x100 on 20260825): the RENDER-3D list detach of the packet pass at `+0x188` (`MOV RCX,[rip+display]; MOV RDX,[rip+packets]; MOV RCX,[RCX+0x28]; ADD RDX,0x188 (imm32 form — the anchor); CALL detach`) followed by the three MODEL pass detaches `MOV RCX,[rip+display]; MOV RDX,[rip+pass]; MOV RCX,[RCX+0x28]; ADD RDX,0x30; CALL detach(list, viewport)` for OPACITY / LOWPRIO / TRANS. scene3d_resolve_viewport reads per 27-byte MODEL block (k = 0..2 at +30 + 27k): RIP at +3 (display, must equal), RIP at +10 (the pass globals, must equal the boot's in order), imm8 at +17 (list off, must equal the boot's RENDER-3D off), imm8 at +21 (sub off, must equal), CALL at +22 (`scene3d_vp_detach`, FUN_1802667d0 — all three must agree; its body must start `4C 8B 41 08 48 8B 01 4C 8B CA 4C 8B D1 49 3B C0 74 ?? 48 39 10 74 ?? 48 83 C0 10` — the erase walk over 16-byte `{viewport*, prio}` elements). The leading imm32 block is what makes this unique: the three-block run alone also matches one block later (the `ADD RDX,0x8` detach that follows TRANS shares the imm8 shape).",
+    },
+    SignatureDefinition {
+        name: "model_pass_ctor",
+        pattern: "B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 0B 48 89 48 08 48 8B 4B 08 48 89 48 10 48 8B 4B 10 48 89 48 18 48 8B 4B 18 89 70 ?? 48 89 48 20 44 89 70 ?? 4C 89 70 ?? 4C 89 70 ?? 44 89 70 ?? C7 40 ?? 00 00 80 3F 48 89 80 ?? ?? ?? ?? 4C 89 B0 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 48 89 48 ?? 48 89 98 ?? ?? ?? ?? 89 78 ?? 89 68 ??",
+        description: "The MODEL pass object constructor's store block (FUN_1801f6510+0x159 on 20260825, run once per pass DISTANTVIEW/OPACITY/LOWPRIO_TRANS/TRANS): `MOV ECX,0xF8; CALL alloc; TEST RAX; JZ; copy the four callbacks [RBX..RBX+0x18] → [RAX+8..+0x20]; MOV [RAX+0x28],ESI (sort mode); MOV [RAX+0x54],R14D (flags, zeroed); MOV [RAX+0x38],R14; MOV [RAX+0x40],R14 (viewport rect x,y,w,h — zero ⇒ attach fills w/h); MOV [RAX+0x48],R14D (minZ); MOV [RAX+0x4C],1.0f (maxZ); MOV [RAX+0xE0],RAX (self back-pointer); MOV [RAX+0xE8],R14 (render-item list, set later by the SceneGraphManager); LEA RCX,[rip+gs::Renders::Model::Viewport<Render> vftable]; MOV [RAX+0x30],RCX (the Viewport sub-object); MOV [RAX+0xF0],RBX (callback block); MOV [RAX+0x50],EDI (name hash); MOV [RAX+0x2C],EBP (node-mask FILTER)`. scene3d_resolve_viewport reads: imm32 at +1 (`scene3d_vp_pass_size` 0xF8), disp8 at +44 (`scene3d_vp_pass_sort_off` 0x28), +52 (`scene3d_vp_pass_flags_off` 0x54), +56 (`scene3d_vp_pass_rect_off` 0x38), +64 (`scene3d_vp_pass_minz_off` 0x48), +67 (`scene3d_vp_pass_maxz_off` 0x4C), disp32 at +75 (`scene3d_vp_pass_self_off` 0xE0), +82 (`scene3d_vp_pass_items_off` 0xE8), RIP at +89 (`scene3d_vp_pass_vftable` — the clone identity gate; slot 0 = render FUN_1801f68a0 `48 83 EC 28 4C 8B 81 ?? ?? ?? ?? 4D 85 C0 74 0C 48 8B 89 ?? ?? ?? ?? E8` whose two disp32s must equal items_off − sub_off and self_off − sub_off), disp8 at +96 (sub off, must equal the boot's 0x30), disp32 at +100 (`scene3d_vp_pass_callbacks_off` 0xF0), disp8 at +106 (`scene3d_vp_pass_name_off` 0x50), +109 (`scene3d_vp_pass_filter_off` 0x2C). The DLL byte-clones the OPACITY and TRANS objects (pass_size bytes), patches self/rect/filter and writes view/proj per frame. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "model_pass_enable_tail",
+        pattern: "48 8B 05 ?? ?? ?? ?? 83 60 ?? FE 48 8B 05 ?? ?? ?? ?? 83 60 ?? FE 48 8B 05 ?? ?? ?? ?? 83 60 ?? FE 48 8B 05 ?? ?? ?? ?? 83 60 ?? FE 83 25",
+        description: "Tail of the MODEL pass constructor (FUN_1801f6510+0x2C1 on 20260825): `MOV RAX,[rip+pass]; AND dword [RAX+0x54],~1` for the four passes in ctor order (DISTANTVIEW, OPACITY, LOWPRIO_TRANS, TRANS — DAT_1806f1528/1530/1538/1540) then `AND dword [rip+DAT_1806f8244],~1` — flags bit0 = DISABLED cleared at construction. scene3d_resolve_viewport reads the RIP globals at +3/+14/+25/+36 (`scene3d_vp_pass_distant` + the three that must equal `render_graph_boot_attach`'s OPACITY/LOWPRIO/TRANS in that order) and the disp8 at +9 (all four must equal the ctor's flags off). The DISTANTVIEW global exists only for the free-node-mask-bit check (the four live filters must leave 0x08 and 0x20 clear). TWO hits on every build — the SceneGraphManager ctor (FUN_1800238a0+0xFA) re-clears the bit after storing `pass+0xE8 = graph->items` for the same four passes; the derivation accepts 1..=2 hits and requires every hit to decode the same four globals.",
+    },
+    SignatureDefinition {
+        name: "scene_manager_camera_copy",
+        pattern: "48 8B 0D ?? ?? ?? ?? 48 8B D6 48 81 C1 ?? ?? ?? ?? 41 B8 40 00 00 00 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B D7 48 83 C1 ?? 41 B8 40 00 00 00 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B D7 48 83 C1 ?? 41 B8 40 00 00 00 E8",
+        description: "SceneGraphManager tick (FUN_180023fb0+0xAD on 20260825): the TRANS pass VIEW copy `MOV RCX,[rip+TRANS]; MOV RDX,RSI (cam+0x08 view); ADD RCX,0x98; MOV R8D,0x40; CALL memcpy` followed by the DISTANTVIEW and OPACITY PROJ copies `MOV RCX,[rip+pass]; MOV RDX,RDI (cam+0x1C8 proj); ADD RCX,0x58; MOV R8D,0x40; CALL memcpy`. scene3d_resolve_viewport reads RIP at +3 (must equal TRANS), imm32 at +13 (`scene3d_vp_pass_view_off` 0x98), RIP at +31 (must equal DISTANTVIEW), imm8 at +41 (`scene3d_vp_pass_proj_off` 0x58), RIP at +56 (must equal OPACITY), imm8 at +66 (must equal proj off); the 0x40 matrix sizes are pinned. Stock passes get camera slot 0's matrices here every frame — a CLONE is never touched, so the DLL writes its own view/proj at these offsets. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "viewport_setup_rect",
+        pattern: "8B 47 ?? F3 0F 10 47 ?? F3 0F 10 4F ?? 44 8B 4F ?? 44 8B 47 ?? 8B 17 F3 0F 11 44 24 30 F3 0F 11 4C 24 28 49 8B CD 89 44 24 20 E8 ?? ?? ?? ?? F6 47 ?? 02 45 8D 77 08 0F 85 ?? ?? ?? ?? 0F 10 5F ?? 0F 10 57 ?? 0F 10 4F ??",
+        description: "Per-viewport render setup (FUN_18026cec0+0x5A on 20260825; `(workerCtx, rect = viewport+8, list)`): `MOV EAX,[RDI+0xC] (h); MOVSS XMM0,[RDI+0x14] (maxZ); MOVSS XMM1,[RDI+0x10] (minZ); MOV R9D,[RDI+8] (w); MOV R8D,[RDI+4] (y); MOV EDX,[RDI] (x); … CALL set_viewport(ctx,x,y,w,h,minZ,maxZ) (D3D SetViewport — the rect IS honoured per pass); TEST byte [RDI+0x1C],2 (flags bit1 = skip camera upload); JNZ tail; MOVUPS XMM3,[RDI+0x20] … (PROJ rows) … [RDI+0x60] … (VIEW rows)`. scene3d_resolve_viewport reads disp8s at +2/+7/+12/+16/+20 (must be 0xC/0x14/0x10/8/4 — the `{x,y,w,h,minZ,maxZ}` rect order), +49 (`scene3d_vp_vp_flags_off` = rect off + 0x1C, must equal the ctor's flags off − sub off), +64 (proj within rect, must equal the tick's proj off − sub off − rect off) and scans forward for the first `0F 10 5F ??` after +70 (view within rect, 0x60). The DLL's clear viewport sets bit1 so only the rect is applied. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "worker_gd_write",
+        pattern: "48 8D 53 ?? 48 85 DB 75 03 48 8B D6 48 8B CF E8 ?? ?? ?? ?? 4C 8B 1B 48 8B D7 48 8B CB 41 FF 13 48 8B 87 ?? ?? ?? ?? C7 00 3A 00 04 00 48 83 C0 04 48 89 87 ?? ?? ?? ??",
+        description: "Render worker loop (FUN_180272d30+0x187 on 20260825): `LEA RDX,[RBX+8] (viewport rect); TEST RBX; JNZ; MOV RDX,RSI; MOV RCX,RDI (workerCtx); CALL setup (FUN_18026cec0); MOV R11,[RBX]; MOV RDX,RDI; MOV RCX,RBX; CALL [R11] (viewport vtable slot 0 = render(viewport, workerCtx)); MOV RAX,[RDI+0x218] (gd write pointer); MOV dword [RAX],0x4003A (per-viewport terminator); ADD RAX,4; MOV [RDI+0x218],RAX`. scene3d_resolve_viewport reads disp8 at +3 (must equal the attach fn's rect off), CALL at +15 (must lie in `[viewport_setup_rect match − 0x100, match)` and start `40 53 57 41 55 41 56 41 57 48 81 EC`), disp32 at +35 (`scene3d_vp_gd_write_off` 0x218; must equal the disp32 at +52). The DLL's clear viewport's slot-0 callback writes its Clear record at `*(ctx + gd_write_off)` and advances it. Unique on every build.",
+    },
+    SignatureDefinition {
+        name: "target_list_clear",
+        pattern: "F6 42 ?? 01 48 8B FA 48 8B F1 0F 85 ?? ?? ?? ?? 48 8B 52 ?? 48 85 D2 0F 84 ?? ?? ?? ?? 48 89 5C 24 60 48 89 6C 24 68 E8 ?? ?? ?? ?? 33 ED F6 47 ?? 02 74 ?? 0F B6 47 ?? 0F B6 57 ?? 48 8B 4E 10 F3 0F 10 47 ?? 44 8B 47 ?? C1 E2 08 0B D0 0F B6 47 ?? C1 E2 08 0B D0 0F B6 47 ?? C1 E2 08 0B D0 8B 47 ?? C7 01 ?? ?? ?? ?? F3 0F 11 41 0C 89 41 04 48 8D 41 ?? 89 51 08 44 89 41 10 48 89 46 10",
+        description: "Target-list render (FUN_180272600+0x07 on 20260825; `(dispatchCtx, list)`): `TEST byte [RDX+0x40],1 (list disabled); … MOV RDX,[RDX+0x38] (target surface); TEST; JZ; … TEST byte [RDI+0x40],2 (clear at start); JZ; MOVZX EAX,byte [RDI+0x24] (R); MOVZX EDX,byte [RDI+0x27] (A); MOV RCX,[RSI+0x10] (gd write); MOVSS XMM0,[RDI+0x28] (z); MOV R8D,[RDI+0x2C] (stencil); compose D3DCOLOR ARGB from bytes 0x27/0x24/0x25/0x26; MOV EAX,[RDI+0x20] (D3DCLEAR flags); MOV dword [RCX],0x00140000 (tag 0, size 0x14); MOVSS [RCX+0xC],z; MOV [RCX+4],flags; LEA RAX,[RCX+0x14]; MOV [RCX+8],color; MOV [RCX+0x10],stencil; MOV [RSI+0x10],RAX`. scene3d_resolve_viewport reads disp8 at +2 and +48 (`scene3d_vp_list_flags_off` 0x40, must agree), +19 (list target off, must equal the attach fn's), the payload offsets +55/+59/+68/+72/+98 (0x24/0x27/0x28/0x2C/0x20 — the list's clear params, informational), imm32 at +101 (`scene3d_vp_clear_tag` 0x00140000 — the record header the DLL's clear viewport emits) and disp8 at +116 (`scene3d_vp_clear_record_size` 0x14). Attests the gd Clear record `{u16 tag 0, u16 size, u32 flags, u32 D3DCOLOR, f32 z, u32 stencil}`. Unique on every build.",
+    },
 ];
 
 pub struct SignatureStore {
@@ -2998,6 +3125,20 @@ impl SignatureStore {
                         );
                     }
                 }
+                // Optional sub-group: the viewport-pass compositor (option
+                // previews). A miss only disables the live 3D previews.
+                match self.scene3d_resolve_viewport() {
+                    Ok(v) => self.publish_viewport(&v),
+                    Err(reason) => {
+                        for name in Self::SCENE3D_VIEWPORT {
+                            self.resolved.remove(*name);
+                        }
+                        log_warn!(
+                            "  [-] scene3d_viewport (optional) -- {} -- 3D option previews unavailable",
+                            reason
+                        );
+                    }
+                }
             }
             Err((site, reason)) => {
                 for name in Self::SCENE3D_PUBLISHED
@@ -3005,12 +3146,660 @@ impl SignatureStore {
                     .chain(Self::SCENE3D_RAW)
                     .chain(Self::SCENE3D_TEXTURE_LOOKUP)
                     .chain(Self::SCENE3D_SHADER_LOOKUP)
+                    .chain(Self::SCENE3D_VIEWPORT)
                 {
                     self.resolved.remove(*name);
                 }
                 log_warn!("  [-] scene3d -- {}: {}", site, reason);
             }
         }
+    }
+
+    /// The optional viewport-pass sub-group's names (raw AOBs + published
+    /// addresses + published values).
+    const SCENE3D_VIEWPORT: &'static [&'static str] = &[
+        "render_graph_boot_attach",
+        "render_graph_2d_attach",
+        "viewport_detach",
+        "model_pass_ctor",
+        "model_pass_enable_tail",
+        "scene_manager_camera_copy",
+        "viewport_setup_rect",
+        "worker_gd_write",
+        "target_list_clear",
+        "scene3d_vp_display",
+        "scene3d_vp_attach",
+        "scene3d_vp_detach",
+        "scene3d_vp_pass_distant",
+        "scene3d_vp_pass_opacity",
+        "scene3d_vp_pass_lowprio",
+        "scene3d_vp_pass_trans",
+        "scene3d_vp_pass_vftable",
+        "scene3d_vp_render2d_list_off",
+        "scene3d_vp_render3d_list_off",
+        "scene3d_vp_list_flags_off",
+        "scene3d_vp_list_target_off",
+        "scene3d_vp_target_w_off",
+        "scene3d_vp_target_h_off",
+        "scene3d_vp_pass_size",
+        "scene3d_vp_sub_off",
+        "scene3d_vp_pass_sort_off",
+        "scene3d_vp_pass_filter_off",
+        "scene3d_vp_pass_rect_off",
+        "scene3d_vp_pass_minz_off",
+        "scene3d_vp_pass_maxz_off",
+        "scene3d_vp_pass_name_off",
+        "scene3d_vp_pass_flags_off",
+        "scene3d_vp_pass_proj_off",
+        "scene3d_vp_pass_view_off",
+        "scene3d_vp_pass_self_off",
+        "scene3d_vp_pass_items_off",
+        "scene3d_vp_pass_callbacks_off",
+        "scene3d_vp_vp_rect_off",
+        "scene3d_vp_vp_flags_off",
+        "scene3d_vp_gd_write_off",
+        "scene3d_vp_clear_tag",
+        "scene3d_vp_clear_record_size",
+    ];
+
+    /// Publish a resolved viewport sub-group (addresses into `resolved`,
+    /// offsets/values via `publish_value`) with the boot-log lines.
+    fn publish_viewport(&mut self, v: &Scene3dViewportSites) {
+        let base = self.base as usize;
+        let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+        for (name, p) in [
+            ("scene3d_vp_display", v.display),
+            ("scene3d_vp_attach", v.attach),
+            ("scene3d_vp_detach", v.detach),
+            ("scene3d_vp_pass_distant", v.pass_globals[0]),
+            ("scene3d_vp_pass_opacity", v.pass_globals[1]),
+            ("scene3d_vp_pass_lowprio", v.pass_globals[2]),
+            ("scene3d_vp_pass_trans", v.pass_globals[3]),
+            ("scene3d_vp_pass_vftable", v.pass_vftable),
+        ] {
+            self.resolved.insert(name.into(), p);
+            log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+        }
+        for (name, value) in [
+            ("scene3d_vp_render2d_list_off", v.render2d_list_off),
+            ("scene3d_vp_render3d_list_off", v.render3d_list_off),
+            ("scene3d_vp_list_flags_off", v.list_flags_off),
+            ("scene3d_vp_list_target_off", v.list_target_off),
+            ("scene3d_vp_target_w_off", v.target_w_off),
+            ("scene3d_vp_target_h_off", v.target_h_off),
+            ("scene3d_vp_pass_size", v.pass_size),
+            ("scene3d_vp_sub_off", v.sub_off),
+            ("scene3d_vp_pass_sort_off", v.pass_sort_off),
+            ("scene3d_vp_pass_filter_off", v.pass_filter_off),
+            ("scene3d_vp_pass_rect_off", v.pass_rect_off),
+            ("scene3d_vp_pass_minz_off", v.pass_minz_off),
+            ("scene3d_vp_pass_maxz_off", v.pass_maxz_off),
+            ("scene3d_vp_pass_name_off", v.pass_name_off),
+            ("scene3d_vp_pass_flags_off", v.pass_flags_off),
+            ("scene3d_vp_pass_proj_off", v.pass_proj_off),
+            ("scene3d_vp_pass_view_off", v.pass_view_off),
+            ("scene3d_vp_pass_self_off", v.pass_self_off),
+            ("scene3d_vp_pass_items_off", v.pass_items_off),
+            ("scene3d_vp_pass_callbacks_off", v.pass_callbacks_off),
+            ("scene3d_vp_vp_rect_off", v.vp_rect_off),
+            ("scene3d_vp_vp_flags_off", v.vp_flags_off),
+            ("scene3d_vp_gd_write_off", v.gd_write_off),
+            ("scene3d_vp_clear_tag", v.clear_tag as usize),
+            ("scene3d_vp_clear_record_size", v.clear_record_size),
+        ] {
+            self.publish_value(name, value);
+        }
+    }
+
+    /// Decode the nine viewport-pass AOBs into one cross-checked bundle
+    /// (research `preview-compositing.md`; every offset is read from the
+    /// engine's own loads/stores and each site's reading of a shared field
+    /// must agree with every other site's).
+    fn scene3d_resolve_viewport(&self) -> Result<Scene3dViewportSites, String> {
+        let inside = |p: *const u8, len: usize| self.scene3d_inside(p, len);
+        // Unaligned little-endian readers over module memory (the AOB match
+        // guarantees the pattern's own bytes are mapped; anything reached
+        // through a decoded pointer is probed with `inside` first).
+        let u8_at = |p: *const u8, off: usize| unsafe { *p.add(off) } as usize;
+        let u32_at =
+            |p: *const u8, off: usize| unsafe { (p.add(off) as *const u32).read_unaligned() };
+        let rip_at = |p: *const u8, off: usize| unsafe { decode_rip_relative(p.add(off)) };
+        let call_at = |p: *const u8, off: usize| unsafe { decode_call_rel32(p.add(off)) };
+        let unique = |name: &str| -> Result<*const u8, String> {
+            let hits = self.get_all_matches(name);
+            match hits.len() {
+                1 => Ok(hits[0]),
+                n => Err(format!("{name}: expected exactly 1 match, found {n}")),
+            }
+        };
+        let agree = |what: &str, a: usize, b: usize| -> Result<(), String> {
+            if a == b {
+                Ok(())
+            } else {
+                Err(format!("{what} disagree (0x{a:X} vs 0x{b:X})"))
+            }
+        };
+        let agree_p = |what: &str, a: *const u8, b: *const u8| -> Result<(), String> {
+            agree(what, a as usize, b as usize)
+        };
+        /// Compare module bytes against a masked template (`None` = wildcard).
+        fn shape_ok(body: &[u8], want: &[Option<u8>]) -> bool {
+            body.len() >= want.len()
+                && want
+                    .iter()
+                    .zip(body)
+                    .all(|(w, got)| w.is_none_or(|w| w == *got))
+        }
+
+        // ── 1. Boot: the three MODEL pass attaches (RENDER-3D) ────────────
+        let boot = unique("render_graph_boot_attach")?;
+        let mut pass3 = [std::ptr::null::<u8>(); 3];
+        let mut display = std::ptr::null::<u8>();
+        let mut attach = std::ptr::null::<u8>();
+        let mut sub_off = 0usize;
+        let mut render3d_list_off = 0usize;
+        for k in 0..3 {
+            let b = unsafe { boot.add(33 * k) };
+            let pass = rip_at(b, 3);
+            let sub = u8_at(b, 10);
+            let disp = rip_at(b, 20);
+            let list = u8_at(b, 27);
+            let fun = call_at(b, 28);
+            if k == 0 {
+                display = disp;
+                attach = fun;
+                sub_off = sub;
+                render3d_list_off = list;
+            } else {
+                agree_p("boot display globals", disp, display)?;
+                agree_p("boot attach callees", fun, attach)?;
+                agree("boot viewport sub offsets", sub, sub_off)?;
+                agree("boot RENDER-3D list offsets", list, render3d_list_off)?;
+            }
+            pass3[k] = pass;
+        }
+        if pass3[0] == pass3[1] || pass3[1] == pass3[2] || pass3[0] == pass3[2] {
+            return Err("boot pass globals are not distinct".into());
+        }
+        if !inside(display, 8) || !inside(attach, 0x60) {
+            return Err("boot display/attach outside the module".into());
+        }
+        for p in pass3 {
+            if !inside(p, 8) {
+                return Err("boot pass global outside the module".into());
+            }
+        }
+        // Attach callee identity + the list/target/rect facts it reads.
+        //   48 89 5C 24 08 57 48 83 EC 30 48 8B FA 48 8B D9 48 85 D2 74 06
+        //   4C 8D 4A ?? (rect = viewport+8) EB 03 45 33 C9 48 8B 41 ?? (target)
+        //   48 85 C0 74 ?? 41 83 39 00 75 ?? 41 83 79 04 00 75 ?? 41 83 79 08
+        //   00 75 ?? 41 83 79 0C 00 75 ?? 0F B7 40 ?? (w) 41 89 41 08
+        //   48 8B 41 ?? 0F B7 48 ?? (h) 41 89 49 0C
+        const ATTACH_SHAPE: &[Option<u8>] = &[
+            Some(0x48),
+            Some(0x89),
+            Some(0x5C),
+            Some(0x24),
+            Some(0x08),
+            Some(0x57),
+            Some(0x48),
+            Some(0x83),
+            Some(0xEC),
+            Some(0x30),
+            Some(0x48),
+            Some(0x8B),
+            Some(0xFA),
+            Some(0x48),
+            Some(0x8B),
+            Some(0xD9),
+            Some(0x48),
+            Some(0x85),
+            Some(0xD2),
+            Some(0x74),
+            Some(0x06),
+            Some(0x4C),
+            Some(0x8D),
+            Some(0x4A),
+            None,
+            Some(0xEB),
+            Some(0x03),
+            Some(0x45),
+            Some(0x33),
+            Some(0xC9),
+            Some(0x48),
+            Some(0x8B),
+            Some(0x41),
+            None,
+            Some(0x48),
+            Some(0x85),
+            Some(0xC0),
+            Some(0x74),
+            None,
+            Some(0x41),
+            Some(0x83),
+            Some(0x39),
+            Some(0x00),
+            Some(0x75),
+            None,
+            Some(0x41),
+            Some(0x83),
+            Some(0x79),
+            Some(0x04),
+            Some(0x00),
+            Some(0x75),
+            None,
+            Some(0x41),
+            Some(0x83),
+            Some(0x79),
+            Some(0x08),
+            Some(0x00),
+            Some(0x75),
+            None,
+            Some(0x41),
+            Some(0x83),
+            Some(0x79),
+            Some(0x0C),
+            Some(0x00),
+            Some(0x75),
+            None,
+            Some(0x0F),
+            Some(0xB7),
+            Some(0x40),
+            None,
+            Some(0x41),
+            Some(0x89),
+            Some(0x41),
+            Some(0x08),
+            Some(0x48),
+            Some(0x8B),
+            Some(0x41),
+            None,
+            Some(0x0F),
+            Some(0xB7),
+            Some(0x48),
+            None,
+            Some(0x41),
+            Some(0x89),
+            Some(0x49),
+            Some(0x0C),
+        ];
+        let attach_body = unsafe { std::slice::from_raw_parts(attach, ATTACH_SHAPE.len()) };
+        if !shape_ok(attach_body, ATTACH_SHAPE) {
+            return Err("attach callee body is not the target-list push+sort".into());
+        }
+        let vp_rect_off = u8_at(attach, 24);
+        let list_target_off = u8_at(attach, 33);
+        agree("attach target loads", u8_at(attach, 77), list_target_off)?;
+        let target_w_off = u8_at(attach, 69);
+        let target_h_off = u8_at(attach, 81);
+        if target_h_off != target_w_off + 2 {
+            return Err("target dims are not adjacent u16s".into());
+        }
+
+        // ── 2. Boot: the three 2D-list attaches (RENDER_2D) ───────────────
+        let boot2d = unique("render_graph_2d_attach")?;
+        let mut render2d_list_off = 0usize;
+        for k in 0..3 {
+            let b = unsafe { boot2d.add(29 * k) };
+            agree_p("2D attach display global", rip_at(b, 16), display)?;
+            agree_p("2D attach callee", call_at(b, 24), attach)?;
+            let list = u8_at(b, 23);
+            if k == 0 {
+                render2d_list_off = list;
+            } else {
+                agree("2D attach list offsets", list, render2d_list_off)?;
+            }
+        }
+        if render2d_list_off == render3d_list_off {
+            return Err("RENDER_2D list offset equals the RENDER-3D one".into());
+        }
+
+        // ── 3. Shutdown: the three MODEL pass detaches ────────────────────
+        let shut = unique("viewport_detach")?;
+        let mut detach = std::ptr::null::<u8>();
+        // Skip the leading 30-byte `ADD RDX,imm32` anchor block.
+        for k in 0..3 {
+            let b = unsafe { shut.add(30 + 27 * k) };
+            agree_p("detach display global", rip_at(b, 3), display)?;
+            agree_p("detach pass global", rip_at(b, 10), pass3[k])?;
+            agree("detach list offset", u8_at(b, 17), render3d_list_off)?;
+            agree("detach sub offset", u8_at(b, 21), sub_off)?;
+            let fun = call_at(b, 22);
+            if k == 0 {
+                detach = fun;
+            } else {
+                agree_p("detach callees", fun, detach)?;
+            }
+        }
+        if !inside(detach, 0x30) {
+            return Err("detach callee outside the module".into());
+        }
+        const DETACH_SHAPE: &[Option<u8>] = &[
+            Some(0x4C),
+            Some(0x8B),
+            Some(0x41),
+            Some(0x08),
+            Some(0x48),
+            Some(0x8B),
+            Some(0x01),
+            Some(0x4C),
+            Some(0x8B),
+            Some(0xCA),
+            Some(0x4C),
+            Some(0x8B),
+            Some(0xD1),
+            Some(0x49),
+            Some(0x3B),
+            Some(0xC0),
+            Some(0x74),
+            None,
+            Some(0x48),
+            Some(0x39),
+            Some(0x10),
+            Some(0x74),
+            None,
+            Some(0x48),
+            Some(0x83),
+            Some(0xC0),
+            Some(0x10),
+        ];
+        let detach_body = unsafe { std::slice::from_raw_parts(detach, DETACH_SHAPE.len()) };
+        if !shape_ok(detach_body, DETACH_SHAPE) {
+            return Err("detach callee body is not the target-list erase".into());
+        }
+
+        // ── 4. The pass constructor's store block ─────────────────────────
+        let ctor = unique("model_pass_ctor")?;
+        let pass_size = u32_at(ctor, 1) as usize;
+        let pass_sort_off = u8_at(ctor, 44);
+        let pass_flags_off = u8_at(ctor, 52);
+        let pass_rect_off = u8_at(ctor, 56);
+        agree("ctor rect second half", u8_at(ctor, 60), pass_rect_off + 8)?;
+        let pass_minz_off = u8_at(ctor, 64);
+        let pass_maxz_off = u8_at(ctor, 67);
+        let pass_self_off = u32_at(ctor, 75) as usize;
+        let pass_items_off = u32_at(ctor, 82) as usize;
+        let pass_vftable = rip_at(ctor, 89);
+        agree("ctor viewport sub offset", u8_at(ctor, 96), sub_off)?;
+        let pass_callbacks_off = u32_at(ctor, 100) as usize;
+        let pass_name_off = u8_at(ctor, 106);
+        let pass_filter_off = u8_at(ctor, 109);
+        agree(
+            "ctor rect vs attach rect",
+            pass_rect_off,
+            sub_off + vp_rect_off,
+        )?;
+        if pass_minz_off != pass_rect_off + 0x10 || pass_maxz_off != pass_minz_off + 4 {
+            return Err("ctor minZ/maxZ do not follow the rect".into());
+        }
+        if !inside(pass_vftable, 16) {
+            return Err("pass vftable outside the module".into());
+        }
+        // vftable slot 0 = render(viewport, ctx): `SUB RSP,0x28; MOV R8,[RCX+
+        // items−sub]; TEST R8; JZ; MOV RCX,[RCX+self−sub]; CALL collect`.
+        let render_fn = unsafe { (pass_vftable as *const *const u8).read_unaligned() };
+        if !inside(render_fn, 0x24) {
+            return Err("pass vftable slot 0 outside the module".into());
+        }
+        const RENDER_SHAPE: &[Option<u8>] = &[
+            Some(0x48),
+            Some(0x83),
+            Some(0xEC),
+            Some(0x28),
+            Some(0x4C),
+            Some(0x8B),
+            Some(0x81),
+            None,
+            None,
+            None,
+            None,
+            Some(0x4D),
+            Some(0x85),
+            Some(0xC0),
+            Some(0x74),
+            Some(0x0C),
+            Some(0x48),
+            Some(0x8B),
+            Some(0x89),
+            None,
+            None,
+            None,
+            None,
+            Some(0xE8),
+        ];
+        let render_body = unsafe { std::slice::from_raw_parts(render_fn, RENDER_SHAPE.len()) };
+        if !shape_ok(render_body, RENDER_SHAPE) {
+            return Err("pass vftable slot 0 is not the MODEL pass render fn".into());
+        }
+        agree(
+            "render fn items load vs ctor items off",
+            u32_at(render_fn, 7) as usize,
+            pass_items_off - sub_off,
+        )?;
+        agree(
+            "render fn outer load vs ctor self off",
+            u32_at(render_fn, 19) as usize,
+            pass_self_off - sub_off,
+        )?;
+        for (what, off) in [
+            ("self", pass_self_off),
+            ("items", pass_items_off),
+            ("callbacks", pass_callbacks_off),
+        ] {
+            if off + 8 > pass_size {
+                return Err(format!("ctor {what} offset 0x{off:X} beyond pass size"));
+            }
+        }
+
+        // ── 5. The ctor tail: the four pass globals in ctor order ─────────
+        // Two sites share the shape (the pass ctor's tail and the
+        // SceneGraphManager ctor, which re-clears the bit after storing the
+        // item list); both must decode the same four globals.
+        let tails = self.get_all_matches("model_pass_enable_tail");
+        if tails.is_empty() || tails.len() > 2 {
+            return Err(format!(
+                "model_pass_enable_tail: expected 1..=2 matches, found {}",
+                tails.len()
+            ));
+        }
+        let mut pass_globals = [std::ptr::null::<u8>(); 4];
+        for (i, tail) in tails.iter().enumerate() {
+            for k in 0..4 {
+                let b = unsafe { tail.add(11 * k) };
+                let g = rip_at(b, 3);
+                if i == 0 {
+                    pass_globals[k] = g;
+                } else {
+                    agree_p("enable-tail pass globals across sites", g, pass_globals[k])?;
+                }
+                agree("enable-tail flags offset", u8_at(b, 9), pass_flags_off)?;
+            }
+        }
+        agree_p("ctor tail OPACITY", pass_globals[1], pass3[0])?;
+        agree_p("ctor tail LOWPRIO", pass_globals[2], pass3[1])?;
+        agree_p("ctor tail TRANS", pass_globals[3], pass3[2])?;
+        if !inside(pass_globals[0], 8) || pass3.contains(&pass_globals[0]) {
+            return Err("DISTANTVIEW pass global invalid".into());
+        }
+
+        // ── 6. The manager tick's view/proj memcpys ───────────────────────
+        let cam = unique("scene_manager_camera_copy")?;
+        agree_p("camera copy TRANS global", rip_at(cam, 3), pass3[2])?;
+        let pass_view_off = u32_at(cam, 13) as usize;
+        agree_p(
+            "camera copy DISTANT global",
+            rip_at(cam, 31),
+            pass_globals[0],
+        )?;
+        let pass_proj_off = u8_at(cam, 41);
+        agree_p("camera copy OPACITY global", rip_at(cam, 56), pass3[0])?;
+        agree("camera copy proj offsets", u8_at(cam, 66), pass_proj_off)?;
+        if pass_view_off + 0x40 > pass_size || pass_proj_off + 0x40 > pass_size {
+            return Err("view/proj matrices beyond pass size".into());
+        }
+
+        // ── 7. The per-viewport setup: rect order, flags bit, matrix spots ─
+        let setup = unique("viewport_setup_rect")?;
+        if [(2usize, 0xCusize), (7, 0x14), (12, 0x10), (16, 8), (20, 4)]
+            .iter()
+            .any(|&(at, want)| u8_at(setup, at) != want)
+        {
+            return Err("setup rect field order is not {x,y,w,h,minZ,maxZ}".into());
+        }
+        let vp_flags_off = vp_rect_off + u8_at(setup, 49);
+        agree(
+            "setup flags vs ctor flags",
+            vp_flags_off,
+            pass_flags_off - sub_off,
+        )?;
+        agree(
+            "setup proj vs tick proj",
+            vp_rect_off + u8_at(setup, 64),
+            pass_proj_off - sub_off,
+        )?;
+        // The VIEW rows start at the first `MOVUPS XMM3,[RDI+disp8]` after
+        // the projection block.
+        let mut view_in_rect = None;
+        if !inside(setup, 0xC0) {
+            return Err("setup match at module edge".into());
+        }
+        for off in 73..0xB0 {
+            if u8_at(setup, off) == 0x0F
+                && u8_at(setup, off + 1) == 0x10
+                && u8_at(setup, off + 2) == 0x5F
+            {
+                view_in_rect = Some(u8_at(setup, off + 3));
+                break;
+            }
+        }
+        let Some(view_in_rect) = view_in_rect else {
+            return Err("setup view rows not found".into());
+        };
+        agree(
+            "setup view vs tick view",
+            vp_rect_off + view_in_rect,
+            pass_view_off - sub_off,
+        )?;
+
+        // ── 8. The worker: gd write pointer + the setup CALL ──────────────
+        let worker = unique("worker_gd_write")?;
+        agree("worker rect offset", u8_at(worker, 3), vp_rect_off)?;
+        let setup_fn = call_at(worker, 15);
+        let setup_rel = (setup as usize).wrapping_sub(setup_fn as usize);
+        if setup_fn.is_null() || setup_rel >= 0x100 {
+            return Err("worker's setup callee does not contain the setup match".into());
+        }
+        const SETUP_PROLOGUE: &[u8] = &[
+            0x40, 0x53, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC,
+        ];
+        if !inside(setup_fn, SETUP_PROLOGUE.len())
+            || unsafe { std::slice::from_raw_parts(setup_fn, SETUP_PROLOGUE.len()) }
+                != SETUP_PROLOGUE
+        {
+            return Err("worker's setup callee prologue mismatch".into());
+        }
+        let gd_write_off = u32_at(worker, 35) as usize;
+        agree(
+            "worker gd write offsets",
+            u32_at(worker, 52) as usize,
+            gd_write_off,
+        )?;
+
+        // ── 9. The target-list render: flags/target offsets + Clear shape ─
+        let tl = unique("target_list_clear")?;
+        let list_flags_off = u8_at(tl, 2);
+        agree("list flags offsets", u8_at(tl, 48), list_flags_off)?;
+        agree(
+            "list target offset vs attach",
+            u8_at(tl, 19),
+            list_target_off,
+        )?;
+        let clear_tag = u32_at(tl, 101);
+        let clear_record_size = u8_at(tl, 116);
+        if clear_tag & 0xFFFF != 0 || (clear_tag >> 16) as usize != clear_record_size {
+            return Err(format!(
+                "Clear record header 0x{clear_tag:08X} vs size 0x{clear_record_size:X}"
+            ));
+        }
+        if clear_record_size != 0x14 {
+            return Err(format!("Clear record size 0x{clear_record_size:X} != 0x14"));
+        }
+
+        Ok(Scene3dViewportSites {
+            display,
+            render2d_list_off,
+            render3d_list_off,
+            attach,
+            detach,
+            list_flags_off,
+            list_target_off,
+            target_w_off,
+            target_h_off,
+            pass_globals,
+            pass_size,
+            sub_off,
+            pass_vftable,
+            pass_sort_off,
+            pass_filter_off,
+            pass_rect_off,
+            pass_minz_off,
+            pass_maxz_off,
+            pass_name_off,
+            pass_flags_off,
+            pass_proj_off,
+            pass_view_off,
+            pass_self_off,
+            pass_items_off,
+            pass_callbacks_off,
+            vp_rect_off,
+            vp_flags_off,
+            gd_write_off,
+            clear_tag,
+            clear_record_size,
+        })
+    }
+
+    /// Read back the viewport sub-group; `None` unless every name resolved.
+    pub fn scene3d_viewport_sites(&self) -> Option<Scene3dViewportSites> {
+        let a = |n: &str| self.get_address(n);
+        let v = |n: &str| self.published_value(n);
+        Some(Scene3dViewportSites {
+            display: a("scene3d_vp_display")?,
+            render2d_list_off: v("scene3d_vp_render2d_list_off")?,
+            render3d_list_off: v("scene3d_vp_render3d_list_off")?,
+            attach: a("scene3d_vp_attach")?,
+            detach: a("scene3d_vp_detach")?,
+            list_flags_off: v("scene3d_vp_list_flags_off")?,
+            list_target_off: v("scene3d_vp_list_target_off")?,
+            target_w_off: v("scene3d_vp_target_w_off")?,
+            target_h_off: v("scene3d_vp_target_h_off")?,
+            pass_globals: [
+                a("scene3d_vp_pass_distant")?,
+                a("scene3d_vp_pass_opacity")?,
+                a("scene3d_vp_pass_lowprio")?,
+                a("scene3d_vp_pass_trans")?,
+            ],
+            pass_size: v("scene3d_vp_pass_size")?,
+            sub_off: v("scene3d_vp_sub_off")?,
+            pass_vftable: a("scene3d_vp_pass_vftable")?,
+            pass_sort_off: v("scene3d_vp_pass_sort_off")?,
+            pass_filter_off: v("scene3d_vp_pass_filter_off")?,
+            pass_rect_off: v("scene3d_vp_pass_rect_off")?,
+            pass_minz_off: v("scene3d_vp_pass_minz_off")?,
+            pass_maxz_off: v("scene3d_vp_pass_maxz_off")?,
+            pass_name_off: v("scene3d_vp_pass_name_off")?,
+            pass_flags_off: v("scene3d_vp_pass_flags_off")?,
+            pass_proj_off: v("scene3d_vp_pass_proj_off")?,
+            pass_view_off: v("scene3d_vp_pass_view_off")?,
+            pass_self_off: v("scene3d_vp_pass_self_off")?,
+            pass_items_off: v("scene3d_vp_pass_items_off")?,
+            pass_callbacks_off: v("scene3d_vp_pass_callbacks_off")?,
+            vp_rect_off: v("scene3d_vp_vp_rect_off")?,
+            vp_flags_off: v("scene3d_vp_vp_flags_off")?,
+            gd_write_off: v("scene3d_vp_gd_write_off")?,
+            clear_tag: v("scene3d_vp_clear_tag")? as u32,
+            clear_record_size: v("scene3d_vp_clear_record_size")?,
+        })
     }
 
     /// The optional shader-lookup pair's names (raw AOB + published).
@@ -3223,6 +4012,7 @@ impl SignatureStore {
                 _ => None,
             },
             shader_lookup: a("scene3d_shader_lookup"),
+            viewport: self.scene3d_viewport_sites(),
         })
     }
 
@@ -3780,6 +4570,7 @@ impl SignatureStore {
             // `scene3d_sites()` reads it back from the published names.
             texture_lookup: None,
             shader_lookup: None,
+            viewport: None,
         })
     }
 

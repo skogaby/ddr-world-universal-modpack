@@ -172,6 +172,11 @@ def check(reference: Path) -> int:
     #    cross-language marker identity
     for tid, spec in TEMPLATES.items():
         name = f"seop_image_{tid}_TEMPLATE.png"
+        if not (reference / name).exists():
+            # A template with no hand-authored original (added after the
+            # take-over, e.g. the Background Dancers rows) has nothing to
+            # reproduce — nothing to check here.
+            continue
         ref = load(reference / name)
         new = load(gen / name)
         if name in CONTENT_FIXES:

@@ -185,7 +185,11 @@ pub fn marker_rect_for(option_id: &str, color: MarkerColor) -> Option<MarkerRect
 /// whose template is missing/unreadable is skipped with one warn; the other
 /// languages still generate. Returns whether a base image exists (shipped,
 /// pre-existing, or freshly generated) for at least one language.
-pub(super) fn generate_chrome(option_id: &str) -> bool {
+///
+/// `pub(crate)`: the Background Dancers option rows (`background_dancers::
+/// options`) ship template-driven chrome too and call this before their
+/// `register_option` (2026-09-21).
+pub(crate) fn generate_chrome(option_id: &str) -> bool {
     let mut any_ok = false;
     for lang in &OPTION_LANGS {
         let out_path = format!("{}/seop_image_{}.png", preview_dir(lang), option_id);

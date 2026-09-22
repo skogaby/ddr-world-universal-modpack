@@ -207,6 +207,15 @@ impl DanceSchedule {
     }
 }
 
+/// A dance schedule with NO dancers behind it — one pseudo-dancer playing
+/// one non-looping `period_s` clip forever, so a cut lands every
+/// `max(MIN_SEGMENT, period_s − CUT_LEAD)` seconds. Only the cut times are
+/// consumed (the camera event loop of a stage-only preview, design §4.6);
+/// `director::produce` iterates the parsed dancers, of which there are none.
+pub fn synthetic_schedule(period_s: f32) -> Option<DanceSchedule> {
+    DanceSchedule::new(vec![vec![ClipRef::new("synthetic", period_s, false)]])
+}
+
 // ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
@@ -768,5 +777,22 @@ mod tests {
             prev = s;
             t += 1.0 / 60.0;
         }
+    }
+
+    #[test]
+    fn synthetic_schedule_cuts_every_period_minus_lead() {
+        let s = synthetic_schedule(9.0).expect("one pseudo-dancer");
+        assert_eq!(s.dancer_count(), 1);
+        let cuts = s.cut_times(23.0);
+        assert_eq!(cuts.len(), 3);
+        for (c, want) in cuts.iter().zip([7.5f32, 15.0, 22.5]) {
+            assert!((c - want).abs() < 1e-4, "{cuts:?}");
+        }
+        assert_eq!(s.at(0, 8.0).segment, 1);
+        assert_eq!(s.at(0, 8.0).clip, 0);
+        // A degenerate period still yields MIN_SEGMENT segments (no stall).
+        let z = synthetic_schedule(0.0).unwrap();
+        assert_eq!(z.segment_len(0), MIN_SEGMENT);
+        assert_eq!(z.segment_len(7), MIN_SEGMENT);
     }
 }
