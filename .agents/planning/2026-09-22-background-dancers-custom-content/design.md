@@ -73,7 +73,8 @@ stock `startup.arc` lists, so the rows the A3 install used can be copied verbati
 for other keys are ignored). A `.rlist.txt` twin (`key, field, field, …` per line,
 `#` comments) exists for hand authoring. Defaults without a row: dancer `M, A,
 1.0, 0.8` (the modal stock male row, one INFO); stage parts = every
-`data/map/gm_<key>_<part>/gm_<key>_<part>.model` member (no priorities); camera
+`data/map/gm_<key>_<part>/gm_<key>_<part>.model` member (no priorities — the shipped house is `room`
+alone; its A3 `footpanel` dance pad was dropped after cabinet test #2, World shows no pad in normal play); camera
 set = the stage arc's own `*.camanm` member stems if any, else stock camera row 0
 (`boom00`'s `st001_*` set — what the A3 test assigned to `griffin00`).
 

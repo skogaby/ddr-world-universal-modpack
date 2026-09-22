@@ -1192,8 +1192,12 @@ meant repacking `startup.arc` with the rows (`peter00 → [pl, M, A, 1.0, 0.8, 0
 34). On World the DLL is the only reader of those lists, so the rows are optional SIDECARS beside the
 arc — the same three filenames, binary MRL0 or a `.rlist.txt` twin — and the defaults reproduce the A3
 rows without them: dancer `M, A, 1.0, 0.8` (the modal stock male row), stage parts = every
-`gm_<key>_<part>.model` member of the arc (Peter's room: `footpanel`, `room` — no `:N` priorities, so
-both draw in the opaque pass with the default sort), camera set = the arc's own `*.camanm` members if
+`gm_<key>_<part>.model` member of the arc (the shipped living room: `room` alone — no `:N` priority, so
+it draws in the opaque pass with the default sort). The A3 PoC also carried a `footpanel` part, the stock
+`gm_boom00_footpanel` dance pad copied in for the lesson demo — stock World stages carry `footpanel` ONLY on
+the lesson-only `boom00` row 32, never in normal play, so it was dropped from the shipped folder
+(cabinet test #2, 2026-09-22: deleting `gm_griffin00_footpanel/` was the whole fix; parts are derived from
+the folder, the cache arc repacked itself), camera set = the arc's own `*.camanm` members if
 any, else stock camera row 0 (`boom00`'s `st001_*` set — exactly what the A3 test assigned). The `_g`
 arc (`mapset_<key>_g.arc`, the gold-cabinet lesson-demo variant) is ignored: the World mod loads
 `mapset_<key>.arc` only.

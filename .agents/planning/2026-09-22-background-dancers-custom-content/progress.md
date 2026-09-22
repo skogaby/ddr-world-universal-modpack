@@ -1,13 +1,9 @@
 # Progress — Background Dancers: custom dancers & stages from `data_mods/custom_models`
 
-Updated: 2026-09-22 (rev 2)
-Status: IMPLEMENTATION COMPLETE, REVISED after cabinet test #1 (folders instead of arcs; the stage's own
-camera shots); uncommitted — maintainer commits manually. Cabinet test #2 PENDING.
-NEXT ACTION (maintainer): REPLACE the install's `data_mods/custom_models/` with the repo's (the two `.arc`
-files from test #1 are gone — the same models are now FOLDERS + `mapset_griffin00/camera/*.camanm`),
-deploy `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`, launch, check `log.txt` for the lines
-under "Deploy & test log → what to look for", then GRIFFIN HOUSE in the preview and in a song: the camera
-must now stay INSIDE the living room (4 shots of 7.5 s cycling).
+Updated: 2026-09-22 (rev 3)
+Status: DONE — cabinet-validated (tests #2/#3, 2026-09-22); uncommitted — maintainer commits manually.
+NEXT ACTION (maintainer): commit. Follow-ups, if wanted: a `_non` cut-away shot for the house; per-song
+camera sets (`camera_music_*.arc`) as a separate feature.
 
 Resume protocol: read `design.md` (the decisions D1–D10 + module map), then this file. No task files —
 single-session implementation.
@@ -41,7 +37,7 @@ single-session implementation.
   arc's `*.camanm` members first, then `camera/stage_camera.arc` (opened only when needed).
 - Repo content: `data_mods/custom_models/dancers/Peter Griffin/pl_peter00/` (6 files, 10.8 MB
   unpacked) + `data_mods/custom_models/stages/Griffin House/mapset_griffin00/` (`gm_griffin00_room/`,
-  `gm_griffin00_footpanel/`, `camera/griffin_st01..04.camanm`) — the 2026-09-15 A3 PoC arcs UNPACKED
+  `camera/griffin_st01..04.camanm`; the A3 `gm_griffin00_footpanel/` dance pad DROPPED after test #2) — the 2026-09-15 A3 PoC arcs UNPACKED
   (test #1 shipped the `.arc` files; maintainer: no arc packing for users); `.gitignore` keeps the
   `!/data_mods/custom_models/**/*.arc` exception for ready arcs. Ships via `build_release_archive.sh`'s
   wholesale `data_mods/` copy (no script change needed).
@@ -66,12 +62,17 @@ single-session implementation.
 - What to look for in `log.txt` after launch (with the repo's `data_mods/custom_models/` installed):
   0. First boot only: `custom content -- packed ./data_mods/custom_models/dancers/Peter Griffin/pl_peter00 (6 file(s), 10556 KiB) into ./data_mods/_cache/custom_models/pl_peter00-<hash>.arc` (+ the stage, 22 files).
   1. `BackgroundDancers: custom dancer PETER GRIFFIN (peter00) from ./data_mods/custom_models/dancers/Peter Griffin/pl_peter00 -- sex M class A scale 1/0.8 (no sidecar row -- stock male defaults)`
-  2. `BackgroundDancers: custom stage GRIFFIN HOUSE (griffin00) from …/mapset_griffin00 -- 2 part(s) [footpanel, room] (arc members), camera set: 4 name(s) (the arc's own camanm clips)`
+  2. `BackgroundDancers: custom stage GRIFFIN HOUSE (griffin00) from …/mapset_griffin00 -- 1 part(s) [room] (arc members), camera set: 4 name(s) (the arc's own camanm clips)`
   3. `BackgroundDancers: custom content -- 1 dancer(s) + 1 stage(s) from ./data_mods/custom_models, 2 arc(s) mounted`
      then `tables ready -- 35 stage rows (26 distinct stages), 27 dancers, 35 camera rows, 2 custom`.
   Any `custom content -- …` WARN names the folder and the reason. The per-song pick INFO for the house
   should read `cameras=main:4 non:0`.
-- Cabinet test #2: PENDING.
+- **Cabinet test #2 (2026-09-22, folder layout + own camera shots):** PASS — camera inside the living room in
+  the preview and in gameplay, previews "perfect". One remark: the A3 dance pad (`gm_griffin00_footpanel`, the
+  stock lesson-demo `boom00_footpanel` copy) was visible in the room; World's normal play never shows a pad.
+- **Cabinet test #3 (2026-09-22):** deleting `mapset_griffin00/gm_griffin00_footpanel/` from the repo folder
+  (parts derive from the folder ⇒ `1 part(s) [room]`; the cache arc repacked on the fingerprint change) — PASS,
+  maintainer-confirmed. No code change.
 
 ## Deviations & open questions
 
