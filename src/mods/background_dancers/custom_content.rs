@@ -1352,4 +1352,97 @@ mod tests {
         assert_eq!(p.labels[0].1.len(), MAX_LABEL_BYTES);
         assert!(p.warnings.iter().any(|w| w.contains("longer than")));
     }
+
+    /// The two anime dancers shipped 2026-09-22 (`data_mods/custom_models/dancers/
+    /// {Kasane Teto, Hatsune Miku}/`): the add-on's flat export folder + a one-row
+    /// `.rlist.txt` sidecar per friendly-name folder, exactly as on disk — the
+    /// planner must accept both as FEMALE (the `pl_emi00` donor rig), label them
+    /// from the folder names within the SSO budget, and keep the stock rows put.
+    #[test]
+    fn shipped_teto_and_miku_folders() {
+        let body = ArcRole::Body {
+            key: "teto00".into(),
+        };
+        // The flat export layout maps to the member paths the engine keys on.
+        let teto_files = [
+            "pl_teto00.model",
+            "pl_teto00.b2it",
+            "pl_teto00.grp2it",
+            "tt_cloth.dds",
+            "tt_dress.dds",
+            "tt_face.dds",
+            "tt_hair.dds",
+            "tt_skin.dds",
+        ];
+        let teto_members: Vec<String> = teto_files
+            .iter()
+            .map(|f| folder_member_path(&body, "pl_teto00", f))
+            .collect();
+        assert!(body_model_present("teto00", &teto_members));
+        let miku_body = ArcRole::Body {
+            key: "miku00".into(),
+        };
+        let miku_files = [
+            "pl_miku00.model",
+            "pl_miku00.b2it",
+            "pl_miku00.grp2it",
+            "mk_acc.dds",
+            "mk_bdy.dds",
+            "mk_chr.dds",
+            "mk_ehl.dds",
+            "mk_eye.dds",
+        ];
+        let miku_members: Vec<String> = miku_files
+            .iter()
+            .map(|f| folder_member_path(&miku_body, "pl_miku00", f))
+            .collect();
+        assert!(body_model_present("miku00", &miku_members));
+        let dir = |folder: &str, key: &str, members: Vec<String>, row: &str| PackDir {
+            dir: format!("./data_mods/custom_models/dancers/{folder}"),
+            folder: Some(folder.to_string()),
+            arcs: vec![ArcFile {
+                name: format!("pl_{key}.arc"),
+                path: format!("./data_mods/_cache/custom_models/pl_{key}-deadbeef.arc"),
+                source: format!("./data_mods/custom_models/dancers/{folder}/pl_{key}"),
+                members: Some(members),
+            }],
+            chara_rows: parse_text_rlist(row),
+            ..Default::default()
+        };
+        let dirs = [
+            dir(
+                "Hatsune Miku",
+                "miku00",
+                miku_members,
+                "miku00, pl, F, A, 0.9, 0.75, 0.0",
+            ),
+            dir(
+                "Kasane Teto",
+                "teto00",
+                teto_members,
+                "teto00, pl, F, A, 0.9, 0.75, 0.0",
+            ),
+        ];
+        let p = plan(&dirs, &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.dancers.len(), 2);
+        for d in &p.dancers {
+            assert_eq!(d.sex, Sex::Female, "{}", d.key);
+            assert_eq!((d.model_scale, d.shadow_scale), (0.9, 0.75));
+        }
+        assert_eq!(p.dancers[0].key, "miku00");
+        assert_eq!(p.dancers[0].row, 26);
+        assert_eq!(p.dancers[1].key, "teto00");
+        assert_eq!(p.dancers[1].row, 27);
+        assert_eq!(
+            p.labels,
+            vec![
+                ("miku00".to_string(), "HATSUNE MIKU".to_string()),
+                ("teto00".to_string(), "KASANE TETO".to_string()),
+            ]
+        );
+        assert!(p.labels.iter().all(|(_, l)| l.len() <= MAX_LABEL_BYTES));
+        assert_eq!(p.mounts.len(), 2);
+        assert!(p.notes.iter().all(|n| n.contains("(sidecar row)")));
+    }
 }

@@ -148,6 +148,49 @@ diffuse maps). Every step below exists because of a rule of the game's format:
    stock row moved to the end. No face-part arcs are needed (a body without `_face01..03`
    loads fine).
 
+### Anime characters: a Rigify-style GLB and an MMD model (`examples/port_lib.py` + two configs)
+
+The Peter flow above, factored into a reusable module (`port_lib.py`: DDR-rig load, pose-conform
+with a uniform pre-scale, world-space bake incl. evaluated normals, class/position weight retarget,
+palette textures, export + codec checks, sidecar row, Workbench previews) and per-character
+configs of ~150 lines. Both ports (Kasane Teto from a GLB, Project SEKAI Hatsune Miku from an
+mmd_tools FBX, 2026-09-22) ship in `data_mods/custom_models/dancers/` — they are the modpack's
+Background Dancers content, not an A3 startup.arc repack, so no arc packing and no rlist merge:
+the export folder is copied as-is next to a one-row `chara_resources.rlist.txt` sidecar
+(`<key>, pl, F, A, 0.9, 0.75, 0.0` — the SEX must match the donor rig, the modpack picks that sex's
+dance loops + bind offsets). Run either with `SRC`, `OUT_DIR`, `DDR_3D_DATA`, `DDR_3D_RLIST`,
+`TEX_DIR` (+ optional `PREVIEW_ANM`, `PRESCALE`, `MODEL_SCALE`) in the environment.
+
+* **Female characters use `pl_emi00` as the donor** (default in `port_lib.read_env`); its arm
+  joints sit a few cm inward of Rage's — always read the joints from the donor
+  (`load_ddr_rig` returns them), never paste the male table.
+* **Pre-scale `S`** (source units → metres: 0.37 for the ~4.5-unit Teto, 0.08 for MMD's 8 cm
+  units) sets the head and hand size — everything between two DDR joints is stretched to the DDR
+  segment anyway (`conform` scales X/Z by `S` and Y by `target_len / rest_len`). The conform log
+  prints each bone's stretch relative to `S`; torsos come out ~1.2×, limbs 0.75–1.0 on both models.
+* **Teto (`port_character_rigify_glb.py`):** Blender 5.2's glTF importer crashes on a shape-key
+  animation aimed at a mesh without shape keys — `strip_glb_animations` writes an animation-free
+  copy first. Inverted-hull outline shells (`Edge_Col`, half the triangles) are deleted
+  (`delete_faces_by_material`; the modpack draws its own outlines). Untextured flat-colour hair
+  materials become one 2-band palette texture (`palette_texture` — `pack()`ed, or the pixels are
+  lost on save — + `set_face_uvs` to the band centre; glTF `baseColorFactor` is linear, convert
+  with `linear_to_srgb`). The rig has a chest-height torso pivot (`spine.001`) that is the PARENT of
+  the upward `spine` bone — `conform` uses rest data for every direction/length, so parent-before-
+  child processing cannot leak an already-moved neighbour into a stretch factor.
+* **Miku (`port_character_mmd_fbx.py`):** the FBX binds no textures — `examples/pmx_dump.py`
+  reads the PMX material table (texture per material, and flag bit 0 = double-sided; this model
+  is single-sided). Standard MMD names (`上半身/首/頭/肩/腕/ひじ/手首/足/ひざ/足首/足先EX`, `.L/.R`);
+  the twist bones `腕捩`/`手捩` are IN the parent chain (`腕 → 腕捩 → ひじ → 手捩 → 手首`), so the
+  whole chain is placed by arc length on Arm → ForeArm → Hand (`map_chain_arclength`) with the
+  real joints pinned. The trunk has no bone at the DDR Hips point: `下半身`/`腰`/`上半身*` take a
+  linear z-map from the leg joints to the neck (`y_scale` = that map's slope for the identity-
+  rotation pelvis bones). 27 facial shape keys are cleared before the bake; only `UVMap` is kept
+  of the 7 UV layers; mmd_tools rigid-body/joint helpers are deleted. Skirt physics bones map to the
+  `skirt` class (Hips above the hip joints, up to 60 % handed to the nearer thigh down the hem).
+* **Previews:** `preview_renders` (front/¾/back + frames of any `mc_female_*_exec.anm`) is the
+  pre-cabinet check; a `_face`/`_hand`/`_feet` close-up pass caught nothing on these two but is
+  where a wrong UV layer or a dropped texture shows first.
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the
