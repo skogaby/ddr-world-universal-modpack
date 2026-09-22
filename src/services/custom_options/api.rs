@@ -321,8 +321,8 @@ impl PersistMode {
     }
 
     /// Whether the option participates in the offline JSON cache — both the
-    /// write (`json_persisted`) and the boot-time prime (`resolve_from_load`
-    /// with [`LoadSource::JsonPrime`]).
+    /// write (`snapshot_for_json_cache`) and the boot-time prime
+    /// (`resolve_from_load` with [`LoadSource::JsonPrime`]).
     pub fn json_cached(self) -> bool {
         match self {
             PersistMode::Full | PersistMode::Local => true,

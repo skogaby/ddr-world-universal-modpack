@@ -396,24 +396,6 @@ pub fn set_value_silent(option_id: &str, player_side: u8, value: i32) {
     }
 }
 
-/// Whether option `id` participates in the offline JSON cache
-/// ([`PersistMode::json_cached`] — `Full` and `Local`). Consulted by the
-/// persistence service's JSON writer so `SaveOnly`/`None`/`Session` options
-/// never enter `mod-config.json`. Unregistered ids return `false`.
-pub(crate) fn json_persisted(option_id: &str) -> bool {
-    if !is_available() {
-        return false;
-    }
-    let state = match registry::STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    match state.index_of(option_id) {
-        Some(i) => state.options[i].persist.json_cached(),
-        None => false,
-    }
-}
-
 /// Card-in reset: restore every [`PersistMode::Session`] option to its
 /// `default_value` for the carded-in `player_side`, then fire the affected
 /// options' change callbacks (after the lock is released — the
@@ -579,26 +561,33 @@ pub(crate) fn side_for_container(container: *mut u8) -> Option<u8> {
 
 /// Snapshot of the current per-player values for every registered option
 /// that participates in network save ([`PersistMode::saved_to_network`] —
-/// `Full` + `SaveOnly`; `None` and `Session` are excluded). Returned as
-/// `Vec<(id, [p1_value, p2_value])>`. Used by the persistence service at
-/// save time to emit `<mod_{id}>` kbin children.
+/// `Full` + `SaveOnly`; `Local`, `None` and `Session` are excluded). Returned
+/// as `Vec<(id, [p1_value, p2_value])>`. Used by the persistence service at
+/// save time to emit `<mod_{id}>` kbin children, and on load to know which
+/// children to read back.
 pub(crate) fn snapshot_for_save() -> Vec<(String, [i32; 2])> {
     if !is_available() {
         return Vec::new();
     }
-    let state = registry::STATE.lock().unwrap();
-    state
-        .options
-        .iter()
-        .filter(|o| o.persist.saved_to_network())
-        .map(|o| {
-            let vals = match o.save_transform {
-                Some(f) => [f(&o.id, o.values[0]), f(&o.id, o.values[1])],
-                None => o.values,
-            };
-            (o.id.clone(), vals)
-        })
-        .collect()
+    match registry::STATE.lock() {
+        Ok(state) => state.network_save_snapshot(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Snapshot of the current per-player values for every registered option in
+/// the offline JSON cache ([`PersistMode::json_cached`] — `Full` + `Local`),
+/// same shape and post-`save_transform` values as [`snapshot_for_save`].
+/// Used by the persistence service's `mod-config.json` writer. NOT a subset
+/// of [`snapshot_for_save`]: `Local` rows are cache-only.
+pub(crate) fn snapshot_for_json_cache() -> Vec<(String, [i32; 2])> {
+    if !is_available() {
+        return Vec::new();
+    }
+    match registry::STATE.lock() {
+        Ok(state) => state.json_cache_snapshot(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Subscribe to options-modal open events. `cb` fires once per player side

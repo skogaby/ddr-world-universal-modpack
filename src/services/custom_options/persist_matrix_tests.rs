@@ -5,9 +5,11 @@
 //! the row's `default_value` at the card-in profile-load lifecycle point).
 //!
 //! The three persistence choke points in the service facade
-//! (`snapshot_for_save`, `resolve_from_load`, `json_persisted`) consume the
-//! matrix METHODS pinned here — so "Session serializes nothing" is enforced
-//! structurally by these tests, not re-derived per call site.
+//! (`snapshot_for_save` / `snapshot_for_json_cache`, `resolve_from_load`)
+//! consume the matrix METHODS pinned here — so "Session serializes nothing"
+//! is enforced structurally by these tests, not re-derived per call site.
+//! The two snapshots are exercised through the REAL `FrameworkState`
+//! methods the facade calls, not re-implemented filters.
 //!
 //! [`PersistMode::Local`] (Multiplayer Bot Target Score, 2026-09-14): the
 //! cabinet-only mode — JSON cache in both directions, never on the wire. The
@@ -64,9 +66,10 @@ fn persistence_matrix_is_exact() {
     }
 }
 
-/// The save-snapshot filter (`snapshot_for_save` in the facade) includes
-/// exactly the modes with `saved_to_network()` — a Session row with a
-/// non-default value contributes NO wire field.
+/// The network save snapshot (`snapshot_for_save` in the facade →
+/// [`FrameworkState::network_save_snapshot`]) includes exactly the modes with
+/// `saved_to_network()` — a Session / Local row with a non-default value
+/// contributes NO wire field.
 #[test]
 fn save_snapshot_filter_excludes_session_and_none() {
     let mut state = FrameworkState::default();
@@ -80,13 +83,69 @@ fn save_snapshot_filter_excludes_session_and_none() {
         state.try_register(spec(id, mode)).unwrap();
         let _ = state.set_value(id, 0, 500); // non-default everywhere
     }
-    let emitted: Vec<&str> = state
-        .options
-        .iter()
-        .filter(|o| o.persist.saved_to_network())
-        .map(|o| o.id.as_str())
+    let emitted: Vec<String> = state
+        .network_save_snapshot()
+        .into_iter()
+        .map(|(id, _)| id)
         .collect();
     assert_eq!(emitted, vec!["mx_full", "mx_saveonly"]);
+}
+
+/// The JSON-cache snapshot (`snapshot_for_json_cache` →
+/// [`FrameworkState::json_cache_snapshot`]) includes exactly the modes with
+/// `json_cached()` — `Full` AND the cache-only `Local`, with both sides'
+/// current values. Regression (2026-09-22): the writer used to filter the
+/// NETWORK snapshot by `json_cached`, an intersection that is `Full` only, so
+/// no `Local` row (Background Dancer/Stage, the Multiplayer Bot rows) was
+/// ever written to `mod-config.json`.
+#[test]
+fn json_cache_snapshot_includes_local_rows() {
+    let mut state = FrameworkState::default();
+    for (id, mode) in [
+        ("jc_full", PersistMode::Full),
+        ("jc_saveonly", PersistMode::SaveOnly),
+        ("jc_local", PersistMode::Local),
+        ("jc_none", PersistMode::None),
+        ("jc_session", PersistMode::Session),
+    ] {
+        state.try_register(spec(id, mode)).unwrap();
+        let _ = state.set_value(id, 0, 500);
+        let _ = state.set_value(id, 1, 250);
+    }
+    let cached = state.json_cache_snapshot();
+    assert_eq!(
+        cached,
+        vec![
+            ("jc_full".to_string(), [500, 250]),
+            ("jc_local".to_string(), [500, 250]),
+        ]
+    );
+    // Local is cache-only: never in the network snapshot.
+    assert!(state
+        .network_save_snapshot()
+        .iter()
+        .all(|(id, _)| id != "jc_local"));
+}
+
+/// Both snapshots carry the post-`save_transform` wire value — the one the
+/// JSON prime's `load_transform` inverts — for `Local` rows too.
+#[test]
+fn json_cache_snapshot_applies_save_transform() {
+    fn plus_one(_id: &str, v: i32) -> i32 {
+        v + 1
+    }
+    fn minus_one(_id: &str, v: i32) -> i32 {
+        v - 1
+    }
+    let mut state = FrameworkState::default();
+    state
+        .try_register(spec("tx_local", PersistMode::Local).persist_transform(plus_one, minus_one))
+        .unwrap();
+    let _ = state.set_value("tx_local", 0, 200);
+    assert_eq!(
+        state.json_cache_snapshot(),
+        vec![("tx_local".to_string(), [201, 101])]
+    );
 }
 
 /// The load-side gate (`resolve_from_load` in the facade) admits only
@@ -272,12 +331,11 @@ fn local_rows_accept_json_prime_but_not_network_loads() {
         "Full still primed"
     );
 
-    // The JSON writer's filter (`json_persisted`) includes Local.
-    let cached: Vec<&str> = state
-        .options
-        .iter()
-        .filter(|o| o.persist.json_cached())
-        .map(|o| o.id.as_str())
+    // The JSON writer's snapshot (`json_cache_snapshot`) includes Local.
+    let cached: Vec<String> = state
+        .json_cache_snapshot()
+        .into_iter()
+        .map(|(id, _)| id)
         .collect();
     assert_eq!(cached, vec!["lo_local", "lo_full"]);
 }

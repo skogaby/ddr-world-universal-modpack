@@ -1048,7 +1048,8 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
         }
     }
 
-    // Snapshot registered options once; shared by both persistence paths.
+    // Network-save snapshot (`Full` + `SaveOnly`). The JSON cache below takes
+    // its own snapshot: it includes the cache-only `Local` rows this omits.
     let snapshot = custom_options::snapshot_for_save();
 
     // ── Per-song judgement-offset leak fix (belt-and-braces layer) ──────────
@@ -1082,7 +1083,7 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
 
     // ── Offline JSON persistence: write this side's values to mod-config.json ─
     if PERSIST_JSON.load(Ordering::SeqCst) {
-        write_json_cache(&snapshot, side);
+        write_json_cache(side);
     }
 
     result
@@ -1090,17 +1091,15 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
 
 /// Persist the current side's option values to the `custom_options.{p1,p2}`
 /// block in `mod-config.json` (the offline persistence path). Stores the same
-/// post-`save_transform` wire values the network path emits, filtered to the
-/// options whose `PersistMode` includes the JSON cache (`Full` — `SaveOnly`
-/// options ride the network save only and never enter the offline cache).
-/// Dirty-checked and per-side inside `config::save_custom_options_values`.
-fn write_json_cache(snapshot: &[(String, [i32; 2])], side: u8) {
+/// post-`save_transform` wire values the network path emits, for every option
+/// whose `PersistMode` includes the JSON cache (`Full` and the cache-only
+/// `Local`; `SaveOnly` options ride the network save only and never enter the
+/// offline cache). Dirty-checked and per-side inside
+/// `config::save_custom_options_values`.
+fn write_json_cache(side: u8) {
     let mut values = serde_json::Map::new();
-    for (id, vals) in snapshot {
-        if !custom_options::json_persisted(id) {
-            continue;
-        }
-        values.insert(id.clone(), serde_json::json!(vals[side as usize]));
+    for (id, vals) in custom_options::snapshot_for_json_cache() {
+        values.insert(id, serde_json::json!(vals[side as usize]));
     }
     let count = values.len();
     let wrote = config::save_custom_options_values(side, serde_json::Value::Object(values));

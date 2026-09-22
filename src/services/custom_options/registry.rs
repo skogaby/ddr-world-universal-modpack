@@ -370,6 +370,40 @@ impl FrameworkState {
             .map(|i| self.options[i].values[side as usize])
     }
 
+    /// Both sides' post-`save_transform` values of every option that emits a
+    /// `<mod_{id}>` wire field ([`PersistMode::saved_to_network`] — `Full` +
+    /// `SaveOnly`), in registration order.
+    pub(crate) fn network_save_snapshot(&self) -> Vec<(String, [i32; 2])> {
+        self.persisted_snapshot(PersistMode::saved_to_network)
+    }
+
+    /// Both sides' post-`save_transform` values of every option in the
+    /// offline JSON cache ([`PersistMode::json_cached`] — `Full` + `Local`),
+    /// in registration order. The SAME wire values the network path emits,
+    /// so both load paths share one `load_transform`.
+    ///
+    /// Deliberately NOT a filter over [`Self::network_save_snapshot`]:
+    /// `Local` rows are absent from the network set, so filtering it by
+    /// `json_cached` would keep `Full` only (the pre-2026-09-22 JSON writer
+    /// did exactly that and never wrote a `Local` row).
+    pub(crate) fn json_cache_snapshot(&self) -> Vec<(String, [i32; 2])> {
+        self.persisted_snapshot(PersistMode::json_cached)
+    }
+
+    fn persisted_snapshot(&self, include: fn(PersistMode) -> bool) -> Vec<(String, [i32; 2])> {
+        self.options
+            .iter()
+            .filter(|o| include(o.persist))
+            .map(|o| {
+                let vals = match o.save_transform {
+                    Some(f) => [f(&o.id, o.values[0]), f(&o.id, o.values[1])],
+                    None => o.values,
+                };
+                (o.id.clone(), vals)
+            })
+            .collect()
+    }
+
     /// Whether an option's [`ShowWhen`] predicate is currently satisfied for
     /// `side`. Out-of-range handles and unknown parents are fail-open
     /// (visible). Shared by the in-game rows (scroll-mask filtering) and the
