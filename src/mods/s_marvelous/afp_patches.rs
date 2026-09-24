@@ -125,6 +125,11 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     if !PATCH_READY.load(Ordering::Acquire) {
         return None; // disabled/unstaged — stock, no warn (normal state)
     }
+    // A DDR SELECTION legacy judgement package exports the same name; it is
+    // not the staged template — stream it untouched, no variant WARN.
+    if crate::mods::ddr_selection::legacy_package("dance_judge") {
+        return None;
+    }
     let guard = STAGED.lock().ok()?;
     let Some(staged) = guard.as_ref() else {
         warn_once(

@@ -5,11 +5,16 @@
     mesh's own +0x1C slice and copies header.palette_count x 52 slots), and every vertex
     still resolves to the intended GLOBAL bone after re-parsing
   * a rig that fits in 52 bones keeps the stock single-table layout (header palette_count 1)
+  * a stage-screen quad (image named `offscreen1`) exports the KTMDL texture name `offscreen1`
+    and an 8x8 `offscreen1.dds` placeholder instead of the image pixels (Background Movies =
+    STAGE SCREENS — the game binds its movie render target by that name)
 """
 import math
 import os
+import shutil
 import struct
 import sys
+import tempfile
 
 import bpy
 
@@ -119,6 +124,58 @@ for n_bones, expect_multi in ((64, True), (40, False)):
           "all triangles kept across the split")
     # re-serialise through model_to_spec: multi-palette files must round-trip byte-identically too
     check(K.write_model(K.model_to_spec(model)) == data, "writer round-trip byte-identical")
+
+
+def build_screen_quad(image_name):
+    """A static 1x1 m quad (no armature) with a white colour attribute and a material whose Image
+    Texture node shows a 64x32 image called `image_name`."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    me = bpy.data.meshes.new("Screen")
+    me.from_pydata([(-0.5, 0.0, 0.0), (0.5, 0.0, 0.0), (0.5, 0.0, 1.0), (-0.5, 0.0, 1.0)], [],
+                   [(0, 1, 2), (0, 2, 3)])
+    me.validate()
+    me.uv_layers.new(name="UVMap")
+    col = me.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+    for d in col.data:
+        d.color_srgb = (1.0, 1.0, 1.0, 1.0)
+    obj = bpy.data.objects.new("gm_test00_screen", me)
+    bpy.context.collection.objects.link(obj)
+    img = bpy.data.images.new(image_name, width=64, height=32)
+    img.pixels = [0.2, 0.4, 0.8, 1.0] * (64 * 32)
+    mat = bpy.data.materials.new("screen")
+    mat.use_nodes = True
+    node = mat.node_tree.nodes.new("ShaderNodeTexImage")
+    node.image = img
+    me.materials.append(mat)
+    bpy.context.view_layer.update()
+    return obj
+
+
+def dds_dims(path):
+    with open(path, "rb") as f:
+        head = f.read(20)
+    if head[:4] != b"DDS ":
+        return None
+    height, width = struct.unpack_from("<II", head, 12)
+    return width, height
+
+
+for image_name in ("offscreen1", "OffScreen_1.001"):
+    print("== stage-screen quad (image %r)" % image_name)
+    obj = build_screen_quad(image_name)
+    out = tempfile.mkdtemp(prefix="ddr_screen_")
+    path = os.path.join(out, "gm_test00_screen.model")
+    written, spec = export_model.export_model(path, None, [obj], write_textures=True)
+    model = K.parse_model(open(path, "rb").read())
+    names = [t["name"] for t in model["texnames"]]
+    check(names == ["offscreen1"], "KTMDL texture name %s" % names)
+    placeholder = os.path.join(out, "offscreen1.dds")
+    check(placeholder in written and os.path.exists(placeholder), "offscreen1.dds written (%s)" %
+          sorted(os.path.basename(w) for w in written))
+    check(dds_dims(placeholder) == (8, 8), "placeholder DDS is 8x8 (%s)" % (dds_dims(placeholder),))
+    others = [w for w in written if w.lower().endswith(".dds") and w != placeholder]
+    check(not others, "no other DDS written (%s)" % [os.path.basename(w) for w in others])
+    shutil.rmtree(out, ignore_errors=True)
 
 if failures:
     print("FAILED: %d check(s)" % len(failures))

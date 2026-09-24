@@ -189,20 +189,82 @@ impl RenderItem {
         (idx, flags)
     }
 
+    /// Per material copy: whether it samples the resource texture-table
+    /// entry hashed `texture_hash` through any masked slot
+    /// (`layout::materials_sampling`).
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn materials_sampling(&self, texture_hash: u32) -> Vec<bool> {
+        let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS));
+        let res = memory::read_ptr(self.ptr.add(layout::ITEM_RES));
+        if mats.is_null() {
+            return vec![false; self.counts.materials];
+        }
+        layout::materials_sampling(
+            &material_slot_indices(mats, self.counts.materials),
+            &tex_table_hashes(res),
+            texture_hash,
+        )
+    }
+
+    /// The `(width, height, gs hash)` of the `TextureData` the first
+    /// material sampling `texture_hash` binds (the pointer the draw reads,
+    /// `mat + mat_tex_ptr(slot)`), or `None` when no material samples it or
+    /// the bound texture is unreadable. Diagnostic: 1280 × 1280 (or the
+    /// Custom Resolution square) = the stage-screen render target, not a
+    /// shipped placeholder DDS.
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn sampled_texture_info(&self, texture_hash: u32) -> Option<(u16, u16, u32)> {
+        let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS));
+        let res = memory::read_ptr(self.ptr.add(layout::ITEM_RES));
+        if mats.is_null() {
+            return None;
+        }
+        let hashes = tex_table_hashes(res);
+        for m in 0..self.counts.materials {
+            let mat = mats.add(m * layout::MATERIAL_SIZE);
+            let mask = memory::read_u32(mat.add(layout::MAT_TEX_MASK));
+            for slot in 0..layout::MAT_TEX_SLOTS {
+                if mask & (1u32 << slot) == 0 {
+                    continue;
+                }
+                let idx =
+                    (mat.add(layout::mat_tex_index(slot)) as *const u16).read_unaligned() as usize;
+                if hashes.get(idx) != Some(&texture_hash) {
+                    continue;
+                }
+                let td = memory::read_ptr(mat.add(layout::mat_tex_ptr(slot)));
+                if !memory::is_readable(td, layout::TEXDATA_H + 2) {
+                    return None;
+                }
+                return Some((
+                    (td.add(layout::TEXDATA_W) as *const u16).read_unaligned(),
+                    (td.add(layout::TEXDATA_H) as *const u16).read_unaligned(),
+                    memory::read_u32(td.add(layout::TEXDATA_HASH)),
+                ));
+            }
+        }
+        None
+    }
+
     /// Whole-scene restyle (RE §4.7): re-point eligible PRIVATE material
     /// copies at style-variant shader objects. `variant_for(stock_hash)`
     /// returns the replacement `gs::Shader*` for a material whose current
     /// object hashes to `stock_hash` (`None` = leave stock). Eligibility =
     /// `layout::restyle_eligible_materials` (every record using the material
-    /// opaque/alpha-tested, and the instance allows it). Returns
-    /// `(restyled, kept_stock_blend, kept_stock_no_variant)`; the per-record
-    /// `restyled` mask is what a HULL twin needs to hide the records whose
-    /// material stayed stock (their program 0 would be the body again).
+    /// opaque/alpha-tested, and the instance allows it) and the material does
+    /// not sample `keep_stock_texture` (`layout::materials_sampling` — the
+    /// `offscreen1` stage screens stay unlit in every style). Returns the
+    /// counts; the per-record `restyled` mask is what a HULL twin needs to
+    /// hide the records whose material stayed stock (their program 0 would
+    /// be the body again) — so a kept screen gets no outline either.
     /// # Safety
     /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
     pub unsafe fn restyle_materials(
         &self,
         instance_allows: bool,
+        keep_stock_texture: u32,
         variant_for: &dyn Fn(u32) -> Option<*mut u8>,
     ) -> RestyleStats {
         let mut st = RestyleStats::default();
@@ -217,11 +279,16 @@ impl RenderItem {
             &rec_flags,
             instance_allows,
         );
+        let screens = self.materials_sampling(keep_stock_texture);
         let mut restyled_mat = vec![false; self.counts.materials];
         for (mi, ok) in eligible.iter().enumerate() {
             let mat = mats.add(mi * layout::MATERIAL_SIZE);
             let obj_slot = mat.add(layout::MAT_SHADER_OBJ);
             let obj = memory::read_ptr(obj_slot);
+            if screens.get(mi).copied().unwrap_or(false) {
+                st.kept_screen += 1;
+                continue;
+            }
             if !*ok {
                 st.kept_blend += 1;
                 continue;
@@ -531,6 +598,9 @@ pub struct RestyleStats {
     pub kept_blend: usize,
     /// Materials kept stock because no variant object exists for their shader.
     pub kept_no_variant: usize,
+    /// Materials kept stock because they sample the kept texture (the
+    /// `offscreen1` stage screens) — counted before the blend rule.
+    pub kept_screen: usize,
     /// Per draw record: its material was restyled.
     pub record_restyled: Vec<bool>,
 }
@@ -563,17 +633,12 @@ pub unsafe fn retry_texture_resolve(item: *mut u8, material_count: usize) -> Tex
 pub fn texture_readiness(res: &ResourceView) -> TextureStats {
     let mut stats = TextureStats::default();
     let res = res.ptr();
-    // SAFETY: `ResourceView::new` probed the header; the table is probed below.
+    // SAFETY: `ResourceView::new` probed the header; the table is probed by
+    // `tex_table`.
     unsafe {
-        if !memory::is_readable(res, layout::RES_TEX_TABLE + 8) {
+        let Some((table, count)) = tex_table(res) else {
             return stats;
-        }
-        let count = memory::read_u32(res.add(layout::RES_TEX_COUNT)) as usize;
-        let table = memory::read_ptr(res.add(layout::RES_TEX_TABLE));
-        if count == 0 || count > 256 || !memory::is_readable(table, count * layout::TEX_ENTRY_SIZE)
-        {
-            return stats;
-        }
+        };
         stats.total = count;
         let default_tex = texture::default_texture();
         for i in 0..count {
@@ -607,6 +672,53 @@ unsafe fn pointee_hash(p: *const u8, default_tex: Option<*const u8>) -> Option<u
     }
 }
 
+/// The resource's texture table and entry count, probed (`None` when the
+/// header or the table is unreadable, or the count is implausible).
+///
+/// # Safety
+/// Any pointer is acceptable (probed).
+unsafe fn tex_table(res: *const u8) -> Option<(*const u8, usize)> {
+    if !memory::is_readable(res, layout::RES_TEX_TABLE + 8) {
+        return None;
+    }
+    let count = memory::read_u32(res.add(layout::RES_TEX_COUNT)) as usize;
+    let table = memory::read_ptr(res.add(layout::RES_TEX_TABLE));
+    if count == 0 || count > 256 || !memory::is_readable(table, count * layout::TEX_ENTRY_SIZE) {
+        return None;
+    }
+    Some((table, count))
+}
+
+/// The texture table's entry hashes (empty when unreadable).
+///
+/// # Safety
+/// Any pointer is acceptable (probed).
+unsafe fn tex_table_hashes(res: *const u8) -> Vec<u32> {
+    let Some((table, count)) = tex_table(res) else {
+        return Vec::new();
+    };
+    (0..count)
+        .map(|i| memory::read_u32(table.add(i * layout::TEX_ENTRY_SIZE + layout::TEX_ENTRY_HASH)))
+        .collect()
+}
+
+/// Per material copy: the table indices of its MASKED texture slots.
+///
+/// # Safety
+/// `mats` is our material block with `material_count` materials.
+unsafe fn material_slot_indices(mats: *const u8, material_count: usize) -> Vec<Vec<u16>> {
+    (0..material_count)
+        .map(|m| {
+            let mat = mats.add(m * layout::MATERIAL_SIZE);
+            let mask = memory::read_u32(mat.add(layout::MAT_TEX_MASK));
+            (0..layout::MAT_TEX_SLOTS)
+                .filter(|slot| mask & (1u32 << slot) != 0)
+                .map(|slot| (mat.add(layout::mat_tex_index(slot)) as *const u16).read_unaligned())
+                .collect()
+        })
+        .collect()
+}
+
 /// Walk the resource's texture table, re-resolve the entries the converter
 /// left on the default texture (or on nothing), and rewrite every masked
 /// slot of every material COPY from the corrected table. Never writes into
@@ -623,14 +735,9 @@ unsafe fn resolve_material_textures(
     lookup_available: bool,
 ) -> TextureStats {
     let mut stats = TextureStats::default();
-    if !memory::is_readable(res, layout::RES_TEX_TABLE + 8) {
+    let Some((table, count)) = tex_table(res) else {
         return stats;
-    }
-    let count = memory::read_u32(res.add(layout::RES_TEX_COUNT)) as usize;
-    let table = memory::read_ptr(res.add(layout::RES_TEX_TABLE));
-    if count == 0 || count > 256 || !memory::is_readable(table, count * layout::TEX_ENTRY_SIZE) {
-        return stats;
-    }
+    };
     stats.total = count;
     let default_tex = texture::default_texture();
     // Corrected table: what each material slot should point at.

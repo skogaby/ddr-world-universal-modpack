@@ -29,7 +29,9 @@ use crate::services::scene3d::frame_board::{self, NO_SLOT};
 use crate::services::scene3d::render_item_layout::{
     scale_translation, IDENTITY, PASS_MASK_DANCER, PASS_MASK_LOWPRIO, PASS_MASK_STAGE,
 };
-use crate::services::scene3d::{arc_set, model_registry, node, render_item, scene_graph, texture};
+use crate::services::scene3d::{
+    arc_set, model_registry, node, pure, render_item, scene_graph, texture,
+};
 use crate::{log_info, log_warn};
 
 use super::director_math::{
@@ -972,6 +974,40 @@ fn build_one(
     };
     let ts = item.textures;
     let tex = item.bone_textures();
+    // Stage screens (Background Movies = STAGE SCREENS, research §8): a
+    // material sampling `offscreen1` — the movie render target — keeps its
+    // stock unlit shader in every style and gets no outline (the hull twin
+    // hides records whose material stayed stock).
+    let screen_hash = pure::fnv1_name_hash(super::movie_mode::SCREEN_TEXTURE_STEM);
+    if !matches!(inst.kind, InstanceKind::Hull { .. }) {
+        // SAFETY: our own fresh block, not yet attached.
+        let screens = unsafe { item.materials_sampling(screen_hash) };
+        let n = screens.iter().filter(|b| **b).count();
+        if n > 0 {
+            // SAFETY: as above (the bound TextureData is probed).
+            let info = unsafe { item.sampled_texture_info(screen_hash) };
+            log_info!(
+                "BackgroundDancers: {} [{}] {} screen material(s) sample 'offscreen1' -- kept stock (unlit, no outline); bound texture {}",
+                inst.model_name,
+                inst.kind.tag(),
+                n,
+                match info {
+                    Some((w, h, hash)) => format!(
+                        "{}x{} hash 0x{:08X}{}",
+                        w,
+                        h,
+                        hash,
+                        if hash == screen_hash {
+                            ""
+                        } else {
+                            " (NOT the offscreen1 key)"
+                        }
+                    ),
+                    None => "unreadable".to_string(),
+                }
+            );
+        }
+    }
     // Whole-scene restyle (RE §4.7): re-point eligible material copies at the
     // `<name>_<style>` variant objects. Hull twins ALWAYS restyle (their
     // program 0 is the outline pair) and then hide every record whose
@@ -984,7 +1020,7 @@ fn build_one(
             texture::lookup_shader(shader_layout::fnv1_32(&name))
         };
         // SAFETY: our own fresh block, not yet attached.
-        let st = unsafe { item.restyle_materials(true, &variant_for) };
+        let st = unsafe { item.restyle_materials(true, screen_hash, &variant_for) };
         if let InstanceKind::Hull { layer, .. } = inst.kind {
             // Per-kind rim width (the hull VS reads ModelParameters.w): the
             // twin's model_name is the body's, so a `gm_` prefix = stage prop.
@@ -1017,7 +1053,7 @@ fn build_one(
                 item.mark_hull_records(&st.record_restyled)
             };
             log_info!(
-                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {:.2} px; materials restyled={} kept: blend={} no-variant={}",
+                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {:.2} px; materials restyled={} kept: blend={} no-variant={} screen={}",
                 inst.model_name,
                 layer,
                 outline::hex(spec.rgba),
@@ -1026,17 +1062,19 @@ fn build_one(
                 px,
                 st.restyled,
                 st.kept_blend,
-                st.kept_no_variant
+                st.kept_no_variant,
+                st.kept_screen
             );
         } else {
             log_info!(
-                "BackgroundDancers: {} [{}] style {} -- materials restyled={} kept: blend={} no-variant={}",
+                "BackgroundDancers: {} [{}] style {} -- materials restyled={} kept: blend={} no-variant={} screen={}",
                 inst.model_name,
                 inst.kind.tag(),
                 style.key(),
                 st.restyled,
                 st.kept_blend,
-                st.kept_no_variant
+                st.kept_no_variant,
+                st.kept_screen
             );
         }
     } else if matches!(inst.kind, InstanceKind::Hull { .. }) {

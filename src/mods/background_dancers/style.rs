@@ -65,7 +65,7 @@ static LIVE_STOP_SLOW: AtomicBool = AtomicBool::new(true);
 static LIVE_CUSTOM_CONTENT: AtomicBool = AtomicBool::new(true);
 /// BACKGROUND MOVIES (`MovieMode::row_value`) — read by the song window at
 /// its entry (next-song knob).
-static LIVE_MOVIE_MODE: AtomicU8 = AtomicU8::new(1); // MovieMode::Thumbnail
+static LIVE_MOVIE_MODE: AtomicU8 = AtomicU8::new(3); // MovieMode::DEFAULT (StageScreens)
 /// Outline rim widths (f32 bits): dancers / stage props.
 static LIVE_PX_DANCER: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0
 static LIVE_PX_STAGE: AtomicU32 = AtomicU32::new(0x3FC0_0000); // 1.5
@@ -249,8 +249,9 @@ pub fn init_from_config() {
         None => MovieMode::DEFAULT,
         Some(s) => MovieMode::parse(s).unwrap_or_else(|| {
             log_warn!(
-                "BackgroundDancers: background_dancers.movie_mode = '{}' is not off/thumbnail/fullscreen -- using {}",
+                "BackgroundDancers: background_dancers.movie_mode = '{}' is not {} -- using {}",
                 s,
+                MovieMode::keys_list(),
                 MovieMode::DEFAULT.key()
             );
             MovieMode::DEFAULT
@@ -528,7 +529,7 @@ fn register_rows(
     register_enum_row(EnumRowSpec {
         key: ROW_KEY_MOVIE_MODE.to_string(),
         label: "Background Movies".to_string(),
-        hint: "Songs with a movie: OFF hides it; THUMBNAIL plays it in a small window over the stage; FULLSCREEN plays it behind the dancers in place of the stage (DDR 5th Mix style). Next song.".to_string(),
+        hint: "Movie songs: OFF hides it; THUMBNAIL: small window; STAGE SCREENS: on the stage's screens; FULLSCREEN: behind the dancers; MOVIE ONLY: no 3D scene.".to_string(),
         parent_row_key: Some(MOD_ID.to_string()),
         values: MovieMode::ALL.iter().map(|m| m.row_value()).collect(),
         labels: MovieMode::ALL.iter().map(|m| m.label().to_string()).collect(),

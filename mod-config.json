@@ -163,6 +163,11 @@
         "in_game": true
       },
       {
+        "id": "ddr_selection",
+        "overlay": true,
+        "in_game": true
+      },
+      {
         "id": "background_dancer",
         "overlay": false,
         "in_game": true
@@ -395,5 +400,8 @@
     "outlines": true,
     "stop_slow": false,
     "style": "cel"
+  },
+  "ddr_selection": {
+    "era_cutin": true
   }
 }

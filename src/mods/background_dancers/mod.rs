@@ -45,10 +45,11 @@
 //! next song) decides what a song with a background movie does, for every
 //! entered player whose VIDEO SIZE shows one: OFF (VIDEO SIZE OFF for the
 //! song + the shared BuildGraph suppressor; the stage as usual), THUMBNAIL
-//! (the default and the original behaviour: the movie's small window over
-//! the stage) or FULLSCREEN (NO STAGE) — the DDR 5th Mix look. The game
+//! (the original behaviour: the movie's small window over the stage), STAGE
+//! SCREENS (the default since 2026-09-23 — below), FULLSCREEN (NO STAGE) —
+//! the DDR 5th Mix look — or MOVIE ONLY (NO DANCERS). The game
 //! already draws a fullscreen movie into the 3D target ahead of the model
-//! passes, so the last mode only has to leave the movie fullscreen and not
+//! passes, so FULLSCREEN only has to leave the movie fullscreen and not
 //! draw the stage: [`movie_backdrop`] probes the live DancePlaySequence's
 //! MovieActor every frame, and while its movie really plays the stage parts
 //! and floor shadows are published hidden and the camera director films the
@@ -57,6 +58,14 @@
 //! `scripts/gen_movie_cameras.py` — close, front-facing shots; `_1p` / `_2p`
 //! variants per dancer count) instead of the stage's own cameras. RE:
 //! `docs/background_dancers_research.md` §7.
+//!
+//! STAGE SCREENS (2026-09-23, RE §8) is DDR A3's look: on a stage with video
+//! screens (a material textured `offscreen1` — the ten stock monitor /
+//! replicant stages and any custom stage exported with the convention) the
+//! movie plays ON the screens: [`screen_route`] rewrites the MovieActor's
+//! layer choice from entry 9 to entry 10 (the OFFSCREEN1 render target the
+//! screens sample) for the song and frames the movie with A3's contain fit;
+//! a stage without screens plays the song as THUMBNAIL.
 //!
 //! ## Player choice (2026-09-21)
 //!
@@ -109,6 +118,7 @@ pub mod pick;
 pub mod preview;
 pub mod scene_window;
 pub mod schedule;
+pub mod screen_route;
 pub mod selection;
 pub mod session;
 pub mod style;
@@ -169,6 +179,9 @@ impl Mod for BackgroundDancersMod {
         // behind Background Movies = FULLSCREEN (fail-open without them).
         let _ = movie_size::init(ctx.signatures);
         let _ = movie_backdrop::init(ctx.signatures);
+        // Optional: Background Movies = STAGE SCREENS (the layer-select
+        // byte + the MovieActor fit fields; THUMBNAIL without them).
+        let _ = screen_route::init(ctx.signatures);
         scene3d::is_available()
     }
 
@@ -216,6 +229,9 @@ impl Mod for BackgroundDancersMod {
                     return;
                 }
                 background_hide::on_frame();
+                // STAGE SCREENS fit writer — independent of the scene build
+                // (the fit must land before the movie starts playing).
+                screen_route::on_frame();
                 lifecycle::on_frame();
                 preview::on_frame();
                 viewport_smoke::on_frame();

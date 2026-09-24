@@ -267,6 +267,11 @@ LABELS = {
         "ja": '背景ステージ',
         "ko": '배경 스테이지',
     },
+    "ddr_selection": {
+        "en": 'DDR SELECTION',
+        "ja": 'DDR SELECTION',
+        "ko": 'DDR SELECTION',
+    },
 }
 
 # ── Group-heading labels (seop_item_header_*) ────────────────────────────
@@ -621,6 +626,28 @@ PREVIEWS = [
                 '컴퓨터 상대의 실력을 설정합니다.',
                 'Level 1: 실패할 수도 있는 초보자. Level 10: MARVELOUS FULL COMBO를 노리는 상급자.',
                 'TARGET SCORE: 페이스메이커 타깃의 고스트를 한 스텝씩 재현합니다.',
+            ],
+        },
+    ),
+    PreviewSpec(
+        'ddr_selection',
+        None,
+        WIDE,
+        {
+            "en": [
+                'Plays songs with the gameplay screen of a classic DDR era.',
+                'AUTO: each song uses the look of the DDR version it first appeared in. '
+                'Picking an era applies that look to every song.',
+            ],
+            "ja": [
+                'ゲーム画面を過去のDDRシリーズの見た目でプレイします。',
+                'AUTO: 曲ごとに初収録バージョンの見た目になります。'
+                'バージョンを選ぶと全曲に適用されます。',
+            ],
+            "ko": [
+                '게임 화면을 예전 DDR 시리즈의 모습으로 플레이합니다.',
+                'AUTO: 곡마다 처음 수록된 버전의 모습이 됩니다. '
+                '버전을 선택하면 모든 곡에 적용됩니다.',
             ],
         },
     ),

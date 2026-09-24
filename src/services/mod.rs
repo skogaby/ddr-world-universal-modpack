@@ -147,6 +147,7 @@ pub mod score_guard;
 pub mod se_bank_synth;
 pub mod selectmusic_highlight;
 pub mod series_filter_scroll;
+pub mod shutter;
 pub mod smx;
 pub mod song_rate;
 pub mod song_reset;

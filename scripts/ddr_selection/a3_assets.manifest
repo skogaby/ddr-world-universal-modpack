@@ -1,0 +1,102 @@
+# DDR SELECTION — DDR A3 files the feature reads (paths relative to the
+# install's data/ dir; no Konami bytes live in this repo).
+#
+# Consumed by import_a3_assets.sh / import_a3_assets.bat, which copy files
+# from an A3 install into <World>/data_mods/ddr_selection_a3/<path>:
+#   always   copied on every run — World's copy is known bad
+#            (dance_combo0005_v0.arc decompresses to all zeros).
+#   missing  copied only when the World install has no copy (a stock World
+#            install ships all of them, byte-identical or a superset).
+# The `_sel` background movies are not listed: DirectShow opens movies
+# directly, so a data_mods copy would never be seen.
+
+missing arc/banner/banner_sn2_alth.arc
+missing arc/banner/banner_sn2_arra.arc
+missing arc/banner/banner_sn2_cach.arc
+missing arc/banner/banner_sn2_chao.arc
+missing arc/banner/banner_sn2_fasc.arc
+missing arc/banner/banner_sn2_flow2.arc
+missing arc/banner/banner_sn2_fway.arc
+missing arc/banner/banner_sn2_gate.arc
+missing arc/banner/banner_sn2_hana.arc
+missing arc/banner/banner_sn2_plur.arc
+missing arc/banner/banner_sn2_sunk.arc
+missing arc/banner/banner_sn2_vemb.arc
+missing arc/bm2d/common_choice0001_v0.arc
+missing arc/bm2d/common_choice0002_v0.arc
+missing arc/bm2d/common_choice0003_v0.arc
+missing arc/bm2d/common_choice0004_v0.arc
+missing arc/bm2d/common_choice0005_v0.arc
+missing arc/bm2d/common_choice_cutin0001_v0.arc
+missing arc/bm2d/common_choice_cutin0002_v0.arc
+missing arc/bm2d/common_choice_cutin0003_v0.arc
+missing arc/bm2d/common_choice_cutin0004_v0.arc
+missing arc/bm2d/common_choice_cutin0005_v0.arc
+missing arc/bm2d/common_choice_cutinbg_v0.arc
+missing arc/bm2d/common_choice_v2.arc
+missing arc/bm2d/common_shutter0001_v0.arc
+missing arc/bm2d/common_shutter0002_v0.arc
+missing arc/bm2d/common_shutter0003_v0.arc
+missing arc/bm2d/common_shutter0004_v0.arc
+missing arc/bm2d/common_shutter0005_v0.arc
+missing arc/bm2d/common_shutter_v2.arc
+missing arc/bm2d/dance_combo0001_v0.arc
+missing arc/bm2d/dance_combo0002_v0.arc
+missing arc/bm2d/dance_combo0003_v0.arc
+missing arc/bm2d/dance_combo0004_v0.arc
+always arc/bm2d/dance_combo0005_v0.arc
+missing arc/bm2d/dance_common0000_v2.arc
+missing arc/bm2d/dance_common0002_v0.arc
+missing arc/bm2d/dance_common0003_v0.arc
+missing arc/bm2d/dance_common0004_v0.arc
+missing arc/bm2d/dance_common0005_v0.arc
+missing arc/bm2d/dance_danger0001_v0.arc
+missing arc/bm2d/dance_danger0002_v0.arc
+missing arc/bm2d/dance_danger0003_v0.arc
+missing arc/bm2d/dance_danger0004_v0.arc
+missing arc/bm2d/dance_danger0005_v0.arc
+missing arc/bm2d/dance_fast_slow0001_v0.arc
+missing arc/bm2d/dance_fast_slow0002_v0.arc
+missing arc/bm2d/dance_fast_slow0003_v0.arc
+missing arc/bm2d/dance_fast_slow0004_v0.arc
+missing arc/bm2d/dance_fast_slow0005_v0.arc
+missing arc/bm2d/dance_fullcombo0001_v0.arc
+missing arc/bm2d/dance_fullcombo0002_v0.arc
+missing arc/bm2d/dance_fullcombo0003_v0.arc
+missing arc/bm2d/dance_fullcombo0004_v0.arc
+missing arc/bm2d/dance_fullcombo0005_v0.arc
+missing arc/bm2d/dance_game_over0001_v0.arc
+missing arc/bm2d/dance_game_over0002_v0.arc
+missing arc/bm2d/dance_game_over0003_v0.arc
+missing arc/bm2d/dance_game_over0004_v0.arc
+missing arc/bm2d/dance_game_over0005_v0.arc
+missing arc/bm2d/dance_gauge0001_v0.arc
+missing arc/bm2d/dance_gauge0002_v0.arc
+missing arc/bm2d/dance_gauge0003_v0.arc
+missing arc/bm2d/dance_gauge0004_v0.arc
+missing arc/bm2d/dance_gauge0005_v0.arc
+missing arc/bm2d/dance_judge0001_v0.arc
+missing arc/bm2d/dance_judge0002_v0.arc
+missing arc/bm2d/dance_judge0003_v0.arc
+missing arc/bm2d/dance_judge0004_v0.arc
+missing arc/bm2d/dance_judge0005_v0.arc
+missing arc/bm2d/dance_message0001_v0.arc
+missing arc/bm2d/dance_message0002_v0.arc
+missing arc/bm2d/dance_message0003_v0.arc
+missing arc/bm2d/dance_message0004_v0.arc
+missing arc/bm2d/dance_message0005_v0.arc
+missing arc/bm2d/dance_score0001_v0.arc
+missing arc/bm2d/dance_score0002_v0.arc
+missing arc/bm2d/dance_score0003_v0.arc
+missing arc/bm2d/dance_score0004_v0.arc
+missing arc/bm2d/dance_score0005_v0.arc
+missing arc/bm2d/dance_song_info0000_v2.arc
+missing arc/bm2d/dance_song_info0002_v0.arc
+missing arc/bm2d/dance_stage_frame0001_v0.arc
+missing arc/bm2d/dance_stage_frame0002_v0.arc
+missing arc/bm2d/dance_stage_frame0003_v0.arc
+missing arc/bm2d/dance_stage_frame0004_v0.arc
+missing arc/bm2d/dance_stage_frame0005_v0.arc
+missing arc/se_normal_n.arc
+missing arc/soundbanks_n.arc
+missing sound/win/voice_n.xwb

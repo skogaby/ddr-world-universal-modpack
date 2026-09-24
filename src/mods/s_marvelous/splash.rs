@@ -97,6 +97,11 @@ pub fn activate() {
                 if !ASSETS_READY.load(Ordering::Acquire) {
                     return None;
                 }
+                // A DDR SELECTION legacy full-combo package shares the
+                // export names; it is not this template — stream it as is.
+                if crate::mods::ddr_selection::legacy_package("dance_fullcombo") {
+                    return None;
+                }
                 if afp != stock.as_slice() {
                     log_warn!(
                         "SMarvelous: {} variant differs from the staged template — streaming stock",
@@ -157,6 +162,7 @@ fn redrive_if_smfc(actor: *mut u8, msg: u32, payload: *mut u8) {
         || actor.is_null()
         || payload.is_null()
         || !ASSETS_READY.load(Ordering::Acquire)
+        || crate::mods::ddr_selection::legacy_package("dance_fullcombo")
     {
         return;
     }

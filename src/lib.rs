@@ -197,6 +197,7 @@ fn init() {
         Box::new(mods::s_marvelous::SMarvelousMod::new()),
         Box::new(mods::two_player_bpl_mode::TwoPlayerBplMod::new()),
         Box::new(mods::background_dancers::BackgroundDancersMod::new()),
+        Box::new(mods::ddr_selection::DdrSelectionMod::new()),
         Box::new(mods::smx_hardware::SmxHardwareMod::new()),
         // After assist_tick: its enable registers the tick-alignment
         // listener on the assist-tick mod (order matters only for the log).
@@ -375,6 +376,11 @@ fn init() {
     // play-record layout. Must precede custom_options_persistence (whose
     // logout-save sanitiser consumes it); also consumed by premium_free and
     // quick_logout at mod init/enable time (step 7+, always after this).
+    // 4h2a. ShutterActor reader / bannerless stage-panel dismiss (quick
+    // restart's fast paths, DDR SELECTION's legacy intro). Fail-open.
+    if !services::shutter::init(&signatures) {
+        log_warn!("Shutter service unavailable -- quick restart/fail fast paths and the DDR SELECTION intro fall back");
+    }
     let stage_records_ok = stage_records::init(&signatures, &game_module);
     if !stage_records_ok {
         log_warn!(

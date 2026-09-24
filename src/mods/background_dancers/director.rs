@@ -29,12 +29,16 @@ use super::session::{CameraSet, Clip, InstanceKind, InstanceStatus, Session};
 /// same poses hidden (the pre-edge / abandoned states). `mask` hides whole
 /// instance kinds on top of that (Background Movies = FULLSCREEN: the stage
 /// parts — and with them their hull twins, which read the part's slot — and
-/// the floor shadows, while a fullscreen movie is the backdrop); the poses
-/// keep advancing underneath so a kind that comes back is already current.
+/// the floor shadows, while a fullscreen movie is the backdrop; MOVIE ONLY:
+/// additionally the dancer bodies and their parts, whose twins read the
+/// body's / part's slot too); the poses keep advancing underneath so a kind
+/// that comes back (a course stage without a movie after one with) is
+/// already current.
 pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
     let hidden = !visible;
     let stage_hidden = hidden || !mask.stage;
     let shadow_hidden = hidden || !mask.shadows;
+    let dancer_hidden = hidden || !mask.dancers;
     let n_dancers = sess.parsed.dancers.len();
 
     // Stage parts.
@@ -142,7 +146,13 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         }
         if body_built {
             let n = body_bone_count.min(sess.bones.len());
-            frame_board::publish(body_slot, &body_world, WHITE, hidden, &sess.bones[..n]);
+            frame_board::publish(
+                body_slot,
+                &body_world,
+                WHITE,
+                dancer_hidden,
+                &sess.bones[..n],
+            );
         }
 
         // Children read the freshly evaluated `sess.bones`.
@@ -164,7 +174,7 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
                     };
                     let bone = sess.bones.get(p.attach).copied().unwrap_or(IDENTITY);
                     let world = part_world(p.mirror, &bone, &body_world);
-                    frame_board::publish(slot, &world, WHITE, hidden, &[IDENTITY]);
+                    frame_board::publish(slot, &world, WHITE, dancer_hidden, &[IDENTITY]);
                 }
                 InstanceKind::Shadow(dancer) if dancer == i => {
                     let Some(d) = sess.parsed.dancers.get(i) else {

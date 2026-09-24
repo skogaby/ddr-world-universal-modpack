@@ -1395,6 +1395,40 @@ pub(crate) fn gameplay_actors(dps: *mut u8) -> Vec<*mut u8> {
     out
 }
 
+/// Whether [`intro_cascade_step`] can ever answer on this build (DPS,
+/// GamePlayActor and ControlMessageActor vtables resolved).
+pub(crate) fn intro_cascade_available() -> bool {
+    dps_identity_available()
+        && !GAMEPLAY_ACTOR_VTABLE.load(Ordering::Acquire).is_null()
+        && !CMA_VTABLE.load(Ordering::Acquire).is_null()
+}
+
+/// The song-intro cascade position of the live DancePlaySequence: the
+/// HIGHEST ControlMessageActor StackStep across its GamePlayActors (each
+/// side's CMA fires `0x1047` READY → step 1, `0x1048` HERE → 2, `0x1049`
+/// OUT → 3, then the end cascade 4/5 — the thresholds are per side, so in
+/// versus the earlier side leads, which is how A3's single ReadyGoActor
+/// behaved: the first trigger acts, duplicates are no-ops). `None` unless
+/// [`dps_step`] answers (vtable-verified DPS) and at least one CMA reads a
+/// sane step. An in-place reset leaves the steps untouched (World does not
+/// replay its intro either). Game thread.
+pub(crate) fn intro_cascade_step() -> Option<i32> {
+    dps_step()?;
+    let dps = live_dps()?;
+    let mut best: Option<i32> = None;
+    for actor in gameplay_actors(dps) {
+        let Some(cma) = control_message_child(actor) else {
+            continue;
+        };
+        if let Some(step) = unsafe { read_step(cma, CMA_STEP_BASE, CMA_STEP_INDEX) } {
+            if (0..=15).contains(&step) {
+                best = Some(best.map_or(step, |b| b.max(step)));
+            }
+        }
+    }
+    best
+}
+
 /// Classify a child of a GamePlayActor against the resolved gauge
 /// vtable set.
 fn classify_gauge(child: *mut u8) -> Option<GaugeClass> {

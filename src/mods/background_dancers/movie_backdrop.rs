@@ -98,9 +98,11 @@ unsafe fn child_with_vtable(parent: *const u8, vt: *const u8) -> Option<*const u
     None
 }
 
-/// The live MovieActor's StackStep, `None` when there is no verified DPS,
-/// no SceneManageActor yet, no MovieActor, or the step is unreadable.
-fn movie_step() -> Option<i32> {
+/// The live song's MovieActor and its StackStep, `None` when there is no
+/// verified DPS, no SceneManageActor yet, no MovieActor, or the step is
+/// unreadable. Game thread only (the actor tree is the game thread's). Also
+/// the STAGE SCREENS fit writer's accessor (`screen_route.rs`).
+pub fn live_movie_actor() -> Option<(*mut u8, i32)> {
     let sma_vt = SCENE_MANAGE_VT.load(Ordering::Acquire) as *const u8;
     let movie_vt = MOVIE_ACTOR_VT.load(Ordering::Acquire) as *const u8;
     if sma_vt.is_null() || movie_vt.is_null() {
@@ -126,8 +128,13 @@ fn movie_step() -> Option<i32> {
         if !memory::is_readable(at, 4) {
             return None;
         }
-        Some(memory::read_i32(at))
+        Some((movie as *mut u8, memory::read_i32(at)))
     }
+}
+
+/// The live MovieActor's StackStep (see [`live_movie_actor`]).
+fn movie_step() -> Option<i32> {
+    live_movie_actor().map(|(_, step)| step)
 }
 
 /// The live song's fullscreen-movie state (game thread). `Backdrop::None`

@@ -126,6 +126,10 @@ ALT_GROUPS: list[set[str]] = [
     {"series_label_lookup_inlined", "series_label_lookup_standalone"},
     {"textlayer_bind_anchor", "textlayer_bind_direct", "textlayer_bind"},
     {"hud_layout_builder", "hud_layout_builder_style_cluster"},
+    # ddr_selection stage panel: World's state-2 `jacket_usr` SetVisible is
+    # null-checked (20260721+, informational) or a CALL NOPed while hosted
+    # (20250805 / 20260224).
+    {"ddr_sel_shutter_jacket_vis_guard", "ddr_sel_shutter_jacket_vis_call"},
 ]
 
 

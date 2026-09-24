@@ -38,6 +38,7 @@ pub mod center_arrows_single;
 pub mod classic_difficulty;
 pub mod config;
 pub mod custom_resolution;
+pub mod ddr_selection;
 pub mod decorative_option_headers;
 pub mod fast_bootup;
 pub mod folder_expansion;

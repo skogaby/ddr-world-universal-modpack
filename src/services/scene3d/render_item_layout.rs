@@ -194,8 +194,33 @@ pub const TEX_ENTRY_SIZE: usize = 0x10;
 pub const TEX_ENTRY_HASH: usize = 0;
 /// `TextureData*` resolved at conversion (default texture on miss).
 pub const TEX_ENTRY_PTR: usize = 8;
-/// `TextureData`: `u32` gs hash at +0, `u32` texture handle at +4.
+/// `TextureData`: `u32` gs hash at +0, `u32` texture handle at +4, `u16`
+/// width at +8, `u16` height at +0xA.
 pub const TEXDATA_HASH: usize = 0;
+pub const TEXDATA_W: usize = 0x8;
+pub const TEXDATA_H: usize = 0xA;
+
+/// Per material: whether any of its MASKED texture slots samples the
+/// resource texture-table entry hashed `target_hash`.
+/// `material_tex_indices[m]` = the table indices of material `m`'s masked
+/// slots (`u16 mat + slot*2` under the mask at `mat + MAT_TEX_MASK`);
+/// `table_hashes` = the table's `TEX_ENTRY_HASH`es. Out-of-range indices
+/// are ignored. The whole-scene restyle keeps such materials stock — the
+/// `offscreen1` stage screens (the movie render target) stay unlit.
+pub fn materials_sampling(
+    material_tex_indices: &[Vec<u16>],
+    table_hashes: &[u32],
+    target_hash: u32,
+) -> Vec<bool> {
+    material_tex_indices
+        .iter()
+        .map(|slots| {
+            slots
+                .iter()
+                .any(|&i| table_hashes.get(i as usize) == Some(&target_hash))
+        })
+        .collect()
+}
 
 // ── Mode bits (A3 semantics; the engine reads only `MODE_SCRATCH`) ───
 
@@ -538,6 +563,42 @@ mod tests {
             restyle_eligible_materials(1, &[5], &[0x20], true),
             vec![true]
         );
+    }
+
+    #[test]
+    fn materials_sampling_matches_masked_slots_only() {
+        const SCREEN: u32 = 0x5C4E_E0A1;
+        let table = [0x1111u32, SCREEN, 0x3333];
+        // Single slot on the screen entry; single slot elsewhere.
+        assert_eq!(
+            materials_sampling(&[vec![1], vec![0]], &table, SCREEN),
+            vec![true, false]
+        );
+        // Multi-slot: any slot on the screen entry counts.
+        assert_eq!(
+            materials_sampling(&[vec![0, 2], vec![2, 1]], &table, SCREEN),
+            vec![false, true]
+        );
+        // No masked slot ⇒ not a screen; out-of-range indices are ignored.
+        assert_eq!(
+            materials_sampling(&[vec![], vec![7, 300]], &table, SCREEN),
+            vec![false, false]
+        );
+        // A hash that appears twice in the table (two names folding alike):
+        // either index matches.
+        let dup = [SCREEN, 0x2222, SCREEN];
+        assert_eq!(
+            materials_sampling(&[vec![2], vec![1], vec![0]], &dup, SCREEN),
+            vec![true, false, true]
+        );
+        // Several materials over an empty table.
+        assert_eq!(
+            materials_sampling(&[vec![0], vec![1]], &[], SCREEN),
+            vec![false, false]
+        );
+        assert!(materials_sampling(&[], &table, SCREEN).is_empty());
+        assert_eq!(TEXDATA_W, 8);
+        assert_eq!(TEXDATA_H, 0xA);
     }
 
     #[test]

@@ -107,7 +107,7 @@
 //! never passes while the clip is still near frame 0 — i.e. any dismiss in
 //! the first seconds of the song limbos, while mid-song dismisses are
 //! masked (the clip already sits at its final frame). Fixed by
-//! `unblock_shutter_drain` after every verified dismiss: SetFrame the clip
+//! `shutter::unblock_drain` after every verified dismiss: SetFrame the clip
 //! to the wait's own target. No-op on healthy art (state 7's `"out"` play
 //! re-seeks the playhead anyway); fail-open. A silent post-`finish`
 //! watchdog remains permanently: destination scene within 20 s, or ONE
@@ -155,14 +155,14 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering}
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::core::signatures::{GamePlayActorLayout, ShutterActorLayout};
+use crate::core::signatures::GamePlayActorLayout;
 use crate::core::{memory, module_resolver};
 use crate::mods::config;
 use crate::mods::mod_menu;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec};
 use crate::services::{
-    bm2d_api, input_manager, scene_manager, score_guard, song_reset, stage_records, widget_renderer,
+    input_manager, scene_manager, score_guard, shutter, song_reset, stage_records, widget_renderer,
 };
 use crate::types::buttons::*;
 use crate::types::scenes::scene;
@@ -390,74 +390,19 @@ const MAX_SANE_STAGE: i32 = 9;
 const STAGE_LOADER_1IDX: i32 = 0x1C;
 const SELECT_LOADER_1IDX: i32 = 0x19;
 
-// ── ShutterActor layout / protocol (validated by range checks at use) ──
-/// `agcs::StackStep` state base on the ShutterActor (active slot at
-/// `+0x58 + idx*8`, depth index `idx` at `+0x82`) — the same embedded
-/// StackStep shape as `GAMEPLAY_ACTOR_STEP_OFFSET`.
-const SHUTTER_STEP_BASE: usize = 0x58;
-const SHUTTER_STEP_INDEX: usize = 0x82;
-// Active shutter kind (`-1` = none), pending requested kind (written by msg
-// 0x1007; `-1` = none) and the stage-jacket panel's kind id. `+0x310/+0x314`
-// and kind 3 on 20260324+, but `+0x2E0/+0x2E4` and kind 1 on 20250805 /
-// 20260224 (whose shutter has 6 kinds, not 9) — derived per build by
-// `SignatureStore::derive_shutter_actor_layout` from the onUpdate kind/layer
-// lookup + stage-kind compare. Without it every shutter read fails and the
-// fast paths fall back (the pre-2026-09 behavior on the old builds).
-static SHUTTER_LAYOUT: std::sync::OnceLock<ShutterActorLayout> = std::sync::OnceLock::new();
-/// Shutter states the fast path understands: 0 = idle (layer released),
-/// 4 = closed/covering (the READY-window park — the jacket panel fully
-/// displayed, waiting for DPS state 5's `stage_out` send), 5 = the
-/// `stage_out` reveal anim in flight, 6 = the stage panel parked after its
-/// reveal (the mid-song state), 7 = the drain tail entered by the 0x100c
-/// dismiss.
-const SHUTTER_STATE_IDLE: i32 = 0;
-const SHUTTER_STATE_COVERED: i32 = 4;
-const SHUTTER_STATE_REVEALING: i32 = 5;
-const SHUTTER_STATE_PARKED_REVEALED: i32 = 6;
-const SHUTTER_STATE_DRAIN_TAIL: i32 = 7;
-const SHUTTER_STATE_MAX: i32 = 8;
-/// The ShutterActor's bannerless stage-panel dismiss: its custom message
-/// handler forces state 7 iff the active kind is 3 (it does NOT check the
-/// current state — the state-7 drain replays `stage_out` if it never ran,
-/// so a dismiss from 4/5/6 all land in the same 7→8→0 idle-park), leaving
-/// the pending kind untouched — the drain ends parked at idle with NO new
-/// banner.
-const MSG_SHUTTER_DISMISS_STAGE: i32 = 0x100C;
-/// Actor tree-flags offset, the "destruction in progress, dispatch
-/// suppressed" bit (the same guard the game's own message wrappers use),
-/// and the composite "dead or dying" mask (a child with either bit set
-/// must not be `finish`ed — post-transition window).
+// ── ShutterActor (services::shutter owns the layout / protocol) ──
+/// Actor tree-flags offset and the composite "dead or dying" mask (a child
+/// with either bit set must not be `finish`ed — post-transition window).
 const TREE_FLAGS_OFFSET: usize = 0x20;
-const TREE_FLAGS_DISPATCH_SUPPRESSED: u32 = 0x20;
 const TREE_FLAGS_DEAD_MASK: u32 = 0x24;
-/// vtable slot of `agcs::Actor::onMessage(this, msg, param)`.
-const VTBL_ON_MESSAGE_OFFSET: usize = 0x18;
-
-// ── Shutter drain unblock (2026-08-31 early-dismiss limbo fix) ────────
-/// Per-kind layer table on the ShutterActor: the layer OBJECT pointer of a
-/// `shared_ptr<Layer>` pair sits at `+0x88 + kind*0x10` (the control block
-/// at `+0x90 + kind*0x10`) — the `local_200` the update's state waits read.
-const SHUTTER_LAYER_TABLE_OFFSET: usize = 0x88;
-/// AFP MovieClip id on the layer object (`*(u32*)(layer + 0x110)` — the id
-/// every `afp_mc_get_param` in the shutter update targets).
-const SHUTTER_LAYER_MC_ID_OFFSET: usize = 0x110;
-/// `afp_mc_op` SetFrame opcode (BM2D::CMovieClip::SetFrame — same opcode
-/// song_reset uses for the pacemaker clip rewind).
-const MC_OP_SET_FRAME: i32 = 0xF08;
 
 /// `agcs::Sequence::finish(this, nextSceneId_1INDEXED)`.
 type SequenceFinishFn = unsafe extern "C" fn(*mut u8, i32);
-/// `agcs::Actor::onMessage(this, msg, param) -> handled`.
-type OnMessageFn = unsafe extern "C" fn(*mut u8, i32, *mut u8) -> i32;
 
 /// Resolved `sequence_finish` fn ptr (null = fast paths unavailable; the
 /// natural-death fallback still works). Also doubles as the diagnostic
 /// sampler's 20260721 build guard.
 static SEQUENCE_FINISH: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Resolved `shutter_actor_global` (the POINTER TO the ShutterActor
-/// singleton pointer; null = fast paths unavailable).
-static SHUTTER_GLOBAL: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
 // ── Select-residency patch ──────────────────────────────────────────
 /// Resolved `gameplay_loader_masks` site (createNextSequence case 0x1c:
@@ -631,19 +576,15 @@ impl Mod for QuickRestartOrFailMod {
                 "QuickRestartOrFail: sequence_finish unresolved -- fast paths unavailable (natural fail flow only)"
             ),
         }
-        match ctx.signatures.get_address("shutter_actor_global") {
-            Some(addr) => SHUTTER_GLOBAL.store(addr as *mut u8, Ordering::Release),
-            None => log_warn!(
+        if !shutter::global_available() {
+            log_warn!(
                 "QuickRestartOrFail: shutter_actor_global unresolved -- fast paths unavailable (natural fail flow only)"
-            ),
+            );
         }
-        match ctx.signatures.shutter_actor_layout() {
-            Some(layout) => {
-                let _ = SHUTTER_LAYOUT.set(layout);
-            }
-            None => log_warn!(
+        if !shutter::layout_available() {
+            log_warn!(
                 "QuickRestartOrFail: ShutterActor layout underived -- fast paths unavailable (natural fail flow only)"
-            ),
+            );
         }
         match ctx.signatures.gameplay_actor_layout() {
             Some(layout) => {
@@ -719,13 +660,12 @@ impl Mod for QuickRestartOrFailMod {
             );
         }
 
-        let fast = if SEQUENCE_FINISH.load(Ordering::Acquire).is_null()
-            || SHUTTER_GLOBAL.load(Ordering::Acquire).is_null()
-        {
-            "natural fail flow only"
-        } else {
-            "bannerless fast paths armed"
-        };
+        let fast =
+            if SEQUENCE_FINISH.load(Ordering::Acquire).is_null() || !shutter::global_available() {
+                "natural fail flow only"
+            } else {
+                "bannerless fast paths armed"
+            };
         log_info!(
             "QuickRestartOrFail: enabled (press 1 = restart, press 3 = fail; {})",
             fast
@@ -1031,90 +971,43 @@ fn sample_restart_step(gen: usize, started: Instant, last_step: i32) {
     });
 }
 
-/// Snapshot of the ShutterActor's fast-path-relevant state.
-struct ShutterSnapshot {
-    actor: *mut u8,
-    state: i32,
-    active_kind: i32,
-    pending_kind: i32,
-}
-
-/// Read the ShutterActor's state/kind fields, range-validating every value
-/// (a layout drift on a future build must read as "unknown", never as a
-/// plausible state). `Ok(None)` = no shutter actor exists (safe: both the
-/// loader and the fresh DPS treat a missing shutter as passable).
-fn read_shutter() -> Result<Option<ShutterSnapshot>, &'static str> {
-    let global = SHUTTER_GLOBAL.load(Ordering::Acquire);
-    if global.is_null() {
-        return Err("shutter global unresolved");
-    }
-    unsafe {
-        let actor = *(global as *const *mut u8);
-        if actor.is_null() {
-            return Ok(None);
-        }
-        let idx = *(actor.add(SHUTTER_STEP_INDEX) as *const u16) as usize;
-        if idx >= 5 {
-            return Err("step index out of range");
-        }
-        let state = *(actor.add(SHUTTER_STEP_BASE + idx * 8) as *const i32);
-        let Some(layout) = SHUTTER_LAYOUT.get() else {
-            return Err("shutter layout underived");
-        };
-        let active_kind = *(actor.add(layout.active_kind) as *const i32);
-        let pending_kind = *(actor.add(layout.pending_kind) as *const i32);
-        if !(0..=SHUTTER_STATE_MAX).contains(&state)
-            || !(-1..=SHUTTER_STATE_MAX).contains(&active_kind)
-            || !(-1..=SHUTTER_STATE_MAX).contains(&pending_kind)
-        {
-            return Err("state/kind fields out of range");
-        }
-        Ok(Some(ShutterSnapshot {
-            actor,
-            state,
-            active_kind,
-            pending_kind,
-        }))
-    }
-}
-
 /// Ensure the shutter cannot block a `finish`-installed successor:
 /// - no shutter actor, or fully idle (state 0, nothing active or pending):
 ///   nothing to do;
 /// - the stage panel active with no pending request — covering at state 4
 ///   (the READY window), revealing at 5, or parked-revealed at 6 (mid-song):
-///   send the game's own bannerless dismiss (msg `0x100c` through the
-///   actor's `onMessage`) and verify the synchronous state-7 write took
-///   (the handler only checks `active kind == 3`; state 7's drain replays
-///   or finishes the out label as needed, so all three entry states land
-///   in the same 7→8→0 idle park);
+///   send the game's own bannerless dismiss (msg `0x100c`, `services::shutter`)
+///   and verify the synchronous state-7 write took (the handler only checks
+///   `active kind == 3`; state 7's drain replays or finishes the out label as
+///   needed, so all three entry states land in the same 7→8→0 idle park),
+///   then fast-forward the drain (the 2026-08-31 early-dismiss limbo fix —
+///   `shutter::unblock_drain`);
 /// - anything else (art-load transitional states 1–3, a banner request
 ///   already in flight): refuse — the caller falls back.
 fn ensure_shutter_dismissed(label: &str) -> bool {
-    let shutter = match read_shutter() {
+    let snap = match shutter::snapshot() {
         Ok(s) => s,
         Err(why) => {
             log_warn!("QuickRestartOrFail: shutter read failed ({why}) -- {label} falling back");
             return false;
         }
     };
-    let Some(s) = shutter else {
+    let Some(s) = snap else {
         return true; // no shutter actor at all — nothing can block
     };
 
-    if s.state == SHUTTER_STATE_IDLE && s.active_kind < 0 && s.pending_kind < 0 {
+    if s.fully_idle() {
         return true;
     }
 
     if matches!(
         s.state,
-        SHUTTER_STATE_COVERED | SHUTTER_STATE_REVEALING | SHUTTER_STATE_PARKED_REVEALED
-    ) && Some(s.active_kind) == SHUTTER_LAYOUT.get().map(|l| l.stage_kind)
-        && s.pending_kind < 0
+        shutter::STATE_COVERED | shutter::STATE_REVEALING | shutter::STATE_PARKED_REVEALED
+    ) && s.stage_panel_alone()
     {
-        unsafe {
-            let flags = memory::read_u32(s.actor.add(TREE_FLAGS_OFFSET));
-            if flags & TREE_FLAGS_DISPATCH_SUPPRESSED != 0 {
+        match shutter::send_dismiss(&s) {
+            Ok(()) => {}
+            Err(shutter::DismissError::DispatchSuppressed(flags)) => {
                 log_warn!(
                     "QuickRestartOrFail: shutter dispatch suppressed (flags 0x{:X}) -- {} falling back",
                     flags,
@@ -1122,37 +1015,19 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
                 );
                 return false;
             }
-            // vtable slot +0x18 = agcs::Actor::onMessage. All pointer math in
-            // BYTES (`*const u8`); sanity-check the fetched code pointer lies
-            // inside gamemdx before calling it (a bad slot must degrade to
-            // the fallback, never crash).
-            let vtable = *(s.actor as *const *const u8);
-            let on_message_addr = *(vtable.add(VTBL_ON_MESSAGE_OFFSET) as *const *const u8);
-            let in_module = module_resolver::get_game_module().is_some_and(|m| {
-                let base = m.base as usize;
-                let addr = on_message_addr as usize;
-                addr > base && addr < base + m.size
-            });
-            if !in_module {
+            Err(shutter::DismissError::BadOnMessage(addr)) => {
                 log_warn!(
                     "QuickRestartOrFail: shutter onMessage ptr {:?} outside gamemdx -- {} falling back",
-                    on_message_addr,
+                    addr,
                     label
                 );
                 return false;
             }
-            let on_message: OnMessageFn = std::mem::transmute(on_message_addr);
-            on_message(s.actor, MSG_SHUTTER_DISMISS_STAGE, std::ptr::null_mut());
-
-            // The dismiss handler writes state 7 synchronously; read it back
-            // as proof the build's handler actually took the message.
-            let idx = *(s.actor.add(SHUTTER_STEP_INDEX) as *const u16) as usize;
-            let state_after = *(s.actor.add(SHUTTER_STEP_BASE + idx * 8) as *const i32);
-            if state_after != SHUTTER_STATE_DRAIN_TAIL {
+            Err(shutter::DismissError::NotTaken { before, after }) => {
                 log_warn!(
                     "QuickRestartOrFail: shutter dismiss not taken (state {} -> {}) -- {} falling back",
-                    s.state,
-                    state_after,
+                    before,
+                    after,
                     label
                 );
                 return false;
@@ -1163,7 +1038,7 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
             s.state,
             label
         );
-        unblock_shutter_drain(s.actor);
+        log_unblock(shutter::unblock_drain(s.actor));
         return true;
     }
 
@@ -1177,68 +1052,28 @@ fn ensure_shutter_dismissed(label: &str) -> bool {
     false
 }
 
-/// Fast-forward the shutter clip past the drain's wait target (the
-/// 2026-08-31 early-dismiss limbo fix).
-///
-/// The drain's state 8 waits on `current_frame >= max(frame("out_end"),
-/// frame("end"))`, and the only thing that advances the clip is state 7's
-/// `"out"` label play. On shutter art whose `shutter_play` clip carries no
-/// labels (observed on a stock-data CrossOver install: `in`, `stage_out`,
-/// `ready_out`, `out`, `out_end` all missing — only `end` resolves), that
-/// play silently fails, so the clip never moves. Mid-song that's masked —
-/// the clip long since sits at its final frame, so the wait passes
-/// instantly — but a dismiss in the first seconds of the song finds the
-/// clip still near frame 0 and state 8 parks forever (the watchdog-caught
-/// `shutter=8` limbo).
-///
-/// Fix: compute state 8's own target (same label queries the game makes)
-/// and SetFrame the clip there. On label-less art this satisfies the wait
-/// directly; on healthy art state 7's `"out"` play re-seeks the playhead
-/// anyway, so the write is a harmless no-op visually and the natural
-/// sub-second out animation still runs. Fail-open: any unresolved id or
-/// failed lookup just leaves the drain to its stock behavior.
-fn unblock_shutter_drain(actor: *mut u8) {
-    unsafe {
-        let Some(layout) = SHUTTER_LAYOUT.get() else {
-            return;
-        };
-        let kind = *(actor.add(layout.active_kind) as *const i32);
-        if kind != layout.stage_kind || kind < 0 {
-            return;
-        }
-        let layer =
-            *(actor.add(SHUTTER_LAYER_TABLE_OFFSET + kind as usize * 0x10) as *const *const u8);
-        if layer.is_null() {
-            // State 8 treats a missing layer as "drain complete" — nothing
-            // to unblock.
-            return;
-        }
-        let mc_id = *(layer.add(SHUTTER_LAYER_MC_ID_OFFSET) as *const u32);
-        if mc_id == 0 {
-            return;
-        }
-        let out_end = bm2d_api::mc_frame_by_label(mc_id, c"out_end");
-        let end = bm2d_api::mc_frame_by_label(mc_id, c"end");
-        let target = out_end.unwrap_or(0).max(end.unwrap_or(0));
-        if target == 0 {
-            // Both labels absent (or bm2d API unavailable): the wait's
-            // threshold is 0, which any current frame satisfies — the
-            // drain completes on its own.
-            log_info!(
-                "QuickRestartOrFail: shutter drain unblock skipped (out_end={:?} end={:?} -- wait target 0)",
-                out_end,
-                end
-            );
-            return;
-        }
-        let ok = bm2d_api::mc_op(mc_id, MC_OP_SET_FRAME, target as i32);
-        log_info!(
+/// Log the drain fast-forward (see `shutter::unblock_drain`: on label-less
+/// `shutter_play` art the drain's state 8 would otherwise wait forever).
+fn log_unblock(u: shutter::Unblock) {
+    match u {
+        shutter::Unblock::NotNeeded => {}
+        shutter::Unblock::TargetZero { out_end, end } => log_info!(
+            "QuickRestartOrFail: shutter drain unblock skipped (out_end={:?} end={:?} -- wait target 0)",
+            out_end,
+            end
+        ),
+        shutter::Unblock::FastForwarded {
+            target,
+            out_end,
+            end,
+            ok,
+        } => log_info!(
             "QuickRestartOrFail: shutter clip fast-forwarded to drain target frame {} (out_end={:?} end={:?} ok={})",
             target,
             out_end,
             end,
             ok
-        );
+        ),
     }
 }
 
@@ -1258,7 +1093,7 @@ fn unblock_shutter_drain(actor: *mut u8) {
 /// NO lock may be held here (score_guard calls completed before this).
 fn try_fast_finish(target_1idx: i32, label: &str) -> bool {
     let finish_addr = SEQUENCE_FINISH.load(Ordering::Acquire);
-    if finish_addr.is_null() || SHUTTER_GLOBAL.load(Ordering::Acquire).is_null() {
+    if finish_addr.is_null() || !shutter::global_available() {
         return false;
     }
 

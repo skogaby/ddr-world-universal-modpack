@@ -136,6 +136,13 @@ fn on_smarvelous(side: usize, nra: Option<*mut u8>) {
     if !afp_patches::patch_applied() {
         return;
     }
+    // A DDR SELECTION legacy judgement package is loaded for this song: the
+    // patch-applied latch above is session-wide (an earlier stock song), but
+    // THIS song's clip is the unpatched legacy template — its own MARVELOUS
+    // word shows.
+    if crate::mods::ddr_selection::legacy_package("dance_judge") {
+        return;
+    }
     // Preferred target: the actor's OWN stored wrapper — the exact object
     // the stock grade handler just drove for this event. Fallback: the
     // captured pool wrapper (known-wrong outer instance, kept only so a

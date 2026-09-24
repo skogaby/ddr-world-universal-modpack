@@ -481,13 +481,17 @@ pub struct BackgroundDancersConfig {
     pub custom_content: bool,
     /// BACKGROUND MOVIES (2026-09-22): what a song with a background movie
     /// does while the dancers are on — `"off"` (no movie; the 3D stage as on
-    /// any other song), `"thumbnail"` (default — the movie in its small ON
-    /// window over the 3D stage) or `"fullscreen"` (the DDR 5th Mix look: the
-    /// movie full-screen behind the dancers, the 3D stage and floor shadows
-    /// not drawn). Applies to every entered player whose VIDEO SIZE shows a
-    /// movie (VIDEO SIZE OFF stays off); the player's saved VIDEO SIZE is
-    /// never changed. Absent/unknown ⇒ thumbnail. Mod menu (GLOBAL SETTINGS,
-    /// Background Dancers), next song.
+    /// any other song), `"thumbnail"` (the movie in its small ON window over
+    /// the 3D stage), `"stage_screens"` (default since 2026-09-23 — on a
+    /// stage with video screens the movie plays ON them, DDR A3's look; any
+    /// other stage plays as thumbnail), `"fullscreen"` (the DDR 5th Mix look:
+    /// the movie full-screen behind the dancers, the 3D stage and floor
+    /// shadows not drawn) or `"movie_only"` (the whole 3D scene hidden while
+    /// the movie is drawn — A3's default). Applies to every entered player
+    /// whose VIDEO SIZE shows a movie (VIDEO SIZE OFF stays off); the
+    /// player's saved VIDEO SIZE is never changed. Absent/unknown ⇒
+    /// stage_screens. Mod menu (GLOBAL SETTINGS, Background Dancers), next
+    /// song.
     #[serde(default)]
     pub movie_mode: Option<String>,
 }
@@ -548,6 +552,20 @@ impl BackgroundDancersConfig {
             .or_else(|| legacy.and_then(|sf| sf.dancer_outlines))
             .unwrap_or(true)
     }
+}
+
+/// Config for the `ddr-selection` mod (`ddr_selection` section). Seeded at
+/// mod enable; ALSO live-editable from the overlay menu's DDR SELECTION
+/// section (GLOBAL SETTINGS), which rewrites the whole section
+/// (`ddr_selection::settings::persist_section`). Cabinet-wide; applies from
+/// the next song.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct DdrSelectionConfig {
+    /// Play A3's era cut-in (the big skin-number animation with its `sele_*`
+    /// SE) before the legacy stage panel. Default `true` (A3's behaviour);
+    /// `false` shows the stage panel straight away (about 6 s sooner).
+    #[serde(default)]
+    pub era_cutin: Option<bool>,
 }
 
 /// Config for the `s-marvelous` mod (`s_marvelous` section). Seeded from
@@ -855,6 +873,8 @@ pub struct ConfigFile {
     pub gameplay_timing_fixes: Option<GameplayTimingFixesConfig>,
     #[serde(default)]
     pub background_dancers: Option<BackgroundDancersConfig>,
+    #[serde(default)]
+    pub ddr_selection: Option<DdrSelectionConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -896,6 +916,7 @@ pub fn init() {
                     resolution: None,
                     gameplay_timing_fixes: None,
                     background_dancers: None,
+                    ddr_selection: None,
                 }
             }
         },
@@ -926,6 +947,7 @@ pub fn init() {
                 resolution: None,
                 gameplay_timing_fixes: None,
                 background_dancers: None,
+                ddr_selection: None,
             }
         }
     };

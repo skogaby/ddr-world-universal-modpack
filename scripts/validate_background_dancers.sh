@@ -36,8 +36,10 @@
 #   2026-09-22 mods/background_dancers/custom_content.rs (custom dancers/stages from data_mods: arc-name classification,
 #                                                    folder/key labels, text-rlist grammar, defaults, the planner;
 #                                                    reaches selection + catalog via `super::`)
-#   2026-09-22 mods/background_dancers/movie_mode.rs (Background Movies: OFF / THUMBNAIL / FULLSCREEN — movie-size
-#                                                    override table, fullscreen-backdrop classification, scene mask)
+#   2026-09-22 mods/background_dancers/movie_mode.rs (Background Movies: OFF / THUMBNAIL / STAGE SCREENS / FULLSCREEN — movie-size
+#                                                    override table, fullscreen-backdrop classification, scene mask;
+#                                                    2026-09-23: degrade/window-mode rules, the `offscreen1.dds`
+#                                                    has-screens test, the fit window, the checked imm8 write)
 #   2026-09-22 mods/background_dancers/movie_camera.rs (the MOVIE camera set: `_1p`/`_2p` tags, `_non` cut-aways,
 #                                                    dancer-count filter + fallback, folder listing)
 #

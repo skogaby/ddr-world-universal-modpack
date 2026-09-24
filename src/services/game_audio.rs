@@ -174,6 +174,13 @@ pub struct BankHandle {
     slot: i32,
 }
 
+impl BankHandle {
+    /// The manager sound-bank slot the bank lives in.
+    pub fn slot(&self) -> i32 {
+        self.slot
+    }
+}
+
 /// The assist-tick mod's rewritable tick bank, ready for registration: the
 /// containers from `se_bank_synth::build_tick_containers()` plus the location
 /// of the wave bank's rewritable sample segment within `xwb`.
@@ -275,6 +282,10 @@ static AUDIO: Lazy<Mutex<Option<Inner>>> = Lazy::new(|| Mutex::new(None));
 /// hot-path-adjacent [`sound_bank_in_slot`] (the audio clock's voice identity
 /// runs inside engine submission hooks and must not take `AUDIO`).
 static MANAGER_GLOBAL_ADDR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Lock-free copy of the resolved `se_play` address (0 until `init`), for
+/// [`se_play_from_sound_callback`] — callers inside the game's own AFP sound
+/// callback must not take `AUDIO`.
+static SE_PLAY_ADDR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The manager slot the game maps every per-song bank into (slot 5 — the
 /// basename→slot mapper's "anything else" bucket; see the module docs).
 pub const SONG_BANK_SLOT: i32 = 5;
@@ -393,6 +404,7 @@ pub fn init(signatures: &SignatureStore) -> bool {
         manager_global as usize,
         std::sync::atomic::Ordering::Release,
     );
+    SE_PLAY_ADDR.store(se_play as usize, std::sync::atomic::Ordering::Release);
     log_info!(
         "GameAudio: initialized (se_play @ {:p}, audio_manager_global @ {:p})",
         se_play,
@@ -736,6 +748,70 @@ pub fn play_cue(bank: BankHandle, cue: &CStr, pan: f32) -> bool {
         return false;
     }
     true
+}
+
+/// Play `cue` from manager slot `slot` through the game's `se_play` façade,
+/// **lock-free** — for code that runs inside the game's own sound path (the
+/// AFP sound callback, `bm2d::SoundCallback::play`, which stock implements as
+/// exactly this `se_play` call). No logging, no allocation, no `AUDIO` lock;
+/// the façade itself applies the game's mute filter, AVS lock and cue-table
+/// registration. Returns the cue handle, or `None` when the service is
+/// unresolved, the manager is null, or the façade failed (unknown cue, muted,
+/// cue table full).
+///
+/// # Safety
+/// `cue` must be a valid NUL-terminated string for the call's duration, and
+/// the caller must be on a thread the game itself plays sounds from.
+pub unsafe fn se_play_from_sound_callback(slot: i32, cue: *const c_char, pan: f32) -> Option<u32> {
+    if !(0..MGR_SLOT_COUNT).contains(&slot) || cue.is_null() {
+        return None;
+    }
+    let f = SE_PLAY_ADDR.load(std::sync::atomic::Ordering::Acquire);
+    let global = MANAGER_GLOBAL_ADDR.load(std::sync::atomic::Ordering::Acquire);
+    if f == 0 || global == 0 {
+        return None;
+    }
+    // The façade dereferences the manager global unchecked.
+    if (*(global as *const usize)) == 0 {
+        return None;
+    }
+    let se_play: SePlayFn = std::mem::transmute::<usize, SePlayFn>(f);
+    let h = se_play(slot, cue, pan);
+    (h != SE_PLAY_FAILED).then_some(h)
+}
+
+/// Stop every instance of `cue` in the sound bank of manager slot `slot`,
+/// immediately (`IXACT2SoundBank::Stop`, [`STOP_IMMEDIATE`] — the same
+/// dispatch [`stop_cue`] makes on the tick bank). **GAME THREAD ONLY.**
+/// `false` when the slot is empty, the cue is unknown or the engine refused.
+/// A no-op stop (nothing playing) succeeds.
+pub fn stop_cue_in_slot(slot: i32, cue: &CStr) -> bool {
+    let Some(bank) = sound_bank_in_slot(slot) else {
+        return false;
+    };
+    let bank = bank as *mut u8;
+    unsafe {
+        let get_cue_index: GetCueIndexFn = vtable_fn(bank, SOUND_BANK_VT_GET_CUE_INDEX);
+        let index = get_cue_index(bank, cue.as_ptr());
+        if index == CUE_NOT_FOUND {
+            return false;
+        }
+        let stop: SoundBankStopFn = vtable_fn(bank, SOUND_BANK_VT_STOP);
+        stop(bank, index, STOP_IMMEDIATE) >= 0
+    }
+}
+
+/// The index `cue` resolves to in a registered bank (`None` = not found or
+/// the bank is unknown). **GAME THREAD ONLY** — the registration self-check.
+pub fn cue_index(bank: BankHandle, cue: &CStr) -> Option<u16> {
+    let guard = AUDIO.lock().ok()?;
+    let inner = guard.as_ref()?;
+    let entry = inner.banks.iter().find(|b| b.handle.slot == bank.slot)?;
+    let index = unsafe {
+        let get_cue_index: GetCueIndexFn = vtable_fn(entry.sound_bank, SOUND_BANK_VT_GET_CUE_INDEX);
+        get_cue_index(entry.sound_bank, cue.as_ptr())
+    };
+    (index != CUE_NOT_FOUND).then_some(index)
 }
 
 // ── The rewritable tick bank ─────────────────────────────────────────

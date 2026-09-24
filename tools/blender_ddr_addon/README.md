@@ -40,7 +40,8 @@ materials and `.b2it`; the animation and camera must re-evaluate to the stock
 poses); `character_test.py` imports `pl_rinon00` with all seven parts, checks each
 part lands at `v · E · Bind[bone]` in body space, exports the character folder and
 compares every part's vertex data and the rlist against stock, re-imports, then imports the `boom00` stage set + cameras and renders the dancer on it;
-`synthetic_test.py` exports a 64-bone rig (two meshes, 52-slot palette blocks).
+`synthetic_test.py` exports a 64-bone rig (two meshes, 52-slot palette blocks) and a
+stage-screen quad (texture name `offscreen1`, 8 × 8 placeholder DDS).
 Export files land in `$DDR_3D_OUT_DIR` (default `<data-root>/../blender_export_test`);
 the character test finds `chara_resources.rlist` under `<data-root>/../startup/data/chara/`
 or `$DDR_3D_RLIST`.
@@ -95,6 +96,31 @@ two ports below do).
   Rage's slot); ordinary songs pick randomly from the sex/class pools of rows whose unlock
   id is `0.0`. Rigs with more than 52 influencing bones are fine — the exporter splits the
   mesh into 52-slot palette blocks (in-game verified).
+
+## Stage screens (the song's movie on a TV / monitor)
+
+The DDR World modpack's Background Movies = STAGE SCREENS plays the song's background movie
+on the video screens inside a stage, like DDR A3's `monitor*` / `replicant*` stages. The game
+keeps a 1280 × 1280 render target that it registers at boot as the texture **`offscreen1`**,
+and a material textured `offscreen1` samples it — there is no per-stage code. To give a
+custom stage a screen:
+
+* Name the screen material's image **`offscreen1`** (case and `_` do not matter —
+  `OffScreen_1` folds to the same key). The exporter then names the KTMDL texture
+  `offscreen1` and writes a tiny black **`offscreen1.dds`** beside the part instead of
+  the image's pixels: the game never binds it (the render target owns the name), but the
+  DLL recognises a stage with screens by that file. Keep any Blender image you like on the
+  material for the viewport preview.
+* Use the unlit `mdl_bg_constant_vc` shader (a white colour attribute — the default the
+  exporter picks for a coloured mesh). The DLL keeps screen materials unlit and without
+  outlines under every Lighting Style.
+* **UVs** say which part of the square the screen shows. The movie is fitted into the
+  square with its aspect kept and centred (A3's rule), so in D3D top-down space a 16:9
+  movie covers **v 0.21875 – 0.78125**, a 4:3 one **v 0.125 – 0.875**, a square one the
+  whole square; u runs 0 → 1 left to right as seen by the viewer (unmirrored). In Blender
+  (bottom-up v) that is `v_blender = 1 − v_d3d`, i.e. the 16:9 band is also 0.21875 –
+  0.78125. Mapping the 16:9 band onto the whole panel makes a 16:9 movie fill it and crops
+  a 4:3 one top and bottom; songs without a movie show a black screen.
 
 ## Porting an existing model (playbook)
 

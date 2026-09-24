@@ -459,10 +459,33 @@ def is_part_object(obj):
     return obj.type == "MESH" and obj.parent is not None and obj.parent_type == "BONE"
 
 
+SCREEN_TEXTURE_KEY = "offscreen1"
+"""Stage-screen texture name (the DLL's Background Movies = STAGE SCREENS): the game registers its
+1280x1280 movie render target at boot under this name, and the first registration of a name wins,
+so a material textured `offscreen1` samples the song's movie in game. The DDS the exporter writes
+for it is only a placeholder (it also marks the stage as "has screens" for the DLL)."""
+SCREEN_PLACEHOLDER_SIZE = 8
+
+
+def is_screen_texture(stem):
+    """The stem folds (lower-case, '_' removed — the game's texture key) to `offscreen1`."""
+    return stem.lower().replace("_", "") == SCREEN_TEXTURE_KEY
+
+
 def write_textures_for(tex_write, out_dir):
-    """Copy clean source .dds files or write A8R8G8B8 .dds next to the model; returns paths."""
+    """Copy clean source .dds files or write A8R8G8B8 .dds next to the model; returns paths.
+    A stage-screen image (`is_screen_texture`) gets an 8x8 opaque-black `offscreen1.dds` placeholder
+    instead of its pixels — the game never binds it (the movie render target owns the name)."""
     written = []
     for stem, image in tex_write:
+        if is_screen_texture(stem):
+            path = os.path.join(out_dir, SCREEN_TEXTURE_KEY + ".dds")
+            n = SCREEN_PLACEHOLDER_SIZE
+            black = [bytes([0, 0, 0, 255]) * n for _ in range(n)]
+            with open(path, "wb") as fo:
+                fo.write(ktmdl.write_dds_a8r8g8b8(n, n, black))
+            written.append(path)
+            continue
         path = os.path.join(out_dir, stem + ".dds")
         src = bpy.path.abspath(image.filepath) if image.filepath else ""
         if src and src.lower().endswith(".dds") and os.path.exists(src) and not image.is_dirty:

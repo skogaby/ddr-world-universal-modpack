@@ -82,6 +82,21 @@ fn field_ptr(side: usize) -> Option<*mut u32> {
     Some(p as *mut u32)
 }
 
+/// Whether any entered side's VIDEO SIZE shows a movie right now (read
+/// only). `false` when none does or no field is readable — the STAGE
+/// SCREENS route is then pointless, and on 20250805 (whose
+/// SceneManageActor creates a MovieActor even for VIDEO SIZE OFF) it would
+/// put a movie on the screens that the players turned off.
+pub fn any_shows_movie(entered: [bool; 2]) -> bool {
+    (0..2).any(|side| {
+        entered[side]
+            && field_ptr(side).is_some_and(|p| {
+                // SAFETY: probed readable (as `apply`).
+                movie_mode::shows_movie(unsafe { p.read_volatile() })
+            })
+    })
+}
+
 /// Window entry: for every entered side whose value `mode` overrides
 /// (`movie_mode::size_override`), write the override and remember both
 /// values. Returns what to hand back to [`restore`].

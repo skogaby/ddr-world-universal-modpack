@@ -158,6 +158,16 @@ rsync -a \
     --exclude '.DS_Store' \
     data_mods "$STAGE/"
 
+# DDR SELECTION's A3 importer (operators run it once against their own A3
+# install — the repo never ships A3 data). Lands in <game>/ddr_selection_import/
+# so the scripts' default World path (the folder above them) is the game folder.
+mkdir -p "$STAGE/ddr_selection_import"
+cp scripts/ddr_selection/import_a3_assets.sh scripts/ddr_selection/a3_assets.manifest \
+    "$STAGE/ddr_selection_import/"
+# cmd.exe is happiest with CRLF.
+sed 's/$/\r/' scripts/ddr_selection/import_a3_assets.bat \
+    > "$STAGE/ddr_selection_import/import_a3_assets.bat"
+
 echo "==> Creating $ARCHIVE"
 mkdir -p "$RELEASE_DIR"
 rm -f "$ARCHIVE" "$INSTALL_BAT"

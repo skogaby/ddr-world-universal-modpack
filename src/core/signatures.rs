@@ -72,6 +72,98 @@ pub struct ShutterActorLayout {
     pub stage_kind: i32,
 }
 
+/// Every address and offset DDR SELECTION's `LayoutActor` per-package helper
+/// replacement consumes (see `SignatureStore::derive_ddr_selection`).
+/// Addresses are absolute; offsets are byte offsets from the `LayoutActor`
+/// (records / load list) or from `GameWork` (skin).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelectionSites {
+    /// The helper itself (detour target; also called as the original).
+    pub package_helper: *const u8,
+    /// `bool(const char* dir, const char* name)` — the arc version probe.
+    pub probe: *const u8,
+    /// `void(map* records, const char* key, const RecordValue* value)`.
+    pub record_insert: *const u8,
+    /// `void(vector<string>* list, const string* name)`.
+    pub load_list_push: *const u8,
+    /// The game's own `"bm2d"` literal (the probe's dir argument).
+    pub bm2d_dir: *const u8,
+    /// Global holding a pointer to the `GameWork` pointer (double hop).
+    pub game_work_global: *const u8,
+    /// Shared (side 2) record map.
+    pub records_shared_off: usize,
+    /// Side-0 record map; side 1 = + `records_side_stride`.
+    pub records_side_off: usize,
+    pub records_side_stride: usize,
+    /// The load list every registered name is pushed onto.
+    pub load_list_off: usize,
+    /// `GameWork` i32 skin id (0 = World UI).
+    pub gamework_skin_off: usize,
+}
+
+/// ddr_selection's legacy stage-panel sites (`derive_ddr_sel_panel`).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelPanelSites {
+    /// `ShutterActor::onUpdate` (RTTI vtable slot 6) — the detour target.
+    pub shutter_update: *const u8,
+    /// World's stage-voice function (state 2, stage kind only).
+    pub stage_voice: *const u8,
+    /// The default kind table's stage row (`{pkg, root, SE in, SE out, …}`).
+    pub stage_row: *const u8,
+    /// 0x40 (20260721+) / 0x30 (20250805, 20260224).
+    pub row_stride: usize,
+    /// Pending song basename `std::string` (written by the kind-3 fill).
+    pub basename_off: usize,
+    /// Active jacket-name `std::string` (copied at the swap).
+    pub jacket_off: usize,
+    /// World's state machine can host A3's legacy root on this build.
+    pub host_ok: bool,
+    /// Old layout only (20250805 / 20260224): the un-null-checked
+    /// `CALL CMovieClip::SetVisible` on `find("jacket_usr")` in update state 2
+    /// (5 bytes, return value unused) — NOPed while A3's root is hosted.
+    pub jacket_vis_call: Option<*const u8>,
+    /// The CLEARED / FAILED rows of the same table (stage row + 1 / + 2
+    /// strides, content-gated) and their kind ids (stage kind + 1 / + 2) —
+    /// the legacy end banners. `None` when the rows are not the stock rows.
+    pub banner_rows: Option<DdrSelBannerRows>,
+}
+
+/// The two end-banner rows of the ShutterActor's default kind table.
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelBannerRows {
+    pub cleared_row: *const u8,
+    pub failed_row: *const u8,
+    pub cleared_kind: i32,
+    pub failed_kind: i32,
+}
+
+/// ddr_selection's `_sel` movie sites (`derive_ddr_sel_movie`).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelMovieSites {
+    /// `SceneManageActor::onInitialize` (RTTI vtable slot 4) — the detour
+    /// target (it creates the song's MovieActor).
+    pub sma_init: *const u8,
+    /// The music-info lookup by basename (`const char*` → entry or null).
+    pub music_lookup: *const u8,
+    /// The entry's two movie bytes the gate reads (`+0x141` first, `+0x140`
+    /// when that one is 5): 0 / 5 = no movie.
+    pub movie_kind_off: usize,
+    pub movie_kind2_off: usize,
+    /// The entry's movie-name override `std::string` (empty ⇒ vslot 1).
+    pub movie_name_off: usize,
+    /// SceneManageActor: song basename / movie suffix `std::string`s, VIDEO
+    /// SIZE (1 FULLSCREEN, 2 ON), the created MovieActor pointer.
+    pub sma_basename_off: usize,
+    pub sma_suffix_off: usize,
+    pub sma_video_size_off: usize,
+    pub sma_movie_off: usize,
+    /// MovieActor: RTTI vtable, the `_sel`-first flag byte, the found movie
+    /// path `std::string`.
+    pub movie_actor_vtable: *const u8,
+    pub sel_flag_off: usize,
+    pub movie_path_off: usize,
+}
+
 /// Every engine address and struct offset the Background Dancers 3D scene
 /// service (`services::scene3d`) consumes, derived all-or-nothing by
 /// `SignatureStore::derive_scene3d` (RE record:
@@ -2247,6 +2339,65 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "4C 8B DC 56 57 41 54 41 55 41 56 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B EA 48 8B F9 8B 42 14 24 01 88 41 16 8B 42 14 C1 E8 02 24 01 88 41 17 48 8D 71 48",
         description: "DShowPlayer::BuildGraph — sole DirectShow filter-graph builder (CLSID_FilterGraph + RenderFile). Detoured by non-native-os-support to fake a successful open (player state 3, no COM) so movies are skipped without crashing Wine (builtin winmm AVs during audio-renderer enumeration) and without soft-locking the movie-status pollers.",
     },
+    // ── Background Dancers: Background Movies = STAGE SCREENS ─────────
+    // (docs/background_dancers_research.md §8). DDR A3 routed a "monitor"
+    // song's movie into layer-table entry 10 — a 1280×1280 canvas whose
+    // private command list renders into the OFFSCREEN1 render target the
+    // engine publishes at boot as the named texture `offscreen1`, which the
+    // screen materials of the monitor*/replicant* stages sample. World kept
+    // the whole chain but its `MovieActor` layer choice (20260825
+    // `FUN_18007cf90`; 20250805 `FUN_180079280`) never selects entry 10:
+    //
+    //   48 8B 15 d32       MOV   RDX,[rip+layer_table]   ; match − 0x1B
+    //   45 33 C0           XOR   R8D,R8D
+    //   C7 40 0C FF FF FF 7F MOV dword [RAX+0xC],0x7FFFFFFF ; match − 0x11 (draw prio)
+    //   48 85 D2 / 75 05 / 41 8B D0 / EB 19   (null-table guard)
+    //   44 38 81 48 01 00 00 CMP  byte [RCX+0x148],R8B   ; the THUMBNAIL flag
+    //   B8 09 00 00 00     MOV   EAX,9                   ; ← imm8 at match+8
+    //   49 0F 45 C0        CMOVNZ RAX,R8                 ; thumbnail ⇒ entry 0
+    //   48 8D 04 40        LEA   RAX,[RAX+RAX*2]
+    //   48 8B 54 C2 08     MOV   RDX,[RDX+RAX*8+8]       ; entry.layer (stride 0x18)
+    //
+    // `derive_movie_screen_route` publishes the imm byte's address as
+    // `movie_layer_select_imm`; the mod rewrites it `09 → 0A` for a routed
+    // song only (checked, restored at window exit). Gates: unique; the byte
+    // reads `09`; the `MOV RDX,[rip]` at match − 0x1B decodes to the derived
+    // `layer_table`; the draw-priority store at match − 0x11. Unique +
+    // byte-identical on all five builds (capstone sweep 2026-09-23):
+    // 20250805 0x1800792a2 / 20260224 0x1800783e2 / 20260721 0x18007cbd2 /
+    // 20260825 0x18007cfb2 / 20260915 0x18007d122.
+    SignatureDefinition {
+        name: "movie_layer_select",
+        pattern: "44 38 81 48 01 00 00 B8 09 00 00 00 49 0F 45 C0 48 8D 04 40 48 8B 54 C2 08",
+        description: "MovieActor layer-table entry choice (`thumbnail ? 0 : 9`) — imm8 at +8 (published as movie_layer_select_imm) is the fullscreen entry the STAGE SCREENS route rewrites to 10 (OFFSCREEN1).",
+    },
+    // The MovieActor's 0x1045 (per-frame, song clock) case (20260825
+    // `FUN_18007d250`; the fit call `FUN_18007d030(this, &size, &origin)`
+    // runs only while the actor's StackStep is 2):
+    //
+    //   83 7C C1 58 02     CMP   dword [RCX+RAX*8+0x58],2   ; StackStep == 2
+    //   0F 85 rel32        JNZ
+    //   0F 10 81 d32       MOVUPS XMM0,[RCX+origin]         ; d32 @ +14 (0x108)
+    //   F2 0F 10 89 d32    MOVSD XMM1,[RCX+origin+0x10]     ; d32 @ +22 (0x118)
+    //   4C 8D 44 24 20 / 48 8D 54 24 40 / 0F 29 44 24 20
+    //   0F 10 81 d32       MOVUPS XMM0,[RCX+size]           ; d32 @ +44 (0x120)
+    //   F2 0F 11 4C 24 30
+    //   F2 0F 10 89 d32    MOVSD XMM1,[RCX+size+0x10]       ; d32 @ +58 (0x130)
+    //
+    // Origin = f64 (x, y, z), size = f64 (w, h, d), written only by the ctor
+    // (`FUN_18007c960`, from the SceneManageActor's marker rect). Published
+    // as `movie_fit_origin_off` / `movie_fit_size_off` (values); the STAGE
+    // SCREENS route writes origin (0,0) / size (1280,1280) while the step is
+    // ≤ 2 — A3's monitor fit. Gates: unique; +22 == +14 + 0x10; +58 == +44 +
+    // 0x10; both below the actor's 0x150 allocation. Unique + identical
+    // displacements on all five builds: 20250805 0x180079570 / 20260224
+    // 0x1800786b0 / 20260721 0x18007cea0 / 20260825 0x18007d280 / 20260915
+    // 0x18007d3f0.
+    SignatureDefinition {
+        name: "movie_actor_fit_case",
+        pattern: "83 7C C1 58 02 0F 85 ?? ?? ?? ?? 0F 10 81 ?? ?? ?? ?? F2 0F 10 89 ?? ?? ?? ?? 4C 8D 44 24 20 48 8D 54 24 40 0F 29 44 24 20 0F 10 81 ?? ?? ?? ?? F2 0F 11 4C 24 30 F2 0F 10 89 ?? ?? ?? ??",
+        description: "MovieActor 0x1045 case (step-2 fit) — d32 at +14 = fit origin f64[3] (movie_fit_origin_off), d32 at +44 = fit size f64[3] (movie_fit_size_off); +22/+58 are the +0x10 z/depth halves (identity gate).",
+    },
     // ── Announcer / in-game voice dispatcher ──────────────────────────
     // The per-frame announcer body (docs/hex_edit_porting.md Hack 1,
     // 32-bit analog FUN_10047ab0): plays combo callouts
@@ -2561,6 +2712,104 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "80 B8 ?? ?? 00 00 00 74 08 48 05 ?? ?? 00 00 EB 06 48 05 ?? ?? 00 00 8B 00",
         description: "The per-frame score read in `MatchingDancePlaySequence::onUpdate` state 0xB (FUN_180061cc0+0xC28 on 20260825): `CMP byte [GamePlayActor+isEx],0; JZ; ADD RAX,exScore; JMP; ADD RAX,moneyScore; MOV EAX,[RAX]` — the game's own \"which score counter does this side display\" selector. derive_two_player_bpl publishes the three imm32s as `gpa_is_ex_off` (match+2, 0x1D0 = the cached use-EX-score byte), `gpa_ex_score_off` (match+11, 0x1D8) and `gpa_money_score_off` (match+19, 0x1D4) so two_player_bpl_mode's onUpdate replacement reads exactly what stock BPL reads, with the offsets attested per build instead of hardcoded (all three sit below the +0x208 GamePlayActor layout fork and match song_reset's GPA_SCORE_OFFSET/GPA_EX_SCORE_OFFSET). Unique on all four builds.",
     },
+    // ── DDR SELECTION (ddr_selection) ───────────────────────────────────
+    SignatureDefinition {
+        name: "layout_package_helper",
+        pattern: "40 55 53 56 57 41 54 41 55 41 56 48 8B EC 48 83 EC 70 48 C7 45 B0 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 F0 45 8B F1 49 8B D8 4C 63 EA 4C 8B E1 48 C7 45 D0 0F 00 00 00 48 C7 45 C8 00 00 00 00 C6 45 B8 00 44 89 4D E0 33 C0 48 83 C9 FF 49 8B F8 F2 AE 48 F7 D1 4C 8D 41 FF 48 8B D3 48 8D 4D B8 E8 ?? ?? ?? ?? 48 8D 3D ?? ?? ?? ?? 48 8B F3 B9 0E 00 00 00 F3 A6 75 05 45 85 F6 74 26",
+        description: "Entry of `sequence::dance::LayoutActor`'s per-package helper `void(LayoutActor* this, int side /*0,1; 2 = shared*/, const char* base, int skin, bool shared)` (FUN_18006b710 on 20260825, FUN_180068000 on 20250805 — byte-shape-identical on all five builds apart from rel32/RIP displacements). Builds the record value `{std::string name @[RBP-0x48]; int skin @[RBP-0x20] (= value+0x28)}` from `base`, formats `\"%04d\"` with the skin into a DEAD 8-byte stack buffer (A3 appended it to the name here — World removed the append), probes `FUN_1801ac3f0(\"bm2d\", name)` (skin := 0 on a miss), then — when `!shared || skin != 0` — inserts `records[side][base] = value` and pushes the name on the LayoutActor load list. Pattern = prologue through the `\"dance_message\"` compare (LEA RDI at match+106, disp at +109). Consumer: ddr_selection::package_helper detours the MATCH (full replacement: stock packages call the original with skin 0, legacy skin packages register `<arc_base>000N` A3-style); derive_ddr_selection reads the helper's own body for its callees and record/list offsets. Unique on all five builds.",
+    },
+    SignatureDefinition {
+        name: "dps_skin_table_read",
+        pattern: "C7 45 ?? 01 00 00 00 C7 45 ?? 02 00 00 00 C7 45 ?? 03 00 00 00 C7 45 ?? 04 00 00 00 48 C7 45 ?? 05 00 00 00 48 8B 05 ?? ?? ?? ?? 48 8B 08 48 63 81 ?? ?? ?? ?? 44 8B 4C 85",
+        description: "Inside `DancePlaySequence::onInitialize` (FUN_1800573d0+0x727 on 20260825): the A3 skin identity table `int t[6] = {0,1,2,3,4,5}` stored on the stack, then `MOV RAX,[rip+game_work_global]; MOV RCX,[RAX]; MOVSXD RAX,[RCX+skin_off]; MOV R9D,[RBP+RAX*4+t]` — the skin id handed as the 4th argument to the LayoutActor ctor (which stores it at +0x190). derive_ddr_selection RIP-decodes match+39 (the GameWork global, cross-checked against stage_record_accessor's) and publishes the disp32 at match+49 as `gamework_skin_off` (0xA8 on every supported build; A3 had +0xB0). Nothing in World writes the field except the per-credit reset; ddr_selection writes the armed skin there. Unique on all five builds.",
+    },
+    SignatureDefinition {
+        name: "afp_sound_callback_play",
+        pattern: "48 89 5C 24 08 57 48 83 EC 20 8B 59 08 48 8B CA 48 8B FA E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 0F 57 D2 80 B9 C4 20 00 00 00 74 ?? 85 DB 74 ?? FF CB 75 ?? F3 0F 10 15",
+        description: "Entry of `bm2d::SoundCallback::play(this, const char* label)` (FUN_1801ad8e0 on 20260825, 0x180197fe0 on 20250805; RTTI `.?AVSoundCallback@bm2d@@` vtable slot 1) — the game's handler for AFP-embedded sounds (`asdlib.sound_play(\"<cue>\")` in a clip's bytecode; libafp passes only the name). Body: `slot = classify(label)` (`vo_*` or a 25-name A3 voice table → 3, else 2), pan 0 / −1 / +1 from `this+8` (side) when the audio manager's versus-pan byte `+0x20C4` is set, then tail-JMP `se_play(slot, label, pan)` — ONE bank, a miss is silent. The legacy DDR SELECTION clips name A3 cues that only the mod's `dsel` bank holds, so ddr_selection::sound::afp_route detours the match (pre-original: route its names to the dsel slot). derive_afp_sound_callback cross-checks the RTTI vtable slot 1 == match and the tail `E9` rel32 (disp at match+0x55) → the `se_play` match; any miss un-resolves the name. Unique on all five builds (+ A3 20240402).",
+    },
+    // The code-played full-combo SE inside `FullcomboActor::onMessage`
+    // (FUN_180069c00+0xB7 on 20260825 — the handler is byte-shape-identical
+    // from +0x95 to +0x13B on all five builds): the inlined play
+    //   MOV RBP,[rip+audio_mgr]; MOV RDI,[RBP+0x30] (slot-2 bank);
+    //   TEST RDI,RDI; JZ release;               ← match+0x0E
+    //   MOV RAX,[RDI]; LEA RDX,["se_game_fullcombo"]; MOV RCX,RDI;
+    //   CALL [RAX] (GetCueIndex); CMP AX,0xFFFF; JZ; … CALL [R10+0x20] (Play);
+    //   … MOVAPS XMM3,XMM6; MOV R8D,2; … CALL register_handle
+    // A3's FullcomboActor played no code SE (its only full-combo sound is the
+    // legacy clip's embedded `XAC_full_combo2`), so on a legacy full-combo
+    // song ddr_selection::sound::code_se flips the null-bank JZ to JMP
+    // (`74` → `EB`, rel8 kept) — World's own "no se_normal bank" path: the
+    // play is skipped, the AVS lock is still released. derive_ddr_sel_code_se
+    // gates the LEA (disp at match+0x16) on the string, the JZ opcode and its
+    // target (`TEST ECX,ECX; JLE` = the lock release) and — when resolved —
+    // the site lying inside `fullcombo_actor_on_message`; publishes the JZ as
+    // `ddr_sel_fullcombo_se_jz`. Unique on all five builds (the first 35
+    // bytes alone also hit one unrelated inlined play; the tail pins it).
+    SignatureDefinition {
+        name: "ddr_sel_fullcombo_se_site",
+        pattern: "48 8B 2D ?? ?? ?? ?? 48 8B 7D 30 48 85 FF 74 ?? 48 8B 07 48 8D 15 ?? ?? ?? ?? 48 8B CF FF 10 B9 FF FF 00 00 66 3B C1 74 ?? 48 C7 84 24 98 00 00 00 00 00 00 00 4C 8B 17 48 8D 8C 24 98 00 00 00 48 89 4C 24 20 45 33 C9 45 33 C0 0F B7 D0 48 8B CF 41 FF 52 20 85 C0 78 ?? 0F 28 DE 41 B8 02 00 00 00",
+        description: "FullcomboActor::onMessage's inlined `se_game_fullcombo` play from the slot-2 bank (FUN_180069c00+0xB7 on 20260825). ddr_selection flips the null-bank JZ at match+0x0E to JMP while a legacy full-combo package is loaded (A3 played only the clip's own XAC_full_combo2). Identity-gated by derive_ddr_sel_code_se (LEA at +0x13 → \"se_game_fullcombo\").",
+    },
+    // DancePlaySequence::onUpdate step 5's READY? dwell gate (FUN_180057e10
+    // +0xA94 on 20260825): `MOVSS XMM0,[RSI+timer]; COMISS XMM0,[rip+5.0f];
+    // JB wait; MOV RDX,[rip+shutter_global]; TEST RDX,RDX; JZ; MOVZX EAX,
+    // word [RDX+0x82]` — the song waits until 5.0 s have passed since the
+    // DPS was created. A3 had no dwell (its stage panel held itself), so
+    // while a legacy intro is armed ddr_selection seeds the timer past the
+    // threshold every pre-song frame (the quick-restart technique).
+    // derive_ddr_sel_intro publishes the timer disp32 (match+4, 0x130 on
+    // every build) as `ddr_sel_dps_ready_timer_off`, gated on the threshold
+    // float (rip at match+11) being a plausible dwell and the shutter global
+    // (rip at match+24) equalling `shutter_actor_global`. Unique on all five
+    // builds (the bare MOVSS/COMISS prefix also hits a +0x158 twin on
+    // 20250805/20260224; the shutter load pins it).
+    SignatureDefinition {
+        name: "ddr_sel_dps_ready_dwell",
+        pattern: "F3 0F 10 86 ?? ?? 00 00 0F 2F 05 ?? ?? ?? ?? 0F 82 ?? ?? 00 00 48 8B 15 ?? ?? ?? ?? 48 85 D2 74 ?? 0F B7 82 82 00 00 00",
+        description: "DancePlaySequence step-5 READY? dwell gate (MOVSS [RSI+0x130]; COMISS [rip 5.0f]; JB) followed by the ShutterActor global load. ddr_selection seeds the DPS timer past the threshold while a legacy intro is armed (A3 had no dwell).",
+    },
+    // ── DDR SELECTION legacy stage panel (ShutterActor kind-3 host) ─────
+    //
+    // RE: `.agents/planning/2026-09-22-ddr-selection/research/stage-panel.md`.
+    // All four feed derive_ddr_sel_panel (all-or-nothing, publishes on every
+    // build; `ddr_sel_panel_host_ok` = 1 only where World's state machine can
+    // host A3's legacy root).
+    SignatureDefinition {
+        name: "ddr_sel_shutter_swap",
+        pattern: "8B 8E ?? ?? 00 00 8B 86 ?? ?? 00 00 89 86 ?? ?? 00 00 89 8E ?? ?? 00 00 48 8D 8E ?? ?? 00 00 48 8D 96 ?? ?? 00 00 E8 ?? ?? ?? ?? 48 8D 96 ?? ?? 00 00 48 8D 9E ?? ?? 00 00 48 8B CB E8",
+        description: "ShutterActor::onUpdate state 2 (FUN_180033f60+0x4E5 on 20260825): the active/pending kind swap `MOV ECX,[RSI+active]; MOV EAX,[RSI+pending]; MOV [RSI+active],EAX; MOV [RSI+pending],ECX` followed by the two std::string copies basename `+0x318 <- +0x340` and jacket name `+0x368 <- +0x390`. derive_ddr_sel_panel cross-checks the kind offsets (+2/+8/+14/+20) against shutter_actor_layout and publishes `ddr_sel_shutter_basename_off` (pending basename, disp at +34) and `ddr_sel_shutter_jacket_off` (active jacket name, disp at +53). Unique on all five builds.",
+    },
+    SignatureDefinition {
+        name: "ddr_sel_shutter_stage_tail",
+        pattern: "48 8D 15 ?? ?? ?? ?? 48 8B 8E ?? ?? 00 00 E8 ?? ?? ?? ?? 48 85 C0 74 0A 33 D2 48 8B C8 E8 ?? ?? ?? ?? E8 ?? ?? ?? ??",
+        description: "ShutterActor::onUpdate state 2, stage kind only: `LEA RDX,[\"choice_stage_usr\"]; MOV RCX,[RSI+stage_layer]; CALL find; TEST RAX,RAX; JZ; XOR EDX,EDX; MOV RCX,RAX; CALL CMovieClip::Pause; CALL stage_voice` (FUN_180033f60+0x640 on 20260825). derive_ddr_sel_panel checks the LEA string, the layer slot (+10) == 0x88 + stage_kind*0x10, publishes the stage-voice function (CALL at +34) and whether the preceding `jacket_usr` SetVisible is null-checked (`48 85 C0 74 0A` at -15: 20260721+ yes; 20250805/20260224 no — there the unchecked `CALL SetVisible` at -5 is shape-checked from -29 and published as `ddr_sel_shutter_jacket_vis_call`, which ddr_selection NOPs while it hosts A3's root: that root has no `jacket_usr`). Unique on all five builds.",
+    },
+    SignatureDefinition {
+        name: "ddr_sel_shutter_kind_table",
+        pattern: "48 63 C2 48 C1 E0 06 83 F9 0A 75 ?? 48 8D 0D ?? ?? ?? ?? 0F 10 84 08 ?? ?? ?? ?? 0F 10 94 08 ?? ?? ?? ?? 0F 10 9C 08 ?? ?? ?? ?? 0F 10 A4 08 ?? ?? ?? ?? EB ?? 83 F9 09 48 8D 0D ?? ?? ?? ?? 75 ?? 0F 10 84 08 ?? ?? ?? ?? 0F 10 94 08 ?? ?? ?? ?? 0F 10 9C 08 ?? ?? ?? ?? 0F 10 A4 08 ?? ?? ?? ?? EB ?? 0F 10 84 08 ?? ?? ?? ??",
+        description: "ShutterActor kind-art loader (FUN_180035420+0x200 on 20260825, 20260721+): the per-kind 0x40-byte row copy `{pkg, root, SE in, SE out, voice in, voice out, …}` from the dan (mode 10) / galaxy-brave (mode 9) / default tables; the default table is the module-relative disp32 at +103. derive_ddr_sel_panel publishes the stage row (`ddr_sel_shutter_stage_row`, gated: pkg NULL, root \"shutter_play\", SE in \"se_start_game\"). ddr_selection rewrites that row while a legacy panel is hosted (pkg \"common_choice_v2\", root \"shutter_choice_hd_root\") so World's own named-package path loads A3's root. 20250805/20260224 have the 0x30-stride row getter instead (`_v1`).",
+    },
+    SignatureDefinition {
+        name: "ddr_sel_shutter_kind_table_v1",
+        pattern: "48 8D 0C 40 48 03 C9 49 8B 84 C8 ?? ?? ?? ?? 49 89 01 49 8B 84 C8 ?? ?? ?? ?? 49 89 41 08 49 8B 84 C8 ?? ?? ?? ?? 49 89 41 10",
+        description: "Old-layout (20250805/20260224) ShutterActor kind-row getter (0x1800351e0+0x70 on 20250805): the default 0x30-stride, 6-pointer table's module-relative disp32 at +11. derive_ddr_sel_panel publishes the stage row (kind 1) from it; the first three pointers (pkg, root, SE in) are laid out like the 0x40 rows, and the old kind-art loader (0x180034fc0 on 20250805) has the same named-package branch.",
+    },
+    // ── DDR SELECTION `_sel` background movies ───────────────────────────
+    //
+    // RE: `.agents/planning/2026-09-22-ddr-selection/research/
+    // end-banners-sel-movies.md` §4. Both feed derive_ddr_sel_movie
+    // (all-or-nothing; a miss only means World's own movie rules).
+    SignatureDefinition {
+        name: "ddr_sel_sma_movie_gate",
+        pattern: "E8 ?? ?? ?? ?? 48 85 C0 74 27 0F B6 88 ?? ?? ?? ?? 80 F9 05 75 10 0F B6 88 ?? ?? ?? ?? 80 F9 05 0F 84 ?? ?? ?? ?? 0F B6 C1 84 C0 0F 84 ?? ?? ?? ??",
+        description: "SceneManageActor::onInitialize's movie gate (FUN_18007d700+0x33 on 20260825): `CALL music_info_lookup(basename); TEST RAX,RAX; JZ create; MOVZX ECX,byte [RAX+0x141]; CMP CL,5; JNZ; MOVZX ECX,byte [RAX+0x140]; CMP CL,5; JZ skip; MOVZX EAX,CL; TEST AL,AL; JZ skip` — World creates the song's MovieActor only for a null entry or movie bytes other than 0 / 5 (then VIDEO SIZE `+0xE4` 1 or 2). derive_ddr_sel_movie checks the match lies in the RTTI slot-4 function, decodes the lookup (CALL), both movie-byte disps (+13 / +25), the VIDEO SIZE disp (+51, the instruction the null-entry JZ lands on) and the basename LEA 0x16 before the CALL. ddr_selection (the `_sel` movies) makes a movie-less legacy song pass this gate for the one call. Unique and byte-identical on all five builds.",
+    },
+    SignatureDefinition {
+        name: "ddr_sel_movie_sel_test",
+        pattern: "48 83 B8 ?? ?? ?? ?? 00 75 0E 48 8B 10 48 8B C8 FF 52 08 48 8B D8 EB 11 48 8D 98 ?? ?? ?? ?? 48 83 7B 18 10 72 03 48 8B 1B 80 BF ?? ?? ?? ?? 00 74 ?? 4C 8D 87 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8B D3 E8",
+        description: "MovieActor::onInitialize's path search (FUN_18007cd70+0x67 on 20260825): the movie name = the music-info override string (`+0x148`, empty ⇒ entry vslot 1), then `CMP byte [RDI+0x149],0; JZ; LEA R8,[RDI+0xB0]; LEA RCX,[RDI+0xD8]; MOV RDX,RBX; CALL try_sel` — World's dormant `_sel` flag (nothing writes it). derive_ddr_sel_movie gates the CALL target on its `\"_sel\"` string and the match on lying 0x100 into the first CALL of MovieActor vtable slot 4, publishes the flag (+43), the override string (+27, its size at +3) and the found-path string (+60). Unique and byte-identical on all five builds.",
+    },
     // ── Multiplayer Bot (multiplayer_bot) ───────────────────────────────
     SignatureDefinition {
         name: "extra_stage_grant",
@@ -2793,6 +3042,8 @@ impl SignatureStore {
         self.derive_file_manager_singleton();
         self.derive_render_globals();
         self.derive_layer_table();
+        // Cross-checks its table load against `layer_table` — keep after it.
+        self.derive_movie_screen_route();
         self.derive_player_work_table();
         self.derive_max_stage_global();
         self.derive_shutter_actor_global();
@@ -2837,6 +3088,17 @@ impl SignatureStore {
         self.derive_smarv_results_course_gate();
         self.derive_ghost_vec_copy();
         self.derive_two_player_bpl();
+        self.derive_ddr_selection();
+        self.derive_music_series_vslot();
+        self.derive_afp_sound_callback();
+        self.derive_ddr_sel_code_se();
+        self.derive_ddr_sel_vo_ready();
+        self.derive_ddr_sel_intro();
+        // Consumes shutter_actor_layout (derived above).
+        self.derive_ddr_sel_panel();
+        // Consumes the SceneManageActor / MovieActor RTTI vtables
+        // (find_movie_backdrop_vtables, above).
+        self.derive_ddr_sel_movie();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -2946,6 +3208,167 @@ impl SignatureStore {
             log_info!("  [+] bottom_text_slots (derived) @ +0x{:X}", slots_off);
             log_info!("  [+] bottom_text_empty_str (derived) @ +0x{:X}", empty_off);
         }
+    }
+
+    /// Derive the Background Movies = STAGE SCREENS route
+    /// (docs/background_dancers_research.md §8) from `movie_layer_select`
+    /// and `movie_actor_fit_case`:
+    ///
+    /// * `movie_layer_select_imm` (address) — the `MOV EAX,9` imm8 of the
+    ///   MovieActor's layer choice (match+8);
+    /// * `movie_fit_origin_off` / `movie_fit_size_off` (published values) —
+    ///   the MovieActor fit rectangle fields (d32 at +14 / +44).
+    ///
+    /// All-or-nothing for the three names. Gates: both AOBs unique; the
+    /// imm8 reads `09`; the `MOV RDX,[rip+disp32]` at select − 0x1B decodes
+    /// to the derived `layer_table` (or at least into the module when that
+    /// derivation failed); the `MOV dword [RAX+0xC],0x7FFFFFFF` draw-priority
+    /// store at select − 0x11; the fit's +22 / +58 displacements are its
+    /// +14 / +44 ones + 0x10 (the f64 z / depth halves); both offsets end
+    /// inside the MovieActor's 0x150-byte allocation. Consumer:
+    /// `mods::background_dancers::screen_route` (optional — a miss degrades
+    /// STAGE SCREENS to THUMBNAIL with one WARN).
+    fn derive_movie_screen_route(&mut self) {
+        const TAG: &str = "movie_screen_route";
+        const IMM_OFF: usize = 8;
+        const STOCK_IMM: u8 = 0x09;
+        const TABLE_LOAD_BACK: usize = 0x1B;
+        const TABLE_LOAD: [u8; 3] = [0x48, 0x8B, 0x15];
+        const PRIO_STORE_BACK: usize = 0x11;
+        const PRIO_STORE: [u8; 7] = [0xC7, 0x40, 0x0C, 0xFF, 0xFF, 0xFF, 0x7F];
+        const ORIGIN_DISP: usize = 14;
+        const ORIGIN_Z_DISP: usize = 22;
+        const SIZE_DISP: usize = 44;
+        const SIZE_D_DISP: usize = 58;
+        const FIT_LEN: usize = 62;
+        /// `MovieActor` allocation size (SceneManageActor::onInitialize
+        /// `MOV ECX,0x150`, research §7.1).
+        const MOVIE_ACTOR_SIZE: usize = 0x150;
+        /// The three f64s of a fit field.
+        const FIELD_LEN: usize = 0x18;
+
+        let (Some(select), Some(fit)) = (
+            self.get_address("movie_layer_select"),
+            self.get_address("movie_actor_fit_case"),
+        ) else {
+            log_warn!("  [-] {} -- layer-select / fit-case AOB unresolved", TAG);
+            return;
+        };
+        for name in ["movie_layer_select", "movie_actor_fit_case"] {
+            let hits = self.get_all_matches(name);
+            if hits.len() != 1 {
+                log_warn!(
+                    "  [-] {} -- {} expected exactly 1 match, found {}",
+                    TAG,
+                    name,
+                    hits.len()
+                );
+                return;
+            }
+        }
+        let base = self.base as usize;
+        let inside = |p: usize, len: usize| {
+            p.wrapping_sub(base) < self.size
+                && p.wrapping_sub(base).saturating_add(len) <= self.size
+        };
+        let select_addr = select as usize;
+        if select_addr.wrapping_sub(base) < TABLE_LOAD_BACK
+            || !inside(select_addr - TABLE_LOAD_BACK, TABLE_LOAD_BACK + 25)
+            || !inside(fit as usize, FIT_LEN)
+        {
+            log_warn!("  [-] {} -- match window outside module", TAG);
+            return;
+        }
+        unsafe {
+            let imm = *select.add(IMM_OFF);
+            if imm != STOCK_IMM {
+                log_warn!(
+                    "  [-] {} -- layer-select imm reads 0x{:02X} (expected 0x{:02X})",
+                    TAG,
+                    imm,
+                    STOCK_IMM
+                );
+                return;
+            }
+            let load = select.sub(TABLE_LOAD_BACK);
+            if std::slice::from_raw_parts(load, 3) != TABLE_LOAD {
+                log_warn!("  [-] {} -- no MOV RDX,[rip] at layer-select − 0x1B", TAG);
+                return;
+            }
+            let table = decode_rip_relative(load.add(3));
+            match self.get_address("layer_table") {
+                Some(t) if t != table => {
+                    log_warn!(
+                        "  [-] {} -- layer-select loads +0x{:X}, layer_table is +0x{:X} (identity mismatch)",
+                        TAG,
+                        (table as usize).wrapping_sub(base),
+                        (t as usize).wrapping_sub(base)
+                    );
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    if !inside(table as usize, 8) {
+                        log_warn!("  [-] {} -- layer-table global outside module", TAG);
+                        return;
+                    }
+                }
+            }
+            if std::slice::from_raw_parts(select.sub(PRIO_STORE_BACK), PRIO_STORE.len())
+                != PRIO_STORE
+            {
+                log_warn!(
+                    "  [-] {} -- draw-priority store absent at layer-select − 0x11",
+                    TAG
+                );
+                return;
+            }
+            let disp = |o: usize| (fit.add(o) as *const i32).read_unaligned();
+            let (origin, origin_z, size, size_d) = (
+                disp(ORIGIN_DISP),
+                disp(ORIGIN_Z_DISP),
+                disp(SIZE_DISP),
+                disp(SIZE_D_DISP),
+            );
+            let plausible = |d: i32| d > 0 && (d as usize) + FIELD_LEN <= MOVIE_ACTOR_SIZE;
+            if origin_z != origin.wrapping_add(0x10)
+                || size_d != size.wrapping_add(0x10)
+                || !plausible(origin)
+                || !plausible(size)
+            {
+                log_warn!(
+                    "  [-] {} -- fit displacements implausible (origin 0x{:X}/0x{:X}, size 0x{:X}/0x{:X})",
+                    TAG,
+                    origin,
+                    origin_z,
+                    size,
+                    size_d
+                );
+                return;
+            }
+            // Everything validated — publish the three names.
+            let imm_addr = select.add(IMM_OFF);
+            self.resolved
+                .insert("movie_layer_select_imm".into(), imm_addr);
+            log_info!(
+                "  [+] movie_layer_select_imm (derived) @ +0x{:X}",
+                (imm_addr as usize).wrapping_sub(base)
+            );
+            self.publish_value("movie_fit_origin_off", origin as usize);
+            self.publish_value("movie_fit_size_off", size as usize);
+        }
+    }
+
+    /// MovieActor fit-origin field (f64 x, y, z) offset — see
+    /// `derive_movie_screen_route` — or `None`.
+    pub fn movie_fit_origin_off(&self) -> Option<usize> {
+        self.published_value("movie_fit_origin_off")
+    }
+
+    /// MovieActor fit-size field (f64 w, h, d) offset — see
+    /// `derive_movie_screen_route` — or `None`.
+    pub fn movie_fit_size_off(&self) -> Option<usize> {
+        self.published_value("movie_fit_size_off")
     }
 
     // ── Background Dancers: the `scene3d` group ─────────────────────────
@@ -4878,6 +5301,923 @@ impl SignatureStore {
             self.published_value("gpa_ex_score_off")?,
             self.published_value("gpa_money_score_off")?,
         ))
+    }
+
+    /// Derive everything DDR SELECTION's package-helper replacement needs
+    /// beyond its two AOBs (`layout_package_helper`, `dps_skin_table_read`).
+    /// All values are read from the helper's OWN body, whose shape is
+    /// identical on every supported build (RE: the 2026-09-22 DDR SELECTION
+    /// planning notes; `docs/ddr_selection_research.md` §3.1):
+    ///
+    /// * identity gates — the LEA at match+106 decodes to `"dance_message"`,
+    ///   the `45 8B CE 4C 8D 05` LEA to `"%04d"` (the dead skin format), the
+    ///   probe's `48 8D 0D` LEA to `"bm2d"`;
+    /// * `ddr_sel_pkg_probe` — `FUN_1801ac3f0(dir, name) -> bool`, the arc
+    ///   version probe (`_v3`, `_v0`, `_lite`, bare);
+    /// * from the insert/push tail
+    ///   `LEA R8,[RBP-0x48]; MOV RDX,RBX; CMP R13D,2; JNZ; LEA RCX,[R12+shared];
+    ///   JMP; LEA RCX,[R13+R13*8]; LEA RCX,[R12+RCX*8+side]; CALL insert;
+    ///   LEA RCX,[R12+list]; LEA RDX,[RBP-0x48]; CALL push` —
+    ///   `ddr_sel_record_insert` (`void(map*, const char* key, value*)`, copies
+    ///   the string and value+0x28), `ddr_sel_load_list_push`
+    ///   (`void(vector<string>*, const string*)`, copies) and the published
+    ///   offsets `ddr_sel_records_shared_off` / `ddr_sel_records_side_off` /
+    ///   `ddr_sel_load_list_off` (per-side stride 0x48 is pinned by the
+    ///   pattern's literal `R13+R13*8` / `*8` encoding);
+    /// * from `dps_skin_table_read`: `ddr_sel_game_work_global` (RIP at
+    ///   match+39, must equal stage_record_accessor's GameWork global when
+    ///   that resolved) and the published `gamework_skin_off` (match+49).
+    ///
+    /// All-or-nothing: any failure publishes nothing (the mod lists these
+    /// names in `required_signatures` and is skipped cleanly).
+    fn derive_ddr_selection(&mut self) {
+        const TAG: &str = "ddr_selection";
+        let (Some(helper), Some(skin_site)) = (
+            self.get_address("layout_package_helper"),
+            self.get_address("dps_skin_table_read"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- package helper / skin table read unresolved",
+                TAG
+            );
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        // NUL-terminated string at `p` equals `want`?
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) || (p as usize - base) + want.len() + 1 > size {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        const WINDOW: usize = 0x200;
+        let find = |pattern: &str| -> Option<*const u8> {
+            let hits = scan_pattern_all(helper, WINDOW, pattern);
+            if hits.len() == 1 {
+                Some(hits[0].address as *const u8)
+            } else {
+                None
+            }
+        };
+
+        unsafe {
+            if !cstr_is(decode_rip_relative(helper.add(109)), b"dance_message") {
+                log_warn!(
+                    "  [-] {} -- helper LEA at +106 is not \"dance_message\"",
+                    TAG
+                );
+                return;
+            }
+            let Some(fmt) = find("45 8B CE 4C 8D 05 ?? ?? ?? ?? 8D 50 08 48 8D 4D E8 E8") else {
+                log_warn!("  [-] {} -- helper skin-format site not unique", TAG);
+                return;
+            };
+            if !cstr_is(decode_rip_relative(fmt.add(6)), b"%04d") {
+                log_warn!("  [-] {} -- helper format string is not \"%04d\"", TAG);
+                return;
+            }
+            let Some(probe_site) = find("48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 75") else {
+                log_warn!("  [-] {} -- helper probe site not unique", TAG);
+                return;
+            };
+            let dir = decode_rip_relative(probe_site.add(3));
+            if !cstr_is(dir, b"bm2d") {
+                log_warn!("  [-] {} -- helper probe dir is not \"bm2d\"", TAG);
+                return;
+            }
+            let probe = decode_call_rel32(probe_site.add(7));
+            let Some(tail) = find(
+                "4C 8D 45 B8 48 8B D3 41 83 FD 02 75 0A 49 8D 8C 24 ?? ?? ?? ?? EB 0D 4B 8D 4C ED 00 49 8D 8C CC ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8D 8C 24 ?? ?? ?? ?? 48 8D 55 B8 E8 ?? ?? ?? ??",
+            ) else {
+                log_warn!("  [-] {} -- helper insert/push tail not unique", TAG);
+                return;
+            };
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let shared_off = rd(tail.add(17));
+            let side_off = rd(tail.add(32));
+            let list_off = rd(tail.add(45));
+            let insert = decode_call_rel32(tail.add(36));
+            let push = decode_call_rel32(tail.add(53));
+            if !inside(probe) || !inside(insert) || !inside(push) {
+                log_warn!("  [-] {} -- helper callees outside module", TAG);
+                return;
+            }
+            // Record maps come first (shared, then 2 × 0x48 per side), the
+            // load list after them — the ctor's field order.
+            if !(shared_off < side_off && side_off + 2 * 0x48 <= list_off && list_off < 0x400) {
+                log_warn!(
+                    "  [-] {} -- implausible LayoutActor offsets (shared 0x{:X}, side 0x{:X}, list 0x{:X})",
+                    TAG,
+                    shared_off,
+                    side_off,
+                    list_off
+                );
+                return;
+            }
+
+            let game_work_global = decode_rip_relative(skin_site.add(39));
+            let skin_off = rd(skin_site.add(49));
+            if !inside(game_work_global) || !(0x40..0x400).contains(&skin_off) {
+                log_warn!(
+                    "  [-] {} -- implausible GameWork global / skin offset 0x{:X}",
+                    TAG,
+                    skin_off
+                );
+                return;
+            }
+            let accessor = self
+                .get_address("stage_record_accessor")
+                .or_else(|| self.get_address("stage_record_accessor_v1"));
+            if let Some(acc) = accessor {
+                if decode_rip_relative(acc.add(3)) != game_work_global {
+                    log_warn!(
+                        "  [-] {} -- skin-table GameWork global disagrees with stage_record_accessor",
+                        TAG
+                    );
+                    return;
+                }
+            }
+
+            let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+            for (name, p) in [
+                ("ddr_sel_pkg_probe", probe),
+                ("ddr_sel_record_insert", insert),
+                ("ddr_sel_load_list_push", push),
+                ("ddr_sel_bm2d_dir", dir),
+                ("ddr_sel_game_work_global", game_work_global),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+            }
+            self.publish_value("ddr_sel_records_shared_off", shared_off);
+            self.publish_value("ddr_sel_records_side_off", side_off);
+            self.publish_value("ddr_sel_load_list_off", list_off);
+            self.publish_value("gamework_skin_off", skin_off);
+        }
+    }
+
+    /// Publish `music_series_vslot` — the music-DB entry's "raw musicdb
+    /// `<series>`" virtual slot, read from `flare_skill_classifier`'s own
+    /// `CALL qword [RDX+disp32]` (match+2): 0xA0 on 20260324+, 0x88 on
+    /// 20250805 / 20260224. The object is the same entry `find_music_by_mcode`
+    /// returns (both walk the `music_db_global` vector). Consumer:
+    /// ddr_selection's AUTO trigger. Soft: a miss publishes nothing.
+    fn derive_music_series_vslot(&mut self) {
+        let Some(site) = self.get_address("flare_skill_classifier") else {
+            log_warn!("  [-] music_series_vslot -- flare_skill_classifier unresolved");
+            return;
+        };
+        let slot = unsafe { std::ptr::read_unaligned(site.add(2) as *const u32) } as usize;
+        if slot % 8 != 0 || !(0x40..0x200).contains(&slot) {
+            log_warn!("  [-] music_series_vslot -- implausible slot 0x{:X}", slot);
+            return;
+        }
+        self.publish_value("music_series_vslot", slot);
+    }
+
+    /// Validate `afp_sound_callback_play`: the RTTI `bm2d::SoundCallback`
+    /// vtable's slot 1 must be the match, and the tail `JMP rel32` (opcode at
+    /// match+0x54, disp at +0x55) must land on the `se_play` match. On any
+    /// failure the AOB is un-resolved so no consumer can detour a function of
+    /// the wrong shape.
+    fn derive_afp_sound_callback(&mut self) {
+        const NAME: &str = "afp_sound_callback_play";
+        let Some(play) = self.get_address(NAME) else {
+            return;
+        };
+        let fail = |this: &mut Self, why: &str| {
+            this.resolved.remove(NAME);
+            log_warn!("  [-] {} -- {}; un-resolved", NAME, why);
+        };
+        let Some(se_play) = self.get_address("se_play") else {
+            return fail(self, "se_play unresolved");
+        };
+        let Some(vt) =
+            self.find_vtable_by_rtti(".?AVSoundCallback@bm2d@@", "sound_callback_vtable")
+        else {
+            return fail(self, "RTTI vtable not found");
+        };
+        unsafe {
+            let slot1 = *(vt as *const *const u8).add(1);
+            if slot1 != play {
+                return fail(self, "RTTI vtable slot 1 is not the match");
+            }
+            if *play.add(0x54) != 0xE9 || decode_rip_relative(play.add(0x55)) != se_play {
+                return fail(self, "tail JMP does not reach se_play");
+            }
+        }
+        log_info!("  [+] {} verified (RTTI slot 1, tail -> se_play)", NAME);
+    }
+
+    /// Validate `ddr_sel_fullcombo_se_site` and publish the null-bank JZ of
+    /// FullcomboActor::onMessage's inlined `se_game_fullcombo` play as
+    /// `ddr_sel_fullcombo_se_jz` (the byte ddr_selection flips `74` → `EB`).
+    ///
+    /// Gates: the `LEA RDX,[rip]` at match+0x13 names `"se_game_fullcombo"`;
+    /// match+0x0E is `JZ rel8` and lands on `TEST ECX,ECX; JLE` (the AVS lock
+    /// release — the path World takes when the slot-2 bank is absent, so the
+    /// JMP keeps the lock balanced); when `fullcombo_actor_on_message`
+    /// resolved, the site lies within its first 0x200 bytes. Any failure
+    /// un-resolves the AOB (the full-combo SE then doubles on legacy songs —
+    /// cosmetic, one WARN at the consumer).
+    fn derive_ddr_sel_code_se(&mut self) {
+        const NAME: &str = "ddr_sel_fullcombo_se_site";
+        const JZ_OFF: usize = 0x0E;
+        const LEA_DISP_OFF: usize = 0x16;
+        let Some(site) = self.get_address(NAME) else {
+            return;
+        };
+        let fail = |this: &mut Self, why: &str| {
+            this.resolved.remove(NAME);
+            log_warn!("  [-] {} -- {}; un-resolved", NAME, why);
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        unsafe {
+            let label = decode_rip_relative(site.add(LEA_DISP_OFF));
+            let want = b"se_game_fullcombo\0";
+            let off = (label as usize).wrapping_sub(base);
+            if off + want.len() > size || std::slice::from_raw_parts(label, want.len()) != want {
+                return fail(self, "LEA does not name \"se_game_fullcombo\"");
+            }
+            let jz = site.add(JZ_OFF);
+            if *jz != 0x74 {
+                return fail(self, "null-bank branch is not JZ rel8");
+            }
+            let target = jz.add(2).offset(*jz.add(1) as i8 as isize);
+            if std::slice::from_raw_parts(target, 3) != [0x85, 0xC9, 0x7E] {
+                return fail(self, "null-bank JZ does not reach the lock release");
+            }
+            if let Some(handler) = self.get_address("fullcombo_actor_on_message") {
+                if (site as usize).wrapping_sub(handler as usize) >= 0x200 {
+                    return fail(self, "site is outside fullcombo_actor_on_message");
+                }
+            }
+            self.resolved.insert("ddr_sel_fullcombo_se_jz".into(), jz);
+            log_info!(
+                "  [+] ddr_sel_fullcombo_se_jz (derived) @ +0x{:X}",
+                (jz as usize).wrapping_sub(base)
+            );
+        }
+    }
+
+    /// The ShutterActor update's two inlined `vo_ingame_ready` plays (state 5
+    /// = the `stage_out` reveal, state 7 = the `0x100c` drain when the reveal
+    /// never ran; FUN_180033f60+0x78C / +0x94E on 20260825), each
+    /// `MOV Rb,[rip+audio_mgr]; MOV RDI,[Rb+0x40] (slot-3 voice bank); TEST
+    /// RDI,RDI; JZ release; MOV RAX,[RDI]; LEA RDX,["vo_ingame_ready"]; …
+    /// GetCueIndex; … Play; … MOV R8D,3; CALL register_handle`. A legacy
+    /// `dance_message000N` READY clip plays its own era voice, so
+    /// ddr_selection::sound::code_se flips both null-bank `JZ`s to `JMP`
+    /// while the legacy intro is armed. Pattern starts at the `MOV RDI` (the
+    /// preceding manager load and the bank register differ between 20250805 /
+    /// 20260224 and 20260721+); exactly two hits on every build, both must
+    /// name the string, both `JZ rel8` (match+7) must land on the AVS lock
+    /// release `TEST ECX,ECX; JLE`, and they must sit within 0x400 bytes of
+    /// each other. Publishes `ddr_sel_vo_ready_jz_0` / `_1`. Soft: any
+    /// failure publishes nothing (World's voice then doubles the legacy one).
+    const VO_READY_SITE: &'static str = "?? 8B ?? 40 48 85 FF 74 ?? 48 8B 07 48 8D 15 ?? ?? ?? ?? 48 8B CF FF 10 0F B7 D0 B9 FF FF 00 00 66 3B C1 74 ?? ?? 89 ?? ?? 48 8B 07 48 8D 4D ?? 48 89 4C 24 20 45 33 C9 45 33 C0 48 8B CF FF 50 20 85 C0 78 ?? 0F 57 DB 41 B8 03 00 00 00";
+
+    fn derive_ddr_sel_vo_ready(&mut self) {
+        const LABEL: &str = "ddr_sel_vo_ready_jz";
+        const JZ_OFF: usize = 7;
+        const LEA_DISP_OFF: usize = 15;
+        let base = self.base as usize;
+        let size = self.size;
+        let hits = scan_pattern_all(self.base, self.size, Self::VO_READY_SITE);
+        if hits.len() != 2 {
+            log_warn!(
+                "  [-] {} -- expected 2 inlined vo_ingame_ready plays, found {}",
+                LABEL,
+                hits.len()
+            );
+            return;
+        }
+        let a = hits[0].address as usize;
+        let b = hits[1].address as usize;
+        if a.abs_diff(b) > 0x400 {
+            log_warn!(
+                "  [-] {} -- the two sites are 0x{:X} apart",
+                LABEL,
+                a.abs_diff(b)
+            );
+            return;
+        }
+        let mut jzs = Vec::with_capacity(2);
+        unsafe {
+            for h in &hits {
+                let site = h.address;
+                let label = decode_rip_relative(site.add(LEA_DISP_OFF));
+                let want = b"vo_ingame_ready\0";
+                let off = (label as usize).wrapping_sub(base);
+                if off + want.len() > size || std::slice::from_raw_parts(label, want.len()) != want
+                {
+                    log_warn!(
+                        "  [-] {} -- a site's LEA does not name \"vo_ingame_ready\"",
+                        LABEL
+                    );
+                    return;
+                }
+                let jz = site.add(JZ_OFF);
+                if *jz != 0x74 {
+                    log_warn!("  [-] {} -- null-bank branch is not JZ rel8", LABEL);
+                    return;
+                }
+                let target = jz.add(2).offset(*jz.add(1) as i8 as isize);
+                if std::slice::from_raw_parts(target, 3) != [0x85, 0xC9, 0x7E] {
+                    log_warn!(
+                        "  [-] {} -- null-bank JZ does not reach the lock release",
+                        LABEL
+                    );
+                    return;
+                }
+                jzs.push(jz);
+            }
+        }
+        for (i, jz) in jzs.into_iter().enumerate() {
+            let name = format!("ddr_sel_vo_ready_jz_{i}");
+            log_info!(
+                "  [+] {} (derived) @ +0x{:X}",
+                name,
+                (jz as usize).wrapping_sub(base)
+            );
+            self.resolved.insert(name, jz);
+        }
+    }
+
+    /// Validate `ddr_sel_dps_ready_dwell` and publish the DancePlaySequence
+    /// READY?-dwell timer offset as `ddr_sel_dps_ready_timer_off` (see the
+    /// signature's comment). Gates: disp32 at match+4 in 0x40..0x400 and
+    /// 4-aligned; the COMISS operand (rip at match+11) a float in (0.5, 30);
+    /// the shutter global (rip at match+24) equal to `shutter_actor_global`
+    /// when that resolved. Any failure un-resolves the AOB.
+    fn derive_ddr_sel_intro(&mut self) {
+        const NAME: &str = "ddr_sel_dps_ready_dwell";
+        let Some(site) = self.get_address(NAME) else {
+            return;
+        };
+        let fail = |this: &mut Self, why: &str| {
+            this.resolved.remove(NAME);
+            log_warn!("  [-] {} -- {}; un-resolved", NAME, why);
+        };
+        unsafe {
+            let off = std::ptr::read_unaligned(site.add(4) as *const u32) as usize;
+            if !(0x40..0x400).contains(&off) || off % 4 != 0 {
+                return fail(self, "implausible timer offset");
+            }
+            let threshold = decode_rip_relative(site.add(11));
+            let t_off = (threshold as usize).wrapping_sub(self.base as usize);
+            if t_off + 4 > self.size {
+                return fail(self, "threshold outside the module");
+            }
+            let t = std::ptr::read_unaligned(threshold as *const f32);
+            if !(t > 0.5 && t < 30.0) {
+                return fail(self, "threshold is not a plausible dwell");
+            }
+            if let Some(global) = self.get_address("shutter_actor_global") {
+                if decode_rip_relative(site.add(24)) != global {
+                    return fail(self, "shutter global disagrees with shutter_actor_global");
+                }
+            }
+            self.publish_value("ddr_sel_dps_ready_timer_off", off);
+            log_info!("  [+] {} verified (dwell {:.2} s)", NAME, t);
+        }
+    }
+
+    /// The DancePlaySequence READY?-dwell timer offset, or `None`.
+    pub fn ddr_sel_dps_ready_timer_off(&self) -> Option<usize> {
+        self.published_value("ddr_sel_dps_ready_timer_off")
+    }
+
+    /// Derive everything ddr_selection's legacy stage panel needs from World's
+    /// ShutterActor (RE: `.agents/planning/2026-09-22-ddr-selection/research/
+    /// stage-panel.md`). All-or-nothing; publishes on every build:
+    ///
+    /// * `ddr_sel_shutter_update` — RTTI `ShutterActor` vtable slot 6; the
+    ///   swap and stage-tail matches must lie inside its first 0x1000 bytes;
+    /// * `ddr_sel_shutter_basename_off` / `ddr_sel_shutter_jacket_off` — from
+    ///   the swap's two string copies (kind offsets cross-checked against
+    ///   `shutter_actor_layout`);
+    /// * `ddr_sel_shutter_stage_voice` — the stage-voice function (the CALL
+    ///   ending the stage tail; the tail's layer slot must be
+    ///   `0x88 + stage_kind * 0x10`);
+    /// * `ddr_sel_stage_voice_jz` — the voice mute-filter `JZ rel8` inside it
+    ///   (`MOV [rsp+x],5; CALL [filter]; CMP [rsp+x],6; JZ skip`), gated on the
+    ///   skipped block holding the slot-3 play (`MOV ECX,3; CALL`) — the byte
+    ///   ddr_selection::sound::code_se flips while the legacy panel is hosted;
+    /// * `ddr_sel_shutter_stage_row` + `ddr_sel_shutter_row_stride` — the
+    ///   default kind table's stage row (pkg NULL, root `"shutter_play"`, SE in
+    ///   `"se_start_game"`);
+    /// * `ddr_sel_shutter_jacket_vis_guard` — new layout only, informational:
+    ///   the `TEST RAX,RAX; JZ` null check of `find("jacket_usr")`;
+    /// * `ddr_sel_shutter_jacket_vis_call` — old layout only: the state-2
+    ///   `CALL SetVisible` on the un-null-checked `find("jacket_usr")`
+    ///   (shape-checked: `"jacket_usr"` LEA, the stage layer slot, the same
+    ///   `find` as the stage tail, `MOV DL,1; MOV RCX,RAX; CALL`);
+    /// * `ddr_sel_panel_host_ok` — 1 when World can host A3's root: the
+    ///   `jacket_usr` SetVisible is null-checked (20260721+), or the old
+    ///   unchecked CALL was recognised (20250805 / 20260224, NOPed while
+    ///   hosted); else 0.
+    fn derive_ddr_sel_panel(&mut self) {
+        const TAG: &str = "ddr_sel_panel";
+        let (Some(swap), Some(tail)) = (
+            self.get_address("ddr_sel_shutter_swap"),
+            self.get_address("ddr_sel_shutter_stage_tail"),
+        ) else {
+            log_warn!("  [-] {} -- swap / stage tail unresolved", TAG);
+            return;
+        };
+        let table_new = self.get_address("ddr_sel_shutter_kind_table");
+        let table_old = self.get_address("ddr_sel_shutter_kind_table_v1");
+        let Some(layout) = self.shutter_actor_layout() else {
+            log_warn!("  [-] {} -- shutter_actor_layout underived", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) || (p as usize - base) + want.len() + 1 > size {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        let Some(vt) = self.find_vtable_by_rtti(
+            ".?AVShutterActor@shutter@common@sequence@@",
+            "shutter_actor_vtable",
+        ) else {
+            log_warn!("  [-] {} -- ShutterActor RTTI vtable not found", TAG);
+            return;
+        };
+        unsafe {
+            let update = *(vt as *const *const u8).add(6);
+            let within = |p: *const u8| (p as usize).wrapping_sub(update as usize) < 0x1000;
+            if !inside(update) || !within(swap) || !within(tail) {
+                log_warn!(
+                    "  [-] {} -- swap / stage tail outside ShutterActor::onUpdate",
+                    TAG
+                );
+                return;
+            }
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let (act, pend) = (rd(swap.add(2)), rd(swap.add(8)));
+            if act != layout.active_kind
+                || pend != layout.pending_kind
+                || rd(swap.add(14)) != act
+                || rd(swap.add(20)) != pend
+            {
+                log_warn!(
+                    "  [-] {} -- swap kind offsets disagree with shutter_actor_layout",
+                    TAG
+                );
+                return;
+            }
+            let basename_off = rd(swap.add(34));
+            let jacket_off = rd(swap.add(53));
+            if rd(swap.add(27)) + 0x28 != basename_off
+                || rd(swap.add(46)) != jacket_off + 0x28
+                || !(0x200..0x800).contains(&basename_off)
+                || !(0x200..0x800).contains(&jacket_off)
+            {
+                log_warn!("  [-] {} -- implausible basename / jacket offsets", TAG);
+                return;
+            }
+
+            if !cstr_is(decode_rip_relative(tail.add(3)), b"choice_stage_usr") {
+                log_warn!(
+                    "  [-] {} -- stage tail LEA is not \"choice_stage_usr\"",
+                    TAG
+                );
+                return;
+            }
+            let stage_kind = layout.stage_kind.max(0) as usize;
+            if rd(tail.add(10)) != 0x88 + stage_kind * 0x10 {
+                log_warn!(
+                    "  [-] {} -- stage tail layer slot disagrees with the stage kind",
+                    TAG
+                );
+                return;
+            }
+            let voice = decode_call_rel32(tail.add(34));
+            if !inside(voice) {
+                log_warn!("  [-] {} -- stage voice call outside module", TAG);
+                return;
+            }
+            let guard =
+                std::slice::from_raw_parts(tail.sub(15), 5) == [0x48, 0x85, 0xC0, 0x74, 0x0A];
+            // Old builds (20250805 / 20260224): the `jacket_usr` SetVisible is
+            // NOT null-checked — `LEA RDX,["jacket_usr"]; MOV RCX,[RSI+slot];
+            // CALL find; MOV DL,1; MOV RCX,RAX; CALL SetVisible` ends right at
+            // the tail. The legacy root has no direct `jacket_usr`, so that
+            // CALL (return value unused) is what ddr_selection NOPs while it
+            // hosts A3's root (`ddr_sel_shutter_jacket_vis_call`).
+            let jacket_vis_call = if guard {
+                None
+            } else {
+                let pre = tail.sub(29);
+                let find_call = pre.add(14);
+                let shape_ok = std::slice::from_raw_parts(pre, 3) == [0x48, 0x8D, 0x15]
+                    && cstr_is(decode_rip_relative(pre.add(3)), b"jacket_usr")
+                    && std::slice::from_raw_parts(pre.add(7), 3) == [0x48, 0x8B, 0x8E]
+                    && rd(pre.add(10)) == 0x88 + stage_kind * 0x10
+                    && *find_call == 0xE8
+                    && decode_call_rel32(find_call) == decode_call_rel32(tail.add(14))
+                    && std::slice::from_raw_parts(pre.add(19), 6)
+                        == [0xB2, 0x01, 0x48, 0x8B, 0xC8, 0xE8]
+                    && inside(decode_call_rel32(pre.add(24)));
+                if !shape_ok {
+                    log_warn!(
+                        "  [-] {} -- unchecked jacket_usr SetVisible not recognised (old layout)",
+                        TAG
+                    );
+                    return;
+                }
+                Some(pre.add(24))
+            };
+
+            let mute = scan_pattern_all(
+                voice,
+                0x300,
+                "C7 44 24 ?? 05 00 00 00 48 8D 4C 24 ?? FF 15 ?? ?? ?? ?? 83 7C 24 ?? 06 74 ??",
+            );
+            if mute.len() != 1 {
+                log_warn!(
+                    "  [-] {} -- stage voice mute gate not unique ({} hits)",
+                    TAG,
+                    mute.len()
+                );
+                return;
+            }
+            let jz = mute[0].address.add(24);
+            let skipped = std::slice::from_raw_parts(jz.add(2), *jz.add(1) as usize);
+            if *jz != 0x74
+                || !skipped
+                    .windows(6)
+                    .any(|w| w == [0xB9, 0x03, 0x00, 0x00, 0x00, 0xE8])
+            {
+                log_warn!(
+                    "  [-] {} -- stage voice mute JZ does not skip the play",
+                    TAG
+                );
+                return;
+            }
+
+            let (table, stride) = match (table_new, table_old) {
+                (Some(t), None) => (self.base.offset(rd(t.add(103)) as i32 as isize), 0x40usize),
+                (None, Some(t)) => (self.base.offset(rd(t.add(11)) as i32 as isize), 0x30usize),
+                _ => {
+                    log_warn!("  [-] {} -- kind table not uniquely resolved", TAG);
+                    return;
+                }
+            };
+            let row = table.add(stage_kind * stride);
+            let field = |i: usize| *(row as *const *const u8).add(i);
+            if !inside(row)
+                || !field(0).is_null()
+                || !cstr_is(field(1), b"shutter_play")
+                || !cstr_is(field(2), b"se_start_game")
+                || !cstr_is(field(3), b"")
+            {
+                log_warn!(
+                    "  [-] {} -- stage row is not the stock shutter_play row",
+                    TAG
+                );
+                return;
+            }
+
+            // The end banners (optional — a miss leaves World's banners):
+            // CLEARED / FAILED are the next two kinds after the stage panel
+            // on every build (4 / 5 on 20260721+, 2 / 3 on the old layout),
+            // and their rows follow the stage row in the same table.
+            let banner_rows = {
+                let cleared = row.add(stride);
+                let failed = row.add(2 * stride);
+                let f = |r: *const u8, i: usize| *(r as *const *const u8).add(i);
+                let ok = inside(failed.add(6 * 8))
+                    && f(cleared, 0).is_null()
+                    && cstr_is(f(cleared, 1), b"shutter_cleared")
+                    && cstr_is(f(cleared, 2), b"se_game_clear")
+                    && cstr_is(f(cleared, 3), b"")
+                    && cstr_is(f(cleared, 4), b"vo_stage_clear")
+                    && cstr_is(f(cleared, 5), b"")
+                    && f(failed, 0).is_null()
+                    && cstr_is(f(failed, 1), b"shutter_failed")
+                    && cstr_is(f(failed, 2), b"se_game_failed")
+                    && cstr_is(f(failed, 3), b"")
+                    && cstr_is(f(failed, 4), b"")
+                    && cstr_is(f(failed, 5), b"");
+                if !ok {
+                    log_warn!(
+                        "  [-] {} -- CLEARED / FAILED rows are not the stock rows after the stage row (legacy end banners off)",
+                        TAG
+                    );
+                }
+                ok.then_some((cleared, failed))
+            };
+
+            // Both layouts can host: new builds null-check `jacket_usr`, old
+            // builds get the SetVisible CALL NOPed while hosted. The old
+            // 0x30-stride rows share the first three pointers (pkg, root, SE
+            // in) with the 0x40 rows, and the old loader has the same
+            // named-package branch (its mode-9 table uses it).
+            let host_ok = guard || jacket_vis_call.is_some();
+            let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+            for (name, p) in [
+                ("ddr_sel_shutter_update", update),
+                ("ddr_sel_shutter_stage_voice", voice),
+                ("ddr_sel_stage_voice_jz", jz),
+                ("ddr_sel_shutter_stage_row", row),
+            ]
+            .into_iter()
+            // Exactly one of the two per build (the sweep's ALT_GROUPS pair):
+            // the new layout's null check (informational) or the old layout's
+            // CALL the panel NOPs while hosted.
+            .chain(guard.then(|| ("ddr_sel_shutter_jacket_vis_guard", tail.sub(15))))
+            .chain(jacket_vis_call.map(|p| ("ddr_sel_shutter_jacket_vis_call", p)))
+            .chain(banner_rows.map(|(c, _)| ("ddr_sel_shutter_cleared_row", c)))
+            .chain(banner_rows.map(|(_, f)| ("ddr_sel_shutter_failed_row", f)))
+            {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+            }
+            self.publish_value("ddr_sel_shutter_basename_off", basename_off);
+            self.publish_value("ddr_sel_shutter_jacket_off", jacket_off);
+            self.publish_value("ddr_sel_shutter_row_stride", stride);
+            self.publish_value("ddr_sel_panel_host_ok", host_ok as usize);
+            if banner_rows.is_some() {
+                self.publish_value("ddr_sel_shutter_cleared_kind", stage_kind + 1);
+                self.publish_value("ddr_sel_shutter_failed_kind", stage_kind + 2);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_panel`] produced, or `None` unless the whole
+    /// group resolved.
+    pub fn ddr_sel_panel_sites(&self) -> Option<DdrSelPanelSites> {
+        Some(DdrSelPanelSites {
+            shutter_update: self.get_address("ddr_sel_shutter_update")?,
+            stage_voice: self.get_address("ddr_sel_shutter_stage_voice")?,
+            stage_row: self.get_address("ddr_sel_shutter_stage_row")?,
+            row_stride: self.published_value("ddr_sel_shutter_row_stride")?,
+            basename_off: self.published_value("ddr_sel_shutter_basename_off")?,
+            jacket_off: self.published_value("ddr_sel_shutter_jacket_off")?,
+            host_ok: self.published_value("ddr_sel_panel_host_ok")? == 1,
+            jacket_vis_call: self.get_address("ddr_sel_shutter_jacket_vis_call"),
+            banner_rows: self.ddr_sel_banner_rows(),
+        })
+    }
+
+    /// The end-banner rows [`derive_ddr_sel_panel`] published, or `None`.
+    fn ddr_sel_banner_rows(&self) -> Option<DdrSelBannerRows> {
+        Some(DdrSelBannerRows {
+            cleared_row: self.get_address("ddr_sel_shutter_cleared_row")?,
+            failed_row: self.get_address("ddr_sel_shutter_failed_row")?,
+            cleared_kind: self.published_value("ddr_sel_shutter_cleared_kind")? as i32,
+            failed_kind: self.published_value("ddr_sel_shutter_failed_kind")? as i32,
+        })
+    }
+
+    /// Derive ddr_selection's `_sel` background-movie sites (RE:
+    /// `.agents/planning/2026-09-22-ddr-selection/research/
+    /// end-banners-sel-movies.md` §4). All-or-nothing:
+    ///
+    /// * `ddr_sel_sma_init` — RTTI `SceneManageActor` vtable slot 4
+    ///   (`onInitialize`); the `ddr_sel_sma_movie_gate` match must lie in its
+    ///   first 0x60 bytes;
+    /// * `ddr_sel_music_info_lookup` — the gate's CALL (the basename LEA
+    ///   `48 8D ?? disp32` 0x16 before it, `[RCX+disp]`, gives
+    ///   `ddr_sel_sma_basename_off`);
+    /// * `ddr_sel_music_movie_kind_off` / `_kind2_off` — the gate's two
+    ///   `MOVZX ECX,byte [RAX+disp32]`; `ddr_sel_sma_video_size_off` — the
+    ///   instruction the null-entry JZ lands on (`CMP dword [R+disp],1` /
+    ///   `MOV ECX,[R+disp]`);
+    /// * `ddr_sel_sma_movie_off` — the unique `CALL ctor; NOP; MOV
+    ///   [R+disp32],RAX; MOV RDX,RAX` after the gate, the ctor referencing
+    ///   the RTTI `MovieActor` vtable; `ddr_sel_sma_suffix_off` — the
+    ///   `LEA R8,[R+disp32]` (same base register) between the two; the
+    ///   allocation size (`MOV EDX,imm32` before the pool alloc) must cover
+    ///   the flag byte;
+    /// * `ddr_sel_movie_sel_flag_off` / `ddr_sel_music_movie_name_off` /
+    ///   `ddr_sel_movie_path_off` — from `ddr_sel_movie_sel_test`, gated on
+    ///   the tried function's `"_sel"` string and on the match lying within
+    ///   0x100 of the first CALL of MovieActor vtable slot 4.
+    fn derive_ddr_sel_movie(&mut self) {
+        const TAG: &str = "ddr_sel_movie";
+        let (Some(gate), Some(test), Some(sma_vt), Some(movie_vt)) = (
+            self.get_address("ddr_sel_sma_movie_gate"),
+            self.get_address("ddr_sel_movie_sel_test"),
+            self.get_address("scene_manage_actor_vtable"),
+            self.get_address("movie_actor_vtable"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- gate / _sel test / SceneManageActor or MovieActor vtable unresolved",
+                TAG
+            );
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        let plausible = |v: usize| (0x40..0x400).contains(&v);
+        unsafe {
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let bytes = |p: *const u8, n: usize| std::slice::from_raw_parts(p, n);
+
+            let sma_init = *(sma_vt as *const *const u8).add(4);
+            if !inside(sma_init) || (gate as usize).wrapping_sub(sma_init as usize) >= 0x60 {
+                log_warn!(
+                    "  [-] {} -- movie gate not in SceneManageActor::onInitialize",
+                    TAG
+                );
+                return;
+            }
+            let lookup = decode_call_rel32(gate);
+            let lea = gate.sub(0x16);
+            if !inside(lookup)
+                || bytes(lea, 2) != [0x48, 0x8D]
+                || *lea.add(2) & 0xC7 != 0x81
+                || !plausible(rd(lea.add(3)))
+            {
+                log_warn!(
+                    "  [-] {} -- music-info lookup / basename LEA not recognised",
+                    TAG
+                );
+                return;
+            }
+            let basename_off = rd(lea.add(3));
+            let (kind_off, kind2_off) = (rd(gate.add(13)), rd(gate.add(25)));
+            let vs = gate.add(49);
+            let vs_ok = (bytes(vs, 2) == [0x83, 0xBF]
+                || bytes(vs, 2) == [0x83, 0xBB]
+                || bytes(vs, 2) == [0x8B, 0x8B]
+                || bytes(vs, 2) == [0x8B, 0x8F])
+                && plausible(rd(vs.add(2)));
+            if !plausible(kind_off) || !plausible(kind2_off) || !vs_ok {
+                log_warn!(
+                    "  [-] {} -- movie-byte / VIDEO SIZE fields implausible",
+                    TAG
+                );
+                return;
+            }
+            let video_size_off = rd(vs.add(2));
+
+            // The MovieActor creation after the gate.
+            let body = gate.add(49);
+            let stores = scan_pattern_all(
+                body,
+                0x180,
+                "E8 ?? ?? ?? ?? 90 48 89 ?? ?? ?? ?? ?? 48 8B D0",
+            );
+            if stores.len() != 1 {
+                log_warn!(
+                    "  [-] {} -- MovieActor store not unique ({} hits)",
+                    TAG,
+                    stores.len()
+                );
+                return;
+            }
+            let store = stores[0].address;
+            let modrm = *store.add(8);
+            let ctor = decode_call_rel32(store);
+            let ctor_has_vt = inside(ctor)
+                && scan_pattern_all(ctor, 0x120, "48 8D ?? ?? ?? ?? ??")
+                    .iter()
+                    .any(|m| {
+                        *m.address.add(2) & 0xC7 == 0x05
+                            && decode_rip_relative(m.address.add(3)) == movie_vt
+                    });
+            if modrm & 0xF8 != 0x80 || !ctor_has_vt || !plausible(rd(store.add(9))) {
+                log_warn!(
+                    "  [-] {} -- MovieActor store / ctor identity not recognised",
+                    TAG
+                );
+                return;
+            }
+            let movie_off = rd(store.add(9));
+            let rm = modrm & 0x07;
+            let span = (store as usize - body as usize) + 1;
+            let suffix: Vec<_> = scan_pattern_all(body, span, "4C 8D ?? ?? ?? 00 00")
+                .into_iter()
+                .filter(|m| *m.address.add(2) == 0x80 | rm)
+                .collect();
+            let allocs = scan_pattern_all(body, span, "BA ?? ?? 00 00 48 8B 0D");
+            if suffix.len() != 1 || allocs.len() != 1 || !plausible(rd(suffix[0].address.add(3))) {
+                log_warn!(
+                    "  [-] {} -- suffix LEA / MovieActor allocation not recognised",
+                    TAG
+                );
+                return;
+            }
+            let suffix_off = rd(suffix[0].address.add(3));
+            let alloc_size = rd(allocs[0].address.add(1));
+
+            // MovieActor::onInitialize's `_sel` search.
+            let init = *(movie_vt as *const *const u8).add(4);
+            let first_call = if inside(init) {
+                scan_pattern_all(init, 0x40, "E8 ?? ?? ?? ??")
+                    .first()
+                    .map(|m| decode_call_rel32(m.address))
+            } else {
+                None
+            };
+            let try_sel = decode_call_rel32(test.add(67));
+            // `LEA R8,[rip+"_sel"]` (4C 8D 05) — any RIP-relative LEA.
+            let sel_str = inside(try_sel)
+                && scan_pattern_all(try_sel, 0x100, "?? 8D ?? ?? ?? ?? ??")
+                    .iter()
+                    .any(|m| {
+                        let rex = *m.address;
+                        let p = decode_rip_relative(m.address.add(3));
+                        (rex == 0x48 || rex == 0x4C)
+                            && *m.address.add(2) & 0xC7 == 0x05
+                            && inside(p)
+                            && bytes(p, 5) == b"_sel\0"
+                    });
+            let flag_off = rd(test.add(43));
+            let name_off = rd(test.add(27));
+            let path_off = rd(test.add(60));
+            let near = first_call.is_some_and(|f| (test as usize).wrapping_sub(f as usize) < 0x100);
+            if !near
+                || !sel_str
+                || rd(test.add(3)) != name_off + 0x10
+                || !plausible(name_off)
+                || !plausible(path_off)
+                || !(0x100..alloc_size).contains(&flag_off)
+            {
+                log_warn!(
+                    "  [-] {} -- MovieActor _sel test not recognised (flag +0x{:X}, alloc 0x{:X})",
+                    TAG,
+                    flag_off,
+                    alloc_size
+                );
+                return;
+            }
+
+            let rel = |p: *const u8| (p as usize).wrapping_sub(base);
+            for (name, p) in [
+                ("ddr_sel_sma_init", sma_init),
+                ("ddr_sel_music_info_lookup", lookup),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, rel(p));
+            }
+            for (name, v) in [
+                ("ddr_sel_music_movie_kind_off", kind_off),
+                ("ddr_sel_music_movie_kind2_off", kind2_off),
+                ("ddr_sel_music_movie_name_off", name_off),
+                ("ddr_sel_sma_basename_off", basename_off),
+                ("ddr_sel_sma_suffix_off", suffix_off),
+                ("ddr_sel_sma_video_size_off", video_size_off),
+                ("ddr_sel_sma_movie_off", movie_off),
+                ("ddr_sel_movie_sel_flag_off", flag_off),
+                ("ddr_sel_movie_path_off", path_off),
+            ] {
+                self.publish_value(name, v);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_movie`] produced, or `None`.
+    pub fn ddr_sel_movie_sites(&self) -> Option<DdrSelMovieSites> {
+        Some(DdrSelMovieSites {
+            sma_init: self.get_address("ddr_sel_sma_init")?,
+            music_lookup: self.get_address("ddr_sel_music_info_lookup")?,
+            movie_kind_off: self.published_value("ddr_sel_music_movie_kind_off")?,
+            movie_kind2_off: self.published_value("ddr_sel_music_movie_kind2_off")?,
+            movie_name_off: self.published_value("ddr_sel_music_movie_name_off")?,
+            sma_basename_off: self.published_value("ddr_sel_sma_basename_off")?,
+            sma_suffix_off: self.published_value("ddr_sel_sma_suffix_off")?,
+            sma_video_size_off: self.published_value("ddr_sel_sma_video_size_off")?,
+            sma_movie_off: self.published_value("ddr_sel_sma_movie_off")?,
+            movie_actor_vtable: self.get_address("movie_actor_vtable")?,
+            sel_flag_off: self.published_value("ddr_sel_movie_sel_flag_off")?,
+            movie_path_off: self.published_value("ddr_sel_movie_path_off")?,
+        })
+    }
+
+    /// The music-DB entry's raw-series vtable slot (byte offset), or `None`.
+    pub fn music_series_vslot(&self) -> Option<usize> {
+        self.published_value("music_series_vslot")
+    }
+
+    /// Everything [`derive_ddr_selection`] produced, or `None` unless the whole
+    /// group resolved.
+    pub fn ddr_selection_sites(&self) -> Option<DdrSelectionSites> {
+        Some(DdrSelectionSites {
+            package_helper: self.get_address("layout_package_helper")?,
+            probe: self.get_address("ddr_sel_pkg_probe")?,
+            record_insert: self.get_address("ddr_sel_record_insert")?,
+            load_list_push: self.get_address("ddr_sel_load_list_push")?,
+            bm2d_dir: self.get_address("ddr_sel_bm2d_dir")?,
+            game_work_global: self.get_address("ddr_sel_game_work_global")?,
+            records_shared_off: self.published_value("ddr_sel_records_shared_off")?,
+            records_side_off: self.published_value("ddr_sel_records_side_off")?,
+            records_side_stride: 0x48,
+            load_list_off: self.published_value("ddr_sel_load_list_off")?,
+            gamework_skin_off: self.published_value("gamework_skin_off")?,
+        })
     }
 
     /// Derive `gpa_judge_effect_off` — the GamePlayActor field holding the

@@ -27,6 +27,7 @@
 //! work already runs on the game thread; the parse thread never touches the
 //! engine. Every path is panic-free.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,9 +45,10 @@ use super::clock::{Clock, ClockEvent};
 use super::director;
 use super::movie_backdrop;
 use super::movie_camera;
-use super::movie_mode::{self, Backdrop, MovieMode, SceneMask};
+use super::movie_mode::{self, Backdrop, Capabilities, MovieMode, SceneMask};
 use super::movie_size;
 use super::scene_window::{self, ScenePhase, SceneWindow};
+use super::screen_route;
 use super::selection::{
     apply_pin, dancer_candidates, parse_pin, seed_from, stage_candidates, DancerCandidate,
     PickSource, Pin, Rng, StageCandidate,
@@ -78,6 +80,11 @@ struct Tables {
     /// `(key, label)` of every CUSTOM entry (`data_mods/custom_models`) — the catalog
     /// appends these after the stock block with their folder-derived names.
     custom_labels: Vec<(String, String)>,
+    /// Stage keys whose arc carries video screens (an `offscreen1.dds`
+    /// member — `movie_mode::arc_members_have_screen`), for Background
+    /// Movies = STAGE SCREENS. Built once at enable, stock + custom +
+    /// LayeredFS overrides alike.
+    screen_stages: HashSet<String>,
 }
 
 static TABLES: Mutex<Option<Tables>> = Mutex::new(None);
@@ -206,6 +213,7 @@ pub fn init_tables() -> bool {
             None => String::new(),
         }
     );
+    let screen_stages = scan_screen_stages(&stages);
     if let Ok(mut t) = TABLES.lock() {
         *t = Some(Tables {
             stages,
@@ -213,6 +221,7 @@ pub fn init_tables() -> bool {
             dancers,
             pin,
             custom_labels,
+            screen_stages,
         });
     }
     TABLES_READY.store(true, Ordering::Release);
@@ -221,6 +230,59 @@ pub fn init_tables() -> bool {
 
 pub fn tables_ready() -> bool {
     TABLES_READY.load(Ordering::Acquire)
+}
+
+/// Which distinct stages have video screens (design R5): the stage arc — as
+/// the engine will load it (mounts / LayeredFS / stock, `arc_set`) — lists
+/// an `offscreen1.dds` member. One header read per distinct key at enable
+/// (a 64 KiB prefix). An unreadable arc counts as "no screens" and is named
+/// in the INFO.
+fn scan_screen_stages(stages: &[StageCandidate]) -> HashSet<String> {
+    let keys = super::selection::distinct_stage_keys(stages);
+    let mut with = HashSet::new();
+    let mut unreadable: Vec<&str> = Vec::new();
+    for key in &keys {
+        let members = arc_set::resolve_path(&format!("data/arc/mapset_{key}.arc"))
+            .and_then(|path| super::custom_scan::read_arc_members(&path));
+        match members {
+            Some(m) => {
+                if movie_mode::arc_members_have_screen(&m) {
+                    with.insert((*key).to_string());
+                }
+            }
+            None => unreadable.push(*key),
+        }
+    }
+    let mut listed: Vec<&str> = with.iter().map(String::as_str).collect();
+    listed.sort_unstable();
+    log_info!(
+        "BackgroundDancers: stages with screens: {} ({} of {}){}",
+        if listed.is_empty() {
+            "none".to_string()
+        } else {
+            listed.join(", ")
+        },
+        listed.len(),
+        keys.len(),
+        if unreadable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " -- arc header unreadable (counted as no screens): {}",
+                unreadable.join(", ")
+            )
+        }
+    );
+    with
+}
+
+/// Whether the stage `key` has video screens (see [`scan_screen_stages`]).
+fn stage_has_screens(key: &str) -> bool {
+    TABLES
+        .lock()
+        .ok()
+        .and_then(|t| t.as_ref().map(|t| t.screen_stages.contains(key)))
+        .unwrap_or(false)
 }
 
 /// `(key, label)` of the custom (`data_mods/custom_models`) entries in the tables — empty
@@ -300,8 +362,8 @@ struct Window {
     /// Background Movies, latched at window entry (what the movie-size
     /// writes and the suppressor were set up for).
     movie_mode: MovieMode,
-    /// The live song's fullscreen-movie state (re-probed every visible
-    /// frame in FULLSCREEN mode; always `None` otherwise).
+    /// The live song's movie state (re-probed every frame in FULLSCREEN and
+    /// MOVIE ONLY — `movie_mode::probes_backdrop`; always `None` otherwise).
     backdrop: Backdrop,
 }
 
@@ -327,8 +389,8 @@ static MOVIE_SIZE_SAVED: Mutex<[Option<movie_size::Saved>; 2]> = Mutex::new([Non
 static WINDOW_MOVIE_MODE: AtomicU8 = AtomicU8::new(1);
 /// The window set the `BackgroundDancers` BuildGraph suppressor (OFF mode).
 static MOVIE_SUPPRESSED: AtomicBool = AtomicBool::new(false);
-/// FULLSCREEN-unavailable WARN — once per boot.
-static FULLSCREEN_DEGRADE_WARNED: AtomicBool = AtomicBool::new(false);
+/// Mode-unavailable WARNs already emitted this boot (bit = `row_value`).
+static DEGRADE_WARNED: AtomicU8 = AtomicU8::new(0);
 /// The per-frame driver has work (O(1) when clear).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// `stage_records` unavailable WARN — once per boot.
@@ -370,24 +432,37 @@ pub fn on_scene_change(prev: i32, next: i32) {
     }
 }
 
-/// The mode this window can honour: FULLSCREEN needs the movie-size write
-/// (an ON player would otherwise keep a thumbnail over a stage-less scene)
-/// and the fullscreen-movie probe; without either it degrades to THUMBNAIL
-/// (one WARN per boot).
+/// What this boot can honour (each mode's dependencies).
+fn capabilities() -> Capabilities {
+    Capabilities {
+        movie_size: movie_size::is_available(),
+        probe: movie_backdrop::is_available(),
+        route: screen_route::is_available(),
+    }
+}
+
+/// The mode this boot can honour (`movie_mode::degrade`): FULLSCREEN needs
+/// the movie-size write (an ON player would otherwise keep a thumbnail over
+/// a stage-less scene) and the movie probe; STAGE SCREENS also the screen
+/// route. A miss degrades to THUMBNAIL (one WARN per boot per mode).
 fn effective_movie_mode(requested: MovieMode) -> MovieMode {
-    if requested != MovieMode::Fullscreen
-        || (movie_size::is_available() && movie_backdrop::is_available())
-    {
-        return requested;
+    let caps = capabilities();
+    let mode = movie_mode::degrade(requested, caps);
+    if mode != requested {
+        let bit = 1u8 << (requested.row_value() as u32 & 7);
+        if DEGRADE_WARNED.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
+            let ok = |b: bool| if b { "ok" } else { "MISSING" };
+            log_warn!(
+                "BackgroundDancers: Background Movies = {} unavailable this boot (movie-size override {}, movie probe {}, screen route {}) -- {} instead",
+                requested.label(),
+                ok(caps.movie_size),
+                ok(caps.probe),
+                ok(caps.route),
+                mode.label()
+            );
+        }
     }
-    if !FULLSCREEN_DEGRADE_WARNED.swap(true, Ordering::AcqRel) {
-        log_warn!(
-            "BackgroundDancers: Background Movies = FULLSCREEN unavailable this boot (movie-size override {}, movie probe {}) -- THUMBNAIL instead",
-            if movie_size::is_available() { "ok" } else { "MISSING" },
-            if movie_backdrop::is_available() { "ok" } else { "MISSING" }
-        );
-    }
-    MovieMode::Thumbnail
+    mode
 }
 
 /// The Background Movies mode the open window latched.
@@ -398,12 +473,45 @@ fn window_movie_mode() -> MovieMode {
 /// Window entry (game thread, before `createNextSequence`): latch the
 /// Background Movies mode and set the song up for it — every entered side's
 /// movie size per `movie_mode::size_override` (OFF → 3, THUMBNAIL → 2,
-/// FULLSCREEN → 1), plus, for OFF, the shared BuildGraph suppressor (the
-/// backstop for builds where 3 still builds a graph). Returns the latched
-/// (effective) mode.
-fn apply_movie_mode() -> MovieMode {
+/// FULLSCREEN / routed STAGE SCREENS → 1), plus, for OFF, the shared
+/// BuildGraph suppressor (the backstop for builds where 3 still builds a
+/// graph). STAGE SCREENS runs only when the picked stage `has_screens`
+/// (else THUMBNAIL — `movie_mode::window_mode`), and the screen route is
+/// armed BEFORE any movie-size write: a refused arm makes the song
+/// THUMBNAIL first, so a song can never end up with a fullscreen-size movie
+/// hidden under a full stage. Returns the latched (window) mode.
+fn apply_movie_mode(has_screens: bool) -> MovieMode {
     let requested = super::style::movie_mode();
-    let mode = effective_movie_mode(requested);
+    let entered = [
+        stage_records::side_entered(0).unwrap_or(false),
+        stage_records::side_entered(1).unwrap_or(false),
+    ];
+    let mut mode = movie_mode::window_mode(effective_movie_mode(requested), has_screens);
+    let mut routed = false;
+    let mut route_note = "";
+    if movie_mode::routes_to_screens(mode) {
+        if !movie_size::any_shows_movie(entered) {
+            // Nobody shows a movie: nothing to route (and 20250805 would
+            // still build a MovieActor for VIDEO SIZE OFF).
+            mode = MovieMode::Thumbnail;
+            route_note = " (no entered side shows a movie)";
+        } else if screen_route::arm() {
+            routed = true;
+        } else {
+            mode = MovieMode::Thumbnail;
+            route_note = " (layer-select byte refused)";
+        }
+    }
+    let screens_note = if requested == MovieMode::StageScreens {
+        format!(
+            " -- stage screens: {}, routed: {}{}",
+            if has_screens { "yes" } else { "no" },
+            if routed { "yes" } else { "no" },
+            route_note
+        )
+    } else {
+        String::new()
+    };
     WINDOW_MOVIE_MODE.store(mode.row_value() as u8, Ordering::Release);
     if mode == MovieMode::Off && movie_policy::is_available() {
         movie_policy::set_suppressed(MovieSuppressor::BackgroundDancers, true);
@@ -411,8 +519,9 @@ fn apply_movie_mode() -> MovieMode {
     }
     if !movie_size::is_available() {
         log_info!(
-            "BackgroundDancers: background movies {} for the song (movie-size override unavailable -- VIDEO SIZE as configured{})",
+            "BackgroundDancers: background movies {} for the song{} (movie-size override unavailable -- VIDEO SIZE as configured{})",
             mode.key(),
+            screens_note,
             if MOVIE_SUPPRESSED.load(Ordering::Acquire) {
                 ", movie graphs suppressed"
             } else {
@@ -421,18 +530,15 @@ fn apply_movie_mode() -> MovieMode {
         );
         return mode;
     }
-    let entered = [
-        stage_records::side_entered(0).unwrap_or(false),
-        stage_records::side_entered(1).unwrap_or(false),
-    ];
     let saved = movie_size::apply(entered, mode);
     let fmt = |s: &Option<movie_size::Saved>| match s {
         Some(s) => format!("{} -> {}", s.original, s.written),
         None => "kept".to_string(),
     };
     log_info!(
-        "BackgroundDancers: background movies {} for the song -- movie size P1 {} P2 {}{} (restored at window exit)",
+        "BackgroundDancers: background movies {} for the song{} -- movie size P1 {} P2 {}{} (restored at window exit)",
         mode.key(),
+        screens_note,
         fmt(&saved[0]),
         fmt(&saved[1]),
         if MOVIE_SUPPRESSED.load(Ordering::Acquire) {
@@ -468,9 +574,10 @@ fn movie_camera_lists(rng: &mut Rng, dancers: usize) -> (Vec<String>, Vec<String
     (main, non)
 }
 
-/// Window exit / disable: clear the suppressor and put the remembered movie
-/// sizes back.
+/// Window exit / disable: put the screen route's code byte back, clear the
+/// suppressor and put the remembered movie sizes back.
 fn restore_movie_mode() {
+    screen_route::disarm();
     if MOVIE_SUPPRESSED.swap(false, Ordering::AcqRel) {
         movie_policy::set_suppressed(MovieSuppressor::BackgroundDancers, false);
         log_info!("BackgroundDancers: movie graph suppression lifted at song-window exit");
@@ -610,7 +717,11 @@ fn window_entry(scene_id: i32) {
     };
     let mut pick = pick;
     pick.seed = seed;
-    if apply_movie_mode() == MovieMode::Fullscreen {
+    let has_screens = pick
+        .stage
+        .as_ref()
+        .map_or(false, |s| stage_has_screens(&s.key));
+    if apply_movie_mode(has_screens) == MovieMode::Fullscreen {
         let (main, non) = movie_camera_lists(&mut rng, pick.dancers.len());
         pick = pick.with_movie_cameras(main, non);
     }
@@ -896,27 +1007,40 @@ fn drive_live(w: &mut Window) {
         ClockEvent::None => {}
     }
 
-    // Background Movies = FULLSCREEN: is this song's movie the backdrop?
-    // Probed every frame (the probe reads the LIVE DancePlaySequence only —
-    // before its step 2 there is no SceneManageActor yet and the answer is
-    // None), so the camera director switches to the movie set while the
-    // scene is still hidden and the first visible frame is already filmed
-    // by it. By DPS step 5 (the visibility edge) the SceneManageActor has
-    // settled the movie: it answers the step-3 readiness poll only after its
-    // MovieActor left the opening step.
-    if w.movie_mode == MovieMode::Fullscreen {
+    // Background Movies = FULLSCREEN / MOVIE ONLY: is this song's movie
+    // drawn? Probed every frame (the probe reads the LIVE DancePlaySequence
+    // only — before its step 2 there is no SceneManageActor yet and the
+    // answer is None), so the camera director switches to the movie set
+    // while the scene is still hidden and the first visible frame is
+    // already filmed by it. By DPS step 5 (the visibility edge) the
+    // SceneManageActor has settled the movie: it answers the step-3
+    // readiness poll only after its MovieActor left the opening step.
+    if movie_mode::probes_backdrop(w.movie_mode) {
         let backdrop = movie_backdrop::probe();
         if backdrop != w.backdrop {
             w.backdrop = backdrop;
+            let what = match (w.movie_mode, backdrop) {
+                (MovieMode::MovieOnly, Backdrop::Active) => {
+                    "movie is drawn: the whole 3D scene hidden (stage, dancers, shadows), 2D background left to the game"
+                }
+                (MovieMode::MovieOnly, Backdrop::Pending) => {
+                    "movie still opening: the whole 3D scene hidden until it settles"
+                }
+                (MovieMode::MovieOnly, Backdrop::None) => {
+                    "no movie drawn this song: stage + dancers shown"
+                }
+                (_, Backdrop::Active) => {
+                    "movie is the backdrop: stage + floor shadows hidden, 2D background left to the game"
+                }
+                (_, Backdrop::Pending) => {
+                    "movie still opening: stage + floor shadows hidden until it settles"
+                }
+                (_, Backdrop::None) => "no movie drawn this song: stage shown",
+            };
             log_info!(
-                "BackgroundDancers: background movies fullscreen -- {} ({})",
-                match backdrop {
-                    Backdrop::Active =>
-                        "movie is the backdrop: stage + floor shadows hidden, 2D background left to the game",
-                    Backdrop::Pending =>
-                        "movie still opening: stage + floor shadows hidden until it settles",
-                    Backdrop::None => "no movie drawn this song: stage shown",
-                },
+                "BackgroundDancers: background movies {} -- {} ({})",
+                w.movie_mode.key(),
+                what,
                 movie_backdrop::describe()
             );
         }

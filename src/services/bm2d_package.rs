@@ -409,6 +409,50 @@ pub fn lookup<'t>(ticket: &'t LoadTicket) -> Option<PackageHandle<'t>> {
     }
 }
 
+/// A package some OTHER owner keeps resident — typically a gameplay
+/// `LayoutActor`'s own package, which it releases at its finalize. No
+/// ticket, no refcount, no ownership: the caller must re-validate it every
+/// frame ([`lookup_unowned`] again, same pointer) and destroy every layer
+/// bound to it before the owner can release the name (for a gameplay
+/// package: the scene change that tears the DancePlaySequence down — the
+/// scene callback fires before `createNextSequence`/`installSequence`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnownedPackage {
+    pub ptr: *const u8,
+    pub afpu_package_id: u32,
+}
+
+/// Registry lookup by name WITHOUT claiming residency (see
+/// [`UnownedPackage`]). `None` until the package exists. Game thread.
+pub fn lookup_unowned(name: &CStr) -> Option<UnownedPackage> {
+    let api = API.get()?;
+    let obj = registry_obj(api)?;
+    unsafe {
+        let begin = *(obj as *const *const u8);
+        let end = *(obj.add(8) as *const *const u8);
+        let entry = (api.lookup)(begin, end, name.as_ptr());
+        if entry == end || entry.is_null() {
+            return None;
+        }
+        let pkg = *(entry.add(api.entry_package_offset) as *const *const u8);
+        if pkg.is_null() {
+            return None;
+        }
+        Some(UnownedPackage {
+            ptr: pkg,
+            afpu_package_id: *(pkg.add(PACKAGE_AFPU_ID_OFFSET) as *const u32),
+        })
+    }
+}
+
+/// Whether any [`LoadTicket`] of this module currently holds `name`. A game
+/// system that loads the same name itself (its own request dedups onto our
+/// entry, and its release has no refcount) must not be pointed at it while we
+/// hold it.
+pub fn held_by_tickets(name: &str) -> bool {
+    lock_residency().get(name).is_some_and(|r| r.count > 0)
+}
+
 /// Drop one holder's claim. When the last ticket for the name goes, the
 /// game-side release is issued (destroys the package + erases the entry
 /// synchronously; the actual afpu destroy is deferred to the engine's

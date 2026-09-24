@@ -404,7 +404,7 @@ fn read_sidecar(path: &str, text: bool) -> Vec<rlist::Row> {
 /// The member paths of an arc from its header (a bounded prefix read, the
 /// whole file only when the string table runs past it). `None` for anything
 /// that is not a parseable arc.
-fn read_arc_members(path: &str) -> Option<Vec<String>> {
+pub(super) fn read_arc_members(path: &str) -> Option<Vec<String>> {
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len() as usize;
     let want = len.min(HEADER_PREFIX);

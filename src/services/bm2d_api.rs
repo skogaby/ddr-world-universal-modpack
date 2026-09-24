@@ -456,6 +456,19 @@ pub fn mc_frame_by_label(mc_id: u32, label: &std::ffi::CStr) -> Option<u32> {
     }
 }
 
+/// The MovieClip's current frame (`afp_mc_get_param(mc, 0x1010, &u32)` —
+/// the shape every game-side "wait for label" poll uses; the out param is a
+/// u32 frame, not a float, so [`mc_get_param`] would misread it).
+pub fn mc_current_frame(mc_id: u32) -> Option<u32> {
+    let api = API.lock().ok()?;
+    let api = api.as_ref()?;
+    let get = api.mc_get_param?;
+    let mut out: [u32; 4] = [0; 4];
+    let get: unsafe extern "C" fn(u32, i32, *mut u32) -> i32 = unsafe { std::mem::transmute(get) };
+    let ret = unsafe { get(mc_id, 0x1010, out.as_mut_ptr()) };
+    (ret == 0).then_some(out[0])
+}
+
 /// Iterate active BM2D pool entries (non-zero layer_id). Calls `f(pool_index, layer_id)`.
 pub fn for_each_active<F: FnMut(usize, u32) -> bool>(mut f: F) {
     let api = API.lock().unwrap();
@@ -731,6 +744,13 @@ static LAYER_SET_COLOR: OnceCell<Option<AfpLayerSetColorRawFn>> = OnceCell::new(
 type AfpLayerGetMatrixRawFn = unsafe extern "C" fn(u32, *mut f32) -> i32;
 static LAYER_GET_MATRIX: OnceCell<Option<AfpLayerGetMatrixRawFn>> = OnceCell::new();
 
+/// `i32 afp_mc_load_movie(u32 mc_id, u32 stream_id)` — replace a placeholder
+/// MovieClip's content with another package's movie (0 on success; A3's stage
+/// panel composite, `FUN_1801b7460` on 20240402). Same independent-optional
+/// treatment as [`LAYER_SET_COLOR`].
+type AfpMcLoadMovieFn = unsafe extern "C" fn(u32, u32) -> i32;
+static MC_LOAD_MOVIE: OnceCell<Option<AfpMcLoadMovieFn>> = OnceCell::new();
+
 /// Resolve a named export from an already-loaded module, or None (logged).
 unsafe fn resolve_named_export(module: &str, name: &str) -> Option<*const ()> {
     use windows::core::PCSTR;
@@ -832,6 +852,65 @@ fn init_raw_layer_ops() {
             log_warn!("BM2D_API: afp_layer_get_matrix not found — raw matrix reads disabled");
         }
         let _ = LAYER_GET_MATRIX.set(get_matrix);
+    }
+    if MC_LOAD_MOVIE.get().is_none() {
+        let load = unsafe { resolve_named_export("libafp-win64.dll", "afp_mc_load_movie") }
+            .map(|f| unsafe { std::mem::transmute::<*const (), AfpMcLoadMovieFn>(f) });
+        if load.is_some() {
+            log_info!("BM2D_API: resolved afp_mc_load_movie (placeholder movie loads)");
+        } else {
+            log_warn!("BM2D_API: afp_mc_load_movie not found — placeholder movie loads disabled");
+        }
+        let _ = MC_LOAD_MOVIE.set(load);
+    }
+}
+
+/// Whether [`mc_load_movie`] can work (the export and the AFP-layer set).
+pub fn mc_load_movie_available() -> bool {
+    MC_LOAD_MOVIE.get().is_some_and(|o| o.is_some()) && afp_layers_available()
+}
+
+/// Replace the content of the placeholder MovieClip `mc_id` with `template`
+/// from the BM2D package `afpu_package_id` (package+0x314), then mark it
+/// playable (`afp_mc_set_param(mc, 0x101e, 1)`) — A3's `CMovieClip::LoadMovie`
+/// (`FUN_1801b7460` on 20240402). The package must stay resident for as long
+/// as the layer holding `mc_id` lives (the deferred-destroy rule). Game thread.
+pub fn mc_load_movie(mc_id: u32, afpu_package_id: u32, template: &str) -> bool {
+    let (Some(api), Some(Some(load))) = (LAYER_API.get(), MC_LOAD_MOVIE.get()) else {
+        return false;
+    };
+    let Ok(c_template) = CString::new(template) else {
+        return false;
+    };
+    unsafe {
+        let mut desc = AfpInfoDesc::zeroed();
+        if (api.afpu_get_afp_info_at_package)(&mut desc, afpu_package_id, c_template.as_ptr()) != 0
+        {
+            return false;
+        }
+        if load(mc_id, desc.stream_id()) != 0 {
+            return false;
+        }
+    }
+    mc_set_param(mc_id, 0x101E, 1);
+    true
+}
+
+/// Whether `layer_id` still names a live engine layer (`afp_id_is_valid(5,
+/// id) >= 0`). `false` when the AFP-layer set is unavailable.
+pub fn layer_id_is_valid(layer_id: u32) -> bool {
+    match LAYER_API.get() {
+        Some(api) => unsafe { (api.id_is_valid)(AFP_LAYER, layer_id) >= 0 },
+        None => false,
+    }
+}
+
+/// Non-owning: set a **game-owned** layer's display priority within its group
+/// (same raw-id caveat as [`layer_set_scale_raw`]).
+pub fn layer_set_priority_raw(layer_id: u32, priority: u16) -> bool {
+    match LAYER_API.get() {
+        Some(api) => unsafe { (api.layer_set_priority)(layer_id, priority) == 0 },
+        None => false,
     }
 }
 

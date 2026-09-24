@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Mutex;
 
-use crate::{log_info, log_warn};
+use crate::{log_debug, log_info, log_warn};
 
 /// Callback type for AFP patches. Receives (afp_data, bsi_data).
 /// Returns Some((new_afp, new_bsi)) to replace, or None to pass through unchanged.
@@ -137,7 +137,11 @@ unsafe extern "C" fn hooked_stream_do_create(data: *const u8, size: i32, flags: 
                 STATE.lock().unwrap().kept_alive.push((new_afp, new_bsi));
                 return original.call(new_ptr, new_size, flags);
             } else {
-                log_warn!("AfpPatcher: patch function returned None for \"{}\"", name);
+                // `None` is a normal decision ("stream stock": mod disabled,
+                // a DDR SELECTION legacy package sharing the export name, a
+                // course-mode gate …); the patch fns WARN themselves when the
+                // decline is a real degradation.
+                log_debug!("AfpPatcher: patch function declined \"{}\" (stock)", name);
             }
         }
     }

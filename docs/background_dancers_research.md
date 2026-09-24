@@ -1356,3 +1356,245 @@ the feet are what leave the frame first), i.e. the figure reads 55–62 % of the
 variants (`_2p`, dancers at ±0.8 m) need ~2.7–3.3 m and drop the mediums and the deep side angles (the pair
 would line up in depth). The Blender add-on's `load_camanm` (in-game-verified projection) reproduced the
 intended framing on every clip.
+
+## 8. Movies on the stage monitors — A3's OFFSCREEN1 route (2026-09-23, A3 `gamemdx_20240402` + World 20250805…20260915)
+
+The question: how A3 played a song's background movie on the screens INSIDE some 3D stages (ENDYMION on
+`replicant05`), and what it takes to put any song's movie on those screens in the World revival. Static RE
+only (Ghidra on A3 final + World 20260825, capstone sweeps over the five World builds, a parser survey of
+every A3 stage arc) — nothing here is cabinet-tested yet. **Implemented 2026-09-23** as Background Movies
+= STAGE SCREENS (+ MOVIE ONLY (NO DANCERS)) — §8.8.
+
+**Headline: there is no per-stage or per-song screen code.** A3 draws the movie into a dedicated 1280×1280
+render target that the engine publishes at boot as the NAMED TEXTURE `offscreen1`; the screen meshes of the
+`monitor*` / `replicant*` stages simply have a material whose texture is named `offscreen1`, so the model
+converter binds the render target exactly like any DDS. A song only decides WHERE its movie draws: movie type
+3 ⇒ into that offscreen target instead of the screen. **World kept every piece except the routing**: the
+render target, both names, its command list, its render-graph slot and the converter binding are unchanged;
+only the MovieActor's layer choice went from A3's `monitor ? 10 : 9` to World's `thumbnail ? 0 : 9`. Nothing
+ever draws into OFFSCREEN1 on World, so a revived monitor stage should currently show BLACK screens (the
+target list clears the RT to `0xFF000000` every frame) — a static prediction, see §8.7.
+
+### 8.1 The render target and its two names (A3 ≡ World)
+
+| Piece | A3 `gamemdx_20240402` | World 20260825 |
+|---|---|---|
+| Display ctor: `+0xDC = create(0x500, 0x500, fmt 0x15 A8R8G8B8)`, `+0x10C = texture view(+0xDC, 0x804)`, `register(+0x10C, "OFFSCREEN1")`; render-target object `display[0x12]` (u16 dims `0x0500_0500`) bound to `+0xDC`; target list `display+0x08` "OFFSCREEN1": clear flags 1 (colour only), colour `0xFF000000`, clear-at-start bit, render prio **0x65** (first target list of the frame; RENDER-3D is 0x66) | `FUN_180131f80` | `FUN_1801f10e0` |
+| Render-graph boot: `register(display+0x10C, "offscreen1", 0)` (the lowercase alias), then attach ScreenCommandList viewport 5 (OFFSCREEN1) into `display+0x08` at 0x65 | `FUN_180133c30` (viewport `DAT_1802ed7c0`) | `FUN_1801f2c30` (viewport `DAT_1806f15e0`) |
+| ScreenCommandList viewport table (8 lists; OFFSCREEN1 = list 5, **0x500 × 0x500** — the coordinate space the movie is fitted in) | `FUN_180137e70` | `FUN_1801f6dc0` |
+| Named-texture register | `FUN_1801472f0` | `FUN_1802036d0` |
+| DDS file callback (texture from a `.dds` member) | `FUN_18014c560` | `FUN_1802088e0` |
+| Teardown releases `"offscreen1"` by name | `FUN_1801340b0` | (`FUN_1801f2170`, see `docs/custom_shader_backgrounds_research.md` §5.3) |
+
+Register semantics (`FUN_1802036d0`): the key is the ResourceManager name hash (lower-case, `_` stripped,
+then the gs hasher — `FUN_180202340`; KTMDL texture names are stored already folded, so a model's
+`offscreen1` hashes to the same key). On a NEW key it inserts into the RM map at `RM+0xB8` AND
+(`FUN_18026ff00`) pushes a `TextureData {u32 hash, u32 handle, u16 w, u16 h}` into the gs texture registry
+`*DAT_1806f3290` (clearing its sorted flag) — the exact registry the model converter's lookup
+`FUN_18026f9e0` binary-searches when it fills a model's texture table (§2.1). On an EXISTING key it only
+bumps the refcount. The DDS callback creates its texture, calls the register, then releases its own
+reference — so **the first registration of a name wins**: `offscreen1` is registered at boot, a stage arc's
+own `offscreen1.dds` (§8.2) is decoded and immediately discarded, and every material naming `offscreen1`
+resolves to the render target at conversion time (the §2.1 "resolved at load" case — nothing for the DLL's
+re-resolve to do).
+
+### 8.2 Which stages sample it (survey of every A3 stage arc)
+
+10 of the 26 stock `mapset_*.arc` (A3 and World ship the same 26; `mapset_monitor00.arc` is byte-identical
+between the two installs) have at least one material whose texture is `offscreen1`: `mapset_monitor00..03`
+and `mapset_replicant00..05`. The other 16 (boom00, boom00_g, boom01–06, club00, crystaldium00, cyber00,
+dawnstreet00, disco00, floor00, lovesweets00, speaker00) have none, nor does the `griffin00` PoC. Each of the
+ten carries a placeholder `offscreen1.dds` (512×512 A8R8G8B8, a coloured test image, identical bytes in every
+arc) in exactly ONE part directory — an authoring stand-in (so the exporter/viewers had a texture), never
+bound in game (§8.1). Its presence is therefore a free header-only test: *"arc lists an `…/offscreen1.dds`
+member"* ⇔ *"stage has screens"* holds on all 26 stock arcs.
+
+| Stage (rlist rows) | Parts whose meshes sample `offscreen1` | Shader | Screen UV band u / v |
+|---|---|---|---|
+| `monitor00` (18, 24) | `monitor` mesh 2 (228 v) | `mdl_ch_constant_vc` | 0.000–1.000 / **0.125–0.874** (exactly the 4:3 fit band) |
+| `monitor01` (1) | `monitor1` (4 v), `monitor2` (120 v), `monitor3` (24 v) | `mdl_ch_constant_vc` | 0.000–1.000 / 0.200–0.800 |
+| `monitor02` (22), `monitor03` (23) | `bg` (355 v); `monitor` meshes 0 (10 v, two-sided) and 1 (1170 v) | `mdl_bg_constant_vc` | bg 0.007–0.993 / 0.254–0.747; monitor 0.007–0.995 / 0.130–0.857 |
+| `replicant00..05` (19–21, 25, 26, 33) | `bg` (29 v); `monitor1` (16 v, ALPHA-blended, vertex α 0.8); `monitor2` mesh 0 (380 v opaque) + mesh 2 (the same 380 v as an ADDITIVE glow copy) | `mdl_bg_constant_vc` | ≈0.005–0.995 / ≈0.01–0.99 (the whole square); monitor1 v ≈0.13–0.87 |
+
+Every screen is unlit `*_constant_vc` (texture × vertex colour); the opaque ones are alpha-tested at 127, so
+the RT's alpha must stay ≥ 0x80 wherever the movie is drawn (the clear writes 0xFF; the movie quad draws with
+blending over it).
+
+### 8.3 How A3 routes a song's movie — the only code involved
+
+- **Data.** musicdb `<movie>` (u8 type) and `<bgstage>` (u16 stage row). A3's music entry keeps the type at
+  `+0xB1` (with `+0xB0` as the fallback when `+0xB1 == 5`; 5 or 0 = no movie). A3 musicdb census (1221
+  songs): type 1 ×141, 4 ×100, **3 ×43**, 2 ×2, 5 ×1, absent ×934.
+- **`SceneManageActor::onInitialize`** (A3 vtable `0x18026b868` slot 4, `FUN_180060090`): the monitor flag
+  `+0x120` = **movie type == 3** (forced off in one special case: game mode `*(*DAT_1802ed6d0 + 0x14) == 13`
+  with a `litp_w` / `<name>_sel` select-movie present, `FUN_18005f100` — that path passes `+0x119` instead).
+  It creates the 0x120-byte MovieActor `FUN_18005f370(this, basename, movie path, monitor flag → +0x118,
+  select flag → +0x119)` (vtable `0x18026b4b8`).
+- **`MovieActor::onInitialize`** (`FUN_18005f5f0`): resolves the file (`FUN_18005f740`:
+  `data/mdb_apx/movie/<movieoverride | basename>` + `_w`, then no suffix, `_vj`, `_m`, `.wmv`), copies the
+  entry's type (`+0x114`) and offset (`+0x110`), creates the `agcs::Movie` (`FUN_18015d6a0(…, 4)` → `+0x108`)
+  and registers it (`FUN_18005f960`) into **`layer_table[+0x118 ? 10 : 9]`** (`DAT_1802eee58 + 8 +
+  (flag·3 + 0x1B)·8`, draw priority 0x7FFFFFFF — the World shape of §7.1).
+- **Layer table** (A3 `FUN_180023730`, World `FUN_18002aab0`, same list indices `[1,0,0,0,0,0,3,3,1,4,5]`):
+  entries 7–10 own PRIVATE ScreenCommandLists — **entry 9 → list 4 OFFSCREEN0** (RENDER-3D prio 0x65, under
+  the model passes, §7.2), **entry 10 → list 5 OFFSCREEN1** (the offscreen target, drawn before RENDER-3D in
+  the same frame, so the screens show the current frame's movie image).
+- **Per-frame fit** (A3 msg `0x1048` in `FUN_18005fba0` — A3's anchor/per-frame ids are 0x1047/0x1048, World
+  shifted them to 0x1044/0x1045): `FUN_18005f9f0(this, fitW, fitH, boxW, boxH)` = scale `s = min(fitW/movieW,
+  fitH/movieH)`, size `movie·s`, position `(box − size)/2`. Monitor movies use **fit = box = (1280, 1280)**
+  (`DAT_180288894 = 1280.0`): aspect-preserved and centred in the square — a 4:3 movie lands in v ∈ [0.125,
+  0.875] (monitor00's band exactly), a 16:9 one in [0.219, 0.781], a square one fills the RT. (Screen movies:
+  type 4 or an HD cabinet — `FUN_180011c30`, machine type ∉ {0,1} — fit `(1280, 720)`; otherwise the SD 4:3
+  fit `(960, 720)` pillarboxed in `(1280, 720)`.)
+- **`SceneManageActor::onUpdate`** step 0 (`FUN_180060460`): the StageActor (`FUN_180061f30(row)`, row from
+  entry `+0xE5`, `+0xE4` when negative) is created only when there is **no MovieActor, the MovieActor ended at
+  step 4 (no file), or the monitor flag is set**; the two CharaActors are created in step 1 only if a stage
+  exists. So on A3 an ordinary movie song showed the movie INSTEAD of the 3D scene, and a type-3 song showed
+  the full scene with the movie on the screens.
+- **The stage pairing is pure data.** All 43 type-3 songs carry a `<bgstage>` in {18–26, 33} = monitor00
+  (18, 24), replicant00–02 (19–21), monitor02 (22), monitor03 (23), replicant03/04 (25/26), replicant05 (33),
+  and no other song uses those rows. ENDYMION (`endy`, mcode 38149) = type 3 + bgstage 33 = `replicant05`;
+  its `endy.wmv` is **512×512** — a square movie made for replicant05's full-square screens (Eon Break, the
+  other row-33 song, is 1280×720). The rest are mostly 640×480 (4:3 — monitor00's band, and roughly the
+`monitor` meshes of monitor02/03), a few
+  640×360 / 852×480 / 480×360 / 448×336 / 320×240. Two use `_vj` "VJ" movies via `<movieoverride>`
+  (`umu/miku_vj.wmv`, `umu/miso_vj.wmv`).
+
+### 8.4 What World changed
+
+- **Layer select** (World `FUN_18007cf90`; 20250805 `FUN_180079280`): `CMP byte [RCX+0x148],R8B ; MOV
+  EAX,9 ; CMOVNZ RAX,R8 ; LEA RAX,[RAX+RAX*2] ; MOV RDX,[RDX+RAX*8+8]` = `thumbnail ? 0 : 9`. **Entry 10
+  is unreachable.** The only fixed-index reference to entry 10 (`[layer_table + 0xF8]`) on 20250805,
+  20260825 and 20260915 is the table builder's own init (20260825 `0x18002ac68` in `FUN_18002aab0`; capstone
+  scan of every `MOV r64,[rip+layer_table]` followed by a `[r+0xF8]` operand). Computed-index users (AFP
+  layers created by layer id) cannot be ruled out statically.
+- World **kept the type byte** — its musicdb still flags the same 43 songs `<movie>3` (entry
+  `+0x141/+0x140`, copied to `MovieActor+0x144`, read by no MovieActor method) — but **dropped `<bgstage>`**:
+  none of its 1484 songs carries one.
+- **Fit** (`FUN_18007d250` case 0x1045 → `FUN_18007d030(this, &size, &origin)`) is the generalised A3 fit:
+  `size` = f64 `(w, h)` at `MovieActor+0x120/+0x128`, `origin` = f64 `(x, y)` at `+0x108/+0x110` (ctor
+  `FUN_18007c960` copies both from the SceneManageActor's marker rect), movie pixel dims = f32 at
+  `*(*(MovieActor+0x138) + 0x18) + 0x24/+0x28`; `s = min(w/mw, h/mh)`, position `origin + (size −
+  movie·s)/2` (rounded), re-applied every frame while playing. Size `(1280, 1280)` at origin `(0, 0)` is
+  A3's monitor fit bit-for-bit. (Field offsets read on 20260825 only — derive and sweep before use.)
+
+### 8.5 The routing signature (swept 2026-09-23; `movie_layer_select` in `signatures.rs`, §8.8)
+
+`44 38 81 48 01 00 00 B8 09 00 00 00 49 0F 45 C0 48 8D 04 40 48 8B 54 C2 08` — `CMP [RCX+0x148],R8B` (the
+thumbnail flag, same displacement on every build) through the table load; **unique and byte-identical on all
+five builds**; the entry imm is the byte at **match+8** (`09`); the layer-table global is the `MOV
+RDX,[rip+disp32]` 0x1B bytes before the match.
+
+| Build | Match |
+|---|---|
+| 20250805 | `0x1800792a2` |
+| 20260224 | `0x1800783e2` |
+| 20260721 | `0x18007cbd2` |
+| 20260825 | `0x18007cfb2` |
+| 20260915 | `0x18007d122` |
+
+(One-off capstone sweep, then `./scripts/validate_signatures.sh` ALL GREEN with the signature added. The
+fit-field offsets of §8.4 have their own AOB, `movie_actor_fit_case` — the 0x1045 case's
+`CMP [..+0x58],2; JNZ; MOVUPS XMM0,[RCX+origin]; MOVSD XMM1,[RCX+origin+0x10]; …; MOVUPS XMM0,[RCX+size];
+…; MOVSD XMM1,[RCX+size+0x10]` with the d32s at +14 / +22 / +44 / +58 = 0x108 / 0x118 / 0x120 / 0x130 on
+all five builds, matches 0x180079570 / 0x1800786b0 / 0x18007cea0 / 0x18007d280 / 0x18007d3f0.)
+
+### 8.6 Reusing it in the revival (the proposal — implemented, see §8.8 for what shipped)
+
+Per song, scoped to the GAMEPLAY window like the existing Background Movies modes (§7.3):
+
+1. **Know the stage has screens — at window entry.** The layer choice happens in `MovieActor::onInitialize`
+   (DPS step 2, scene 28), before the parse thread is guaranteed to be done, so decide from the pick at the
+   25→26 edge: the `offscreen1.dds` member test (header only, §8.2) or a precomputed per-stage flag. Custom
+   stages opt in by naming the screen image `offscreen1` in Blender — the add-on derives the KTMDL texture
+   name from the image stem (`export_model.sanitize_texture_stem`; case and `_` fold away) and writes an
+   `offscreen1.dds` next to the part, which is harmless (§8.1 first-wins) and makes the header test work.
+2. **Route.** Force VIDEO SIZE = FULLSCREEN (1) for the window (`movie_size.rs` — keeps `+0x148 = 0`; with
+   size 1 the SceneManageActor also disables the 2D BackgroundFrame, §7.1, which is right with a stage) and
+   write the layer-select imm `09 → 0A` for the window (game thread, restored at window exit and at disable;
+   the imm is read once per song by that one call). The Movie then registers into entry 10, draws into
+   OFFSCREEN1 at prio 0x65, and RENDER-3D samples it in the same frame.
+3. **Frame it.** When the `movie_backdrop` walk (§7.3's probe) finds the MovieActor at step ≤ 2, write origin
+   `(0, 0)` / size `(1280, 1280)` — A3's exact result (bars on screens whose band is not the movie's aspect,
+   e.g. a 16:9 movie on monitor00). Optional per-stage "cover": for band `[v0, v1]` (u spanning the RT width) and movie `mw × mh`, `s =
+   max(1280/mw, (v1 − v0)·1280/mh)`, size `(mw·s, mh·s)`, origin `(640 − mw·s/2, 640·(v0 + v1) − mh·s/2)` —
+   the fit then reproduces `s` and crops the overflow at the RT edge. A pure, host-testable function of
+   (movie dims, stage band).
+4. **Keep the stage.** Scene mask FULL (not FULLSCREEN mode's DANCERS_ONLY), stage camera set.
+5. **Restyle exemption.** `render_item_layout::restyle_eligible_materials` (blend group 0) would re-point the
+   OPAQUE screen materials at `_lit` / `_cel` (§4.7) and build hull twins over them — N·L shading, cel bands
+   and ink rims on a video. Exempt every material whose texture is `offscreen1` (keep the stock unlit
+   `*_constant_vc`) and give it no hull records.
+6. **Movie-less songs.** A3 never put a monitor stage under a song without a monitor movie; with the RT
+   unused the screens stay black. Choices: drop the ten screen stages from the random pool when the song has
+   no movie (A3-faithful), accept black screens, or later draw something else into entry 10 / list 5 (e.g.
+   the jacket through `overlay_draw`).
+7. **Interplay.** A faked or suppressed movie (`movie_policy`: song rate without sync, the Wine suppress
+   mode) draws nothing ⇒ black screens — gate the route on the same `movie_policy::last_build() ==
+   RealOpened` test the FULLSCREEN probe uses, falling back to the non-monitor behaviour. `movie_sync` and the
+   rate clock proxy are unaffected (same graph; only the draw list changes). Custom resolution rescales
+   OFFSCREEN1 and its viewport to `render_w²` (`rt_dims_square` + the square viewport pair,
+   `docs/custom_resolution.md`); the screens sample by UV so the RT size is transparent, but whether entry
+   10's 2D canvas follows that viewport (the fit's 1280-unit coordinates) is unverified — test at stock
+   1280×720 first. The 1280² RT is already cleared every frame on every World boot (§8.1), so the feature
+   adds only the movie quad.
+
+Rejected alternatives: re-linking the Movie's node from entry 9's render list into entry 10's after
+onInitialize (no code patch, but intrusive surgery on the manager's node pool — free list `+0x18/+0x20`,
+count `+0x3C`, active head/tail `+0x28/+0x30` — with an unexamined removal path); drawing the movie ourselves
+into list 5 (needs the movie's texture object and a quad emitter, for no gain over the game's own draw).
+
+### 8.7 To confirm on the cabinet
+
+1. A revived monitor/replicant stage shows black screens today (the §8.4 prediction; a non-black screen
+   means something else draws into entry 10).
+2. With the imm patch + rect write: the movie appears on the screens, alpha-tested screens stay opaque.
+3. ENDYMION on `replicant05` fills the square screens; a 4:3 song on `monitor00` fills its screen exactly.
+4. A 1080p custom-resolution run keeps the same framing.
+5. The per-item INFO names the screen material's bound texture as 1280 × 1280 with hash `0x3420C1B9`
+   (FNV-1 of `offscreen1`) — the render target, not the arc's placeholder DDS.
+
+### 8.8 What shipped (2026-09-23; code `mods/background_dancers/{movie_mode,screen_route,lifecycle}.rs`)
+
+- **Row.** Background Movies gains **STAGE SCREENS** (row value 3, key `stage_screens`) and **MOVIE ONLY (NO
+  DANCERS)** (4, `movie_only`); display order OFF / THUMBNAIL / STAGE SCREENS / FULLSCREEN / MOVIE ONLY; the
+  old values keep 0/1/2. Default THUMBNAIL at first; STAGE SCREENS became the default after the cabinet pass
+  the same day (it plays as THUMBNAIL on every stage without screens).
+- **Has screens** (§8.6 step 1): decided once at mod enable, per distinct stage key, from the arc the engine
+  will load (`arc_set` — custom mounts, LayeredFS, stock): a member whose file name is `offscreen1.dds`.
+  Songs without a movie keep the screen stages in the rotation (black screens, maintainer decision — the
+  A3-faithful "drop them" alternative of step 6 was not taken).
+- **Route** (step 2): `derive_movie_screen_route` publishes `movie_layer_select_imm` (+ the two fit
+  offsets). DEVIATION: the byte is armed at the 25 → 26 window entry BEFORE the VIDEO SIZE write, and a
+  refused checked write (the byte not `09`) turns the song into THUMBNAIL before anything else is written,
+  so a song can never end up with a fullscreen-size movie under a full stage. Restored (checked `0A → 09`) in
+  the window-exit branch of the scene callback and at mod disable. A song where no entered side's VIDEO
+  SIZE shows a movie is not routed at all (20250805's SceneManageActor builds a MovieActor even for VIDEO
+  SIZE OFF, which the patch would put on the screens; residual edge: 2P on 20250805 with the GOVERNING side
+  OFF and the other ON). The step-7 `RealOpened` gate was NOT
+  added: a routed movie that fails or is faked draws nothing into the RT, which shows the same black the
+  thumbnail-less stage would.
+- **Fit** (step 3): A3's contain fit, written per MovieActor instance every frame while its step is 0 / 1 /
+  2. DEVIATION: the writer runs from the mod's frame callback, not the scene driver (`drive_live` returns
+  early until the scene is built, and the fit must land before the 2 → 3 transition). No per-stage cover.
+- **Stage kept** (step 4): scene mask ALL, stage camera set.
+- **Restyle exemption** (step 5): ALWAYS, in every mode and style (previews included) — a material whose
+  masked slots index the texture-table entry hashed FNV-1(`offscreen1`) keeps its stock shader, and its hull
+  twin records are hidden (no outline). The KTMDL texture name is a 6-bit packed lowercase/digit string
+  (20260825 `FUN_180275ad0`) hashed by the gs hasher (`DAT_1806f2040`, the same FNV-1 as shader names) at
+  `FUN_180273e20`, so the table key is computable.
+- **Diagnostics** (added): the enable INFO listing the stages with screens; the per-song INFO `stage screens:
+  yes/no, routed: yes/no`; the imm write; one INFO per framed MovieActor with the movie's pixel size; a
+  one-shot INFO of layer entry 10 (override, layer, list index, walk gate `+0x10/+0x12`, active node count
+  `+0x3C`); per built item with screen materials the bound `TextureData` size + hash.
+- **MOVIE ONLY** (added, A3's default for ordinary movie songs, §8.3): VIDEO SIZE untouched; the FULLSCREEN
+  probe (§7.3) runs, and while the backdrop is not None every 3D instance is published hidden (`SceneMask::
+  NOTHING` — the mask gained a `dancers` field) and the 2D background is left to the game.
+- **Custom stages**: the Blender add-on writes an 8 × 8 black `offscreen1.dds` for an image whose stem folds
+  to `offscreen1`; the shipped Griffin House TV maps the 16:9 band of the square (D3D v 0.21875–0.78125,
+  unmirrored u) — a 16:9 movie fills the TV with a ~3 % horizontal squeeze onto its 1.72:1 panel, a 4:3 one
+  is cropped 12.5 % top and bottom.
+- Cabinet results (2026-09-23, maintainer): STAGE SCREENS, MOVIE ONLY, unlit screens and the Griffin House TV
+  all work as designed; training-mode scrubs keep the movie on the screens in sync (movie_sync needs nothing —
+  entries 9 and 10 are the same `agcs::ScreenRoot` class, prepared and walked every frame). Details: the planning
+  `progress.md` deploy log.

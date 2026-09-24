@@ -1,8 +1,10 @@
 # DDR SELECTION (legacy gameplay skins) in DDR World — Feasibility & Research
 
-Status: **RESEARCH COMPLETE — GO (data-first architecture), spike-gated** (2026-09-21).
-No code written, no PDD docs yet; this is the design-input record for a future
-PDD cycle.
+Status: **IN IMPLEMENTATION** (2026-09-22) — `src/mods/ddr_selection/`,
+planning `.agents/planning/2026-09-22-ddr-selection/`. The P0 mechanism is
+cabinet-proven (legacy judge / FAST/SLOW / full combo / game over / danger on
+every skin). **Several statements below were corrected by the pre-design RE —
+read §12 first**; the architecture actually built is §12.1, not §6.1.
 
 Goal: bring back DDR A / A20 / A20 PLUS / A3's **DDR SELECTION** behaviour — the
 gameplay UI (judgement words, combo digits, life gauge, score panel, stage
@@ -736,3 +738,66 @@ course/training per-stage arming, a song-select preview of the active skin.
 `0x180341e58`, `sn2_dgm_high` @ `0x18035dfa8` — same shape as 20260825.
 
 No Ghidra symbols were added in this pass.
+
+---
+
+## 12. Corrections (2026-09-22 pre-design RE + P0 cabinet test)
+
+Detail: `.agents/planning/2026-09-22-ddr-selection/research/` (`orientation.md`,
+`hud-actors.md`, `intro-and-skin-surface.md`, `sounds-options-folder.md`).
+
+### 12.1 Mechanism actually built
+
+The suffix is restored in the **`LayoutActor` per-package helper**
+(`FUN_18006b710`, AOB `layout_package_helper`), not at the arc resolver
+(§6.1): the helper is fully replaced; stock packages run the original with
+skin **0**, legacy packages are registered A3-style under `<base>000N` with
+record skin N. `GameWork+0xA8` IS written (§6.1 step 5) — safe only together
+with the helper append, because suffixed names never collide with the stage
+loader's stock entries (a non-zero skin makes the `LayoutActor` register the
+shared set; with unsuffixed names those would dedupe onto loader-owned entries
+the `LayoutActor` then erases at finalize). A resolver-level swap would share
+package keys and forbid the write. Cabinet-proven 2026-09-22 on all five skins.
+
+### 12.2 Corrected facts
+
+- **`dance_message` has no World consumer.** A3's READY / HERE WE GO player is
+  `sequence::dance::ReadyGoActor` (ctor `FUN_180042000` on A3), which World
+  deleted; World's READY lives inside the kind-3 `shutter_play` panel. The §5
+  "class A" row is wrong — it needs a re-implemented ReadyGoActor. World msg
+  `0x100c` is A3's `0x100D` (its only stock sender was ReadyGoActor).
+- **`dance_danger` is a SHARED package on World** (`LayoutActor::onInitialize`
+  passes `shared = 1`), loaded by the stage loader under skin 0.
+- **World's HUD actors still carry A3's skin branches**, keyed on the
+  `LayoutActor` record skin (`+0x28`): DanceDangerActor placement (skins 1–2
+  centred, 3–5 at the `danger_gauge` marker), gauge intro label (skin 3),
+  full-life display (skin 2), StageFrame / SongInfo / layout-builder package
+  choice.
+- **A missing export NULL-derefs every World HUD actor**, so a package may only
+  turn legacy once its consumer is adapted, and the fallback must be the
+  unsuffixed World base — `<base>0000` resolves to early-World `*0000_v3` or
+  A3-oldest `_v0` arcs with the wrong export names.
+- **`dance_common` roots carry positions only** — their textures are
+  placeholders; there is no gauge-frame art to re-texture (§5, §9.3).
+- **The era sound cues ship in World**: `data/sound/win/voice_n.xwb`
+  (byte-identical to A3's), `data/arc/soundbanks_n.arc`,
+  `data/arc/se_normal_n.arc` — the A3-generation banks World never loads (§4,
+  §7.5 "absent" is wrong; no operator audio needed).
+- **Raw series numbering**: 14 = 2013, 15–16 = 2014, **17 = DDR A, 18 = A20,
+  19 = A20 PLUS, 20 = A3** (§7.1's 16 = A / 17 = A20 labels are off by one).
+  A3's DDR SELECTION membership is a curated list of 54 songs bucketed 1–5 /
+  6–8 / 9–10 / 11–13 / **14–17**; the shipped AUTO rule uses those buckets over
+  every song.
+- **World's `dance_combo0005_v0.arc` is blanked** (decompresses to 518 016
+  zero bytes; A3's copy is intact) — `scripts/ddr_selection/import_a3_assets.{sh,bat}`
+  copies it from an operator's A3 install into `data_mods/ddr_selection_a3/`.
+- **The end-of-song STAGE CLEARED / FAILED banners are the ShutterActor**
+  (World kinds 4/5, `common_shutter_v3`), not `dance_game_over` (which is the
+  in-lane game-over clip). Legacy banners = `common_shutter000N` + an overlay
+  layer — a separate phase.
+- Beyond §2: the skin also selected the stage-choice panel's cut-in
+  (`common_choice_cutin000N`, SE `sele_*`), the skin-3 SuperNOVA 2 banner as
+  jacket, per-skin stage voices, the skin-1 HERE WE GO voice (`ACT3_1` /
+  `ACT4_2`), the legacy CLEARED / FAILED / PRAY FOR ALL banners, and `_sel`
+  background movies (World MovieActor flag `+0x149`, never set).
+
