@@ -164,6 +164,39 @@ pub struct DdrSelMovieSites {
     pub movie_path_off: usize,
 }
 
+/// The gameplay HUD layout builder / marker setter (`derive_hud_layout`) —
+/// consumed by `services::hud_layout_hooks` (center-arrows' lane shift,
+/// ddr_selection's legacy marker post-pass).
+#[derive(Clone, Copy, Debug)]
+pub struct HudLayoutSites {
+    /// `LayoutActor`'s marker builder `void(LayoutActor*)`.
+    pub builder: *const u8,
+    /// Marker setter `void(parent, const char* key, const i32 coord[6])`.
+    pub setter: *const u8,
+    /// The builder's per-side extras (all-or-nothing): style
+    /// (`+style + side*4`: 0 single / 1 double / 2 skipped), the reverse flag
+    /// byte World latched (`+reverse + side*0x48`), and the Option vslot of
+    /// `judge_position`. `None` when any failed.
+    pub side: Option<HudLayoutSideSites>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HudLayoutSideSites {
+    pub style_off: usize,
+    pub reverse_off: usize,
+    pub judge_pos_vslot: usize,
+}
+
+/// ddr_selection's legacy stage-frame patch sites (`derive_ddr_sel_stage_frame`).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelStageFrameSites {
+    /// `LEA R8,[rip+"dance_stage"]` (7 bytes) — the export-name load.
+    pub export_lea: *const u8,
+    /// `MOV R8D,0xB; LEA RDX,[rip+"dast_stage_"]` (13 bytes) — the texture
+    /// prefix assign.
+    pub texture_site: *const u8,
+}
+
 /// Every engine address and struct offset the Background Dancers 3D scene
 /// service (`services::scene3d`) consumes, derived all-or-nothing by
 /// `SignatureStore::derive_scene3d` (RE record:
@@ -888,6 +921,42 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "hud_layout_setter",
         pattern: "4C 8B DC 56 57 41 54 41 55 41 56 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B 05",
         description: "Named-layout setter: void(parent /*RCX*/, name /*RDX, C-string*/, coord /*R8, 6xi32; [0]=X,[1]=Y*/). Center-arrows mod detours this to shift coord[0] for the active 1P side's lane-relative keys. Pattern ends at the stack-cookie LEA opcode (the differing displacement is excluded); verified to match one site on both supported builds.",
+    },
+    // HUD layout builder per-side loop head (FUN_18006bd40+0x5A0 on
+    // 20260825): `MOV EAX,[R13+RBX*4+style]; CMP EAX,2; JZ next_side` — the
+    // per-side play style (0 single, 1 double, 2 = side skipped, no key
+    // written). derive_hud_layout requires the match inside the builder and
+    // publishes the disp32 (+4) as `hud_layout_style_off` (0x84 on every
+    // build; cross-checked against the style cluster's literal 0x84).
+    // Unique on all five builds.
+    SignatureDefinition {
+        name: "hud_layout_side_loop",
+        pattern: "41 8B 84 9D ?? ?? ?? ?? 83 F8 02 0F 84",
+        description: "HUD layout builder per-side loop head (MOV EAX,[R13+RBX*4+style]; CMP EAX,2; JZ skip). derive_hud_layout publishes the style disp32 as `hud_layout_style_off`. Consumer: ddr_selection's legacy marker post-pass (lane name per side).",
+    },
+    // The builder's per-side scroll-reverse latch (FUN_18006bd40+0x5C7 on
+    // 20260825): `MOV RDX,[RAX]; MOV RCX,RAX; CALL [RDX+0x2F8] (Option::
+    // isReverse); MOV [RSP+x],AL; LEA RCX,[RBX+RBX*8]; MOV [R13+RCX*8+rev],AL`
+    // — World stores each side's reverse flag at LayoutActor + rev +
+    // side*0x48 (the per-side marker parent + 4). derive_hud_layout
+    // publishes the disp32 (+24) as `hud_layout_reverse_off` (0xE4 on every
+    // build). Unique on all five builds.
+    SignatureDefinition {
+        name: "hud_layout_reverse_store",
+        pattern: "48 8B 10 48 8B C8 FF 92 ?? ?? ?? ?? 88 44 24 ?? 48 8D 0C DB 41 88 84 CD ?? ?? ?? ??",
+        description: "HUD layout builder: the per-side reverse flag store MOV [R13+RCX*8+0xE4],AL after the Option isReverse vcall. derive_hud_layout publishes `hud_layout_reverse_off`. Consumer: ddr_selection's legacy marker post-pass (reverse lane / difficulty variants).",
+    },
+    // The builder's judge-group lane variant (FUN_18006bd40+0x1839 on
+    // 20260825): `MOV RCX,[RBP+x] (the side's Option); MOV R11,[RCX]; CALL
+    // [R11+0x298]; CMP EAX,1; SETZ AL` — Option `judge_position` (+0x4C);
+    // XORed with reverse it picks `lane_*_{normal,reverse}` for judge / combo
+    // / fast_slow / filter / score_compare. derive_hud_layout publishes the
+    // vslot (+10) as `hud_layout_judge_pos_vslot` (0x298 on every build).
+    // Unique on all five builds.
+    SignatureDefinition {
+        name: "hud_layout_judge_pos_call",
+        pattern: "48 8B 4D ?? 4C 8B 19 41 FF 93 ?? ?? ?? ?? 83 F8 01 0F 94 C0",
+        description: "HUD layout builder: the judge_position Option vcall (CALL [R11+0x298]; CMP EAX,1; SETZ) that picks the judge-group lane variant. derive_hud_layout publishes `hud_layout_judge_pos_vslot`. Consumer: ddr_selection's legacy marker post-pass.",
     },
     // Song-info card builder — the branch cluster that picks the card style:
     //   CMP dword [RBP+0xC4],EDI   ; card style field: 0 = single, 1 = double
@@ -2810,6 +2879,21 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 83 B8 ?? ?? ?? ?? 00 75 0E 48 8B 10 48 8B C8 FF 52 08 48 8B D8 EB 11 48 8D 98 ?? ?? ?? ?? 48 83 7B 18 10 72 03 48 8B 1B 80 BF ?? ?? ?? ?? 00 74 ?? 4C 8D 87 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8B D3 E8",
         description: "MovieActor::onInitialize's path search (FUN_18007cd70+0x67 on 20260825): the movie name = the music-info override string (`+0x148`, empty ⇒ entry vslot 1), then `CMP byte [RDI+0x149],0; JZ; LEA R8,[RDI+0xB0]; LEA RCX,[RDI+0xD8]; MOV RDX,RBX; CALL try_sel` — World's dormant `_sel` flag (nothing writes it). derive_ddr_sel_movie gates the CALL target on its `\"_sel\"` string and the match on lying 0x100 into the first CALL of MovieActor vtable slot 4, publishes the flag (+43), the override string (+27, its size at +3) and the found-path string (+60). Unique and byte-identical on all five builds.",
     },
+    // ── DDR SELECTION legacy stage frame ("1st STAGE" …) ────────────────
+    //
+    // RE: `.agents/planning/2026-09-22-ddr-selection/research/
+    // hud-layout-stage-frame.md` §4 / §8. Both feed derive_ddr_sel_stage_frame
+    // (all-or-nothing; a miss keeps World's stage frame).
+    SignatureDefinition {
+        name: "ddr_sel_stage_frame_export",
+        pattern: "4C 8D 05 ?? ?? ?? ?? 41 B9 05 00 00 00 48 8D 3C C0 48 8B D6",
+        description: "StageFrameActor::onInitialize's clip create (init+0xC8 on every build, FUN_18007a190 on 20260825): `LEA R8,[\"dance_stage\"] (the EXPORT name — the init's earlier \"dance_stage\" LEA is the record key); MOV R9D,5; … CALL CMovieClip::Create`. ddr_selection points the disp32 (+3) at a near-allocated \"stage_frame\" (A3's export in `dance_stage_frame000N`) while the current LayoutActor's dance_stage record is legacy. derive_ddr_sel_stage_frame checks the match lies in the RTTI slot-4 function and the string. Unique on all five builds.",
+    },
+    SignatureDefinition {
+        name: "ddr_sel_stage_frame_texture",
+        pattern: "41 B8 0B 00 00 00 48 8D 15 ?? ?? ?? ?? 49 8D 4B ?? E8 ?? ?? ?? ?? 90 48 8B 1D ?? ?? ?? ?? 48 8B 13 80 7A",
+        description: "StageFrameActor's stage-texture fn (texture fn+0x46 on every build; the fn is the CALL at msg+0x24 of RTTI slot 8, FUN_18007a390 on 20260825): `MOV R8D,0xB; LEA RDX,[\"dast_stage_\"]; LEA RCX,[R11-0x40]; CALL string::assign` — the texture-name prefix World's stage suffix (01..05 / final / extra / …) is appended to. ddr_selection rewrites imm32 (+2) and disp32 (+9) to A3's `stage_frame000N_stage_` (22 chars) while the dance_stage record is legacy. derive_ddr_sel_stage_frame checks the fn, the imm and the string. Unique on all five builds (the 17-byte head alone also hits a `music_title` assign).",
+    },
     // ── Multiplayer Bot (multiplayer_bot) ───────────────────────────────
     SignatureDefinition {
         name: "extra_stage_grant",
@@ -3099,6 +3183,8 @@ impl SignatureStore {
         // Consumes the SceneManageActor / MovieActor RTTI vtables
         // (find_movie_backdrop_vtables, above).
         self.derive_ddr_sel_movie();
+        self.derive_hud_layout();
+        self.derive_ddr_sel_stage_frame();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -6194,6 +6280,219 @@ impl SignatureStore {
             movie_actor_vtable: self.get_address("movie_actor_vtable")?,
             sel_flag_off: self.published_value("ddr_sel_movie_sel_flag_off")?,
             movie_path_off: self.published_value("ddr_sel_movie_path_off")?,
+        })
+    }
+
+    /// Resolve the gameplay HUD layout builder entry and its per-side extras.
+    ///
+    /// * `hud_layout_builder_entry` — the `hud_layout_builder` prologue AOB
+    ///   when it matched (20260324+), else a backward scan from the
+    ///   build-stable `hud_layout_builder_style_cluster` (exactly one match
+    ///   required) for the frame-size-agnostic prologue head
+    ///   `MOV RAX,RSP; PUSH RBP; PUSH R12..R15; LEA RBP,[RAX+disp32]`
+    ///   (entry = cluster − 0x1DC on every inspected build; the full AOB
+    ///   bakes in per-build frame constants and misses 20250805 / 20260224).
+    ///   Moved here from center_arrows_single (identical logic).
+    /// * all-or-nothing extras (RE: `.agents/planning/2026-09-22-ddr-selection/
+    ///   research/hud-layout-stage-frame.md` §6): `hud_layout_style_off`,
+    ///   `hud_layout_reverse_off`, `hud_layout_judge_pos_vslot`, each read
+    ///   from a unique site inside the builder's first 0x2000 bytes; the style
+    ///   offset must equal the style cluster's literal 0x84, the reverse byte
+    ///   must sit inside the per-side 0x48 block that starts at the record map
+    ///   `ddr_sel_records_side_off` when that resolved.
+    fn derive_hud_layout(&mut self) {
+        const TAG: &str = "hud_layout";
+        const PROLOGUE_HEAD: &str = "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8";
+        const SCAN_BACK: usize = 0x400;
+        let clusters = self.get_all_matches("hud_layout_builder_style_cluster");
+        let entry = match self.get_address("hud_layout_builder") {
+            Some(e) => Some(e),
+            None => match clusters.as_slice() {
+                [cluster] => {
+                    let lo = (*cluster as usize)
+                        .saturating_sub(SCAN_BACK)
+                        .max(self.base as usize);
+                    let span = *cluster as usize - lo;
+                    scan_pattern_all(lo as *const u8, span, PROLOGUE_HEAD)
+                        .last()
+                        .map(|m| m.address as *const u8)
+                }
+                other => {
+                    log_warn!(
+                        "  [-] {} -- builder AOB missed and style cluster resolved {} matches (want 1)",
+                        TAG,
+                        other.len()
+                    );
+                    None
+                }
+            },
+        };
+        let Some(entry) = entry else {
+            log_warn!("  [-] {} -- builder entry unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        self.resolved
+            .insert("hud_layout_builder_entry".into(), entry);
+        log_info!(
+            "  [+] hud_layout_builder_entry (derived) @ +0x{:X}",
+            (entry as usize).wrapping_sub(base)
+        );
+
+        const WINDOW: usize = 0x2000;
+        let within = |p: *const u8| (p as usize).wrapping_sub(entry as usize) < WINDOW;
+        let (Some(side_loop), Some(rev_store), Some(judge_call)) = (
+            self.get_address("hud_layout_side_loop"),
+            self.get_address("hud_layout_reverse_store"),
+            self.get_address("hud_layout_judge_pos_call"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- side loop / reverse store / judge_position call unresolved",
+                TAG
+            );
+            return;
+        };
+        if !within(side_loop) || !within(rev_store) || !within(judge_call) {
+            log_warn!(
+                "  [-] {} -- side loop / reverse store / judge_position call outside the builder",
+                TAG
+            );
+            return;
+        }
+        let rd = |p: *const u8| unsafe { std::ptr::read_unaligned(p as *const u32) as usize };
+        let style_off = unsafe { rd(side_loop.add(4)) };
+        let reverse_off = unsafe { rd(rev_store.add(24)) };
+        let judge_vslot = unsafe { rd(judge_call.add(10)) };
+        if clusters.len() == 1 && style_off != 0x84 {
+            log_warn!(
+                "  [-] {} -- side-loop style offset 0x{:X} disagrees with the style cluster (0x84)",
+                TAG,
+                style_off
+            );
+            return;
+        }
+        let side_ok = match self.published_value("ddr_sel_records_side_off") {
+            Some(side) => (side..side + 0x48).contains(&reverse_off),
+            None => (0x80..0x200).contains(&reverse_off),
+        };
+        if !(0x40..0x200).contains(&style_off)
+            || !side_ok
+            || judge_vslot % 8 != 0
+            || !(0x100..0x800).contains(&judge_vslot)
+        {
+            log_warn!(
+                "  [-] {} -- implausible style 0x{:X} / reverse 0x{:X} / judge_position vslot 0x{:X}",
+                TAG,
+                style_off,
+                reverse_off,
+                judge_vslot
+            );
+            return;
+        }
+        self.publish_value("hud_layout_style_off", style_off);
+        self.publish_value("hud_layout_reverse_off", reverse_off);
+        self.publish_value("hud_layout_judge_pos_vslot", judge_vslot);
+    }
+
+    /// The HUD layout builder / setter pair (+ the side extras when they
+    /// resolved), or `None` when either function is missing.
+    pub fn hud_layout_sites(&self) -> Option<HudLayoutSites> {
+        let side = (|| {
+            Some(HudLayoutSideSites {
+                style_off: self.published_value("hud_layout_style_off")?,
+                reverse_off: self.published_value("hud_layout_reverse_off")?,
+                judge_pos_vslot: self.published_value("hud_layout_judge_pos_vslot")?,
+            })
+        })();
+        Some(HudLayoutSites {
+            builder: self.get_address("hud_layout_builder_entry")?,
+            setter: self.get_address("hud_layout_setter")?,
+            side,
+        })
+    }
+
+    /// Resolve ddr_selection's legacy stage-frame patch sites (RE:
+    /// `.agents/planning/2026-09-22-ddr-selection/research/
+    /// hud-layout-stage-frame.md` §8): the StageFrameActor RTTI vtable →
+    /// init (slot 4) and msg (slot 8); the export LEA must lie in the init's
+    /// first 0x200 bytes and load `"dance_stage"`; the msg fn's `E8` at +0x24
+    /// is the texture fn, the texture site must lie in its first 0x100 bytes,
+    /// carry imm32 0xB and load `"dast_stage_"`. All-or-nothing:
+    /// `ddr_sel_stage_frame_export_lea` / `ddr_sel_stage_frame_texture_site`.
+    fn derive_ddr_sel_stage_frame(&mut self) {
+        const TAG: &str = "ddr_sel_stage_frame";
+        let (Some(export), Some(texture)) = (
+            self.get_address("ddr_sel_stage_frame_export"),
+            self.get_address("ddr_sel_stage_frame_texture"),
+        ) else {
+            log_warn!("  [-] {} -- export / texture site unresolved", TAG);
+            return;
+        };
+        let Some(vt) = self.find_vtable_by_rtti(
+            ".?AVStageFrameActor@dance@sequence@@",
+            "stage_frame_actor_vtable",
+        ) else {
+            log_warn!("  [-] {} -- StageFrameActor RTTI vtable not found", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) || (p as usize - base) + want.len() + 1 > size {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        unsafe {
+            let init = *(vt as *const *const u8).add(4);
+            let msg = *(vt as *const *const u8).add(8);
+            if !inside(init) || !inside(msg) {
+                log_warn!("  [-] {} -- StageFrameActor slots outside the module", TAG);
+                return;
+            }
+            if (export as usize).wrapping_sub(init as usize) >= 0x200
+                || !cstr_is(decode_rip_relative(export.add(3)), b"dance_stage")
+            {
+                log_warn!(
+                    "  [-] {} -- export LEA not \"dance_stage\" inside StageFrameActor::onInitialize",
+                    TAG
+                );
+                return;
+            }
+            let call = msg.add(0x24);
+            if *call != 0xE8 {
+                log_warn!("  [-] {} -- msg+0x24 is not the texture-fn CALL", TAG);
+                return;
+            }
+            let tex_fn = decode_call_rel32(call);
+            let imm = std::ptr::read_unaligned(texture.add(2) as *const u32);
+            if !inside(tex_fn)
+                || (texture as usize).wrapping_sub(tex_fn as usize) >= 0x100
+                || imm != 0xB
+                || !cstr_is(decode_rip_relative(texture.add(9)), b"dast_stage_")
+            {
+                log_warn!(
+                    "  [-] {} -- texture site not the \"dast_stage_\" assign of the texture fn",
+                    TAG
+                );
+                return;
+            }
+            for (name, p) in [
+                ("ddr_sel_stage_frame_export_lea", export),
+                ("ddr_sel_stage_frame_texture_site", texture),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, (p as usize) - base);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_stage_frame`] produced, or `None`.
+    pub fn ddr_sel_stage_frame_sites(&self) -> Option<DdrSelStageFrameSites> {
+        Some(DdrSelStageFrameSites {
+            export_lea: self.get_address("ddr_sel_stage_frame_export_lea")?,
+            texture_site: self.get_address("ddr_sel_stage_frame_texture_site")?,
         })
     }
 

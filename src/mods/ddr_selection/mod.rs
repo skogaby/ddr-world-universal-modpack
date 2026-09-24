@@ -43,6 +43,8 @@ mod banner;
 pub mod banner_logic;
 mod intro;
 pub mod intro_logic;
+pub mod marker_keys;
+mod markers;
 mod movie_sel;
 mod options;
 mod package_helper;
@@ -52,6 +54,7 @@ pub mod policy;
 pub mod sel_movie_logic;
 mod settings;
 mod sound;
+mod stage_frame;
 pub mod trigger;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
@@ -146,6 +149,14 @@ fn adapters() -> AdapterSet {
     let mut set = AdapterSet::none();
     if intro::capable() {
         set = set.with(policy::Adapter::ReadyGo);
+    }
+    if markers::capable() {
+        set = set.with(policy::Adapter::Markers);
+    }
+    // The legacy stage frame must also land at A3's `stage_frame_usr`
+    // marker — World's root places World's frame elsewhere.
+    if stage_frame::capable() && markers::capable() {
+        set = set.with(policy::Adapter::StageFrame);
     }
     set
 }
@@ -412,6 +423,10 @@ fn disarm(reason: &str) {
     // (A legacy end banner still on screen is not disarmed: `banner.rs`
     // follows World's ShutterActor until World releases it.)
     panel::disarm();
+    // World's stage-frame names back (no-op when nothing is patched) and no
+    // pending marker post-pass.
+    stage_frame::restore();
+    markers::reset();
     // Restore World's code sounds (no-op when nothing was silenced).
     sound::code_se::sync();
     if skin == 0 {
@@ -549,6 +564,8 @@ impl Mod for DdrSelectionMod {
         }
         sound::code_se::init(ctx.signatures);
         intro::init(ctx.signatures);
+        markers::init(sites.records_shared_off, sites.records_side_off);
+        stage_frame::init(ctx.signatures);
         panel::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
@@ -588,6 +605,7 @@ impl Mod for DdrSelectionMod {
             log_warn!("DDR SELECTION: game audio service unavailable -- no era bank");
         }
         intro::start();
+        markers::start();
         panel::start();
         movie_sel::start();
         panel::set_enabled(true);

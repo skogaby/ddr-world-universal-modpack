@@ -108,6 +108,12 @@
 //!   `MDX:J:F:M:<ext>` on the wire (`model=`), in `/env/profile/soft_id_code`
 //!   and on the title screen. No config, fail-open to the stock identity.
 //!
+//! - **hud_layout_hooks** — The ONE owner of the gameplay `LayoutActor`
+//!   marker builder + marker setter detours. Builder pre/post and setter-pre
+//!   subscribers (center_arrows_single's lane shift, ddr_selection's legacy
+//!   marker post-pass); `set_marker` writes a key through the setter
+//!   subscribers so every mod's rewrite composes.
+//!
 //! - **bottom_text** — Multi-contributor hide of the bottom-of-screen status
 //!   readouts (centre network-status / CREDIT / COIN line, P1/P2 PASELI
 //!   corners, attract-idle SOFTWARE/SYSTEM/HARDWARE ID lines). One detour on
@@ -131,6 +137,7 @@ pub mod custom_options;
 pub mod custom_options_persistence;
 pub mod foot_panel_swap;
 pub mod game_audio;
+pub mod hud_layout_hooks;
 pub mod ident_override;
 pub mod input_manager;
 pub mod judge_hook;

@@ -196,6 +196,63 @@ pub fn routes_to_screens(mode: MovieMode) -> bool {
     mode == MovieMode::StageScreens
 }
 
+/// Whether the song about to play will have a background movie, as far as
+/// the window entry can tell (before the DancePlaySequence exists).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SongMovie {
+    /// The music DB says the song has a movie, an entered side's VIDEO SIZE
+    /// shows one and no BuildGraph suppressor is set.
+    Plays,
+    /// No movie will be drawn: none authored, every entered side has VIDEO
+    /// SIZE OFF, or the graph is suppressed (song rate, non-native suppress
+    /// mode).
+    None,
+    /// The song could not be determined (course, lookup unavailable, …).
+    Unknown,
+}
+
+/// Which stages a RANDOM stage draw may land on, by whether they have video
+/// screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenFilter {
+    /// Only stages WITH screens (the movie plays on them).
+    WithScreens,
+    /// Only stages WITHOUT screens (screens would stay black).
+    WithoutScreens,
+}
+
+impl ScreenFilter {
+    /// Whether a stage with / without screens passes the filter.
+    pub fn keeps(self, stage_has_screens: bool) -> bool {
+        match self {
+            ScreenFilter::WithScreens => stage_has_screens,
+            ScreenFilter::WithoutScreens => !stage_has_screens,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScreenFilter::WithScreens => "stages with screens only",
+            ScreenFilter::WithoutScreens => "stages without screens only",
+        }
+    }
+}
+
+/// The RANDOM stage pool's screen rule. Under STAGE SCREENS a song whose
+/// movie plays draws only from the screen stages (the movie on the screens
+/// — never demoted to a THUMBNAIL by a screen-less stage); in every other
+/// case — including a song whose movie state cannot be determined — a
+/// screen stage's screens could stay black, so RANDOM draws only from the
+/// stages without screens. (An explicitly chosen BACKGROUND STAGE is never
+/// filtered.) `mode` is the mode the boot can honour (after [`degrade`]).
+pub fn random_pool_filter(mode: MovieMode, song: SongMovie) -> ScreenFilter {
+    if routes_to_screens(mode) && song == SongMovie::Plays {
+        ScreenFilter::WithScreens
+    } else {
+        ScreenFilter::WithoutScreens
+    }
+}
+
 /// Whether a WINDOW mode needs the per-frame live-movie probe (its scene
 /// shape depends on whether the movie is drawn).
 pub fn probes_backdrop(mode: MovieMode) -> bool {
@@ -508,6 +565,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn random_pool_screen_rule() {
+        use MovieMode::*;
+        use ScreenFilter::*;
+        // STAGE SCREENS + a movie: only screen stages (the movie on them).
+        assert_eq!(
+            random_pool_filter(StageScreens, SongMovie::Plays),
+            WithScreens
+        );
+        // STAGE SCREENS + no movie: the screens would be black.
+        assert_eq!(
+            random_pool_filter(StageScreens, SongMovie::None),
+            WithoutScreens
+        );
+        // Undeterminable song: the safe side (screens might stay black).
+        assert_eq!(
+            random_pool_filter(StageScreens, SongMovie::Unknown),
+            WithoutScreens
+        );
+        // Any other mode never feeds the screens.
+        for m in [Off, Thumbnail, Fullscreen, MovieOnly] {
+            for s in [SongMovie::Plays, SongMovie::None, SongMovie::Unknown] {
+                assert_eq!(random_pool_filter(m, s), WithoutScreens, "{m:?} {s:?}");
+            }
+        }
+        assert!(WithScreens.keeps(true) && !WithScreens.keeps(false));
+        assert!(!WithoutScreens.keeps(true) && WithoutScreens.keeps(false));
     }
 
     #[test]

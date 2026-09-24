@@ -301,6 +301,48 @@ pub fn pick_stage<'a>(rng: &mut Rng, cands: &'a [StageCandidate]) -> Option<&'a 
     rows.get(i).copied()
 }
 
+/// The stage rows a RANDOM stage draw picks from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StagePool {
+    /// Every row (the filter keeps every stage).
+    All,
+    /// The rows of the stages the filter keeps; `excluded` distinct stage
+    /// keys were left out.
+    Filtered {
+        rows: Vec<StageCandidate>,
+        excluded: usize,
+    },
+    /// The filter keeps no stage at all: the draw uses every row (a stage
+    /// that does not suit the song beats no stage).
+    NoneLeft,
+}
+
+impl StagePool {
+    /// The rows to draw from.
+    pub fn rows<'a>(&'a self, all: &'a [StageCandidate]) -> &'a [StageCandidate] {
+        match self {
+            StagePool::Filtered { rows, .. } => rows,
+            StagePool::All | StagePool::NoneLeft => all,
+        }
+    }
+}
+
+/// The RANDOM stage pool: the rows whose stage key `keep` accepts (the
+/// caller's screen rule — `movie_mode::random_pool_filter`). Row order is
+/// kept, so a pool that keeps everything draws exactly like [`pick_stage`]
+/// over the whole table under the same seed.
+pub fn random_stage_pool(stages: &[StageCandidate], keep: impl Fn(&str) -> bool) -> StagePool {
+    let rows: Vec<StageCandidate> = stages.iter().filter(|s| keep(&s.key)).cloned().collect();
+    if rows.len() == stages.len() {
+        return StagePool::All;
+    }
+    if rows.is_empty() {
+        return StagePool::NoneLeft;
+    }
+    let excluded = distinct_stage_keys(stages).len() - distinct_stage_keys(&rows).len();
+    StagePool::Filtered { rows, excluded }
+}
+
 /// Dancer candidates: rows with ≥ 5 fields, a parseable sex and scales, and
 /// an existing `pl_<key>.arc`. Unlock ids are ignored (every dancer).
 pub fn dancer_candidates(
@@ -866,6 +908,52 @@ mod tests {
         );
         // a repeated key is NOT twice as likely
         assert!((per_key[0] as f64 - expected).abs() < 0.15 * expected);
+    }
+
+    #[test]
+    fn random_stage_pool_filters_by_screens() {
+        let cands = stage_candidates(&real_map_rows(), |_| true);
+        let screens = |k: &str| k.starts_with("monitor") || k.starts_with("replicant");
+        let total_keys = distinct_stage_keys(&cands).len();
+        let screen_keys = distinct_stage_keys(&cands)
+            .into_iter()
+            .filter(|k| screens(k))
+            .count();
+        assert!(screen_keys > 0, "fixture has screen stages");
+        // Keep everything ⇒ the whole table, drawn exactly like pick_stage.
+        let all = random_stage_pool(&cands, |_| true);
+        assert_eq!(all, StagePool::All);
+        let (mut a, mut b) = (Rng::new(7), Rng::new(7));
+        for _ in 0..200 {
+            assert_eq!(
+                pick_stage(&mut a, all.rows(&cands)),
+                pick_stage(&mut b, &cands)
+            );
+        }
+        // Both directions of the screen rule.
+        for (want_screens, kept_keys) in [(false, total_keys - screen_keys), (true, screen_keys)] {
+            let pool = random_stage_pool(&cands, |k| screens(k) == want_screens);
+            let StagePool::Filtered { rows, excluded } = &pool else {
+                panic!("{want_screens}: {pool:?}");
+            };
+            assert_eq!(*excluded, total_keys - kept_keys);
+            assert_eq!(distinct_stage_keys(rows).len(), kept_keys);
+            assert!(rows.iter().all(|s| screens(&s.key) == want_screens));
+            // Rows keep their table row (the camera-row index).
+            for s in rows {
+                assert!(cands.contains(s));
+            }
+            let mut r = Rng::new(0xBEEF);
+            for _ in 0..2_000 {
+                let key = &pick_stage(&mut r, pool.rows(&cands)).unwrap().key;
+                assert_eq!(screens(key), want_screens);
+            }
+        }
+        // Nothing kept ⇒ fall back to the whole table.
+        let none = random_stage_pool(&cands, |_| false);
+        assert_eq!(none, StagePool::NoneLeft);
+        assert_eq!(none.rows(&cands).len(), cands.len());
+        assert_eq!(random_stage_pool(&[], |_| false), StagePool::All);
     }
 
     #[test]

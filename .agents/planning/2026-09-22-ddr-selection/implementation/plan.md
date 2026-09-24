@@ -16,8 +16,8 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 3: Era sound bank + AFP cue routing (P2a) — cabinet-proven 2026-09-23 (`XAC_full_combo2` routed; World's `se_game_fullcombo` doubling fixed by `sound/code_se.rs`). The in-lane game-over clip (and its `Plate_spin3_st`) never appears on a fail even in stock World — moved to Step 6
 - [x] Step 4: Legacy READY / HERE WE GO + World-intro suppression (P2b) — cabinet-proven 2026-09-23 (run #2). The READY? dwell skip is implemented but OFF until Step 5 (see progress.md)
 - [x] Step 5: Legacy stage panel, cut-in, stage voices (P2c) — cabinet-proven 2026-09-23 (run #2, rev 2: just-in-time hosting at the song-select request, adoption-gated suppressions, old builds hosted); + GLOBAL SETTINGS "Era Cut-In" ON/OFF toggle (maintainer request). Score-set contents and the SD root are follow-ups (see progress.md)
-- [ ] Step 6: Legacy end banners + `_sel` movies (P2d) — implemented 2026-09-24 (uncommitted), awaiting the cabinet test (progress.md). The in-lane game over needs no work (World shows it on EXTRA-stage fails only, A3 never on a normal stage — research `end-banners-sel-movies.md` §3)
-- [ ] Step 7: Legacy element positions, stage frame, danger 3–5, World-only HUD hiding (P3a)
+- [x] Step 6: Legacy end banners + `_sel` movies (P2d) — cabinet-proven 2026-09-24 (runs #1–#3: CLEARED / FAILED on every skin, PRAY FOR ALL on skin 4 only — skin 1's clip has no art, maintainer decision; `_sel` movies incl. the 11 movie-less songs and the stage monitors; the stage-panel `afp_mc_get_param` log spam found in run #1 fixed). The in-lane game over needs no work (World shows it on EXTRA-stage fails only, A3 never on a normal stage — research `end-banners-sel-movies.md` §3)
+- [x] Step 7: Legacy element positions, stage frame, danger 3–5, World-only HUD hiding (P3a)
 - [ ] Step 8: Legacy life gauge (P3b)
 - [ ] Step 9: Legacy combo (P3c)
 - [ ] Step 10: Legacy score + song info (P3d)
@@ -176,6 +176,14 @@ Step 7: Legacy element positions, stage frame, danger 3–5, World-only HUD hidi
 - **Integration.** Center-arrows' lane shift runs after the post-pass.
 - **Demo.** Cabinet: positions per skin match A3 reference captures;
   center-arrows on and off.
+- **As built (2026-09-24).** `research/hud-layout-stage-frame.md` §11. Stage
+  frame = two checked code patches (export LEA + texture prefix) scoped to the
+  `LayoutActor`'s legacy `dance_stage` record instead of detours; BPM / name
+  hidden by parking their markers off screen (no detour); keys whose World
+  art is replaced only in Steps 8–10 (score, difficulty, gauge, combo,
+  song info) stay World's until their packages turn legacy; the song-info
+  card detour stays in center_arrows_single until Step 10; no center-arrows
+  validator exists (regression = cabinet).
 
 Step 8: Legacy life gauge (P3b)
 

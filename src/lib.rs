@@ -378,6 +378,9 @@ fn init() {
     // quick_logout at mod init/enable time (step 7+, always after this).
     // 4h2a. ShutterActor reader / bannerless stage-panel dismiss (quick
     // restart's fast paths, DDR SELECTION's legacy intro). Fail-open.
+    // 4h2b. Gameplay HUD layout builder / marker setter (center-arrows,
+    // DDR SELECTION markers). Resolves only; consumers `acquire()` the detours.
+    let _ = services::hud_layout_hooks::init(&signatures);
     if !services::shutter::init(&signatures) {
         log_warn!("Shutter service unavailable -- quick restart/fail fast paths and the DDR SELECTION intro fall back");
     }

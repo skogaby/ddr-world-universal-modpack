@@ -206,6 +206,18 @@ pub fn decide(base: &str, skin: u8, adapters: AdapterSet) -> Decision {
     Decision::Stock
 }
 
+/// The adapter of the row [`decide`] would pick for `base` / `skin` (any
+/// adapter availability), or `None` when no row covers it.
+pub fn adapter_for(base: &str, skin: u8) -> Option<Adapter> {
+    if skin == 0 || skin > SKIN_MAX {
+        return None;
+    }
+    TABLE
+        .iter()
+        .find(|e| e.base == base && e.skins & (1 << skin) != 0)
+        .map(|e| e.adapter)
+}
+
 /// The package name the helper registers for a legacy decision
 /// (`dance_judge` + 1 → `dance_judge0001`), NUL-terminated for the game.
 pub fn legacy_name(arc_base: &str, skin: u8) -> String {
@@ -399,6 +411,39 @@ mod tests {
             legacy_name("dance_stage_frame", 5),
             "dance_stage_frame0005\0"
         );
+    }
+
+    #[test]
+    fn adapter_for_reports_the_row_adapter() {
+        assert_eq!(adapter_for("dance_danger", 2), Some(Adapter::None));
+        assert_eq!(adapter_for("dance_danger", 3), Some(Adapter::Markers));
+        assert_eq!(adapter_for("dance_stage", 4), Some(Adapter::StageFrame));
+        assert_eq!(adapter_for("dance_common", 2), None);
+        assert_eq!(adapter_for("dance_judge", 0), None);
+    }
+
+    #[test]
+    fn step7_adapters_unlock_stage_frame_and_danger() {
+        let a = AdapterSet::none()
+            .with(Adapter::Markers)
+            .with(Adapter::StageFrame);
+        assert_eq!(
+            decide("dance_stage", 3, a),
+            Decision::Legacy {
+                arc_base: "dance_stage_frame",
+                skin: 3
+            }
+        );
+        assert!(matches!(
+            decide("dance_danger", 5, a),
+            Decision::Legacy { .. }
+        ));
+        assert_eq!(
+            decide("dance_danger", 5, AdapterSet::none()),
+            Decision::Stock
+        );
+        assert_eq!(decide("dance_common", 3, a), Decision::Stock);
+        assert_eq!(decide("dance_gauge", 3, a), Decision::Stock);
     }
 
     #[test]

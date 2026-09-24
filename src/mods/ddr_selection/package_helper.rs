@@ -127,6 +127,11 @@ unsafe extern "C" fn helper_hook(
     let armed = super::armed_skin();
     if armed == 0 || base.is_null() || this.is_null() {
         hook.call(this, side, base, skin, shared);
+        if !base.is_null() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                after_stock(this, base, 0)
+            }));
+        }
         return;
     }
     let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -137,7 +142,53 @@ unsafe extern "C" fn helper_hook(
         // World's own behaviour for this package (skin 0: no suffix, record
         // skin 0, shared packages left to the stage loader).
         hook.call(this, side, base, 0, shared);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            after_stock(this, base, armed)
+        }));
     }
+}
+
+/// A package went through World's own path (`armed` = the armed skin, 0 when
+/// disarmed): World's stage-frame names back for a stock `dance_stage`; on an
+/// armed song, the legacy layout root pushed onto the load list next to
+/// World's `dance_common` (no record — World's builder keeps World's root;
+/// `markers.rs` reads the legacy one after it).
+unsafe fn after_stock(this: *mut u8, base: *const c_char, armed: u8) {
+    let Ok(base_str) = CStr::from_ptr(base).to_str() else {
+        return;
+    };
+    match base_str {
+        "dance_stage" => super::stage_frame::restore(),
+        "dance_common" if armed != 0 && !this.is_null() => {
+            let Some(root) = super::markers::on_common_request(this, armed) else {
+                return;
+            };
+            if push_extra(this, root) {
+                log_info!(
+                    "DDR SELECTION: legacy layout root {} queued on the LayoutActor load list (skin {})",
+                    root,
+                    armed
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Push `name` onto the `LayoutActor` load list without a record (the actor
+/// loads it with its own packages and releases it at finalize).
+unsafe fn push_extra(this: *mut u8, name: &str) -> bool {
+    let Some(c) = CALLEES.get() else {
+        return false;
+    };
+    if !memory::is_readable(this, c.load_list_off + 0x18) {
+        return false;
+    }
+    let mut bytes = name.as_bytes().to_vec();
+    bytes.push(0);
+    let view = string_view(&bytes[..bytes.len() - 1]);
+    (c.push)(this.add(c.load_list_off), &view);
+    true
 }
 
 /// A3's append for one package. `true` = registered (the original must NOT
@@ -164,6 +215,20 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     }
 
     let name = policy::legacy_name(arc_base, skin);
+    // Positions from the legacy layout root (danger 3–5 at `danger_gauge`):
+    // never without the root, or the element lands at (0,0).
+    if policy::adapter_for(base_str, skin) == Some(policy::Adapter::Markers)
+        && !super::markers::root_available(skin)
+    {
+        if LOGGED_MISS.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            log_info!(
+                "DDR SELECTION: no legacy layout root for skin {} -- {} stays stock",
+                skin,
+                base_str
+            );
+        }
+        return false;
+    }
     if (c.probe)(c.bm2d_dir, name.as_ptr() as *const c_char) == 0 {
         if LOGGED_MISS.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
             log_info!(
@@ -173,6 +238,12 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
                 base_str
             );
         }
+        return false;
+    }
+
+    // World's StageFrameActor asks the package for export `dance_stage` —
+    // A3's names must be patched in first, or the package stays stock.
+    if base_str == "dance_stage" && !super::stage_frame::apply(skin) {
         return false;
     }
 

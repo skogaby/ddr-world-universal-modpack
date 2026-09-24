@@ -45,13 +45,15 @@ use super::clock::{Clock, ClockEvent};
 use super::director;
 use super::movie_backdrop;
 use super::movie_camera;
-use super::movie_mode::{self, Backdrop, Capabilities, MovieMode, SceneMask};
+use super::movie_mode::{
+    self, Backdrop, Capabilities, MovieMode, SceneMask, ScreenFilter, SongMovie,
+};
 use super::movie_size;
 use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::screen_route;
 use super::selection::{
-    apply_pin, dancer_candidates, parse_pin, seed_from, stage_candidates, DancerCandidate,
-    PickSource, Pin, Rng, StageCandidate,
+    apply_pin, dancer_candidates, parse_pin, random_stage_pool, seed_from, stage_candidates,
+    DancerCandidate, PickSource, Pin, Rng, StageCandidate, StagePool,
 };
 use super::session::{assemble_pick, make_pick, CameraSet, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
@@ -649,12 +651,29 @@ fn window_entry(scene_id: i32) {
     };
     let seed = seed_now(scene_id, generation);
     let mut rng = Rng::new(seed);
+    // The RANDOM stage pool's screen rule: STAGE SCREENS + a movie that
+    // plays ⇒ only stages with screens (the movie on them, never a
+    // THUMBNAIL); otherwise only stages without screens (they would be
+    // black). Read before the tables lock (it calls the game's music-DB
+    // lookup).
+    let entered = [
+        stage_records::side_entered(0).unwrap_or(false),
+        stage_records::side_entered(1).unwrap_or(false),
+    ];
+    let pool_mode = effective_movie_mode(super::style::movie_mode());
+    let song_movie = super::song_movie::committed_song_movie(entered);
+    let screen_filter = movie_mode::random_pool_filter(pool_mode, song_movie);
     // Part arcs are probed through the same LayeredFS-aware resolver as the
     // candidates (a missing part is silent — A3 behaviour).
     let arc_exists = |arc: &str| arc_set::resolve_path(&format!("data/arc/{arc}")).is_some();
     let pick = {
         let Ok(tables) = TABLES.lock() else { return };
         let Some(t) = tables.as_ref() else { return };
+        let pool = random_stage_pool(&t.stages, |k| {
+            screen_filter.keeps(t.screen_stages.contains(k))
+        });
+        log_random_pool(&pool, screen_filter, pool_mode, song_movie, t.stages.len());
+        let random_stages = pool.rows(&t.stages);
         // 1. Developer pin (developer_mode) wins.
         let pinned = t.pin.as_ref().and_then(|p| {
             let (stage, dancers) = apply_pin(p, &t.stages, &t.dancers, n)?;
@@ -665,7 +684,7 @@ fn window_entry(scene_id: i32) {
             };
             let stage = match stage {
                 Some(s) => s,
-                None => super::selection::pick_stage(&mut rng, &t.stages)?.clone(),
+                None => super::selection::pick_stage(&mut rng, random_stages)?.clone(),
             };
             let dancer_src = if dancers.is_empty() {
                 PickSource::Random
@@ -692,12 +711,12 @@ fn window_entry(scene_id: i32) {
                     );
                 }
                 // 2. The BACKGROUND DANCER / BACKGROUND STAGE rows.
-                match option_pick(&mut rng, t, &sides, &arc_exists) {
+                match option_pick(&mut rng, t, random_stages, &sides, &arc_exists) {
                     Some(p) => p,
                     // 3. Plain random.
                     None => match make_pick(
                         &mut rng,
-                        &t.stages,
+                        random_stages,
                         &t.camera_rows,
                         &t.dancers,
                         n,
@@ -729,15 +748,59 @@ fn window_entry(scene_id: i32) {
     widget_renderer::run_on_render_thread(move || request_load(generation, pick));
 }
 
+/// One INFO per song: which stages a RANDOM stage draw may land on (only
+/// consulted when the stage is not chosen explicitly).
+fn log_random_pool(
+    pool: &StagePool,
+    filter: ScreenFilter,
+    mode: MovieMode,
+    song: SongMovie,
+    rows: usize,
+) {
+    let song = match song {
+        SongMovie::Plays => "movie plays",
+        SongMovie::None => "no movie",
+        SongMovie::Unknown => "movie unknown",
+    };
+    match pool {
+        StagePool::All => log_info!(
+            "BackgroundDancers: random stage pool -- all {} rows ({}; Background Movies {}, {})",
+            rows,
+            filter.label(),
+            mode.key(),
+            song
+        ),
+        StagePool::Filtered { rows: kept, excluded } => log_info!(
+            "BackgroundDancers: random stage pool -- {} of {} rows, {} stage(s) excluded ({}; Background Movies {}, {})",
+            kept.len(),
+            rows,
+            excluded,
+            filter.label(),
+            mode.key(),
+            song
+        ),
+        StagePool::NoneLeft => log_warn!(
+            "BackgroundDancers: random stage pool -- no stage matches ({}); drawing from all {} rows (Background Movies {}, {})",
+            filter.label(),
+            rows,
+            mode.key(),
+            song
+        ),
+    }
+}
+
 /// The option rows' pick (design §4.3 / FR-6): the first entered side's
 /// BACKGROUND STAGE (mirrored in versus, so both sides agree) and each
 /// entered side's BACKGROUND DANCER for that side's dancer index. `None`
 /// when every element is RANDOM (the plain random path then runs). A key the
 /// catalog no longer covers (data drift between the cached value and the
 /// install) ⇒ one WARN naming it, that element falls back to RANDOM.
+/// `random_stages` is the RANDOM stage pool (the screen rule applied); an
+/// explicitly chosen stage is looked up in the whole table.
 fn option_pick(
     rng: &mut Rng,
     t: &Tables,
+    random_stages: &[StageCandidate],
     sides: &[u8],
     arc_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Pick> {
@@ -791,8 +854,15 @@ fn option_pick(
         })
         .collect();
     let refs: Vec<Option<&str>> = dancer_keys.iter().map(Option::as_deref).collect();
+    // resolve_choice draws a RANDOM stage from `stages` and looks a chosen
+    // key up in it: the pool for RANDOM, the whole table for a choice.
+    let stages = if stage_key.is_some() {
+        &t.stages[..]
+    } else {
+        random_stages
+    };
     let (stage, dancers) =
-        super::selection::resolve_choice(rng, &t.stages, &t.dancers, stage_key.as_deref(), &refs)?;
+        super::selection::resolve_choice(rng, stages, &t.dancers, stage_key.as_deref(), &refs)?;
     Some(
         assemble_pick(rng, stage, &t.camera_rows, dancers, false, arc_exists)
             .with_sources(stage_src, dancer_src),

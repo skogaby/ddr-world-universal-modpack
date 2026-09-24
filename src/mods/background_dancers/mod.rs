@@ -65,7 +65,13 @@
 //! movie plays ON the screens: [`screen_route`] rewrites the MovieActor's
 //! layer choice from entry 9 to entry 10 (the OFFSCREEN1 render target the
 //! screens sample) for the song and frames the movie with A3's contain fit;
-//! a stage without screens plays the song as THUMBNAIL.
+//! a stage without screens plays the song as THUMBNAIL. A RANDOM stage
+//! (no BACKGROUND STAGE chosen) follows the song: under STAGE SCREENS a
+//! song whose movie plays draws only from the screen stages, so the movie
+//! is always on screens ([`song_movie`], `movie_mode::random_pool_filter`);
+//! in every other case RANDOM draws only from the stages without screens,
+//! so it never lands on black screens. An explicitly chosen stage is never
+//! filtered.
 //!
 //! ## Player choice (2026-09-21)
 //!
@@ -121,6 +127,7 @@ pub mod schedule;
 pub mod screen_route;
 pub mod selection;
 pub mod session;
+pub mod song_movie;
 pub mod style;
 pub mod tempo;
 pub mod tempo_source;
@@ -182,6 +189,9 @@ impl Mod for BackgroundDancersMod {
         // Optional: Background Movies = STAGE SCREENS (the layer-select
         // byte + the MovieActor fit fields; THUMBNAIL without them).
         let _ = screen_route::init(ctx.signatures);
+        // Optional: the committed song's movie state, for the RANDOM stage
+        // pool's screen rule (Unknown ⇒ stages without screens only).
+        let _ = song_movie::init(ctx.signatures);
         scene3d::is_available()
     }
 

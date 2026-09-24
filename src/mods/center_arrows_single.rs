@@ -6,15 +6,15 @@
 //! (arrow receptors, freeze judge, judge/combo/fast_slow/filter/score_compare)
 //! are repositioned to the screen-center X. `score`/`gauge` are left in place.
 //!
-//! Mechanism (two detours on the gameplay HUD layout builder):
-//!   1. `hud_layout_builder` entry — captures the builder root and computes
-//!      `{single_player, active_side}` from the per-side play-states. The
-//!      direct prologue AOB bakes in per-build stack-frame constants (it misses
-//!      on 20250805 and 20260224), so the entry falls back to a derivation from
-//!      the build-stable `hud_layout_builder_style_cluster` anchor (unique on
-//!      all six inspected builds, entry = match-0x1DC) via a backward scan for
-//!      the frame-size-agnostic prologue head.
-//!   2. `hud_layout_setter` (`set(parent, name, coord)`) — for the active
+//! Mechanism (two subscribers on `services::hud_layout_hooks`, which owns the
+//! gameplay HUD layout builder / setter detours — shared with DDR SELECTION's
+//! legacy marker post-pass, whose `set_marker` writes run this shift too):
+//!   1. builder PRE (`hud_layout_builder_entry`) — captures the builder root
+//!      and computes `{single_player, active_side}` from the per-side
+//!      play-states. (Entry derivation — the prologue AOB, else the
+//!      build-stable style cluster − 0x1DC — lives in
+//!      `SignatureStore::derive_hud_layout`.)
+//!   2. setter PRE (`hud_layout_setter`, `set(parent, name, coord)`) — for the active
 //!      single-player side, rewrites `coord[0]` (X) of the target keys to
 //!      `CENTER_X`. The engine's own renderers read these stored coords and push
 //!      them into the AFP layers, so the rewrite moves the rendered elements
@@ -53,6 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::core::scanner::decode_rip_relative;
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{self, RegisterSpec};
+use crate::services::hud_layout_hooks;
 use crate::{log_info, log_warn};
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -125,25 +126,6 @@ const CARD_BUILDER_PROLOGUE: &[u8] = &[
 /// entry (0x9D on all four builds; generous headroom for code drift).
 const CARD_BUILDER_SCAN_BACK: usize = 0x200;
 
-/// HUD layout builder prologue HEAD, used to derive the builder entry from the
-/// `hud_layout_builder_style_cluster` match when the full `hud_layout_builder`
-/// AOB misses. The full AOB bakes in the stack-frame constants (`LEA RBP,[RAX-
-/// 0x1D8]; SUB RSP,0x2B0; MOV [RBP+0x20],-2`), which drift per build — 20250805
-/// is `-0x1D8/0x2A0/+0x18`, 20260224 `-0x1C8/0x2A0/+0x18` — so only the
-/// frame-size-agnostic head is matched here:
-/// `MOV RAX,RSP; PUSH RBP; PUSH R12; PUSH R13; PUSH R14; PUSH R15; LEA RBP,[RAX+disp32]`.
-/// The `48 8D A8` LEA opcode (RBP ← RAX-relative) is included to reject the
-/// far more common frame-less `MOV RAX,RSP; PUSH...` prologues; its disp32 is
-/// not.
-const HUD_BUILDER_PROLOGUE_HEAD: &[u8] = &[
-    0x48, 0x8B, 0xC4, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8,
-];
-
-/// Style-cluster → builder-entry distance is exactly 0x1DC on all six builds
-/// inspected (20250805/20260224/20260324/20260616/20260721/20260825); allow
-/// generous drift but stay well inside the ~0x1D00-byte function.
-const HUD_BUILDER_SCAN_BACK: usize = 0x400;
-
 /// Lane-relative element keys to recenter (Q1). `score`/`gauge`/`bpm`/`option`
 /// and the lane-name keys are intentionally excluded.
 ///
@@ -196,23 +178,20 @@ static PLAYER_ARRAY: AtomicU64 = AtomicU64::new(0);
 
 static HOOKS_OK: AtomicBool = AtomicBool::new(false);
 
+/// Mod enabled: the shared layout hooks stay installed for the session, the
+/// subscribers below go inert while this is false.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Last logged classification (packed). Sentinel u64::MAX = nothing logged yet,
 /// so the first pass always logs; thereafter only transitions log.
 static DIAG_LAST: AtomicU64 = AtomicU64::new(u64::MAX);
 
-// ── Builder entry detour ────────────────────────────────────────────
+// ── Builder PRE subscriber ──────────────────────────────────────────
 
-/// Gameplay HUD/lane layout builder entry — `void(builder_root /*RCX*/)`.
-/// (Resolved by the `hud_layout_builder` signature.)
-type HudBuilderFn = unsafe extern "C" fn(*mut u8);
-static mut HUD_BUILDER_HOOK: Option<GenericDetour<HudBuilderFn>> = None;
-
-unsafe extern "C" fn hud_builder_hook(builder_root: *mut u8) {
-    let _ = std::panic::catch_unwind(|| {
+/// `hud_layout_hooks` builder PRE subscriber — `(builder_root)`.
+fn on_builder_pre(builder_root: *mut u8) {
+    if ACTIVE.load(Ordering::Acquire) {
         compute_pass_state(builder_root);
-    });
-    if let Some(ref hook) = *std::ptr::addr_of!(HUD_BUILDER_HOOK) {
-        hook.call(builder_root);
     }
 }
 
@@ -290,19 +269,13 @@ fn read_presence() -> (bool, bool) {
     }
 }
 
-// ── Setter detour ───────────────────────────────────────────────────
+// ── Setter PRE subscriber ───────────────────────────────────────────
 
-/// Named-layout setter — `void(parent /*RCX*/, name /*RDX, C-string*/, coord
-/// /*R8, 6xi32*/)`. (Resolved by the `hud_layout_setter` signature.)
-type HudSetterFn = unsafe extern "C" fn(*mut u8, *const i8, *mut i32);
-static mut HUD_SETTER_HOOK: Option<GenericDetour<HudSetterFn>> = None;
-
-unsafe extern "C" fn hud_setter_hook(parent: *mut u8, name: *const i8, coord: *mut i32) {
-    let _ = std::panic::catch_unwind(|| {
+/// `hud_layout_hooks` setter PRE subscriber — `(parent, key, coord)`; runs
+/// before World's setter AND before every DDR SELECTION `set_marker` write.
+fn on_setter_pre(parent: *mut u8, name: &CStr, coord: &mut [i32; 6]) {
+    if ACTIVE.load(Ordering::Acquire) {
         maybe_center(parent, name, coord);
-    });
-    if let Some(ref hook) = *std::ptr::addr_of!(HUD_SETTER_HOOK) {
-        hook.call(parent, name, coord);
     }
 }
 
@@ -310,8 +283,8 @@ unsafe extern "C" fn hud_setter_hook(parent: *mut u8, name: *const i8, coord: *m
 /// the option is on, shift `coord[0]` (X) toward screen center before the
 /// original stores it. P1 (left, side 0) shifts +RIGHT; P2 (right, side 1)
 /// shifts -LEFT — landing either side's elements on the same centered midpoint.
-fn maybe_center(parent: *mut u8, name: *const i8, coord: *mut i32) {
-    if parent.is_null() || name.is_null() || coord.is_null() {
+fn maybe_center(parent: *mut u8, cname: &CStr, coord: &mut [i32; 6]) {
+    if parent.is_null() {
         return;
     }
 
@@ -331,7 +304,6 @@ fn maybe_center(parent: *mut u8, name: *const i8, coord: *mut i32) {
         None
     };
 
-    let cname = unsafe { CStr::from_ptr(name) };
     let name_str = cname.to_str().unwrap_or("<bad>");
 
     // ── Gate ────────────────────────────────────────────────────────
@@ -363,10 +335,7 @@ fn maybe_center(parent: *mut u8, name: *const i8, coord: *mut i32) {
     // lane-relative elements), so a uniform shift preserves their relative
     // alignment and lands the active side on the centered midpoint.
     let delta = if side == 0 { LANE_SHIFT } else { -LANE_SHIFT };
-    unsafe {
-        let x = coord.read_unaligned();
-        coord.write_unaligned(x + delta);
-    }
+    coord[0] += delta;
 }
 
 // ── Song-info card detour (dark card for centered 1P play) ──────────
@@ -441,120 +410,47 @@ fn derive_entry_behind(anchor: *const u8, prologue: &[u8], max_back: usize) -> O
     None
 }
 
-/// Resolve the HUD layout builder entry: prefer the direct prologue AOB, else
-/// derive it from the build-stable lane-name style cluster (exactly one match
-/// required — ambiguity means the anchor drifted, so fail rather than guess).
-fn resolve_hud_builder(ctx: &ModContext) -> Option<*const u8> {
-    if let Some(addr) = ctx.signatures.get_address("hud_layout_builder") {
-        return Some(addr);
-    }
-    let clusters = ctx
-        .signatures
-        .get_all_matches("hud_layout_builder_style_cluster");
-    match clusters.as_slice() {
-        [cluster] => {
-            let entry =
-                derive_entry_behind(*cluster, HUD_BUILDER_PROLOGUE_HEAD, HUD_BUILDER_SCAN_BACK);
-            match entry {
-                Some(e) => log_info!(
-                    "CenterArrowsSingle: hud_layout_builder AOB missed; derived entry @ {:p} from style cluster @ {:p} (delta 0x{:X})",
-                    e,
-                    *cluster,
-                    (*cluster as usize).wrapping_sub(e as usize)
-                ),
-                None => log_warn!(
-                    "CenterArrowsSingle: builder prologue head not found behind style cluster @ {:p}",
-                    *cluster
-                ),
-            }
-            entry
-        }
-        other => {
-            log_warn!(
-                "CenterArrowsSingle: hud_layout_builder AOB missed and style cluster resolved {} matches (want 1)",
-                other.len()
-            );
-            None
-        }
-    }
-}
-
 // ── Hook lifecycle ──────────────────────────────────────────────────
 
-fn install_hooks(
-    builder_addr: *const u8,
-    setter_addr: *const u8,
-    card_builder_addr: Option<*const u8>,
-) -> bool {
-    // Builder entry hook.
-    unsafe {
-        let target: HudBuilderFn = std::mem::transmute(builder_addr);
-        if let Err(e) = crate::core::hooks::install_enabled(
-            std::ptr::addr_of_mut!(HUD_BUILDER_HOOK),
-            target,
-            hud_builder_hook,
-        ) {
-            log_warn!("CenterArrowsSingle: builder hook install failed: {:?}", e);
-            return false;
-        }
+fn install_hooks(card_builder_addr: Option<*const u8>) -> bool {
+    if !hud_layout_hooks::acquire() {
+        log_warn!("CenterArrowsSingle: shared HUD layout hooks unavailable");
+        return false;
     }
-
-    // Setter hook.
-    unsafe {
-        let target: HudSetterFn = std::mem::transmute(setter_addr);
-        if let Err(e) = crate::core::hooks::install_enabled(
-            std::ptr::addr_of_mut!(HUD_SETTER_HOOK),
-            target,
-            hud_setter_hook,
-        ) {
-            log_warn!("CenterArrowsSingle: setter hook install failed: {:?}", e);
-            // Roll back the builder hook so we don't half-install.
-            if let Some(d) = (*std::ptr::addr_of_mut!(HUD_BUILDER_HOOK)).take() {
-                let _ = d.disable();
-            }
-            return false;
-        }
-    }
+    hud_layout_hooks::subscribe_builder_pre(on_builder_pre);
+    hud_layout_hooks::subscribe_setter_pre(on_setter_pre);
 
     // Song-info dark-card hook (best-effort: centering works without it, the
     // card just stays opaque; one WARN at derivation/install failure).
     if let Some(card_addr) = card_builder_addr {
         unsafe {
-            let target: SongInfoBuilderFn = std::mem::transmute(card_addr);
-            match crate::core::hooks::install_enabled(
-                std::ptr::addr_of_mut!(SONG_INFO_HOOK),
-                target,
-                song_info_builder_hook,
-            ) {
-                Ok(()) => log_info!(
-                    "CenterArrowsSingle: song-info dark-card hook installed @ {:p}",
-                    card_addr
-                ),
-                Err(e) => log_warn!(
-                    "CenterArrowsSingle: song-info card hook install failed ({:?}) — card stays opaque",
-                    e
-                ),
+            if (*std::ptr::addr_of!(SONG_INFO_HOOK)).is_none() {
+                let target: SongInfoBuilderFn = std::mem::transmute(card_addr);
+                match crate::core::hooks::install_enabled(
+                    std::ptr::addr_of_mut!(SONG_INFO_HOOK),
+                    target,
+                    song_info_builder_hook,
+                ) {
+                    Ok(()) => log_info!(
+                        "CenterArrowsSingle: song-info dark-card hook installed @ {:p}",
+                        card_addr
+                    ),
+                    Err(e) => log_warn!(
+                        "CenterArrowsSingle: song-info card hook install failed ({:?}) — card stays opaque",
+                        e
+                    ),
+                }
             }
         }
     }
 
-    log_info!(
-        "CenterArrowsSingle: hooks installed (builder @ {:p}, setter @ {:p})",
-        builder_addr,
-        setter_addr
-    );
+    log_info!("CenterArrowsSingle: layout subscribers registered (shared HUD layout hooks)");
     true
 }
 
 fn remove_hooks() {
     unsafe {
         if let Some(d) = (*std::ptr::addr_of_mut!(SONG_INFO_HOOK)).take() {
-            let _ = d.disable();
-        }
-        if let Some(d) = (*std::ptr::addr_of_mut!(HUD_SETTER_HOOK)).take() {
-            let _ = d.disable();
-        }
-        if let Some(d) = (*std::ptr::addr_of_mut!(HUD_BUILDER_HOOK)).take() {
             let _ = d.disable();
         }
     }
@@ -570,8 +466,6 @@ fn on_change(side: u8, value: i32) {
 }
 
 pub struct CenterArrowsSingleMod {
-    builder_addr: Option<*const u8>,
-    setter_addr: Option<*const u8>,
     /// Song-info card builder entry (derived from `song_info_card_style`);
     /// None = dark-card feature unavailable (centering still works).
     card_builder_addr: Option<*const u8>,
@@ -582,8 +476,6 @@ unsafe impl Send for CenterArrowsSingleMod {}
 impl CenterArrowsSingleMod {
     pub fn new() -> Self {
         Self {
-            builder_addr: None,
-            setter_addr: None,
             card_builder_addr: None,
         }
     }
@@ -610,9 +502,6 @@ impl Mod for CenterArrowsSingleMod {
     }
 
     fn init(&mut self, ctx: &ModContext) -> bool {
-        self.builder_addr = resolve_hud_builder(ctx);
-        self.setter_addr = ctx.signatures.get_address("hud_layout_setter");
-
         // Song-info dark-card derivation (best-effort). Require exactly one
         // cluster match (the pattern is unique on all four supported builds;
         // multiple matches would mean the anchor drifted — fail the feature,
@@ -664,12 +553,8 @@ impl Mod for CenterArrowsSingleMod {
             log_warn!("CenterArrowsSingle: player_array_anchor unresolved — detection unavailable");
         }
 
-        if self.builder_addr.is_none() || self.setter_addr.is_none() {
-            log_warn!(
-                "CenterArrowsSingle: layout signatures unresolved (builder={}, setter={}) — mod will be inert",
-                self.builder_addr.is_some(),
-                self.setter_addr.is_some()
-            );
+        if !hud_layout_hooks::is_available() {
+            log_warn!("CenterArrowsSingle: layout builder / setter unresolved — mod will be inert");
         }
         true
     }
@@ -678,11 +563,9 @@ impl Mod for CenterArrowsSingleMod {
         // Detection requires the player array; without it the mod can't tell
         // single- from two-player, so don't install/offer it (no inert row).
         let detection_ok = PLAYER_ARRAY.load(Ordering::Acquire) != 0;
-        let ok = match (self.builder_addr, self.setter_addr, detection_ok) {
-            (Some(b), Some(s), true) => install_hooks(b, s, self.card_builder_addr),
-            _ => false,
-        };
+        let ok = detection_ok && install_hooks(self.card_builder_addr);
         HOOKS_OK.store(ok, Ordering::Release);
+        ACTIVE.store(ok, Ordering::Release);
 
         if !ok {
             // No inert option row (Q6/UX): if hooks/detection aren't in, don't register.
@@ -714,6 +597,9 @@ impl Mod for CenterArrowsSingleMod {
     }
 
     fn disable(&mut self) {
+        // The shared layout detours stay installed (hud_layout_hooks);
+        // our subscribers go inert.
+        ACTIVE.store(false, Ordering::Release);
         remove_hooks();
         HOOKS_OK.store(false, Ordering::Release);
         DIAG_LAST.store(u64::MAX, Ordering::Release);
