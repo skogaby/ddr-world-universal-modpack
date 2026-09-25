@@ -70,7 +70,7 @@ const fn k(key: &'static str, map: Map, source: Source, gate: Gate) -> KeySpec {
 
 /// Every key the post-pass may overwrite, in World's builder order (the
 /// lane groups are read in this order after their lane load). World-only
-/// keys (`dance_matching`, `bpm`, `name`, `option`, `option_icon`) are absent: they stay World's (`bpm` / `name` are
+/// keys (`dance_matching`, `bpm`, `name`, `option_icon`) are absent: they stay World's (`bpm` / `name` are
 /// hidden instead — [`HIDDEN_KEYS`]).
 pub const KEYS: &[KeySpec] = &[
     k(
@@ -114,6 +114,14 @@ pub const KEYS: &[KeySpec] = &[
         Map::Side,
         Source::Root("{n}p_gameover_usr"),
         Gate::Package("dance_game_over"),
+    ),
+    // A3's option-icon row (World's `option` key; World's own icons read
+    // `option_icon`, which stays World's).
+    k(
+        "option",
+        Map::Side,
+        Source::Root("option_icon_{n}p{r}_usr"),
+        Gate::Package("dance_option"),
     ),
     k(
         "fullcombo",
@@ -181,7 +189,7 @@ pub const HIDDEN_COORD: [i32; 6] = [-4096, -4096, 0, 0, 0x3F80_0000, 0x3F80_0000
 /// World keys the post-pass must never write from a legacy root (the design's
 /// World-only set; the DPS `movie_*_usr` placements are read from World's
 /// loader-owned root directly, not through the maps).
-pub const WORLD_ONLY_KEYS: &[&str] = &["dance_matching", "bpm", "name", "option", "option_icon"];
+pub const WORLD_ONLY_KEYS: &[&str] = &["dance_matching", "bpm", "name", "option_icon"];
 
 /// The legacy layout root for a skin (A3 had no `dance_common0001`: skin 1
 /// used A3's own `dance_common0000_v2`, which World ships and which World's

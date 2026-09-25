@@ -61,6 +61,9 @@ pub enum Adapter {
     /// A3's skins 3–5 song-info panel (`dance_song_info0000_v2` + the A3
     /// SongInfoChild text layout).
     SongInfoPanel = 8,
+    /// A3's option-icon sprites (`dance_option_icon0000_v0` on World's
+    /// OptionIconActor).
+    OptionIcons = 9,
 }
 
 /// Which adapters resolved on this boot. `Adapter::None` is always present.
@@ -110,6 +113,8 @@ const ALL: u8 = skins(&[1, 2, 3, 4, 5]);
 pub const A3_SONG_INFO_PANEL: &str = "dance_song_info0000_v2";
 /// A3's pacemaker (skin 0 — the only one A3 had), used on every skin.
 pub const A3_PACEMAKER: &str = "dance_score_compare0000_v0";
+/// A3's option-icon textures (skin 0 — the only set A3 had), skins 2–5.
+pub const A3_OPTION_ICONS: &str = "dance_option_icon0000_v0";
 
 /// The full policy (every phase). A base may appear in several rows with
 /// disjoint skin sets (danger: skins 1–2 need nothing, 3–5 need markers).
@@ -218,6 +223,17 @@ pub const TABLE: &[Entry] = &[
         adapter: Adapter::None,
         fixed_arc: Some(A3_PACEMAKER),
     },
+    // The in-gameplay option icons: A3's texture-only `dance_option_icon`
+    // package (skin 0 only — A3's probe fell back to it on every skin) drawn
+    // as sprites by the re-hosted A3 icon row. Skin 1 has no icons (World's
+    // own gate, as in A3).
+    Entry {
+        base: "dance_option",
+        arc_base: "dance_option_icon",
+        skins: skins(&[2, 3, 4, 5]),
+        adapter: Adapter::OptionIcons,
+        fixed_arc: Some(A3_OPTION_ICONS),
+    },
     Entry {
         base: "dance_message",
         arc_base: "dance_message",
@@ -228,7 +244,7 @@ pub const TABLE: &[Entry] = &[
     // dance_common (the layout root) is deliberately absent: World's layout
     // builder needs World's root markers; the legacy positions are applied by
     // a post-pass that reads the legacy root itself. dance_effect / bpm /
-    // filter / cover / option have no legacy variants.
+    // filter / cover have no legacy variants.
 ];
 
 /// What the per-package helper does with one request.
@@ -305,6 +321,7 @@ pub fn package_index(base: &str) -> Option<u32> {
         "dance_song_info",
         "dance_message",
         "dance_score_compare",
+        "dance_option",
     ];
     BASES.iter().position(|b| *b == base).map(|i| i as u32)
 }
@@ -324,6 +341,7 @@ mod tests {
             Adapter::StageFrame,
             Adapter::SongInfo,
             Adapter::SongInfoPanel,
+            Adapter::OptionIcons,
             Adapter::ReadyGo,
         ]
         .iter()
@@ -463,6 +481,27 @@ mod tests {
     }
 
     #[test]
+    fn option_icons_are_a3s_texture_set_on_skins_2_to_5() {
+        let all = every_adapter();
+        assert_eq!(decide("dance_option", 1, all), Decision::Stock);
+        for skin in 2..=5 {
+            assert_eq!(
+                decide("dance_option", skin, all),
+                Decision::Legacy {
+                    arc_base: "dance_option_icon",
+                    skin,
+                    fixed_arc: Some("dance_option_icon0000_v0"),
+                }
+            );
+        }
+        assert_eq!(
+            decide("dance_option", 3, AdapterSet::none()),
+            Decision::Stock
+        );
+        assert_eq!(adapter_for("dance_option", 4), Some(Adapter::OptionIcons));
+    }
+
+    #[test]
     fn layout_root_is_never_swapped() {
         for skin in 0..=SKIN_MAX {
             assert_eq!(
@@ -509,8 +548,12 @@ mod tests {
         let fixed: Vec<&str> = TABLE.iter().filter_map(|e| e.fixed_arc).collect();
         assert_eq!(
             fixed,
-            ["dance_song_info0000_v2", "dance_score_compare0000_v0"],
-            "only A3's own song-info panel and pacemaker name a fixed arc"
+            [
+                "dance_song_info0000_v2",
+                "dance_score_compare0000_v0",
+                "dance_option_icon0000_v0"
+            ],
+            "only A3's own song-info panel, pacemaker and option icons name a fixed arc"
         );
     }
 

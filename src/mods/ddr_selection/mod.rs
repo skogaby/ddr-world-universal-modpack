@@ -40,7 +40,8 @@
 //! `services::combo_hooks`); Step 10: score / difficulty ([`score`]) and
 //! skin 2's song-info band and skins 3–5's A3 panel ([`song_info`]); Step 11:
 //! A3's announcer and crowd ([`sound::call_voice`] over
-//! `services::call_voice_hooks`).
+//! `services::call_voice_hooks`); A3's in-gameplay option icons
+//! ([`option_icons`]).
 //!
 //! Fail-open: every derivation is all-or-nothing and listed in
 //! `required_signatures`; a disarmed or stock package runs World's code.
@@ -56,6 +57,8 @@ pub mod intro_logic;
 pub mod marker_keys;
 mod markers;
 mod movie_sel;
+mod option_icons;
+mod option_icons_logic;
 mod options;
 mod package_helper;
 mod panel;
@@ -193,6 +196,10 @@ fn adapters() -> AdapterSet {
     }
     if song_info::panel_capable() && markers::capable() {
         set = set.with(policy::Adapter::SongInfoPanel);
+    }
+    // The icon row sits at A3's `option` marker, written by the post-pass.
+    if option_icons::capable() && markers::capable() {
+        set = set.with(policy::Adapter::OptionIcons);
     }
     set
 }
@@ -488,6 +495,7 @@ fn disarm(reason: &str) {
     stage_frame::restore();
     gauge::restore();
     song_info::restore();
+    option_icons::release_all("disarm");
     markers::reset();
     // Restore World's code sounds (no-op when nothing was silenced).
     sound::code_se::sync();
@@ -513,6 +521,7 @@ fn on_scene_change(prev: i32, next: i32) {
     // Legacy intro clips go first: leaving GAMEPLAY must destroy them while
     // the owning LayoutActor still lives.
     intro::on_scene_change(next);
+    option_icons::on_scene_change(next);
     // Register the era bank as soon as it is built — before the first legacy
     // clip can play (the song-select → stage shutter already fires sounds).
     sound::bank::try_register();
@@ -632,6 +641,7 @@ impl Mod for DdrSelectionMod {
         combo::init(ctx.signatures);
         score::init(ctx.signatures);
         song_info::init(ctx.signatures);
+        option_icons::init(ctx.signatures);
         panel::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
@@ -677,6 +687,7 @@ impl Mod for DdrSelectionMod {
         gauge::start();
         combo::start();
         score::start();
+        option_icons::start();
         panel::start();
         movie_sel::start();
         panel::set_enabled(true);

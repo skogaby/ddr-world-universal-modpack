@@ -220,6 +220,56 @@ pub struct DdrSelGaugeSites {
     pub clip_set_scale_vslot: usize,
 }
 
+/// ddr_selection's A3 option icons (`derive_ddr_sel_option_icons`): World's
+/// `sequence::dance::OptionIconActor`, World's `ddr::player::Option` field
+/// offsets (each verified by its `MOV EAX,[RCX+off]; RET` getter stub) and
+/// the game's `BM2D::CSprite` pool (RE:
+/// `.agents/planning/2026-09-22-ddr-selection/research/option-icons.md`).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelOptionIconSites {
+    /// `onInitialize` (slot 4) / `onUpdate` (slot 6).
+    pub init: *const u8,
+    pub update: *const u8,
+    /// The actor's side holder (`**(actor + holder_off)` = side).
+    pub holder_off: usize,
+    /// `record* (holder, const char* base)` / `marker* (holder, const char* key)`.
+    pub record_fn: *const u8,
+    pub marker_fn: *const u8,
+    /// `Option* resolver(table[side], 0)` and the table.
+    pub option_resolver: *const u8,
+    pub option_table: *const u8,
+    /// RTTI `ddr::player::Option` vtable.
+    pub option_vtable: *const u8,
+    pub fields: OptionFieldOffsets,
+    /// RTTI `BM2D::CSprite` vtable, the pool (`count` × `stride`) and
+    /// `void CSprite::Create(CSprite*, const char* texture, int priority)`.
+    pub sprite_vtable: *const u8,
+    pub sprite_pool: *const u8,
+    pub sprite_count: usize,
+    pub sprite_stride: usize,
+    pub sprite_create: *const u8,
+}
+
+/// World `ddr::player::Option` field offsets (bytes).
+#[derive(Clone, Copy, Debug)]
+pub struct OptionFieldOffsets {
+    pub speed_type: usize,
+    pub hispeed: usize,
+    pub speed_derived: usize,
+    pub gauge: usize,
+    pub scroll: usize,
+    pub visibility: usize,
+    pub lane_cover: usize,
+    pub stepzone: usize,
+    pub boost: usize,
+    pub turn: usize,
+    pub color: usize,
+    pub cut: usize,
+    pub freeze: usize,
+    pub jump: usize,
+    pub flare: usize,
+}
+
 /// World's `sequence::dance::CallVoiceActor` — the in-game announcer
 /// (`derive_call_voice`, from the RTTI vtable). The actor keeps A3's field
 /// layout on every build (checked by the derivation, see there).
@@ -3356,6 +3406,7 @@ impl SignatureStore {
         // Consumes score_actor_vtable (find_gauge_vtables, above).
         self.derive_ddr_sel_score();
         self.derive_ddr_sel_song_info();
+        self.derive_ddr_sel_option_icons();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -6964,6 +7015,315 @@ impl SignatureStore {
             life_clip_off: self.published_value("ddr_sel_life_gauge_clip_off")?,
             clip_root_mc_off: self.published_value("ddr_sel_clip_root_mc_off")?,
             clip_set_scale_vslot: self.published_value("ddr_sel_clip_set_scale_vslot")?,
+        })
+    }
+
+    /// ddr_selection's A3 option icons (optional, all-or-nothing, never
+    /// required; consumer `ddr_selection::option_icons`):
+    ///
+    /// * RTTI `OptionIconActor@dance` → init (slot 4), update (slot 6); in the
+    ///   init `LEA RDX,["dance_option"]; MOV RCX,[RCX+holder]; CALL record`,
+    ///   `MOVSXD RCX,[RAX]; LEA RAX,[table]; (XOR EDX,EDX;) MOV RCX,[RAX+RCX*8];
+    ///   CALL resolver` (old builds pass one argument) and the CALL after
+    ///   `LEA RDX,["option_icon"]` (the marker getter);
+    /// * RTTI `Option@player@ddr`: each field getter slot must be the 4-byte
+    ///   stub `8B 41 off C3` (speed type 0x208, hispeed 0x220, gauge 0x230,
+    ///   scroll 0x238, visibility 0x250, lane cover 0x268, step zone 0x280,
+    ///   boost 0x2A8, turn 0x2B0, colour 0x2B8, cut 0x2C8, freeze 0x2D0, jump
+    ///   0x2D8, flare level 0x310); the derived real-speed multiplier = the
+    ///   other `MOV EAX,[RBX+off]` in the effective-speed getter (0x218, which
+    ///   first calls vt+0x208);
+    /// * RTTI `CSprite@BM2D` + the SpriteLayer's pool create: `LEA RAX,[pool];
+    ///   MOV RBX,RSI; XOR R8D,R8D; MOV RDX,R12; IMUL RBX,RBX,stride; ADD
+    ///   RBX,RAX; MOV RCX,RBX; CALL create` (unique on all five builds) with
+    ///   `CMP EBX,count` in the free-slot loop before it; create must call
+    ///   vt+0xE0 (SetPriority).
+    fn derive_ddr_sel_option_icons(&mut self) {
+        const TAG: &str = "ddr_sel_option_icons";
+        let Some(vt) = self.find_vtable_by_rtti(".?AVOptionIconActor@dance@sequence@@", TAG) else {
+            return;
+        };
+        let Some(opt_vt) = self.find_vtable_by_rtti(".?AVOption@player@ddr@@", TAG) else {
+            return;
+        };
+        let Some(spr_vt) = self.find_vtable_by_rtti(".?AVCSprite@BM2D@@", TAG) else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let in_mod = |p: *const u8, n: usize| (p as usize).wrapping_sub(base) + n <= size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            in_mod(p, want.len() + 1)
+                && unsafe {
+                    std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0
+                }
+        };
+        unsafe {
+            let init = *(vt as *const *const u8).add(4);
+            let update = *(vt as *const *const u8).add(6);
+            if !in_mod(init, 0x200) || !in_mod(update, 0x40) {
+                log_warn!("  [-] {} -- actor functions outside the module", TAG);
+                return;
+            }
+            let body = std::slice::from_raw_parts(init, 0x200);
+            // record lookup
+            let rec = (0..0x200 - 16).find(|&o| {
+                body[o] == 0x48
+                    && body[o + 1] == 0x8D
+                    && body[o + 2] == 0x15
+                    && body[o + 7] == 0x48
+                    && body[o + 8] == 0x8B
+                    && body[o + 9] == 0x49
+                    && body[o + 11] == 0xE8
+                    && cstr_is(decode_rip_relative(init.add(o + 3)), b"dance_option")
+            });
+            let Some(rec) = rec else {
+                log_warn!("  [-] {} -- dance_option record lookup", TAG);
+                return;
+            };
+            let holder_off = body[rec + 10] as usize;
+            let record_fn = decode_call_rel32(init.add(rec + 11));
+            // option resolver
+            let mut resolver = None;
+            for o in rec..0x200 - 20 {
+                if body[o..o + 6] != [0x48, 0x63, 0x08, 0x48, 0x8D, 0x05] {
+                    continue;
+                }
+                let tail = if body[o + 10..o + 12] == [0x33, 0xD2] {
+                    o + 12
+                } else {
+                    o + 10
+                };
+                if body[tail..tail + 5] == [0x48, 0x8B, 0x0C, 0xC8, 0xE8] {
+                    resolver = Some((
+                        decode_rip_relative(init.add(o + 6)),
+                        decode_call_rel32(init.add(tail + 4)),
+                    ));
+                }
+                break;
+            }
+            let Some((option_table, option_resolver)) = resolver else {
+                log_warn!("  [-] {} -- option resolver call", TAG);
+                return;
+            };
+            // marker getter: the CALL after LEA RDX,["option_icon"] (the
+            // whole init; the create block sits between).
+            let whole = std::slice::from_raw_parts(init, 0x400.min(size - (init as usize - base)));
+            let mut marker_fn = None;
+            for o in 0..whole.len() - 7 {
+                if whole[o] == 0x48
+                    && whole[o + 1] == 0x8D
+                    && whole[o + 2] == 0x15
+                    && cstr_is(decode_rip_relative(init.add(o + 3)), b"option_icon")
+                {
+                    marker_fn = (o + 7..(o + 0x14).min(whole.len() - 5))
+                        .find(|&q| whole[q] == 0xE8)
+                        .map(|q| decode_call_rel32(init.add(q)));
+                    break;
+                }
+            }
+            let Some(marker_fn) = marker_fn else {
+                log_warn!("  [-] {} -- option_icon marker getter", TAG);
+                return;
+            };
+            if !in_mod(record_fn, 0x10)
+                || !in_mod(marker_fn, 0x10)
+                || !in_mod(option_resolver, 0x10)
+                || !in_mod(option_table, 16)
+            {
+                log_warn!("  [-] {} -- callees outside the module", TAG);
+                return;
+            }
+            // Option getters.
+            let stub = |slot: usize| -> Option<usize> {
+                let f = *(opt_vt as *const *const u8).add(slot / 8);
+                if !in_mod(f, 4) {
+                    return None;
+                }
+                let b = std::slice::from_raw_parts(f, 4);
+                (b[0] == 0x8B && b[1] == 0x41 && b[3] == 0xC3).then_some(b[2] as usize)
+            };
+            let wanted: [(usize, usize, &str); 14] = [
+                (0x208, 0x08, "speed type"),
+                (0x220, 0x0C, "hispeed"),
+                (0x230, 0x18, "gauge"),
+                (0x238, 0x1C, "scroll"),
+                (0x250, 0x28, "visibility"),
+                (0x268, 0x34, "lane cover"),
+                (0x280, 0x40, "step zone"),
+                (0x2A8, 0x54, "boost"),
+                (0x2B0, 0x58, "turn"),
+                (0x2B8, 0x5C, "colour"),
+                (0x2C8, 0x64, "cut"),
+                (0x2D0, 0x68, "freeze"),
+                (0x2D8, 0x6C, "jump"),
+                (0x310, 0x7C, "flare level"),
+            ];
+            let mut offs = [0usize; 14];
+            for (i, (slot, want, what)) in wanted.iter().enumerate() {
+                match stub(*slot) {
+                    Some(o) if o == *want => offs[i] = o,
+                    other => {
+                        log_warn!(
+                            "  [-] {} -- Option getter +0x{:X} ({}) is {:?} (want +0x{:X})",
+                            TAG,
+                            slot,
+                            what,
+                            other,
+                            want
+                        );
+                        return;
+                    }
+                }
+            }
+            let eff = *(opt_vt as *const *const u8).add(0x218 / 8);
+            if !in_mod(eff, 0x40) {
+                log_warn!("  [-] {} -- effective-speed getter outside the module", TAG);
+                return;
+            }
+            let eb = std::slice::from_raw_parts(eff, 0x40);
+            if !eb.windows(6).any(|w| w == [0xFF, 0x90, 0x08, 0x02, 0, 0]) {
+                log_warn!("  [-] {} -- effective-speed getter shape", TAG);
+                return;
+            }
+            let loads: Vec<usize> = (0..0x3D)
+                .filter(|&o| eb[o] == 0x8B && eb[o + 1] >> 6 == 1 && eb[o + 1] & 7 != 4)
+                .map(|o| eb[o + 2] as usize)
+                .collect();
+            let derived: Vec<usize> = loads.iter().copied().filter(|&o| o != 0x0C).collect();
+            let [speed_derived] = derived.as_slice() else {
+                log_warn!("  [-] {} -- derived-speed load {:?}", TAG, loads);
+                return;
+            };
+            if !loads.contains(&0x0C) || *speed_derived != 0x10 {
+                log_warn!("  [-] {} -- effective-speed loads {:?}", TAG, loads);
+                return;
+            }
+            // Sprite pool.
+            let hits = scan_pattern_all(
+                self.base,
+                self.size,
+                "48 8D 05 ?? ?? ?? ?? 48 8B DE 45 33 C0 49 8B D4 48 69 DB ?? ?? ?? ?? 48 03 D8 48 8B CB E8",
+            );
+            let [hit] = hits.as_slice() else {
+                log_warn!(
+                    "  [-] {} -- {} sprite-pool create sites (want 1)",
+                    TAG,
+                    hits.len()
+                );
+                return;
+            };
+            let m = hit.address as *const u8;
+            let pool = decode_rip_relative(m.add(3));
+            let stride = (m.add(19) as *const u32).read_unaligned() as usize;
+            let create = decode_call_rel32(m.add(29));
+            let before = std::slice::from_raw_parts(m.sub(0x40), 0x40);
+            let count = (0..0x3A)
+                .find(|&o| before[o] == 0x81 && before[o + 1] == 0xFB)
+                .map(|o| {
+                    u32::from_le_bytes([before[o + 2], before[o + 3], before[o + 4], before[o + 5]])
+                        as usize
+                });
+            let Some(count) = count.filter(|c| (1..=0x10000).contains(c)) else {
+                log_warn!("  [-] {} -- sprite pool count", TAG);
+                return;
+            };
+            if stride < 0x100
+                || stride > 0x1000
+                || !in_mod(pool, count * stride)
+                || !in_mod(create, 0x80)
+            {
+                log_warn!("  [-] {} -- sprite pool / create outside the module", TAG);
+                return;
+            }
+            let cb = std::slice::from_raw_parts(create, 0x80);
+            let prio = cb.windows(6).any(|w| {
+                w[0] == 0xFF && (0x90..=0x97).contains(&w[1]) && w[2..6] == [0xE0, 0, 0, 0]
+            }) || cb.windows(7).any(|w| {
+                w[0] == 0x41
+                    && w[1] == 0xFF
+                    && (0x90..=0x97).contains(&w[2])
+                    && w[3..7] == [0xE0, 0, 0, 0]
+            });
+            if !prio {
+                log_warn!("  [-] {} -- CSprite::Create shape", TAG);
+                return;
+            }
+            for (n, p) in [
+                ("ddr_sel_option_icon_init", init),
+                ("ddr_sel_option_icon_update", update),
+                ("ddr_sel_option_icon_record_fn", record_fn),
+                ("ddr_sel_option_icon_marker_fn", marker_fn),
+                ("ddr_sel_option_resolver", option_resolver),
+                ("ddr_sel_option_table", option_table),
+                ("ddr_sel_option_vtable", opt_vt),
+                ("ddr_sel_sprite_vtable", spr_vt),
+                ("ddr_sel_sprite_pool", pool),
+                ("ddr_sel_sprite_create", create),
+            ] {
+                self.resolved.insert(n.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", n, p as usize - base);
+            }
+            self.publish_value("ddr_sel_option_icon_holder_off", holder_off);
+            self.publish_value("ddr_sel_sprite_count", count);
+            self.publish_value("ddr_sel_sprite_stride", stride);
+            let names = [
+                "speed_type",
+                "hispeed",
+                "gauge",
+                "scroll",
+                "visibility",
+                "lane_cover",
+                "stepzone",
+                "boost",
+                "turn",
+                "color",
+                "cut",
+                "freeze",
+                "jump",
+                "flare",
+            ];
+            for (n, o) in names.iter().zip(offs.iter()) {
+                self.publish_value(&format!("ddr_sel_option_{}_off", n), *o);
+            }
+            self.publish_value("ddr_sel_option_speed_derived_off", *speed_derived);
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_option_icons`] produced, or `None`.
+    pub fn ddr_sel_option_icon_sites(&self) -> Option<DdrSelOptionIconSites> {
+        let f = |n: &str| self.published_value(&format!("ddr_sel_option_{}_off", n));
+        Some(DdrSelOptionIconSites {
+            init: self.get_address("ddr_sel_option_icon_init")?,
+            update: self.get_address("ddr_sel_option_icon_update")?,
+            holder_off: self.published_value("ddr_sel_option_icon_holder_off")?,
+            record_fn: self.get_address("ddr_sel_option_icon_record_fn")?,
+            marker_fn: self.get_address("ddr_sel_option_icon_marker_fn")?,
+            option_resolver: self.get_address("ddr_sel_option_resolver")?,
+            option_table: self.get_address("ddr_sel_option_table")?,
+            option_vtable: self.get_address("ddr_sel_option_vtable")?,
+            fields: OptionFieldOffsets {
+                speed_type: f("speed_type")?,
+                hispeed: f("hispeed")?,
+                speed_derived: self.published_value("ddr_sel_option_speed_derived_off")?,
+                gauge: f("gauge")?,
+                scroll: f("scroll")?,
+                visibility: f("visibility")?,
+                lane_cover: f("lane_cover")?,
+                stepzone: f("stepzone")?,
+                boost: f("boost")?,
+                turn: f("turn")?,
+                color: f("color")?,
+                cut: f("cut")?,
+                freeze: f("freeze")?,
+                jump: f("jump")?,
+                flare: f("flare")?,
+            },
+            sprite_vtable: self.get_address("ddr_sel_sprite_vtable")?,
+            sprite_pool: self.get_address("ddr_sel_sprite_pool")?,
+            sprite_count: self.published_value("ddr_sel_sprite_count")?,
+            sprite_stride: self.published_value("ddr_sel_sprite_stride")?,
+            sprite_create: self.get_address("ddr_sel_sprite_create")?,
         })
     }
 

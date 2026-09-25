@@ -21,7 +21,8 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 8: Legacy life gauge (P3b)
 - [x] Step 9: Legacy combo (P3c) — cabinet-proven 2026-09-24
 - [x] Step 10: Legacy score + song info (P3d) — cabinet-proven 2026-09-25 (score / difficulty, skin-2 band, skins 3–5 A3 `dance_song_info0000_v2` panel; EX mode untested)
-- [ ] Step 11: A3 announcer and crowd rules (P4) — built 2026-09-25, awaiting the cabinet test
+- [x] Step 11: A3 announcer and crowd rules (P4) — cabinet-proven 2026-09-25
+- [x] Extra (maintainer request 2026-09-25): A3 in-gameplay option icons — cabinet-proven 2026-09-25 (`research/option-icons.md`)
 - [ ] Step 12: 1st-5th option forcing (P5)
 - [ ] Step 13: S-Marvelous legacy art (P6)
 - [ ] Step 14: Release integration

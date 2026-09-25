@@ -1,9 +1,9 @@
 # DDR SELECTION — progress
 
 Updated: 2026-09-25
-Status: Step 11 of 14 — A3 announcer / crowd BUILT, awaiting the cabinet test. Steps 9–10 + AUTO stage-panel fix + A3 pacemaker cabinet-proven 2026-09-25 (all uncommitted)
-NEXT ACTION: maintainer cabinet test "Cabinet test — Step 11 (A3 announcer and crowd)" below. On a pass: tick Step 11 in `implementation/plan.md`, then Step 12 (1st-5th option forcing, design §4.8) — RE first.
-Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/announcer-crowd.md` for Step 11, `research/legacy-score.md` for Step 10, `research/legacy-combo.md` for Step 9, `research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
+Status: Step 11 of 14 — COMPLETE; A3 option icons (maintainer request) cabinet-proven 2026-09-25 incl. in-song speed changes. Next: Step 12 (all uncommitted)
+NEXT ACTION: Step 12 (1st-5th option forcing, design §4.8, `research/sounds-options-folder.md` §B) — RE first (re-verify the Option field offsets / enums against the published `ddr_sel_option_*_off` derivations), write findings, implement, gate, stop for the cabinet test.
+Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/option-icons.md` for the option icons, `research/announcer-crowd.md` for Step 11, `research/legacy-score.md` for Step 10, `research/legacy-combo.md` for Step 9, `research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
 
 ## Done
 
@@ -12,7 +12,15 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## In flight
 
-- Step 11 (2026-09-25, built, NOT yet cabinet-tested) — A3's announcer and crowd on World's CallVoiceActor, per `research/announcer-crowd.md` (§5 = as built):
+- A3 option icons (2026-09-25, cabinet-proven incl. the in-song speed fix; maintainer request — the last A3 graphic not covered) per `research/option-icons.md` (§4 = as built):
+  - RE: A3 drew a row of 11 `BM2D::CSprite`s (speed always, then boost / appear / turn / dark / scroll / arrow / cut / freeze / jump shown when off-default, gauge when named) from the texture-only `dance_option_icon0000_v0` (World ships it byte-identical) at the `option` marker (`option_icon_<n>p[_reverse]_usr`), pitch w − 2, scale w / 36, priority 8, group side + 2. World kept the CSprite class + pool; World's OptionIconActor builds an AFP clip with World art instead.
+  - Signatures (one AOB for the pool create + RTTI): `derive_ddr_sel_option_icons` — actor init / update, holder 0x58, record / marker getters, option resolver + table, Option vtable + 15 field offsets (verified by their getter stubs), CSprite vtable / pool (0x1000 × 0x238) / create. All five builds; sweep ALL GREEN.
+  - `option_icons_logic.rs` (pure, 7 tests; validator 135): World → A3 value mapping (speed rounding, appearance = stealth / lane cover, arrow colour, gauge incl. FLOATING FLARE by level), textures, layout, scale.
+  - `option_icons.rs`: init / update detours on World's OptionIconActor (no other owner): record skin 2..=5 ⇒ A3's row from the game's sprite pool, World's init / update skipped; speed / gauge icons re-created on change; sprites destroyed at GAMEPLAY exit / new actor / disarm / disable.
+  - `policy.rs`: `dance_option` skins 2–5 → `fixed_arc` `dance_option_icon0000_v0`, `Adapter::OptionIcons`; `marker_keys.rs`: `option` ← `option_icon_{n}p{r}_usr` (removed from the World-only list).
+  - Gates: `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 135 tests, signature sweep ALL GREEN, nothing never-resolving.
+
+- Step 11 (2026-09-25, cabinet-proven) — A3's announcer and crowd on World's CallVoiceActor, per `research/announcer-crowd.md` (§5 = as built):
   - **`src/services/call_voice_hooks.rs`** (new, lib.rs after combo_hooks): the ONE owner of the `CallVoiceActor::onUpdate` detour (was announcer_mute's own `GenericDetour`) — mute predicate (announcer_mute; silences everything first), override (ddr_selection), else World's; `cue_is_playing(h)` = World's guard (AVS lock ordinals 16/17 around the game's is-playing). announcer_mute now registers its predicate instead of detouring.
   - Signatures (no AOB): `derive_call_voice` — slot 6 (== `announcer_dispatcher`), A3's field layout checked by 11 exact onUpdate instructions, the voice guard and its lock / is-playing / unlock block (manager == `audio_manager_global`). 7 names, all five builds, sweep ALL GREEN. `CallVoiceSites`.
   - `sound/rules.rs` (pure, 13 tests; validator 127): A3's per-skin combo / state / crowd rules (thresholds bit-exact, `<voice>` mutes, regain latch, quiet-near-callout rule, ties → side 1), every cue in the `dsel` manifest.
@@ -110,7 +118,24 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 - Front-loaded from Step 2 (maintainer request, 2026-09-22): pure `trigger.rs` (row values, AUTO table, governance incl. bot exclusion, dev-knob override; 10 tests), `options.rs` (Dynamic scalar row `ddr_selection` 0..=6, `PersistMode::Local`, overlay + in-game, `versus_mirror`), `derive_music_series_vslot` (publishes `music_series_vslot` from `flare_skill_classifier`+2: 0x88 old / 0xA0 new — sweep green), series read = `find_music_by_mcode(PlayerWork+0x54)` → entry vtable slot; label + preview textures (eng/jpn/kor) via `scripts/option_strings.py` (regeneration touched only the 6 new PNGs); `mod-config.json` `option_menu_settings` entry after `arrow_opacity`.
 - Readiness gates: `cargo check` clean, `cargo fmt` clean, `./build.sh` clean, signature sweep ALL GREEN (all derivations resolve on 20250805/20260224/20260721/20260825/20260915), `shape_diff`: `layout_package_helper` identical through 0x198 on every build; `dps_skin_table_read` diverges only at +0x153 on 20250805/20260224 (consumer reads +39/+49 only).
 
-## Cabinet test — Step 11 (A3 announcer and crowd)
+## Cabinet test — A3 option icons — PASSED 2026-09-25 (run #2 with the speed fix)
+
+Deploy the DLL only (`dance_option_icon0000_v0` ships in World). DDR SELECTION on.
+
+Expect once per boot (sig log, 20260915): `[+] ddr_sel_option_icon_init (derived) @ +0x76C40`, `ddr_sel_option_icon_update @ +0x77330`, `ddr_sel_sprite_pool @ +0x78A5A0`, `ddr_sel_sprite_create @ +0x272F30`, `ddr_sel_sprite_count = 0x1000`, `ddr_sel_sprite_stride = 0x238`, the `ddr_sel_option_*_off` values (0x8, 0xC, 0x18, 0x1C, 0x28, 0x34, 0x40, 0x54, 0x58, 0x5C, 0x64, 0x68, 0x6C, 0x7C; speed derived 0x10); at enable `DDR SELECTION: A3 option icons ready`.
+
+Per legacy song on MAX-EXTREME / SuperNOVA / X / 2013-A: `dance_option -> dance_option_icon0000_v0 (skin N, side S)`, once `A3 option icons (1P, skin N): 10 sprites at (x, y, 34), speed x…, gauge None` (11 with a gauge option); the Step 7 summary lists `1p:option` under `moved`.
+
+Check on screen:
+1. A row of A3's small icons at the era's spot (skins 3–5 bottom-left under the lane, 2P bottom-right; MAX-EXTREME bottom centre-left), instead of World's option icons: the speed icon always; the others only when set (e.g. BOOST, MIRROR, REVERSE, dark/step zone off, NOTE / VIVID / FLAT arrows, CUT, FREEZE OFF, JUMP OFF, HIDDEN+ / SUDDEN+ / STEALTH, LIFE4 / RISKY / FLARE). Unset options leave gaps (A3 did too — fixed slots).
+2. Reverse scroll: the row moves to the reverse spot (top on skins 3–5).
+3. Speed: the icon shows the multiplier (real speed rounds to the nearest ×0.25). **Re-test (fix 2026-09-25):** change the speed mid-song (anytime speed-mod) — the icon follows within a frame, log `A3 option icon (1P) speed -> x…` per change. Cause of the first miss: World's `ControlSpeedActor` changes only its own Option copy and the GamePlayActor speed cluster (msg `0x1042`), never the player's Option the icons read; the update now reads the side's GamePlayActor int ×100 target (`gameplay_actor_layout().speed_int`, the value the lanes scroll at) once it exists.
+4. FLOATING FLARE: the gauge icon follows the current flare level.
+5. 1st-5th: no icons (as A3); a World song afterwards: World's own icons. Versus: both rows. Quick restart / quick fail.
+
+Report any WARN containing `option icon`, `CreateSprite()` lines in the log, any `F:` line / crash, and anything at the top-left corner.
+
+## Cabinet test — Step 11 (A3 announcer and crowd) — PASSED 2026-09-25
 
 Deploy the DLL only (the era bank comes from World's own `_n` files). DDR SELECTION on; Announcer Mute OFF.
 
@@ -310,6 +335,9 @@ Deploy the DLL (no data changes). `ddr-selection` on, pick any era. Expect once 
 
 ## Deploy & test log
 
+- 2026-09-25 option-icon cabinet run #2: maintainer — the speed icon now follows in-song speed changes. Option icons accepted.
+- 2026-09-25 option-icon cabinet run #1: maintainer — every icon correct, but the speed icon did not follow an in-song speed change (World's ControlSpeedActor never writes the player's Option). Fix: read the side's GamePlayActor speed target.
+- 2026-09-25 Step 11 cabinet run: maintainer — every era's announcer / crowd works as expected. Step 11 complete.
 - 2026-09-25 cabinet run #3: maintainer — AUTO now hosts the right era's stage panel for every song; A3's pacemaker digits show on the legacy skins. Both accepted.
 - 2026-09-25 Step 10 cabinet run #2 (skins 3–5 song info): maintainer — the A3 song-info panels look correct on SuperNOVA / X / 2013-A; the skin-2 band confirmed. Step 10 complete. Same session, unrelated bug found with AUTO: the stage panel used the previous song's era (log: request `skin 1 … mcode=243`, edge `skin 2 … mcode=442` for one song; first AUTO song hosted nothing because the stale mcode was a World song) — fixed (see "Cabinet test — AUTO stage-panel era").
 - 2026-09-25 Step 10 cabinet run #1 (20260915, CrossOver): maintainer — everything tried works (score, difficulty, skin-2 band). EX SCORE mode NOT tested (the maintainer has no way to enable EX scoring — untested, not failed). Log: `legacy score ready`, `dance_score -> dance_score000N` on skins 1–5, `legacy score created` 1P and 2P (skin 2 difficulty priority 3, others 7), `legacy difficulty … -> ["challenge1|2", "dance_score000N_lv15"]` (skin 2 `["challenge1|2", "challenge_in"]`), `song-info actor -> A3 export dance_song_info (priority 9)` + `dance_song_info -> dance_song_info0002` on skin 2; no score / song-info WARN, no `F:` lines. Score / difficulty / skin-2 band accepted; Step 10 stays open for skins 3–5 song info.
