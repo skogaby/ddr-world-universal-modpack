@@ -1,9 +1,9 @@
 # DDR SELECTION — progress
 
-Updated: 2026-09-24
-Status: Step 8 of 14 — DONE (cabinet-proven 2026-09-24, uncommitted); Step 9 not started
-NEXT ACTION: start Step 9 (legacy combo — `implementation/plan.md` Step 9): RE first (research doc per the Step 5–8 pattern; `research/hud-actors.md` §2 is the starting point; S-Marvelous owns a post-original detour on the combo digit refresh — promote it to `services/combo_hooks`), then implementation. When `dance_combo` turns legacy, the `combo` marker moves with it automatically (`marker_keys` gate).
-Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
+Updated: 2026-09-25
+Status: Step 11 of 14 — A3 announcer / crowd BUILT, awaiting the cabinet test. Steps 9–10 + AUTO stage-panel fix + A3 pacemaker cabinet-proven 2026-09-25 (all uncommitted)
+NEXT ACTION: maintainer cabinet test "Cabinet test — Step 11 (A3 announcer and crowd)" below. On a pass: tick Step 11 in `implementation/plan.md`, then Step 12 (1st-5th option forcing, design §4.8) — RE first.
+Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/announcer-crowd.md` for Step 11, `research/legacy-score.md` for Step 10, `research/legacy-combo.md` for Step 9, `research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
 
 ## Done
 
@@ -12,7 +12,35 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## In flight
 
-- Step 8 (2026-09-24, uncommitted, cabinet-proven) — legacy life gauge for every gauge type, per `research/legacy-gauge.md` (§5 = as built):
+- Step 11 (2026-09-25, built, NOT yet cabinet-tested) — A3's announcer and crowd on World's CallVoiceActor, per `research/announcer-crowd.md` (§5 = as built):
+  - **`src/services/call_voice_hooks.rs`** (new, lib.rs after combo_hooks): the ONE owner of the `CallVoiceActor::onUpdate` detour (was announcer_mute's own `GenericDetour`) — mute predicate (announcer_mute; silences everything first), override (ddr_selection), else World's; `cue_is_playing(h)` = World's guard (AVS lock ordinals 16/17 around the game's is-playing). announcer_mute now registers its predicate instead of detouring.
+  - Signatures (no AOB): `derive_call_voice` — slot 6 (== `announcer_dispatcher`), A3's field layout checked by 11 exact onUpdate instructions, the voice guard and its lock / is-playing / unlock block (manager == `audio_manager_global`). 7 names, all five builds, sweep ALL GREEN. `CallVoiceSites`.
+  - `sound/rules.rs` (pure, 13 tests; validator 127): A3's per-skin combo / state / crowd rules (thresholds bit-exact, `<voice>` mutes, regain latch, quiet-near-callout rule, ties → side 1), every cue in the `dsel` manifest.
+  - `sound/call_voice.rs`: the override — armed skin 1..=5 ∧ era bank registered ∧ every rule cue present ⇒ A3's rules through `se_play` into the bank slot (unguarded combo callouts, guarded voices, crowd SEs); otherwise World's announcer. Installed at enable with the era bank build; cleared at disable.
+  - Gates: `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 127 tests, signature sweep ALL GREEN, nothing never-resolving.
+
+- Step 10 (2026-09-25, uncommitted; score / difficulty / skin-2 band cabinet-proven, EX untested, skins 3–5 song info open) — A3's score, difficulty and EX display on World's ScoreActor + skin 2's song-info band, per `research/legacy-score.md` (§5 / §6 = as built):
+  - Signatures (no new AOB): `derive_ddr_sel_score` (score_actor_vtable slots 4 / 7 / 8: the three `MOV R9D,7; LEA R8,[name]` creates, clip stores 0x78 / 0x80 / 0x88, record head (side 0x58, skin 0x60, record fn), EX 0xA0, digit head (target 0x68, displayed 0x6C), msg 0x1036 / 0x104F case, difficulty 0x70, level 0x64; `DdrSelScoreSites`) and `derive_ddr_sel_song_info` (SongInfoActor RTTI slot 4: the `_single` / `_double` LEA pair + `MOV R9D,5`; `DdrSelSongInfoSites`). Identical on all five builds; sweep ALL GREEN.
+  - `score_math.rs` (pure, 6 tests; validator 106): A3 export names, skin-2 priority, difficulty labels / level texture, smoothing, the digit / comma write plan (forced repaint on a negative displayed value = `song_reset`'s sentinel).
+  - `score.rs` (engine; three detours on World's ScoreActor — init, digits, msg; nobody else hooks them): init PRE patches World's three name LEAs (→ `frame_score`, per-call `frame_difficulty_<n>p[_reverse]`, the name stand-in `difficulty_level_base`) + skin 2's difficulty priority 7 → 3 for the one call, POST restores, hides the stand-in and sets `ex_tex` from the EX flag; digits = A3's textures for legacy actors; msg `0x104F` = A3's difficulty writes. Patch failure ⇒ World's init skipped for that actor (no score that song).
+  - `song_info.rs` (engine; checked code patches, no detour — center_arrows_single owns the init's): both card-name LEAs → `"dance_song_info"`, priority 5 → 9, applied by the package helper before it registers `dance_song_info0002`, restored on a stock request / disarm / disable. Adapter `SongInfo` needs the marker post-pass too.
+  - `mod.rs`: `Adapter::Score` / `SongInfo` in `adapters()`, `records_side_off()`; `package_helper`: `dance_song_info` apply / restore.
+  - Skins 3–5 song info (2026-09-25, cabinet-proven) — A3's own `dance_song_info0000_v2` panel with title / artist, per `research/legacy-score.md` §7:
+    - RE: A3's probe counts `_v2` → `_v0` (HD ⇒ `_v2`); World ships `_v0..v2` byte-identical to A3's; the panel = 376×56 base + `music_name_usr` (340×28) / `artist_name_usr` (340×18), no jacket / course / colour transforms. A3's child = World's with names `music_name_usr` / `artist_name_usr` / `course_name_usr`, font 3 (`songtitle_m`) vs 4, h-align centre (1) vs left (0), fit box centred vs one width left, white.
+    - Signatures (no AOB): `derive_ddr_sel_song_info_panel` (optional sub-group of `derive_ddr_sel_song_info`; RTTI `SongInfoChild`): child ctor, font imm, colour JNZ, 8 name LEAs (ctor + update slot 6), text helper + its align store / x SUB — 15 names, all five builds, sweep ALL GREEN; `shape_diff`: only font / JNZ windows diverge on 20260825 (+0x95 / +0x6E, outside the read bytes). `DdrSelSongInfoSites.panel`.
+    - `song_info_logic.rs` (pure, 7 tests; validator 114): band / panel patch plans, the `MOV [r+0xA8],r12d` → `MOV BYTE [r+0xA8],1` encoder, stock-shape checks, rel32 reach.
+    - `song_info.rs` rewritten over the plan: `apply(skin)` (band for 2, panel for 3–5), `panel_capable()`; `policy.rs`: `Entry::fixed_arc`, `package_name()`, row `dance_song_info` skins 3–5 → `fixed_arc = "dance_song_info0000_v2"`, `Adapter::SongInfoPanel` (the 0000 test now allows exactly this suffixed name, documented); `package_helper` uses `package_name` + `song_info::apply(skin)`; `mod.rs` adds `SongInfoPanel` (panel ∧ markers).
+  - Gates (after the panel): `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 114 tests, signature sweep ALL GREEN, nothing never-resolving.
+
+- Step 9 (2026-09-24, uncommitted, cabinet-proven) — A3's combo on World's ComboActor, per `research/legacy-combo.md` (§5 = as built):
+  - **`src/services/combo_hooks.rs`** (new, lib.rs 4h2c): the ONE owner of the ComboActor detours — the digit refresh (promoted from s_marvelous, which now subscribes refresh POST; behaviour identical) and the actor's init / finalize / update / msg (RTTI slots 4/5/6/8). Refresh / update / msg OVERRIDE, init PRE (may skip World's init) / POST, finalize POST; fixed-size subscriber snapshots (no allocation on the per-frame paths).
+  - Signatures (no new AOB): `derive_combo_actor` (RTTI vtable → `combo_actor_init/finalize/update/msg`, fields combo 0x68 / worst 0x6C / game over 0x94 from the msg / update instructions; `ComboActorSites`) and `derive_ddr_sel_combo` (inside the init: loop head, `"dance_combo_root%d"` format LEA, record / marker CALLs, side holder 0x58, roots 0x70..0x80, SetPosition vslot 0x38, SetColor vslot 0x90, root MC 0x110, loop tail whose call must be `combo_digit_refresh`; `DdrSelComboSites`). Identical on all five builds; sweep ALL GREEN; `shape_diff`: old builds diverge only outside the read bytes (init +0x49, loop head +0x1C, update +0x115).
+  - `combo_math.rs` (pure, 8 tests; validator 100): A3's growth (constant bits), digit count, cap, cell (skin 1 half), layout x, centre, worst-grade bookkeeping, sheet prefixes / word / place textures + visibility, the NUL-padded format bytes, IFS magic, arc candidates.
+  - `combo.rs` (engine): init PRE reads the actor's `dance_combo` record skin; legacy ⇒ three checked patches for this one call (loop count `02 → 00`, first root `+0x80 → +0x70`, format LEA → near `"dance_combo"` padded to 0x12) so World's own init creates A3's one clip in root1 with A3's priorities (1 / 10); POST restores and finishes A3's init (alpha 1, hidden by attribute, marker, cell, layout). Msg `0x1033` (World's counters kept — the finalize saves the worst grade), per-frame update (number scale, game-over stop) and refresh are A3's for legacy actors; `0x1043` re-lays out then falls through; the centre goes to the side's NoteResultActor (`0x1035` → FAST/SLOW x, A3's rule World kept but never sent). Patch failure ⇒ World's init skipped (no combo that song, WARN). Skin 5: `package_usable` checks the member's IFS magic (World's copy decompresses to zeros) ⇒ stock + one WARN naming the import.
+  - `bm2d_api::layer_get_info_raw` (`afp_layer_get_info`: visible bit, rate, size). `package_helper`: `dance_combo` needs `combo::package_usable(skin)`. `mod.rs`: `Adapter::Combo` in `adapters()`. overlay_element_styling: exact `"dance_combo"` classifies as Combo.
+  - Gates: `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 100 tests, signature sweep ALL GREEN.
+
+- Step 8 (2026-09-24, committed, cabinet-proven) — legacy life gauge for every gauge type, per `research/legacy-gauge.md` (§5 = as built):
   - Signatures: `derive_ddr_sel_gauge` (no AOB — from the gauge RTTI vtables): `ddr_sel_gauge_init` / `ddr_sel_life_gauge_init` / `ddr_sel_gauge_fill`, the two export LEAs, offsets side 0x88 / skin 0xD4 / clip 0xB0 / value 0x94 / state 0x9C / label vslot 0x58, Life skin 0xB4 / clip 0xA8, CMovieClip root MC 0x110 / SetScale vslot 0xC0 (`DdrSelGaugeSites`). Identical on all five builds; sweep ALL GREEN.
   - `gauge_math.rs` (pure, 6 tests; validator 92): A3's mode rule (skins 2–4 or a FLARE label ⇒ continuous; else segmented 63 × 6.984 px on skin 1, 26 × 17 px + partial cell on skin 5), both fills' scissor math incl. the 2P mirror, A3's constant bits checked.
   - `gauge.rs` (engine): export-LEA patches (`dance_gauge` → near `00_dance_gauge`, both inits; applied by the package helper before it registers `dance_gauge000N`, failure ⇒ stock; restored on a stock request / disarm / disable); post-original percent-init detour `SetScale(-1, 1)` on 2P; post-original LifeGauge-init detour playing the skin-3 root `1p_in` / `2p_in`; full-replacement fill detour for legacy actors (World's fill otherwise). `bm2d_api::mc_set_param_ptr` (pointer params, 0x1023 scissor).
@@ -81,6 +109,96 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
   - AGENTS.md row.
 - Front-loaded from Step 2 (maintainer request, 2026-09-22): pure `trigger.rs` (row values, AUTO table, governance incl. bot exclusion, dev-knob override; 10 tests), `options.rs` (Dynamic scalar row `ddr_selection` 0..=6, `PersistMode::Local`, overlay + in-game, `versus_mirror`), `derive_music_series_vslot` (publishes `music_series_vslot` from `flare_skill_classifier`+2: 0x88 old / 0xA0 new — sweep green), series read = `find_music_by_mcode(PlayerWork+0x54)` → entry vtable slot; label + preview textures (eng/jpn/kor) via `scripts/option_strings.py` (regeneration touched only the 6 new PNGs); `mod-config.json` `option_menu_settings` entry after `arrow_opacity`.
 - Readiness gates: `cargo check` clean, `cargo fmt` clean, `./build.sh` clean, signature sweep ALL GREEN (all derivations resolve on 20250805/20260224/20260721/20260825/20260915), `shape_diff`: `layout_package_helper` identical through 0x198 on every build; `dps_skin_table_read` diverges only at +0x153 on 20250805/20260224 (consumer reads +39/+49 only).
+
+## Cabinet test — Step 11 (A3 announcer and crowd)
+
+Deploy the DLL only (the era bank comes from World's own `_n` files). DDR SELECTION on; Announcer Mute OFF.
+
+Expect once per boot (sig log, 20260915): `[+] call_voice_update (derived) @ +0x55CF0`, `call_voice_guard @ +0x56330`, `call_voice_is_playing @ +0x1AAF20`, `call_voice_audio_manager @ +0x6F2D60`, `call_voice_lock_count @ +0x6F3898`, `call_voice_lock_iat @ +0x2D8900`, `call_voice_unlock_iat @ +0x2D8910`; `CallVoiceHooks: announcer onUpdate + voice guard resolved`; at enable `CallVoiceHooks: announcer onUpdate detour installed` + `DDR SELECTION: A3 announcer / crowd rules ready`.
+
+Per legacy song: `DDR SELECTION: A3 announcer / crowd for skin N (<name>)` once. No `era bank lacks announcer cue` WARN.
+
+Check by ear (a long song, full-comboing past 100 / 200 … if you can):
+1. 1st-5th: no combo callouts; with a high gauge (> 80 %) the old "ACT6" voice every ~33 s after the first ~49 s; crowd `2nd_BIG2` cheer every ~65 s (not when the gauge is ≤ 40 % with combo < 13).
+2. MAX-EXTREME / SuperNOVA: the DDRMAX-era combo calls at 100…1000 (`sn2_dgm25..34`), "high" / "middle" state lines; crowd `2nd_KANSEI_B` (MAX-EXTREME) / `STG_APP03` (SuperNOVA).
+3. X / 2013-A: A3's own announcer — combo 100…1000, "over" past 1000, odd-50 lines, high / gen / low (hard on Expert / Challenge) / regain after recovering; crowd `STG_APP02`.
+4. None of World's announcer lines on a legacy song; World's announcer back on a stock song.
+5. Announcer Mute ON: silent on legacy AND stock songs.
+6. Songs whose musicdb `<voice>` disables voices (e.g. some licensed / TV songs) stay as silent as World makes them; versus (both sides' combos / gauges).
+
+Report any WARN containing `announcer` / `CallVoice`, and anything that plays twice.
+
+## Cabinet test — AUTO stage-panel era + A3 pacemaker — PASSED 2026-09-25
+
+Bug (maintainer 2026-09-25, AUTO only): the stage panel before a song showed the PREVIOUS song's era (World → 1st Mix song ⇒ World's panel; 1st Mix → EXTREME song ⇒ 1st-5th panel). Cause: the stage panel is hosted at the song-select confirm (`stage_panel_request_skin`), where `PlayerWork+0x54` still holds the previous song — the log shows `stage panel requested at song select -- skin 1 … mcode=243` followed by `armed skin 2 … mcode=442` for the same song. Fix (`mod.rs`): `resolve_song(SongSource::SongSelect)` reads the wheel's highlighted song (`services::selectmusic_highlight::highlighted_mcode`, the service the S-MFC lamps use) and falls back to `PlayerWork+0x54` only when the highlight is unreadable (one WARN `song-select wheel highlight unreadable`); the play edge still reads `PlayerWork+0x54`. Explicit eras were never affected (they do not read the song).
+
+Deploy the DLL only. With AUTO: World song → 1st Mix song → another 1st Mix song → an EXTREME song → a SuperNOVA / X / 2013-A song → a World song.
+1. Every stage panel matches the song it precedes (World's panel before World songs).
+2. Log per legacy song: `stage panel requested at song select -- skin N … mcode=M` with the SAME skin and mcode as the following `armed skin N … mcode=M (stage panel hosted at the song-select request)`; no `the stage panel is hosted for skin X but the song now resolves skin Y` WARN, no `wheel highlight unreadable` WARN.
+3. Versus with AUTO: same.
+
+A3 pacemaker (maintainer request 2026-09-25; `research/legacy-score.md` §8 — one policy row, `dance_score_compare` → A3's own `dance_score_compare0000_v0` on every skin, no code): with a pacemaker target on (e.g. own PB) on any legacy skin 1–5:
+4. Log: `dance_score_compare -> dance_score_compare0000_v0 (skin N, side S)`.
+5. The pacemaker digits are A3's (flat row, blocky font) instead of World's slanted italic row; + / − / ± sign and the red/blue-ish half-tint by sign as before; it animates in / out as before.
+6. With the Power User Statistics "pacemaker → ms error" option on: the ms readout uses A3's digits, white zone still works; quick restart rewinds it as before.
+7. A stock song afterwards: World's pacemaker.
+
+## Cabinet test — Step 10 (skins 3–5 song info) — PASSED 2026-09-25
+
+Deploy the DLL only (`dance_song_info0000_v2` ships in World). DDR SELECTION on.
+
+Expect once per boot (sig log, 20260915): `[+] ddr_sel_song_info_site (derived) @ +0x79037`, then `[+] ddr_sel_song_info_ctor_music_lea_0 (derived) @ …` … `ddr_sel_song_info_child_ctor @ +0x792D0`, `ddr_sel_song_info_font_imm @ +0x7920B`, `ddr_sel_song_info_color_jcc @ +0x79232`, `ddr_sel_song_info_text_helper @ +0x796F0`, `ddr_sel_song_info_align_store @ +0x79732`, `ddr_sel_song_info_x_offset_sub @ +0x797BF`. No `song-info panel sites` WARN.
+
+Per song on SuperNOVA / X / 2013-A: `dance_song_info -> dance_song_info0000_v2 (skin N, side 2)` (or the side World uses), `song-info actor -> A3 panel (export dance_song_info, priority 5; child: music_name_usr / artist_name_usr, font 3, centred, white)`; the Step 7 summary lists `song_info` under `moved`. Skin 2 unchanged (`… (priority 9)`, `dance_song_info0002`).
+
+Check on screen:
+1. Skins 3–5: a dark rounded bar at the bottom centre with the song title (larger) above the artist, both centred and white — no jacket, no World card. Long titles squeeze to fit the bar.
+2. Center Arrows (1P) ON on skins 3–5: same panel (not World's dark card), text still white.
+3. Skin 2: the band still (no text); skin 1: nothing; a stock song afterwards: World's card with left-aligned title / artist / source in World's small font (the patches restored).
+4. Versus, doubles, quick restart, quick fail, a course (stays World's).
+
+Report any WARN containing `song-info`, any `F:afpu-package` / crash, and anything at the top-left corner.
+
+## Cabinet test — Step 10 — PASSED 2026-09-25 (except EX mode: untested; skins 3–5 song info not built yet)
+
+Deploy the DLL only (every legacy score / song-info arc ships in World). DDR SELECTION on.
+
+Expect once per boot (sig log, 20260915): `[+] ddr_sel_score_init (derived) @ +0x77590`, `ddr_sel_score_digits @ +0x77E70`, `ddr_sel_score_msg @ +0x782E0`, `ddr_sel_score_create_score @ +0x7767C`, `…create_difficulty @ +0x777BC`, `…create_name @ +0x7796C`, `ddr_sel_score_side_off (derived) = 0x58`, `…skin_off = 0x60`, `…target_off = 0x68`, `…displayed_off = 0x6C`, `…ex_off = 0xA0`, `[+] ddr_sel_song_info_site (derived) @ +0x79037`; then `DDR SELECTION: legacy score ready (A3 exports, digits, difficulty)`.
+
+Per legacy song: `dance_score -> dance_score000N (skin N, side 0)` (+ side 1 in versus), `legacy score created (skin N, 1P, exports frame_score / frame_difficulty_1p[_reverse], difficulty priority 7|3)`, `legacy difficulty (skin N, 1P, difficulty D level L) -> ["expert2", "dance_score000N_lv12"]` (skin 2: `["expert1", "expert_in"]`); skin 2 also `song-info actor -> A3 export dance_song_info (priority 9)` and `dance_song_info -> dance_song_info0002`. The Step 7 summary now lists `1p:score`, `1p:difficulty` (and on skin 2 `song_info`) under `moved`.
+
+Check on screen, every skin 1–5 (1P, 2P versus, doubles, reverse scroll, every difficulty):
+1. The era's score frame and digits replace World's, at the era's spot; the score counts up smoothly; leading zeros show in the era's grey (skins 2–5; skin 1 has no grey art — A3 showed nothing there either, report what it looks like); commas on skins 3 and 5.
+2. EX SCORE mode (operator option): skins 2 / 3 / 5 show their "EX" mark, leading zeros hidden.
+3. The era's difficulty frame shows the chosen difficulty (A3 had no level-number art on most eras — the number may be missing, as in A3; report); reverse scroll uses the reverse frame; skin 2 its per-difficulty base.
+4. No player name on legacy songs; World's name / score / difficulty back on a stock song.
+5. Skin 2: the MAX-EXTREME song-info band at the bottom instead of World's jacket card (no text — A3 had none); skins 3–5 still World's card (follow-up); skin 1 none.
+6. Center Arrows (1P) ON on skin 2: the band (not World's dark card).
+7. Quick restart mid-song (the score repaints from 0), quick fail, a stock song afterwards.
+
+Report any WARN containing `score`, `song-info`, `init patch`, any `F:afpu-package` / crash, and anything drawn at the top-left corner.
+
+## Cabinet test — Step 9 — PASSED 2026-09-24
+
+Deploy the DLL only for skins 1–4 (every legacy combo arc ships in World). For skin 5, test twice: first WITHOUT the A3 import, then run `ddr_selection_import/import_a3_assets.bat` (or `scripts/ddr_selection/import_a3_assets.sh <A3 install> <World install>`) so `data_mods/ddr_selection_a3/arc/bm2d/dance_combo0005_v0.arc` exists, and test again. DDR SELECTION on.
+
+Expect once per boot (sig log, 20260915): `[+] combo_actor_init (derived) @ +0x66920`, `combo_actor_finalize … +0x66D80`, `combo_actor_update … +0x66D00`, `combo_actor_msg … +0x66E40`, `combo_actor_combo_off (derived) = 0x68`, `…worst_off … = 0x6C`, `…gameover_off … = 0x94`, `[+] ddr_sel_combo_loop_head (derived) @ +0x669E1`, `ddr_sel_combo_root_fmt_lea @ +0x66A19`, `ddr_sel_combo_record_fn @ +0x6EE90`, `ddr_sel_combo_marker_fn @ +0x6F2B0`, `ddr_sel_combo_root1_off = 0x70`, `…root3_off = 0x80`; then `ComboHooks: digit refresh resolved, actor functions resolved`, `ComboHooks: digit refresh detour installed @ …` (once), `SMarvelous: combo digit refresh subscriber registered (shared combo hooks)` (S-Marv on), `ComboHooks: actor detours installed (…)`, `BM2D_API: resolved afp_layer_get_info …`, `DDR SELECTION: legacy combo ready (A3 ComboActor re-hosted in World's)`.
+
+Per legacy song: `dance_combo -> dance_combo000N (skin N, side 0)` (+ side 1 in versus), `legacy combo created (skin N, 1P, cell W x H (0001 width w), marker (x, y), layer 0x…)`, at the 4th step `legacy combo shown (skin N, 1P, combo 4, sheet dance_combo000N[_marvelous], growth 1.000)`; the Step 7 summary now lists `1p:combo` under `moved`. Skin 5 WITHOUT the import: `DDR SELECTION: data/arc/bm2d/dance_combo0005_v0.arc is damaged (World ships a blanked dance_combo0005) -- skin 5 combo stays World's; run the A3 import …` once per boot and World's combo; WITH the import: no such WARN and `dance_combo -> dance_combo0005`.
+
+Check on screen, every skin 1–5 (1P, 2P versus, doubles, reverse scroll):
+1. The era's combo art replaces World's; nothing below combo 4, it appears at 4 and replays its pop-in on every step.
+2. The digits grow with the count: skin 1 visibly from 10, much bigger from 100 (skin 1 digits are laid out at half cell width — tight); other skins slightly from 10, 1.5× at 100–999, 1.25× from 1000. Leading zeros never show; 1000+ shows four digits.
+3. The clip re-centres for 1 / 2 / 3 / 4 digits (stays centred on the combo spot); FAST/SLOW now follows the combo's centre horizontally (A3's rule — it may sit differently than in the Step 7 run; report).
+4. Skins 4–5: the digits / word change colour set with the worst grade of the current combo (marvelous → perfect → great → good); skins 1–3 one colour.
+5. Combo break (miss): the combo disappears, comes back at 4 in the fresh colour.
+6. Fail by gauge: the combo stops / disappears after its animation.
+7. Center Arrows (1P) ON: the combo follows the centred lane.
+8. S-Marvelous ON: a stock song still gets the violet all-S-Marv combo; legacy songs show the legacy combo, no S-Marv WARN.
+9. Overlay PLAYER SETTINGS → combo scale / opacity rows affect the legacy combo too (log `overlay-element-styling: bind kind=combo …`).
+10. Quick restart mid-song (combo hides, comes back at 4), quick fail, a stock song afterwards (World's combo back).
+
+Report any WARN containing `combo`, `init patch`, `legacy combo clip`, any `F:afpu-package` / crash, and anything drawn at the top-left corner.
 
 ## Cabinet test — Step 8 — PASSED 2026-09-24
 
@@ -191,6 +309,12 @@ Previous (rev 2) instructions, still valid:
 Deploy the DLL (no data changes). `ddr-selection` on, pick any era. Expect once per boot: `era bank built in N ms -- 74 cues, 207 waves, 17.2 MB (…)`, then at the next scene change `GameAudio: … claiming free sound-bank slot 4`, `CreateInMemoryWaveBank('dsel', …) hr=0x00000000`, `CreateSoundBank('dsel', …) hr=0x00000000`, `era bank 'dsel' registered in slot 4 (74/74 cues resolve)`. Play a song on a legacy skin: the full-combo splash plays `XAC_full_combo2`, the in-lane game over plays `Plate_spin3_st` (fail a song); after the song `N legacy clip sound(s) played from the era bank`. Report any `hr=0x8AC7…` or `do not resolve` line. (Rev 2: the per-cue summary `legacy clip sounds -- played from the era bank: [XAC_full_combo2 x1, …]` is logged at EVERY scene change while armed.)
 
 ## Deploy & test log
+
+- 2026-09-25 cabinet run #3: maintainer — AUTO now hosts the right era's stage panel for every song; A3's pacemaker digits show on the legacy skins. Both accepted.
+- 2026-09-25 Step 10 cabinet run #2 (skins 3–5 song info): maintainer — the A3 song-info panels look correct on SuperNOVA / X / 2013-A; the skin-2 band confirmed. Step 10 complete. Same session, unrelated bug found with AUTO: the stage panel used the previous song's era (log: request `skin 1 … mcode=243`, edge `skin 2 … mcode=442` for one song; first AUTO song hosted nothing because the stale mcode was a World song) — fixed (see "Cabinet test — AUTO stage-panel era").
+- 2026-09-25 Step 10 cabinet run #1 (20260915, CrossOver): maintainer — everything tried works (score, difficulty, skin-2 band). EX SCORE mode NOT tested (the maintainer has no way to enable EX scoring — untested, not failed). Log: `legacy score ready`, `dance_score -> dance_score000N` on skins 1–5, `legacy score created` 1P and 2P (skin 2 difficulty priority 3, others 7), `legacy difficulty … -> ["challenge1|2", "dance_score000N_lv15"]` (skin 2 `["challenge1|2", "challenge_in"]`), `song-info actor -> A3 export dance_song_info (priority 9)` + `dance_song_info -> dance_song_info0002` on skin 2; no score / song-info WARN, no `F:` lines. Score / difficulty / skin-2 band accepted; Step 10 stays open for skins 3–5 song info.
+
+- 2026-09-24 Step 9 cabinet run #1 (20260915, CrossOver): maintainer — everything worked correctly. The last session's log (skin 5 with the A3 import, 1P and versus): `ComboHooks: … resolved`, both detour installs, `dance_combo -> dance_combo0005` ×4, `legacy combo created (skin 5, 1P|2P, cell 72 x 75 (0001 width 72), marker (281|1000, 377), …)`, `legacy combo shown (skin 5, 1P|2P, combo 4, sheet dance_combo0005_marvelous, growth 1.000)`, `overlay-element-styling: bind kind=combo …` for both sides; no combo WARN, no `F:` lines. **Step 9 ticked.**
 
 - 2026-09-24 Step 8 cabinet run #1 (20260915, CrossOver): maintainer — the legacy life gauge works in every scenario tried, incl. various gauge / grade modes. Log: 10 legacy songs, `gauge actors -> A3 export 00_dance_gauge` each; created on skins 1–5, every 2P gauge `mirrored`; fills skin 1 `Segmented { cells: 63 }` (1P and 2P), skin 5 `Segmented { cells: 26, partial: true }`, skins 2–4 `Continuous`, FLARE labels (6, 15) `Continuous` on skins 1 and 5 (A3's rule). No gauge WARN, no `F:` lines. Not exercised in this log: the skin-3 LIFE4 / RISKY intro (`legacy LIFE gauge intro …` never logged — no skin-3 LIFE song played); low-risk, check opportunistically. **Step 8 ticked.**
 

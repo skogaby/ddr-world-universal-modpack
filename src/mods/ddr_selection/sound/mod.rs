@@ -10,12 +10,17 @@
 //! * [`afp_route`] — pre-original detour on `bm2d::SoundCallback::play`.
 //! * [`code_se`] — one-byte branch flips that silence World's code-played
 //!   sounds a legacy clip already plays itself (`se_game_fullcombo`).
+//! * [`rules`] (pure) — A3's announcer / crowd rules per skin.
+//! * [`call_voice`] — runs them on World's `CallVoiceActor` (override of
+//!   `services::call_voice_hooks`).
 
 pub mod afp_route;
 pub mod bank;
 pub mod bank_build;
+pub mod call_voice;
 pub mod code_se;
 pub mod cues;
+pub mod rules;
 
 use std::ffi::CString;
 

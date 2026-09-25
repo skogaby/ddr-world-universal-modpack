@@ -9,14 +9,16 @@
 //!
 //! ## Mechanism
 //!
-//! One `GenericDetour` on the announcer/voice dispatcher — the single
-//! per-frame function that plays every family above (RE:
+//! The announcer/voice dispatcher — the single per-frame function that plays
+//! every family above (`CallVoiceActor::onUpdate`; RE:
 //! `docs/hex_edit_porting.md` Hack 1; AOB `announcer_dispatcher` in
-//! `signatures.rs`, unique on all four supported builds). When mute is
-//! effective the callback returns without calling the original — the whole
-//! announcer body is skipped, exactly the effect of the original hex
-//! edit's entry-guard patch, but AOB-resolved and toggleable at runtime.
-//! When not muted the original runs unmodified.
+//! `signatures.rs`, unique on all supported builds) — is detoured by the
+//! shared `services::call_voice_hooks` (DDR SELECTION's A3 announcer rules
+//! ride the same detour). This mod registers the service's MUTE predicate:
+//! when mute is effective the whole announcer body is skipped (World's and
+//! DDR SELECTION's alike), exactly the effect of the original hex edit's
+//! entry-guard patch, but toggleable at runtime. When not muted the
+//! original (or the override) runs unmodified.
 //!
 //! The mute state is read live from atomics on every dispatch, so an
 //! options-menu toggle between songs takes effect on the next song with no
@@ -45,14 +47,10 @@
 //! skips the mod cleanly (stock announcer, no option row). A hook-install
 //! failure logs one WARN and registers no option row.
 
-use std::ffi::c_void;
-use std::ptr::addr_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use retour::GenericDetour;
-
-use crate::core::hooks;
 use crate::mods::mod_trait::{Mod, ModContext};
+use crate::services::call_voice_hooks;
 use crate::services::custom_options::{self, RegisterSpec};
 use crate::services::stage_records;
 use crate::{log_info, log_warn};
@@ -61,13 +59,9 @@ use crate::{log_info, log_warn};
 /// read live by the dispatcher hook.
 static MUTE_ENABLED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// True once the detour is installed (drives `is_active()` and gates the
-/// option-row registration).
+/// True once the shared detour is installed and the predicate registered
+/// (drives `is_active()` and gates the option-row registration).
 static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-type AnnouncerFn = unsafe extern "C" fn(*mut c_void);
-
-static mut ANNOUNCER_HOOK: Option<GenericDetour<AnnouncerFn>> = None;
 
 /// Cabinet-wide effective mute. Entered side governs; P1 wins when both
 /// sides are in. Falls back to `p1 || p2` when entered state is unknown.
@@ -91,18 +85,6 @@ fn effective_mute() -> bool {
     }
 }
 
-unsafe extern "C" fn announcer_hook(this: *mut c_void) {
-    let Some(hook) = (&*addr_of!(ANNOUNCER_HOOK)).as_ref() else {
-        return;
-    };
-    // `effective_mute` is panic-free (atomics + guarded pointer reads); the
-    // muted branch is a plain return — the whole announcer body is skipped.
-    if effective_mute() {
-        return;
-    }
-    hook.call(this);
-}
-
 fn mute_on_change(player_side: u8, new_value: i32) {
     if player_side < 2 {
         let enabled = new_value != 0;
@@ -115,17 +97,11 @@ fn mute_on_change(player_side: u8, new_value: i32) {
     }
 }
 
-pub struct AnnouncerMuteMod {
-    dispatcher_addr: *const u8,
-}
-
-unsafe impl Send for AnnouncerMuteMod {}
+pub struct AnnouncerMuteMod;
 
 impl AnnouncerMuteMod {
     pub fn new() -> Self {
-        Self {
-            dispatcher_addr: std::ptr::null(),
-        }
+        Self
     }
 }
 
@@ -146,29 +122,20 @@ impl Mod for AnnouncerMuteMod {
         &["announcer_dispatcher"]
     }
 
-    fn init(&mut self, ctx: &ModContext) -> bool {
-        self.dispatcher_addr = ctx.signatures.require_address("announcer_dispatcher");
+    fn init(&mut self, _ctx: &ModContext) -> bool {
         true
     }
 
     fn enable(&mut self) {
         if HOOK_INSTALLED.load(Ordering::Acquire) {
+            call_voice_hooks::set_mute(Some(effective_mute));
             return;
         }
-        let target: AnnouncerFn = unsafe { std::mem::transmute(self.dispatcher_addr) };
-        if let Err(error) = unsafe {
-            hooks::install_enabled(
-                std::ptr::addr_of_mut!(ANNOUNCER_HOOK),
-                target,
-                announcer_hook,
-            )
-        } {
-            log_warn!(
-                "AnnouncerMute: dispatcher hook installation failed: {} -- mod inactive",
-                error
-            );
+        if !call_voice_hooks::acquire() {
+            log_warn!("AnnouncerMute: shared announcer hook unavailable -- mod inactive");
             return;
         }
+        call_voice_hooks::set_mute(Some(effective_mute));
         HOOK_INSTALLED.store(true, Ordering::Release);
 
         if custom_options::is_available() {
@@ -195,9 +162,9 @@ impl Mod for AnnouncerMuteMod {
     }
 
     fn disable(&mut self) {
-        // The detour stays installed (one detour per target, never
-        // uninstalled at runtime); clearing both side flags makes the
-        // callback pass every call straight through to the original.
+        // The shared detour stays installed (one detour per target, never
+        // uninstalled at runtime); the predicate is cleared.
+        call_voice_hooks::set_mute(None);
         MUTE_ENABLED[0].store(false, Ordering::Release);
         MUTE_ENABLED[1].store(false, Ordering::Release);
         log_info!("AnnouncerMute: disabled (announcer passthrough)");

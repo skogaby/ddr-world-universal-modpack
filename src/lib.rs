@@ -381,6 +381,11 @@ fn init() {
     // 4h2b. Gameplay HUD layout builder / marker setter (center-arrows,
     // DDR SELECTION markers). Resolves only; consumers `acquire()` the detours.
     let _ = services::hud_layout_hooks::init(&signatures);
+    // 4h2c. Gameplay ComboActor digit refresh / init / finalize / update /
+    // msg (S-Marvelous combo repaint, DDR SELECTION legacy combo). Resolves
+    // only; consumers `acquire_*()` the detours.
+    let _ = services::combo_hooks::init(&signatures);
+    let _ = services::call_voice_hooks::init(&signatures);
     if !services::shutter::init(&signatures) {
         log_warn!("Shutter service unavailable -- quick restart/fail fast paths and the DDR SELECTION intro fall back");
     }

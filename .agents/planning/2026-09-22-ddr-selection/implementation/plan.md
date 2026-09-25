@@ -19,9 +19,9 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 6: Legacy end banners + `_sel` movies (P2d) — cabinet-proven 2026-09-24 (runs #1–#3: CLEARED / FAILED on every skin, PRAY FOR ALL on skin 4 only — skin 1's clip has no art, maintainer decision; `_sel` movies incl. the 11 movie-less songs and the stage monitors; the stage-panel `afp_mc_get_param` log spam found in run #1 fixed). The in-lane game over needs no work (World shows it on EXTRA-stage fails only, A3 never on a normal stage — research `end-banners-sel-movies.md` §3)
 - [x] Step 7: Legacy element positions, stage frame, danger 3–5, World-only HUD hiding (P3a)
 - [x] Step 8: Legacy life gauge (P3b)
-- [ ] Step 9: Legacy combo (P3c)
-- [ ] Step 10: Legacy score + song info (P3d)
-- [ ] Step 11: A3 announcer and crowd rules (P4)
+- [x] Step 9: Legacy combo (P3c) — cabinet-proven 2026-09-24
+- [x] Step 10: Legacy score + song info (P3d) — cabinet-proven 2026-09-25 (score / difficulty, skin-2 band, skins 3–5 A3 `dance_song_info0000_v2` panel; EX mode untested)
+- [ ] Step 11: A3 announcer and crowd rules (P4) — built 2026-09-25, awaiting the cabinet test
 - [ ] Step 12: 1st-5th option forcing (P5)
 - [ ] Step 13: S-Marvelous legacy art (P6)
 - [ ] Step 14: Release integration
@@ -214,6 +214,16 @@ Step 9: Legacy combo (P3c)
 - **Integration.** S-Marv combo repaint unchanged on stock songs.
 - **Demo.** Cabinet: combo per skin incl. 1000+; skin 5 with and without the
   import.
+- **As built (2026-09-24).** `research/legacy-combo.md` §5. `services/combo_hooks`
+  owns the refresh (S-Marv subscribes) and the actor's init / finalize /
+  update / msg detours. World's own init creates A3's one clip: three checked
+  patches live only for a legacy actor's init call (loop count 2 → 0, first
+  root +0x80 → +0x70, the `"dance_combo_root%d"` format → NUL-padded
+  `"dance_combo"`); A3's msg / update / texture writes replace World's for
+  legacy actors (World's counters kept for the finalize's worst-grade write).
+  The combo centre is sent to the side's NoteResultActor (`0x1035` — World
+  kept A3's FAST/SLOW follow, never sent). Skin 5: a blanked arc is detected
+  by the member's IFS magic. HD only (A3's SD `x −= 30` not ported).
 
 Step 10: Legacy score + song info (P3d)
 
@@ -224,6 +234,19 @@ Step 10: Legacy score + song info (P3d)
 - **Integration.** `song_reset` score sentinel honoured.
 - **Demo.** Cabinet: score, EX mode, every difficulty, reverse scroll, per
   skin.
+- **As built (2026-09-25).** `research/legacy-score.md` §5 / §6. Score:
+  World's own init creates A3's clips through init-scoped checked patches of
+  its three create names (+ skin 2's difficulty priority), the name clip
+  pointed at a stand-in export and hidden; A3's digits and difficulty
+  message replace World's for legacy actors (three detours, ScoreActor has
+  no other hook owner). Song info: skin 2's band via helper-scoped patches of
+  the SongInfoActor's two card names + priority (no detour, so
+  center_arrows_single keeps its init detour — the planned move into
+  `hud_layout_hooks` was not needed). Skins 3–5 (§7): A3's own
+  `dance_song_info0000_v2` panel, named explicitly (policy `fixed_arc`),
+  with World's SongInfoChild turned into A3's by helper-scoped checked
+  patches (child names → `music_name_usr` / `artist_name_usr`, font 4 → 3,
+  centred fit box, white text) — still patches, no detour.
 
 Step 11: A3 announcer and crowd rules (P4)
 
@@ -235,6 +258,12 @@ Step 11: A3 announcer and crowd rules (P4)
 - **Integration.** Uses Step 3's bank; World announcer when the bank is
   missing.
 - **Demo.** Cabinet: a long song per skin, voice mute songs, versus.
+- **As built (2026-09-25).** `research/announcer-crowd.md` §5. announcer_mute
+  already owned the onUpdate detour ⇒ promoted to
+  `services/call_voice_hooks.rs` (mute predicate, then the ddr_selection
+  override, else World's). Pure `sound/rules.rs` + engine
+  `sound/call_voice.rs` playing through `se_play` into the era bank slot,
+  World's own is-playing guard under the AVS lock.
 
 Step 12: 1st-5th option forcing (P5)
 

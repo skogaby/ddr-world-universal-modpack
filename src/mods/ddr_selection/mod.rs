@@ -25,7 +25,7 @@
 //! `DDR_SELECTION_FORCE=<1..5>` (requires `layeredfs.developer_mode`)
 //! overrides it. Courses and event chains stay stock.
 //!
-//! Current scope (Steps 1–6): the whole-package swaps (judge, FAST/SLOW, full
+//! Current scope (Steps 1–10): the whole-package swaps (judge, FAST/SLOW, full
 //! combo, game over, danger for skins 1–2), the era sounds ([`sound`]: the
 //! `dsel` bank, the AFP-clip routing, World's doubled code sounds silenced),
 //! the legacy READY / HERE WE GO ([`intro`]; World's READY? panel and voice
@@ -34,13 +34,21 @@
 //! request at the song-select confirm; World's 5 s READY? dwell skipped while
 //! A3's root is live), A3's CLEARED / FAILED / PRAY FOR ALL end banners
 //! ([`banner`], hosted in World's banner kinds on the same ShutterActor
-//! detour) and the A3 DDR SELECTION `_sel` background movies ([`movie_sel`]).
+//! detour) and the A3 DDR SELECTION `_sel` background movies ([`movie_sel`]);
+//! Steps 7–9: the era's element positions ([`markers`]), stage frame, life
+//! gauge ([`gauge`]) and combo ([`combo`], A3's `ComboActor` re-hosted through
+//! `services::combo_hooks`); Step 10: score / difficulty ([`score`]) and
+//! skin 2's song-info band and skins 3–5's A3 panel ([`song_info`]); Step 11:
+//! A3's announcer and crowd ([`sound::call_voice`] over
+//! `services::call_voice_hooks`).
 //!
 //! Fail-open: every derivation is all-or-nothing and listed in
 //! `required_signatures`; a disarmed or stock package runs World's code.
 
 mod banner;
 pub mod banner_logic;
+mod combo;
+pub mod combo_math;
 mod gauge;
 pub mod gauge_math;
 mod intro;
@@ -53,8 +61,12 @@ mod package_helper;
 mod panel;
 pub mod panel_logic;
 pub mod policy;
+mod score;
+pub mod score_math;
 pub mod sel_movie_logic;
 mod settings;
+mod song_info;
+mod song_info_logic;
 mod sound;
 mod stage_frame;
 pub mod trigger;
@@ -65,7 +77,7 @@ use std::sync::OnceLock;
 use crate::core::memory;
 use crate::core::signatures::DdrSelectionSites;
 use crate::mods::mod_trait::{Mod, ModContext};
-use crate::services::{scene_manager, stage_records};
+use crate::services::{scene_manager, selectmusic_highlight, stage_records};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
 
@@ -146,6 +158,12 @@ pub fn legacy_package(base: &str) -> bool {
     }
 }
 
+/// `LayoutActor` offset of the per-side record / marker parent (`+ side ·
+/// 0x48`) — HUD actors hold a pointer to theirs.
+fn records_side_off() -> Option<usize> {
+    Some(SITES.get()?.0.records_side_off)
+}
+
 /// Adapters available on this boot.
 fn adapters() -> AdapterSet {
     let mut set = AdapterSet::none();
@@ -162,6 +180,19 @@ fn adapters() -> AdapterSet {
     }
     if gauge::capable() {
         set = set.with(policy::Adapter::Gauge);
+    }
+    if combo::capable() {
+        set = set.with(policy::Adapter::Combo);
+    }
+    if score::capable() {
+        set = set.with(policy::Adapter::Score);
+    }
+    // The band / panel must land at A3's `song_info_usr` marker too.
+    if song_info::capable() && markers::capable() {
+        set = set.with(policy::Adapter::SongInfo);
+    }
+    if song_info::panel_capable() && markers::capable() {
+        set = set.with(policy::Adapter::SongInfoPanel);
     }
     set
 }
@@ -292,10 +323,21 @@ impl Song {
     }
 }
 
-/// Resolve the committed song from the rows / AUTO / dev knob and the mode
-/// policy. Game thread; the same inputs at the song-select stage-panel
-/// request (the confirm committed the song) and at the play edge.
-fn resolve_song() -> Song {
+/// Where [`resolve_song`] reads the song from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SongSource {
+    /// The song-select stage-panel request: `PlayerWork+0x54` still holds the
+    /// PREVIOUS song there (World writes it after requesting the panel —
+    /// cabinet 2026-09-25: AUTO hosted the last song's era), so the wheel's
+    /// highlighted song — the one just confirmed — is read instead.
+    SongSelect,
+    /// The play edge (25 → 26): the committed mcode is current.
+    PlayEdge,
+}
+
+/// Resolve the song from the rows / AUTO / dev knob and the mode policy.
+/// Game thread; at the song-select stage-panel request and at the play edge.
+fn resolve_song(at: SongSource) -> Song {
     let entered = [
         stage_records::side_entered(0),
         stage_records::side_entered(1),
@@ -305,7 +347,18 @@ fn resolve_song() -> Song {
         .find(|&s| crate::mods::multiplayer_bot::is_bot_side(s))
         .map(|s| s as u8);
     let governing = trigger::governing_side(entered, bot_side);
-    let mcode = governing.and_then(committed_mcode).unwrap_or(-1);
+    let highlighted = match at {
+        SongSource::SongSelect => selectmusic_highlight::highlighted_mcode().filter(|m| *m > 0),
+        SongSource::PlayEdge => None,
+    };
+    if at == SongSource::SongSelect && highlighted.is_none() {
+        log_warn!(
+            "DDR SELECTION: song-select wheel highlight unreadable -- the stage panel uses PlayerWork's mcode (may be the previous song; AUTO can pick the wrong era)"
+        );
+    }
+    let mcode = highlighted
+        .or_else(|| governing.and_then(committed_mcode))
+        .unwrap_or(-1);
     let row = [options::row_value(0), options::row_value(1)];
     let needs_series = governing.is_some_and(|g| row[g as usize] == trigger::ROW_AUTO);
     let series = if needs_series { series_of(mcode) } else { None };
@@ -329,7 +382,7 @@ fn stage_panel_request_skin() -> Option<u8> {
     if !ENABLED.load(Ordering::Acquire) || !CAPABLE.load(Ordering::Acquire) {
         return None;
     }
-    let song = resolve_song();
+    let song = resolve_song(SongSource::SongSelect);
     let skin = song.skin();
     if skin != 0 {
         log_info!(
@@ -366,7 +419,7 @@ fn arm() {
     if !ENABLED.load(Ordering::Acquire) || !CAPABLE.load(Ordering::Acquire) {
         return;
     }
-    let song = resolve_song();
+    let song = resolve_song(SongSource::PlayEdge);
     let hosted = panel::hosted_skin();
     let r = &song.r;
     if r.skin == 0 {
@@ -402,6 +455,8 @@ fn arm() {
     }
     LEGACY_MASK.store(0, Ordering::Release);
     package_helper::reset_arm_logs();
+    combo::reset_logs();
+    score::reset_logs();
     ARMED_MCODE.store(song.mcode, Ordering::Release);
     ARMED_SKIN.store(r.skin, Ordering::Release);
     // Usually already hosted by the song-select request; otherwise before
@@ -432,6 +487,7 @@ fn disarm(reason: &str) {
     // pending marker post-pass.
     stage_frame::restore();
     gauge::restore();
+    song_info::restore();
     markers::reset();
     // Restore World's code sounds (no-op when nothing was silenced).
     sound::code_se::sync();
@@ -573,6 +629,9 @@ impl Mod for DdrSelectionMod {
         markers::init(sites.records_shared_off, sites.records_side_off);
         stage_frame::init(ctx.signatures);
         gauge::init(ctx.signatures);
+        combo::init(ctx.signatures);
+        score::init(ctx.signatures);
+        song_info::init(ctx.signatures);
         panel::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
@@ -607,6 +666,8 @@ impl Mod for DdrSelectionMod {
         if play != 0 && crate::services::game_audio::is_available() {
             if sound::afp_route::install(play as *const u8) {
                 sound::bank::start_build();
+                // A3's announcer / crowd plays from the era bank.
+                sound::call_voice::init();
             }
         } else if play != 0 {
             log_warn!("DDR SELECTION: game audio service unavailable -- no era bank");
@@ -614,6 +675,8 @@ impl Mod for DdrSelectionMod {
         intro::start();
         markers::start();
         gauge::start();
+        combo::start();
+        score::start();
         panel::start();
         movie_sel::start();
         panel::set_enabled(true);
@@ -632,6 +695,7 @@ impl Mod for DdrSelectionMod {
     }
 
     fn disable(&mut self) {
+        sound::call_voice::shutdown();
         intro::stop();
         movie_sel::stop();
         panel::set_enabled(false);

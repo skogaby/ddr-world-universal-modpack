@@ -114,6 +114,15 @@
 //!   marker post-pass); `set_marker` writes a key through the setter
 //!   subscribers so every mod's rewrite composes.
 //!
+//! - **call_voice_hooks** — The ONE owner of the detour on World's gameplay
+//!   announcer (`CallVoiceActor::onUpdate`): announcer_mute's mute predicate
+//!   and ddr_selection's A3 announcer override.
+//! - **combo_hooks** — The ONE owner of the detours on World's gameplay
+//!   `ComboActor`: the digit refresh (s_marvelous' all-S-Marvelous repaint,
+//!   refresh POST) and the actor's init / finalize / update / msg
+//!   (ddr_selection's legacy A3 combo, which overrides a legacy actor's
+//!   refresh / update / combo message so World's code never reaches it).
+//!
 //! - **bottom_text** — Multi-contributor hide of the bottom-of-screen status
 //!   readouts (centre network-status / CREDIT / COIN line, P1/P2 PASELI
 //!   corners, attract-idle SOFTWARE/SYSTEM/HARDWARE ID lines). One detour on
@@ -131,7 +140,9 @@ pub mod avs_layeredfs;
 pub mod bm2d_api;
 pub mod bm2d_package;
 pub mod bottom_text;
+pub mod call_voice_hooks;
 pub mod chart_length;
+pub mod combo_hooks;
 pub mod cull_window;
 pub mod custom_options;
 pub mod custom_options_persistence;

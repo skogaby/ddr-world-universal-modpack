@@ -213,6 +213,10 @@ fn classify(name: &str) -> Option<ElementKind> {
         "dance_judge_for_freeze" => Some(ElementKind::FreezeJudge),
         "dance_fast_slow" => Some(ElementKind::FastSlow),
         "dance_score_compare" => Some(ElementKind::Pacemaker),
+        // DDR SELECTION's legacy combo: World's ComboActor creates A3's one
+        // clip (export `dance_combo` of `dance_combo000N`) instead of
+        // `dance_combo_root1..3`; no stock path creates this name.
+        "dance_combo" => Some(ElementKind::Combo),
         _ if name.starts_with("dance_combo_root") => Some(ElementKind::Combo),
         _ => None,
     }

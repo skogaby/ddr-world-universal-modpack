@@ -220,6 +220,135 @@ pub struct DdrSelGaugeSites {
     pub clip_set_scale_vslot: usize,
 }
 
+/// World's `sequence::dance::CallVoiceActor` — the in-game announcer
+/// (`derive_call_voice`, from the RTTI vtable). The actor keeps A3's field
+/// layout on every build (checked by the derivation, see there).
+#[derive(Clone, Copy, Debug)]
+pub struct CallVoiceSites {
+    /// `onUpdate` (vtable slot 6) — the per-frame announcer
+    /// (== the `announcer_dispatcher` AOB).
+    pub update: *const u8,
+    /// `bool is_playing(AudioManager*, u32 handle)` (the voice guard's call).
+    pub is_playing: *const u8,
+    /// The audio-manager pointer global the guard passes.
+    pub audio_manager_global: *const u8,
+    /// The AVS lock-id global (`> 0` ⇒ lock / unlock around sound calls).
+    pub lock_count: *const u8,
+    /// IAT slots of libavs ordinals 16 / 17 (`lock(id)` / `unlock(id)`).
+    pub lock_iat: *const u8,
+    pub unlock_iat: *const u8,
+}
+
+/// World's `ComboActor` (`derive_combo_actor`, from the RTTI vtable) — the
+/// four functions `services::combo_hooks` detours and the counter fields.
+#[derive(Clone, Copy, Debug)]
+pub struct ComboActorSites {
+    /// `onInitialize` (slot 4), `onFinalize` (slot 5), `onUpdate` (slot 6),
+    /// `onMessage` (slot 8).
+    pub init: *const u8,
+    pub finalize: *const u8,
+    pub update: *const u8,
+    pub msg: *const u8,
+    /// i32 combo count and worst-grade index (0..=3; 0xFF = none) — written by
+    /// the msg-0x1033 case, the worst grade saved at finalize.
+    pub combo_off: usize,
+    pub worst_off: usize,
+    /// u8 set by msg 0x103C (game over), read by the update.
+    pub gameover_off: usize,
+}
+
+/// ddr_selection's legacy-combo sites inside World's `ComboActor::onInitialize`
+/// (`derive_ddr_sel_combo`; `research/legacy-combo.md` §5).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelComboSites {
+    pub actor: ComboActorSites,
+    /// `MOV R15D,2; LEA R13D,[R15+1]; LEA RBP,[R14+disp32]` (17 bytes) — the
+    /// three-root loop head (count imm at +2, first-root disp at +13).
+    pub loop_head: *const u8,
+    /// `LEA RDX,[rip+"dance_combo_root%d"]` (7 bytes) — after `MOV R8D,0x12`.
+    pub root_fmt_lea: *const u8,
+    /// `record_value* (side_holder, const char* base)` — the LayoutActor
+    /// record lookup (skin at value+0x28).
+    pub record_fn: *const u8,
+    /// `const i32* (side_holder, const char* key)` — the marker lookup.
+    pub marker_fn: *const u8,
+    /// Actor field holding the side holder (`**(actor+off)` = side).
+    pub side_off: usize,
+    /// First root (root1) and last root (root3) fields; stride 8.
+    pub root1_off: usize,
+    pub root3_off: usize,
+    /// `CMovieClip` vslots: SetPosition `(this, i32, i32)`, SetColor
+    /// `(this, f32 a, f32 r, f32 g, f32 b)`; root MovieClip id field.
+    pub clip_set_position_vslot: usize,
+    pub clip_set_color_vslot: usize,
+    pub clip_root_mc_off: usize,
+}
+
+/// ddr_selection's legacy-score sites in World's `ScoreActor`
+/// (`derive_ddr_sel_score`; `research/legacy-score.md` §5).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelScoreSites {
+    /// `onInitialize` (slot 4), the digit refresh (slot 7), `onMessage` (slot 8).
+    pub init: *const u8,
+    pub digits: *const u8,
+    pub msg: *const u8,
+    /// The three clip creates in the init: `MOV R9D,7; LEA R8,[rip+name]`
+    /// (13 bytes; priority imm at +2, name disp32 at +9) for `dance_score`,
+    /// `dance_difficulty`, `dance_name`.
+    pub create_score: *const u8,
+    pub create_difficulty: *const u8,
+    pub create_name: *const u8,
+    /// `record_value* (side_holder, const char* base)` — the LayoutActor
+    /// record lookup the init calls first (skin at value+0x28).
+    pub record_fn: *const u8,
+    /// Actor fields: side holder, record skin, level, score target, displayed
+    /// score (`-1` = repaint all), difficulty, the three clips, EX flag.
+    pub side_off: usize,
+    pub skin_off: usize,
+    pub level_off: usize,
+    pub target_off: usize,
+    pub displayed_off: usize,
+    pub difficulty_off: usize,
+    pub score_clip_off: usize,
+    pub difficulty_clip_off: usize,
+    pub name_clip_off: usize,
+    pub ex_off: usize,
+}
+
+/// ddr_selection's legacy song-info patch site (`derive_ddr_sel_song_info`):
+/// in `SongInfoActor::onInitialize`, `LEA RAX,["dance_song_info_single"]; LEA
+/// R8,["dance_song_info_double"]; TEST; CMOVNE; MOV [RSP+0x20],1; MOV R9D,5`
+/// (35 bytes: single disp32 at +3, double disp32 at +10, priority imm at +31).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelSongInfoSites {
+    pub site: *const u8,
+    /// Skins 3–5 (A3's `dance_song_info0000_v2` panel with title / artist
+    /// text) — `None` when that optional group did not resolve.
+    pub panel: Option<DdrSelSongInfoPanelSites>,
+}
+
+/// ddr_selection's legacy song-info PANEL sites (skins 3–5,
+/// `derive_ddr_sel_song_info_panel`) — every place World's SongInfoActor /
+/// SongInfoChild differs from A3's for the `0000` panel (RE:
+/// `.agents/planning/2026-09-22-ddr-selection/research/legacy-score.md` §7).
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelSongInfoPanelSites {
+    /// The imm32 of `MOV R9D,4` (the SongInfoChild ctor's font id; A3: 3).
+    pub font_imm: *const u8,
+    /// The `JNZ rel8` after `TEST r8,r8` (style single ⇒ skip the white text
+    /// colour write).
+    pub color_jcc: *const u8,
+    /// The child's `LEA reg,[rip+name]` loads: ctor `music_usr` ×2,
+    /// `artist_usr` ×2, then update (vtable slot 6) the same (disp32 at +3).
+    pub name_leas: [*const u8; 8],
+    /// The text-create helper's `MOV [reg+0xA8],<zero reg>` (7 bytes — the
+    /// horizontal alignment; A3: 1 = centred).
+    pub align_store: *const u8,
+    /// The helper's `SUB r32,r32` (2 bytes — World moves the text box one
+    /// placeholder width left; A3 centres it on the placeholder).
+    pub x_offset_sub: *const u8,
+}
+
 /// ddr_selection's legacy stage-frame patch sites (`derive_ddr_sel_stage_frame`).
 #[derive(Clone, Copy, Debug)]
 pub struct DdrSelStageFrameSites {
@@ -3220,6 +3349,13 @@ impl SignatureStore {
         self.derive_ddr_sel_stage_frame();
         // Consumes the gauge-family RTTI vtables (find_gauge_vtables, above).
         self.derive_ddr_sel_gauge();
+        self.derive_combo_actor();
+        self.derive_call_voice();
+        // Consumes derive_combo_actor.
+        self.derive_ddr_sel_combo();
+        // Consumes score_actor_vtable (find_gauge_vtables, above).
+        self.derive_ddr_sel_score();
+        self.derive_ddr_sel_song_info();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -6828,6 +6964,918 @@ impl SignatureStore {
             life_clip_off: self.published_value("ddr_sel_life_gauge_clip_off")?,
             clip_root_mc_off: self.published_value("ddr_sel_clip_root_mc_off")?,
             clip_set_scale_vslot: self.published_value("ddr_sel_clip_set_scale_vslot")?,
+        })
+    }
+
+    /// Derive World's `CallVoiceActor` (the announcer) from its RTTI vtable
+    /// (consumer: `services::call_voice_hooks`). All-or-nothing:
+    ///
+    /// * `onUpdate` = slot 6; when the `announcer_dispatcher` AOB resolved it
+    ///   must be the same function;
+    /// * A3's field layout, checked by the exact instructions World's
+    ///   `onUpdate` uses (each exactly once, identical on 20250805 …
+    ///   20260915): step state `MOVZX EAX,word [RCX+0x82]; MOV ECX,[RCX+RAX*8
+    ///   +0x58]`, combos `LEA RDX,[RBX+0xB0]` / `LEA RCX,[RBX+0xA4]`,
+    ///   milestone `MOV ECX,[RBX+0x98]`, gauges `MOVSS XMM0,[RBX+0xA0]` /
+    ///   `COMISS XMM0,[RBX+0xAC]`, mutes `CMP byte [RBX+0x9C]/[RBX+0x9D],0`,
+    ///   time `CMP [RBX+0x88],ECX`, was-low `MOV byte [RBX+0x9E],1`, regain
+    ///   gate `CMP dword [RBX+0x8C],0x4E20`;
+    /// * the voice guard = the CALL right after `LEA reg,["vo_ingame_state_01_
+    ///   highest"]`; inside it the one `MOV ECX,[cnt]; TEST; JLE; CALL
+    ///   [lock]; NOP; MOV EDX,EDI; MOV RCX,[mgr]; CALL is_playing; MOVZX
+    ///   EDI,AL; MOV ECX,[cnt]; TEST; JLE; CALL [unlock]` (both counter loads
+    ///   the same global; `mgr` == `audio_manager_global` when that resolved).
+    fn derive_call_voice(&mut self) {
+        const TAG: &str = "call_voice";
+        let Some(vt) = self.find_vtable_by_rtti(".?AVCallVoiceActor@dance@sequence@@", TAG) else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let in_mod = |p: *const u8, n: usize| (p as usize).wrapping_sub(base) + n <= size;
+        unsafe {
+            let update = *(vt as *const *const u8).add(6);
+            if !in_mod(update, 0x700) {
+                log_warn!("  [-] {} -- onUpdate outside the module", TAG);
+                return;
+            }
+            if let Some(aob) = self.get_address("announcer_dispatcher") {
+                if aob != update {
+                    log_warn!(
+                        "  [-] {} -- onUpdate +0x{:X} is not announcer_dispatcher +0x{:X}",
+                        TAG,
+                        update as usize - base,
+                        aob as usize - base
+                    );
+                    return;
+                }
+            }
+            let body = std::slice::from_raw_parts(update, 0x700);
+            let count = |hex: &[u8]| body.windows(hex.len()).filter(|w| *w == hex).count();
+            let layout: [(&str, &[u8]); 11] = [
+                (
+                    "step state",
+                    &[0x0F, 0xB7, 0x81, 0x82, 0, 0, 0, 0x8B, 0x4C, 0xC1, 0x58],
+                ),
+                ("combo 1", &[0x8D, 0x93, 0xB0, 0, 0, 0]),
+                ("combo 0", &[0x8D, 0x8B, 0xA4, 0, 0, 0]),
+                ("milestone", &[0x8B, 0x8B, 0x98, 0, 0, 0]),
+                ("gauge 0", &[0xF3, 0x0F, 0x10, 0x83, 0xA0, 0, 0, 0]),
+                ("gauge 1", &[0x0F, 0x2F, 0x83, 0xAC, 0, 0, 0]),
+                ("voice mute", &[0x80, 0xBB, 0x9C, 0, 0, 0, 0]),
+                ("se mute", &[0x80, 0xBB, 0x9D, 0, 0, 0, 0]),
+                ("time", &[0x39, 0x8B, 0x88, 0, 0, 0]),
+                ("was low", &[0xC6, 0x83, 0x9E, 0, 0, 0, 1]),
+                (
+                    "regain gate",
+                    &[0x81, 0xBB, 0x8C, 0, 0, 0, 0x20, 0x4E, 0, 0],
+                ),
+            ];
+            for (what, bytes) in layout {
+                let n = count(bytes);
+                if n != 1 {
+                    log_warn!("  [-] {} -- {} instruction x{} (want 1)", TAG, what, n);
+                    return;
+                }
+            }
+            // The voice guard.
+            let want: &[u8] = b"vo_ingame_state_01_highest";
+            let mut guards: Vec<*const u8> = Vec::new();
+            for o in 0..0x700 - 0x20 {
+                let p = update.add(o);
+                if !((*p == 0x48 || *p == 0x4C) && *p.add(1) == 0x8D && (*p.add(2) & 0xC7) == 0x05)
+                {
+                    continue;
+                }
+                let t = decode_rip_relative(p.add(3));
+                if !in_mod(t, want.len() + 1)
+                    || std::slice::from_raw_parts(t, want.len()) != want
+                    || *t.add(want.len()) != 0
+                {
+                    continue;
+                }
+                if let Some(q) = (7..0x20).map(|k| p.add(k)).find(|q| **q == 0xE8) {
+                    let g = decode_call_rel32(q);
+                    if !guards.contains(&g) {
+                        guards.push(g);
+                    }
+                }
+            }
+            let [guard] = guards.as_slice() else {
+                log_warn!("  [-] {} -- {} voice guards (want 1)", TAG, guards.len());
+                return;
+            };
+            if !in_mod(*guard, 0x100) {
+                log_warn!("  [-] {} -- voice guard outside the module", TAG);
+                return;
+            }
+            let hits = scan_pattern_all(
+                *guard,
+                0x100,
+                "8B 0D ?? ?? ?? ?? 85 C9 7E 07 FF 15 ?? ?? ?? ?? 90 8B D7 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 0F B6 F8 8B 0D ?? ?? ?? ?? 85 C9 7E 06 FF 15 ?? ?? ?? ??",
+            );
+            let [hit] = hits.as_slice() else {
+                log_warn!(
+                    "  [-] {} -- {} is-playing blocks in the guard (want 1)",
+                    TAG,
+                    hits.len()
+                );
+                return;
+            };
+            let m = hit.address as *const u8;
+            let cnt = decode_rip_relative(m.add(2));
+            let lock_iat = decode_rip_relative(m.add(12));
+            let mgr = decode_rip_relative(m.add(22));
+            let is_playing = decode_call_rel32(m.add(26));
+            let cnt2 = decode_rip_relative(m.add(36));
+            let unlock_iat = decode_rip_relative(m.add(46));
+            if cnt != cnt2 {
+                log_warn!("  [-] {} -- lock counters disagree", TAG);
+                return;
+            }
+            if !in_mod(is_playing, 0x40)
+                || !in_mod(mgr, 8)
+                || !in_mod(cnt, 4)
+                || !in_mod(lock_iat, 8)
+                || !in_mod(unlock_iat, 8)
+            {
+                log_warn!("  [-] {} -- guard operands outside the module", TAG);
+                return;
+            }
+            if let Some(g) = self.get_address("audio_manager_global") {
+                if g != mgr {
+                    log_warn!(
+                        "  [-] {} -- guard manager +0x{:X} is not audio_manager_global +0x{:X}",
+                        TAG,
+                        mgr as usize - base,
+                        g as usize - base
+                    );
+                    return;
+                }
+            }
+            for (n, p) in [
+                ("call_voice_update", update),
+                ("call_voice_guard", *guard),
+                ("call_voice_is_playing", is_playing),
+                ("call_voice_audio_manager", mgr),
+                ("call_voice_lock_count", cnt),
+                ("call_voice_lock_iat", lock_iat),
+                ("call_voice_unlock_iat", unlock_iat),
+            ] {
+                self.resolved.insert(n.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", n, p as usize - base);
+            }
+        }
+    }
+
+    /// Everything [`derive_call_voice`] produced, or `None`.
+    pub fn call_voice_sites(&self) -> Option<CallVoiceSites> {
+        Some(CallVoiceSites {
+            update: self.get_address("call_voice_update")?,
+            is_playing: self.get_address("call_voice_is_playing")?,
+            audio_manager_global: self.get_address("call_voice_audio_manager")?,
+            lock_count: self.get_address("call_voice_lock_count")?,
+            lock_iat: self.get_address("call_voice_lock_iat")?,
+            unlock_iat: self.get_address("call_voice_unlock_iat")?,
+        })
+    }
+
+    /// Derive World's `ComboActor` functions and counter fields from its RTTI
+    /// vtable (consumer: `services::combo_hooks`). All-or-nothing; the four
+    /// functions must sit inside the module and each field is decoded from
+    /// the instruction that uses it (identical on 20250805 … 20260915):
+    ///
+    /// * msg: `SUB EDX,0x1033` (the combo case), `MOV [RDI+combo],EAX` after
+    ///   `MOV EAX,[R8+4]`, `MOV ECX,[RDI+worst]; CMP ECX,0xFF`, and the 0x103C
+    ///   case's `MOV byte [RCX+gameover],1`;
+    /// * update: `CMP byte [RCX+gameover],0` (must agree with the msg).
+    fn derive_combo_actor(&mut self) {
+        const TAG: &str = "combo_actor";
+        let Some(vt) = self.find_vtable_by_rtti(".?AVComboActor@dance@sequence@@", TAG) else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) + 0x100 < size;
+        unsafe {
+            let slot = |i: usize| *(vt as *const *const u8).add(i);
+            let (init, finalize, update, msg) = (slot(4), slot(5), slot(6), slot(8));
+            if ![init, finalize, update, msg].iter().all(|p| inside(*p)) {
+                log_warn!("  [-] {} -- vtable slots outside the module", TAG);
+                return;
+            }
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let one = |f: *const u8, len: usize, pat: &str| -> Option<*const u8> {
+                match scan_pattern_all(f, len, pat).as_slice() {
+                    [m] => Some(m.address as *const u8),
+                    _ => None,
+                }
+            };
+            let case_1033 = one(msg, 0x20, "81 EA 33 10 00 00");
+            let combo = one(msg, 0x80, "41 8B 40 04 89 47 ??").map(|p| *p.add(6) as usize);
+            let worst = one(msg, 0x80, "8B 4F ?? 81 F9 FF 00 00 00").map(|p| *p.add(2) as usize);
+            let go_msg = one(msg, 0x40, "C6 81 ?? ?? 00 00 01").map(|p| rd(p.add(2)));
+            let go_upd = one(update, 0x20, "80 B9 ?? ?? 00 00 00").map(|p| rd(p.add(2)));
+            let (Some(_), Some(combo), Some(worst), Some(go), Some(go_upd)) =
+                (case_1033, combo, worst, go_msg, go_upd)
+            else {
+                log_warn!(
+                    "  [-] {} -- msg / update shape not recognised (0x1033 case, combo / worst / game-over fields)",
+                    TAG
+                );
+                return;
+            };
+            if go != go_upd || worst != combo + 4 || !(0x40..0x200).contains(&go) {
+                log_warn!(
+                    "  [-] {} -- implausible fields (combo 0x{:X}, worst 0x{:X}, game over 0x{:X} / 0x{:X})",
+                    TAG,
+                    combo,
+                    worst,
+                    go,
+                    go_upd
+                );
+                return;
+            }
+            self.resolved.insert("combo_actor_vtable".into(), vt);
+            for (name, p) in [
+                ("combo_actor_init", init),
+                ("combo_actor_finalize", finalize),
+                ("combo_actor_update", update),
+                ("combo_actor_msg", msg),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, (p as usize) - base);
+            }
+            for (name, v) in [
+                ("combo_actor_combo_off", combo),
+                ("combo_actor_worst_off", worst),
+                ("combo_actor_gameover_off", go),
+            ] {
+                self.publish_value(name, v);
+            }
+        }
+    }
+
+    /// Everything [`derive_combo_actor`] produced, or `None`.
+    pub fn combo_actor_sites(&self) -> Option<ComboActorSites> {
+        Some(ComboActorSites {
+            init: self.get_address("combo_actor_init")?,
+            finalize: self.get_address("combo_actor_finalize")?,
+            update: self.get_address("combo_actor_update")?,
+            msg: self.get_address("combo_actor_msg")?,
+            combo_off: self.published_value("combo_actor_combo_off")?,
+            worst_off: self.published_value("combo_actor_worst_off")?,
+            gameover_off: self.published_value("combo_actor_gameover_off")?,
+        })
+    }
+
+    /// Derive the sites ddr_selection's legacy combo patches / calls inside
+    /// World's `ComboActor::onInitialize` (`research/legacy-combo.md` §5).
+    /// All-or-nothing; every site is found by content inside the init
+    /// (string-identity-gated LEAs, exact loop head), identical on all five
+    /// sweep builds.
+    fn derive_ddr_sel_combo(&mut self) {
+        const TAG: &str = "ddr_sel_combo";
+        let Some(actor) = self.combo_actor_sites() else {
+            log_warn!("  [-] {} -- combo_actor unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let init = actor.init;
+        const SPAN: usize = 0x400;
+        if (init as usize - base) + SPAN + 0x40 > size {
+            log_warn!("  [-] {} -- init too close to the module end", TAG);
+            return;
+        }
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) + 0x40 < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        unsafe {
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let one = |pat: &str| -> Option<*const u8> {
+                match scan_pattern_all(init, SPAN, pat).as_slice() {
+                    [m] => Some(m.address as *const u8),
+                    _ => None,
+                }
+            };
+            // `LEA RDX,[rip+"<want>"]` followed within 12 bytes by a CALL.
+            let lea_call = |want: &[u8]| -> Option<(*const u8, *const u8)> {
+                let hits: Vec<(*const u8, *const u8)> =
+                    scan_pattern_all(init, SPAN, "48 8D 15 ?? ?? ?? ??")
+                        .into_iter()
+                        .map(|m| m.address as *const u8)
+                        .filter(|p| cstr_is(decode_rip_relative(p.add(3)), want))
+                        .filter_map(|p| {
+                            (7..19usize)
+                                .map(|i| p.add(i))
+                                .find(|q| **q == 0xE8)
+                                .map(|q| (p, decode_call_rel32(q)))
+                        })
+                        .collect();
+                (hits.len() == 1).then(|| hits[0])
+            };
+            let loop_head = one("41 BF 02 00 00 00 45 8D 6F 01 49 8D AE ?? ?? 00 00");
+            let fmt = one("41 B8 12 00 00 00 48 8D 15 ?? ?? ?? ??")
+                .map(|p| p.add(6))
+                .filter(|p| cstr_is(decode_rip_relative(p.add(3)), b"dance_combo_root%d"));
+            let record = lea_call(b"dance_combo");
+            let marker = lea_call(b"combo");
+            // Side holder: `MOV RCX,[R14+disp8]` between the record LEA and its CALL.
+            let side_off = record.and_then(|(lea, _)| {
+                (7..12usize)
+                    .map(|i| lea.add(i))
+                    .find(|q| std::slice::from_raw_parts(*q, 3) == [0x49, 0x8B, 0x4E])
+                    .map(|q| *q.add(3) as usize)
+            });
+            let set_pos = marker.and_then(|(lea, _)| {
+                match scan_pattern_all(lea, 0x40, "44 8B 43 04 8B 13 41 FF 51 ??").as_slice() {
+                    [m] => Some(*m.address.add(9) as usize),
+                    _ => None,
+                }
+            });
+            let set_color = one("0F 28 CF FF 90 ?? ?? 00 00").map(|p| rd(p.add(5)));
+            let root_mc = one("4C 8B 45 00 41 8B 98 ?? ?? 00 00").map(|p| rd(p.add(7)));
+            // Loop tail: the refresh call (`combo > 0`), then `DEC R13D; SUB
+            // RBP,8; DEC R15; JNS head` — the count the head patch zeroes.
+            let steps_back = one("49 8B CE E8 ?? ?? ?? ?? 41 FF CD 48 83 ED 08 49 FF CF 0F 89")
+                .filter(|p| {
+                    self.get_address("combo_digit_refresh")
+                        .is_none_or(|r| decode_call_rel32(p.add(3)) == r)
+                });
+            let (
+                Some(loop_head),
+                Some(fmt),
+                Some((_, record_fn)),
+                Some((_, marker_fn)),
+                Some(side_off),
+                Some(set_pos),
+                Some(set_color),
+                Some(root_mc),
+                Some(_),
+            ) = (
+                loop_head, fmt, record, marker, side_off, set_pos, set_color, root_mc, steps_back,
+            )
+            else {
+                log_warn!(
+                    "  [-] {} -- init shape not recognised (loop head / \"dance_combo_root%d\" / record / marker / SetPosition / SetColor / root MC / loop tail + refresh call)",
+                    TAG
+                );
+                return;
+            };
+            let root3 = rd(loop_head.add(13));
+            let root1 = root3.wrapping_sub(16);
+            let plausible = |v: usize| (0x40..0x200).contains(&v);
+            if !inside(record_fn)
+                || !inside(marker_fn)
+                || !plausible(side_off)
+                || !plausible(root1)
+                || root1 <= side_off
+                || root1 <= actor.worst_off
+                || set_pos % 8 != 0
+                || set_color % 8 != 0
+                || !(0x20..0x200).contains(&set_color)
+                || !(0x100..0x200).contains(&root_mc)
+            {
+                log_warn!(
+                    "  [-] {} -- implausible values (side 0x{:X}, roots 0x{:X}..0x{:X}, SetPosition 0x{:X}, SetColor 0x{:X}, root MC 0x{:X})",
+                    TAG, side_off, root1, root3, set_pos, set_color, root_mc
+                );
+                return;
+            }
+            for (name, p) in [
+                ("ddr_sel_combo_loop_head", loop_head),
+                ("ddr_sel_combo_root_fmt_lea", fmt),
+                ("ddr_sel_combo_record_fn", record_fn),
+                ("ddr_sel_combo_marker_fn", marker_fn),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, (p as usize) - base);
+            }
+            for (name, v) in [
+                ("ddr_sel_combo_side_off", side_off),
+                ("ddr_sel_combo_root1_off", root1),
+                ("ddr_sel_combo_root3_off", root3),
+                ("ddr_sel_combo_set_position_vslot", set_pos),
+                ("ddr_sel_combo_set_color_vslot", set_color),
+                ("ddr_sel_combo_root_mc_off", root_mc),
+            ] {
+                self.publish_value(name, v);
+            }
+        }
+    }
+
+    /// Derive the sites ddr_selection's legacy score port needs in World's
+    /// `ScoreActor` (`research/legacy-score.md` §5). All-or-nothing, from the
+    /// RTTI vtable (slots 4 / 7 / 8); every field decoded from the
+    /// instruction that uses it. Identical on all five sweep builds.
+    fn derive_ddr_sel_score(&mut self) {
+        const TAG: &str = "ddr_sel_score";
+        let Some(vt) = self.get_address("score_actor_vtable") else {
+            log_warn!("  [-] {} -- score_actor_vtable unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) + 0x600 < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            (p as usize).wrapping_sub(base) + want.len() + 1 < size
+                && unsafe {
+                    std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0
+                }
+        };
+        unsafe {
+            let slot = |i: usize| *(vt as *const *const u8).add(i);
+            let (init, digits, msg) = (slot(4), slot(7), slot(8));
+            if ![init, digits, msg].iter().all(|p| inside(*p)) {
+                log_warn!("  [-] {} -- vtable slots outside the module", TAG);
+                return;
+            }
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let one = |f: *const u8, len: usize, pat: &str| -> Option<*const u8> {
+                match scan_pattern_all(f, len, pat).as_slice() {
+                    [m] => Some(m.address as *const u8),
+                    _ => None,
+                }
+            };
+            // The three creates, in order, each followed by its clip store
+            // `MOV [RSI+disp],RBX` (disp8 or disp32).
+            let creates: Vec<*const u8> =
+                scan_pattern_all(init, 0x500, "41 B9 07 00 00 00 4C 8D 05 ?? ?? ?? ??")
+                    .into_iter()
+                    .map(|m| m.address as *const u8)
+                    .collect();
+            let names: [&[u8]; 3] = [b"dance_score", b"dance_difficulty", b"dance_name"];
+            let ok_creates = creates.len() == 3
+                && creates
+                    .iter()
+                    .zip(names.iter())
+                    .all(|(c, n)| cstr_is(decode_rip_relative(c.add(9)), n));
+            let store_after = |c: *const u8| -> Option<usize> {
+                for i in 13..0x80usize {
+                    let q = c.add(i);
+                    if *q == 0x48 && *q.add(1) == 0x89 {
+                        match *q.add(2) {
+                            0x5E => return Some(*q.add(3) as usize),
+                            0x9E => return Some(rd(q.add(3))),
+                            _ => {}
+                        }
+                    }
+                }
+                None
+            };
+            // `MOV RCX,[RCX+side]; CALL record; MOV R8,RAX; MOV EAX,[RAX+0x28];
+            // MOV [RSI+skin],EAX`.
+            let head = one(
+                init,
+                0x60,
+                "48 8B 49 ?? E8 ?? ?? ?? ?? 4C 8B C0 8B 40 28 89 46 ??",
+            );
+            let ex = one(init, 0x500, "88 86 ?? ?? 00 00").map(|p| rd(p.add(2)));
+            let dig = one(
+                digits,
+                0x40,
+                "48 83 79 ?? 00 48 8B F1 0F 84 ?? ?? ?? ?? 44 8B 41 ?? 8B 49 ??",
+            );
+            let case = one(msg, 0x80, "81 EA 36 10 00 00 0F 84 ?? ?? ?? ?? 83 FA 19");
+            let diff = one(
+                msg,
+                0x100,
+                "48 63 43 ?? 48 8B 74 C4 ?? 4C 8B 83 ?? ?? 00 00",
+            );
+            let level = one(msg, 0x300, "4C 63 43 ?? 44 8B 4B ??");
+            let (true, Some(head), Some(ex), Some(dig), Some(_), Some(diff), Some(level)) =
+                (ok_creates, head, ex, dig, case, diff, level)
+            else {
+                log_warn!(
+                    "  [-] {} -- ScoreActor shape not recognised (creates / record head / EX store / digit head / 0x1036+0x104F case / difficulty / level)",
+                    TAG
+                );
+                return;
+            };
+            let side_off = *head.add(3) as usize;
+            let skin_off = *head.add(17) as usize;
+            let score_clip = store_after(creates[0]);
+            let diff_clip = store_after(creates[1]);
+            let name_clip = store_after(creates[2]);
+            let (Some(score_clip), Some(diff_clip), Some(name_clip)) =
+                (score_clip, diff_clip, name_clip)
+            else {
+                log_warn!("  [-] {} -- clip stores not recognised", TAG);
+                return;
+            };
+            let dig_clip = *dig.add(3) as usize;
+            let displayed = *dig.add(17) as usize;
+            let target = *dig.add(20) as usize;
+            let difficulty = *diff.add(3) as usize;
+            let diff_clip_msg = rd(diff.add(12));
+            let level_diff = *level.add(3) as usize;
+            let level_off = *level.add(7) as usize;
+            let plausible = |v: usize| (0x40..0x200).contains(&v);
+            if dig_clip != score_clip
+                || diff_clip_msg != diff_clip
+                || level_diff != difficulty
+                || displayed != target + 4
+                || ![
+                    side_off, skin_off, level_off, target, displayed, difficulty, score_clip,
+                    diff_clip, name_clip, ex,
+                ]
+                .iter()
+                .all(|v| plausible(*v))
+            {
+                log_warn!(
+                    "  [-] {} -- implausible fields (side 0x{:X}, skin 0x{:X}, level 0x{:X}, target 0x{:X}, displayed 0x{:X}, difficulty 0x{:X}/0x{:X}, clips 0x{:X}/0x{:X}/0x{:X} (digits 0x{:X}, msg 0x{:X}), EX 0x{:X})",
+                    TAG, side_off, skin_off, level_off, target, displayed, difficulty, level_diff,
+                    score_clip, diff_clip, name_clip, dig_clip, diff_clip_msg, ex
+                );
+                return;
+            }
+            for (name, p) in [
+                ("ddr_sel_score_init", init),
+                ("ddr_sel_score_digits", digits),
+                ("ddr_sel_score_msg", msg),
+                ("ddr_sel_score_create_score", creates[0]),
+                ("ddr_sel_score_create_difficulty", creates[1]),
+                ("ddr_sel_score_create_name", creates[2]),
+                ("ddr_sel_score_record_fn", decode_call_rel32(head.add(4))),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, (p as usize) - base);
+            }
+            for (name, v) in [
+                ("ddr_sel_score_side_off", side_off),
+                ("ddr_sel_score_skin_off", skin_off),
+                ("ddr_sel_score_level_off", level_off),
+                ("ddr_sel_score_target_off", target),
+                ("ddr_sel_score_displayed_off", displayed),
+                ("ddr_sel_score_difficulty_off", difficulty),
+                ("ddr_sel_score_clip_off", score_clip),
+                ("ddr_sel_score_difficulty_clip_off", diff_clip),
+                ("ddr_sel_score_name_clip_off", name_clip),
+                ("ddr_sel_score_ex_off", ex),
+            ] {
+                self.publish_value(name, v);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_score`] produced, or `None`.
+    pub fn ddr_sel_score_sites(&self) -> Option<DdrSelScoreSites> {
+        Some(DdrSelScoreSites {
+            init: self.get_address("ddr_sel_score_init")?,
+            digits: self.get_address("ddr_sel_score_digits")?,
+            msg: self.get_address("ddr_sel_score_msg")?,
+            create_score: self.get_address("ddr_sel_score_create_score")?,
+            create_difficulty: self.get_address("ddr_sel_score_create_difficulty")?,
+            create_name: self.get_address("ddr_sel_score_create_name")?,
+            record_fn: self.get_address("ddr_sel_score_record_fn")?,
+            side_off: self.published_value("ddr_sel_score_side_off")?,
+            skin_off: self.published_value("ddr_sel_score_skin_off")?,
+            level_off: self.published_value("ddr_sel_score_level_off")?,
+            target_off: self.published_value("ddr_sel_score_target_off")?,
+            displayed_off: self.published_value("ddr_sel_score_displayed_off")?,
+            difficulty_off: self.published_value("ddr_sel_score_difficulty_off")?,
+            score_clip_off: self.published_value("ddr_sel_score_clip_off")?,
+            difficulty_clip_off: self.published_value("ddr_sel_score_difficulty_clip_off")?,
+            name_clip_off: self.published_value("ddr_sel_score_name_clip_off")?,
+            ex_off: self.published_value("ddr_sel_score_ex_off")?,
+        })
+    }
+
+    /// Derive the song-info card-name / priority site in World's
+    /// `SongInfoActor::onInitialize` (RTTI slot 4) — ddr_selection's skin-2
+    /// legacy band (`research/legacy-score.md` §6). Exactly one match whose
+    /// two LEAs name `dance_song_info_single` / `_double` and whose priority
+    /// imm is 5. Identical on all five sweep builds.
+    fn derive_ddr_sel_song_info(&mut self) {
+        const TAG: &str = "ddr_sel_song_info";
+        let Some(vt) = self.find_vtable_by_rtti(".?AVSongInfoActor@dance@sequence@@", TAG) else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            (p as usize).wrapping_sub(base) + want.len() + 1 < size
+                && unsafe {
+                    std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0
+                }
+        };
+        unsafe {
+            let init = *(vt as *const *const u8).add(4);
+            if (init as usize).wrapping_sub(base) + 0x400 > size {
+                log_warn!("  [-] {} -- init outside the module", TAG);
+                return;
+            }
+            let hits: Vec<*const u8> = scan_pattern_all(
+                init,
+                0x300,
+                "48 8D 05 ?? ?? ?? ?? 4C 8D 05 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? C7 44 24 20 01 00 00 00 41 B9 05 00 00 00",
+            )
+            .into_iter()
+            .map(|m| m.address as *const u8)
+            .filter(|p| {
+                cstr_is(decode_rip_relative(p.add(3)), b"dance_song_info_single")
+                    && cstr_is(decode_rip_relative(p.add(10)), b"dance_song_info_double")
+            })
+            .collect();
+            let [site] = hits.as_slice() else {
+                log_warn!("  [-] {} -- {} card-name sites (want 1)", TAG, hits.len());
+                return;
+            };
+            self.resolved.insert("song_info_actor_vtable".into(), vt);
+            self.resolved.insert("ddr_sel_song_info_site".into(), *site);
+            log_info!(
+                "  [+] ddr_sel_song_info_site (derived) @ +0x{:X}",
+                (*site as usize) - base
+            );
+            self.derive_ddr_sel_song_info_panel(init);
+        }
+    }
+
+    /// The skins 3–5 song-info panel group (optional, all-or-nothing; the
+    /// skin-2 band above does not depend on it). From the SongInfoActor init
+    /// (`init`): the one CALL whose target writes the SongInfoChild vtable
+    /// (the child ctor) — the `MOV R9D,imm` font before it, the `TEST
+    /// r8,r8; JNZ rel8` colour skip after its add-child CALL (the skipped
+    /// block must store `[reg+0xA0]`); in the ctor the two `music_usr` and
+    /// two `artist_usr` LEAs and the text-create helper (the CALL target that
+    /// occurs three times and holds `MOV [reg+0xA8],r12d` next to `MOV
+    /// [rcx+0xAC],1`, plus exactly one `CVTTSS2SI r32,xmm; SUB r32(same),r32`);
+    /// in the child's update (RTTI slot 6) the same four LEAs.
+    /// Byte-shape-identical on all five sweep builds.
+    fn derive_ddr_sel_song_info_panel(&mut self, init: *const u8) {
+        const TAG: &str = "ddr_sel_song_info_panel";
+        let Some(child_vt) = self.find_vtable_by_rtti(".?AVSongInfoChild@dance@sequence@@", TAG)
+        else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let in_mod = |p: *const u8, n: usize| (p as usize).wrapping_sub(base) + n <= size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            in_mod(p, want.len() + 1)
+                && unsafe {
+                    std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0
+                }
+        };
+        // Every RIP-relative `LEA r64,[rip+disp32]` in `[start, start+len)`
+        // whose target is the C string `want`.
+        let leas_to = |start: *const u8, len: usize, want: &[u8]| -> Vec<*const u8> {
+            let mut out = Vec::new();
+            unsafe {
+                for off in 0..len.saturating_sub(7) {
+                    let p = start.add(off);
+                    if (*p == 0x48 || *p == 0x4C)
+                        && *p.add(1) == 0x8D
+                        && (*p.add(2) & 0xC7) == 0x05
+                        && cstr_is(decode_rip_relative(p.add(3)), want)
+                    {
+                        out.push(p);
+                    }
+                }
+            }
+            out
+        };
+        unsafe {
+            if !in_mod(init, 0x400) {
+                log_warn!("  [-] {} -- init outside the module", TAG);
+                return;
+            }
+            // The child ctor call: its target writes the child vtable.
+            let mut ctor_calls: Vec<(*const u8, *const u8)> = Vec::new();
+            for off in 0..0x400 - 5 {
+                let p = init.add(off);
+                if *p != 0xE8 {
+                    continue;
+                }
+                let t = decode_call_rel32(p);
+                if !in_mod(t, 0x80) {
+                    continue;
+                }
+                let writes_vt = (0..0x80 - 7).any(|o| {
+                    let q = t.add(o);
+                    (*q == 0x48 || *q == 0x4C)
+                        && *q.add(1) == 0x8D
+                        && (*q.add(2) & 0xC7) == 0x05
+                        && decode_rip_relative(q.add(3)) == child_vt
+                });
+                if writes_vt {
+                    ctor_calls.push((p, t));
+                }
+            }
+            let [(call, ctor)] = ctor_calls.as_slice() else {
+                log_warn!(
+                    "  [-] {} -- {} child-ctor calls (want 1)",
+                    TAG,
+                    ctor_calls.len()
+                );
+                return;
+            };
+            let (call, ctor) = (*call, *ctor);
+            // Font: the last `MOV R9D,imm32` in the 0x20 bytes before the call.
+            let font = (1..0x20usize)
+                .map(|b| call.sub(b))
+                .find(|p| *(*p) == 0x41 && *p.add(1) == 0xB9)
+                .map(|p| p.add(2));
+            let Some(font_imm) = font.filter(|p| (*(*p as *const u32)) < 7) else {
+                log_warn!("  [-] {} -- font MOV R9D before the child ctor call", TAG);
+                return;
+            };
+            // Colour: the add-child CALL after the ctor call, then `TEST r8,r8;
+            // JNZ rel8` over the `[reg+0xA0]` colour stores.
+            let mut color_jcc = None;
+            for off in 5..0x20usize {
+                let p = call.add(off);
+                if *p != 0xE8 {
+                    continue;
+                }
+                let mut q = p.add(5);
+                if *q & 0xF0 == 0x40 {
+                    q = q.add(1);
+                }
+                let modrm = *q.add(1);
+                if *q == 0x84
+                    && modrm >> 6 == 3
+                    && (modrm >> 3) & 7 == modrm & 7
+                    && *q.add(2) == 0x75
+                {
+                    let jcc = q.add(2);
+                    let skip = *jcc.add(1) as usize;
+                    let block = std::slice::from_raw_parts(jcc.add(2), skip.min(0x60));
+                    let stores_a0 = block.windows(8).any(|w| {
+                        w[0] == 0xF3 && w[1] == 0x0F && w[2] == 0x11 && w[4..8] == [0xA0, 0, 0, 0]
+                    });
+                    if stores_a0 {
+                        color_jcc = Some(jcc);
+                    }
+                }
+                break;
+            }
+            let Some(color_jcc) = color_jcc else {
+                log_warn!("  [-] {} -- colour JNZ after the child add", TAG);
+                return;
+            };
+            if !in_mod(ctor, 0x420) {
+                log_warn!("  [-] {} -- child ctor outside the module", TAG);
+                return;
+            }
+            let upd = *(child_vt as *const *const u8).add(6);
+            if !in_mod(upd, 0x300) {
+                log_warn!("  [-] {} -- child update outside the module", TAG);
+                return;
+            }
+            let mut name_leas = [std::ptr::null::<u8>(); 8];
+            let groups = [
+                (ctor, 0x420usize, &b"music_usr"[..], 0usize),
+                (ctor, 0x420, &b"artist_usr"[..], 2),
+                (upd, 0x2F0, &b"music_usr"[..], 4),
+                (upd, 0x2F0, &b"artist_usr"[..], 6),
+            ];
+            for (start, len, want, at) in groups {
+                let hits = leas_to(start, len, want);
+                let [a, b] = hits.as_slice() else {
+                    log_warn!(
+                        "  [-] {} -- {} {} LEAs (want 2)",
+                        TAG,
+                        hits.len(),
+                        String::from_utf8_lossy(want)
+                    );
+                    return;
+                };
+                name_leas[at] = *a;
+                name_leas[at + 1] = *b;
+            }
+            // The text-create helper: a CALL target seen three times in the
+            // ctor that holds the alignment store.
+            let mut counts: Vec<(*const u8, usize)> = Vec::new();
+            for off in 0..0x420 - 5 {
+                let p = ctor.add(off);
+                if *p != 0xE8 {
+                    continue;
+                }
+                let t = decode_call_rel32(p);
+                match counts.iter_mut().find(|(a, _)| *a == t) {
+                    Some(e) => e.1 += 1,
+                    None => counts.push((t, 1)),
+                }
+            }
+            let mut helpers = Vec::new();
+            for (t, n) in counts {
+                if n != 3 || !in_mod(t, 0x200) {
+                    continue;
+                }
+                let body = std::slice::from_raw_parts(t, 0x200);
+                // `MOV [r64+0xA8],r12d` (REX.R only, ModRM mod=10 reg=100,
+                // rm ∉ {SIB}) then `MOV DWORD [RCX+0xAC],1` within 0x20.
+                let align = (0..0x80usize).find(|&o| {
+                    body[o] == 0x44
+                        && body[o + 1] == 0x89
+                        && body[o + 2] >> 6 == 2
+                        && (body[o + 2] >> 3) & 7 == 4
+                        && body[o + 2] & 7 != 4
+                        && body[o + 3..o + 7] == [0xA8, 0, 0, 0]
+                        && body[o + 7..o + 0x27]
+                            .windows(10)
+                            .any(|w| w == [0xC7, 0x81, 0xAC, 0, 0, 0, 1, 0, 0, 0])
+                        && body[..o].windows(3).any(|w| w == [0x45, 0x33, 0xE4])
+                });
+                let Some(align) = align else {
+                    continue;
+                };
+                // `CVTTSS2SI r32,xmm` + `SUB r32(same),r32` (both non-REX).
+                let subs: Vec<usize> = (0..0x200 - 6)
+                    .filter(|&o| {
+                        body[o] == 0xF3
+                            && body[o + 1] == 0x0F
+                            && body[o + 2] == 0x2C
+                            && body[o + 3] >> 6 == 3
+                            && body[o + 4] == 0x2B
+                            && body[o + 5] >> 6 == 3
+                            && (body[o + 5] >> 3) & 7 == (body[o + 3] >> 3) & 7
+                    })
+                    .collect();
+                if let [s] = subs.as_slice() {
+                    helpers.push((t, align, *s + 4));
+                }
+            }
+            let [(helper, align, sub)] = helpers.as_slice() else {
+                log_warn!("  [-] {} -- {} text helpers (want 1)", TAG, helpers.len());
+                return;
+            };
+            let names = [
+                "ddr_sel_song_info_ctor_music_lea_0",
+                "ddr_sel_song_info_ctor_music_lea_1",
+                "ddr_sel_song_info_ctor_artist_lea_0",
+                "ddr_sel_song_info_ctor_artist_lea_1",
+                "ddr_sel_song_info_update_music_lea_0",
+                "ddr_sel_song_info_update_music_lea_1",
+                "ddr_sel_song_info_update_artist_lea_0",
+                "ddr_sel_song_info_update_artist_lea_1",
+            ];
+            let mut found: Vec<(&str, *const u8)> = names
+                .iter()
+                .copied()
+                .zip(name_leas.iter().copied())
+                .collect();
+            found.push(("ddr_sel_song_info_child_ctor", ctor));
+            found.push(("ddr_sel_song_info_font_imm", font_imm));
+            found.push(("ddr_sel_song_info_color_jcc", color_jcc));
+            found.push(("ddr_sel_song_info_text_helper", *helper));
+            found.push(("ddr_sel_song_info_align_store", helper.add(*align)));
+            found.push(("ddr_sel_song_info_x_offset_sub", helper.add(*sub)));
+            for (n, p) in found {
+                self.resolved.insert(n.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", n, p as usize - base);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_song_info`] produced, or `None`.
+    pub fn ddr_sel_song_info_sites(&self) -> Option<DdrSelSongInfoSites> {
+        Some(DdrSelSongInfoSites {
+            site: self.get_address("ddr_sel_song_info_site")?,
+            panel: self.ddr_sel_song_info_panel_sites(),
+        })
+    }
+
+    fn ddr_sel_song_info_panel_sites(&self) -> Option<DdrSelSongInfoPanelSites> {
+        let lea = |n: &str| self.get_address(n);
+        Some(DdrSelSongInfoPanelSites {
+            font_imm: self.get_address("ddr_sel_song_info_font_imm")?,
+            color_jcc: self.get_address("ddr_sel_song_info_color_jcc")?,
+            name_leas: [
+                lea("ddr_sel_song_info_ctor_music_lea_0")?,
+                lea("ddr_sel_song_info_ctor_music_lea_1")?,
+                lea("ddr_sel_song_info_ctor_artist_lea_0")?,
+                lea("ddr_sel_song_info_ctor_artist_lea_1")?,
+                lea("ddr_sel_song_info_update_music_lea_0")?,
+                lea("ddr_sel_song_info_update_music_lea_1")?,
+                lea("ddr_sel_song_info_update_artist_lea_0")?,
+                lea("ddr_sel_song_info_update_artist_lea_1")?,
+            ],
+            align_store: self.get_address("ddr_sel_song_info_align_store")?,
+            x_offset_sub: self.get_address("ddr_sel_song_info_x_offset_sub")?,
+        })
+    }
+
+    /// Everything [`derive_ddr_sel_combo`] produced, or `None`.
+    pub fn ddr_sel_combo_sites(&self) -> Option<DdrSelComboSites> {
+        Some(DdrSelComboSites {
+            actor: self.combo_actor_sites()?,
+            loop_head: self.get_address("ddr_sel_combo_loop_head")?,
+            root_fmt_lea: self.get_address("ddr_sel_combo_root_fmt_lea")?,
+            record_fn: self.get_address("ddr_sel_combo_record_fn")?,
+            marker_fn: self.get_address("ddr_sel_combo_marker_fn")?,
+            side_off: self.published_value("ddr_sel_combo_side_off")?,
+            root1_off: self.published_value("ddr_sel_combo_root1_off")?,
+            root3_off: self.published_value("ddr_sel_combo_root3_off")?,
+            clip_set_position_vslot: self.published_value("ddr_sel_combo_set_position_vslot")?,
+            clip_set_color_vslot: self.published_value("ddr_sel_combo_set_color_vslot")?,
+            clip_root_mc_off: self.published_value("ddr_sel_combo_root_mc_off")?,
         })
     }
 

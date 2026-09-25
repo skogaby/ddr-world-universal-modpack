@@ -17,6 +17,7 @@
 //!   branches keep their stock path) even though `GameWork+0xA8` holds the
 //!   armed skin;
 //! * a `Legacy` package ⇒ A3's append, verbatim: probe `<arc_base>000N`
+//!   (or the row's fixed arc — A3's own skin-0 art by its full `_vN` name)
 //!   through the game's own arc probe (LayeredFS-aware, `_v3`/`_v0`/…), then
 //!   insert `records[side][base] = {"<arc_base>000N", N}` and push the name —
 //!   the `LayoutActor` loads it and releases it at finalize like any stock
@@ -161,6 +162,7 @@ unsafe fn after_stock(this: *mut u8, base: *const c_char, armed: u8) {
     match base_str {
         "dance_stage" => super::stage_frame::restore(),
         "dance_gauge" => super::gauge::restore(),
+        "dance_song_info" => super::song_info::restore(),
         "dance_common" if armed != 0 && !this.is_null() => {
             let Some(root) = super::markers::on_common_request(this, armed) else {
                 return;
@@ -202,7 +204,11 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     let Ok(base_str) = CStr::from_ptr(base).to_str() else {
         return false;
     };
-    let Decision::Legacy { arc_base, skin } = policy::decide(base_str, skin, super::adapters())
+    let Decision::Legacy {
+        arc_base,
+        skin,
+        fixed_arc,
+    } = policy::decide(base_str, skin, super::adapters())
     else {
         return false;
     };
@@ -216,7 +222,7 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
         return false;
     }
 
-    let name = policy::legacy_name(arc_base, skin);
+    let name = policy::package_name(arc_base, skin, fixed_arc);
     // Positions from the legacy layout root (danger 3–5 at `danger_gauge`):
     // never without the root, or the element lands at (0,0).
     if policy::adapter_for(base_str, skin) == Some(policy::Adapter::Markers)
@@ -250,6 +256,17 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     }
     // Same for the gauge actors' `dance_gauge` export (A3: `00_dance_gauge`).
     if base_str == "dance_gauge" && !super::gauge::apply() {
+        return false;
+    }
+    // World's ComboActor asks for A3's one clip only when the package is
+    // really there: World ships `dance_combo0005` blanked (A3 import needed).
+    if base_str == "dance_combo" && !super::combo::package_usable(skin) {
+        return false;
+    }
+    // World's SongInfoActor asks for `dance_song_info_single` / `_double`
+    // (A3's skin-2 band and skins 3-5's panel: `dance_song_info`; the panel
+    // also needs World's SongInfoChild turned into A3's).
+    if base_str == "dance_song_info" && !super::song_info::apply(skin) {
         return false;
     }
 

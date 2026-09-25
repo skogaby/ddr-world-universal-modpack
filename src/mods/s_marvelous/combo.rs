@@ -3,9 +3,11 @@
 //! carry no delta — state.rs mirrors the stock 6→0 grade fold), the combo
 //! counter shows the S-Marvelous digit set + tint instead of Marvelous.
 //!
-//! Mechanism: one post-original `GenericDetour` on the ComboActor
-//! digit-refresh (`combo_digit_refresh` signature — event-driven, called at
-//! init and on combo-changed messages with combo ≥ 4, never per-frame).
+//! Mechanism: a POST subscriber on the shared ComboActor digit-refresh
+//! detour (`services::combo_hooks`, promoted from this file; the refresh is
+//! event-driven — init and combo-changed messages with combo ≥ 4, never
+//! per-frame). A DDR SELECTION legacy combo never reaches World's refresh,
+//! so this never runs for it.
 //! Post-original, when the stock worst-judgement index says Marvelous tier
 //! (`this+0x6C == 0`) AND the side's all-S-Marv bit holds:
 //!
@@ -30,18 +32,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use retour::GenericDetour;
-
 use crate::core::signatures::SignatureStore;
-use crate::services::bm2d_api;
+use crate::services::{bm2d_api, combo_hooks};
 use crate::{log_info, log_warn};
 
 use super::state;
-
-type ComboRefreshFn = unsafe extern "C" fn(*mut u8);
-
-static DETOUR: once_cell::sync::OnceCell<GenericDetour<ComboRefreshFn>> =
-    once_cell::sync::OnceCell::new();
 
 /// Whether the digit textures staged successfully (set at enable). The
 /// override declines without it so we never paint half a digit set.
@@ -73,41 +68,20 @@ pub fn set_assets_ready(ready: bool) {
     ASSETS_READY.store(ready, Ordering::Release);
 }
 
-pub fn install(signatures: &SignatureStore) -> bool {
-    let Some(target) = signatures.get_address("combo_digit_refresh") else {
-        log_warn!("SMarvelous: combo_digit_refresh unresolved — combo stays stock");
+/// Subscribe the repaint to the shared combo-refresh detour
+/// (`services::combo_hooks` — the one owner of the ComboActor detours; the
+/// POST subscriber runs after World's repaint, exactly like the former
+/// private detour).
+pub fn install(_signatures: &SignatureStore) -> bool {
+    combo_hooks::subscribe_refresh_post(override_if_all_smarv);
+    if !combo_hooks::acquire_refresh() {
+        log_warn!(
+            "SMarvelous: combo_digit_refresh unresolved or detour failed — combo stays stock"
+        );
         return false;
-    };
-    let target: ComboRefreshFn = unsafe { std::mem::transmute(target) };
-    match unsafe { GenericDetour::new(target, combo_refresh_hook) } {
-        Ok(detour) => {
-            if unsafe { detour.enable() }.is_err() {
-                log_warn!("SMarvelous: combo refresh detour enable failed — combo stays stock");
-                return false;
-            }
-            let _ = DETOUR.set(detour);
-            log_info!("SMarvelous: combo digit refresh detour installed");
-            true
-        }
-        Err(e) => {
-            log_warn!(
-                "SMarvelous: combo refresh detour failed: {:?} — combo stays stock",
-                e
-            );
-            false
-        }
     }
-}
-
-unsafe extern "C" fn combo_refresh_hook(actor: *mut u8) {
-    // Original FIRST — the stock repaint (art + tint) must precede the
-    // override so declining leaves pure stock visuals.
-    if let Some(detour) = DETOUR.get() {
-        detour.call(actor);
-    }
-    if let Err(e) = std::panic::catch_unwind(|| override_if_all_smarv(actor)) {
-        let _ = e;
-    }
+    log_info!("SMarvelous: combo digit refresh subscriber registered (shared combo hooks)");
+    true
 }
 
 fn override_if_all_smarv(actor: *mut u8) {

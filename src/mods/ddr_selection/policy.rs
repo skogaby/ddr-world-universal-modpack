@@ -15,7 +15,11 @@
 //!   entry whose adapter is not available on this boot stays stock.
 //! * **The fallback is the unsuffixed World base, never `<base>0000`.** World's
 //!   arc probe (`_v3`, `_v0`, `_lite`, bare) resolves `…0000` to early-World or
-//!   A3-oldest arcs whose export names do not match World's actors.
+//!   A3-oldest arcs whose export names do not match World's actors. A row that
+//!   wants A3's own skin-0 art names the arc with its version suffix
+//!   ([`Entry::fixed_arc`], e.g. `dance_song_info0000_v2` — the file A3
+//!   opened on an HD cabinet), which the probe reaches only through its bare
+//!   rung.
 
 /// The legacy skins: 1 = 1st-5th, 2 = MAX-EXTREME, 3 = SuperNOVA, 4 = X,
 /// 5 = 2013-A. 0 = World's own UI.
@@ -54,6 +58,9 @@ pub enum Adapter {
     SongInfo = 6,
     /// Re-implemented A3 ReadyGoActor (the only `dance_message` consumer).
     ReadyGo = 7,
+    /// A3's skins 3–5 song-info panel (`dance_song_info0000_v2` + the A3
+    /// SongInfoChild text layout).
+    SongInfoPanel = 8,
 }
 
 /// Which adapters resolved on this boot. `Adapter::None` is always present.
@@ -81,6 +88,10 @@ pub struct Entry {
     /// Bit N set ⇔ skin N (1..=5) uses this row.
     pub skins: u8,
     pub adapter: Adapter,
+    /// A fixed package name instead of `<arc_base>000N` — only for A3's own
+    /// skin-0 art, and always with its explicit `_vN` suffix (never a bare
+    /// `…0000`, which World's probe would resolve to early-World art).
+    pub fixed_arc: Option<&'static str>,
 }
 
 const fn skins(list: &[u8]) -> u8 {
@@ -95,6 +106,11 @@ const fn skins(list: &[u8]) -> u8 {
 
 const ALL: u8 = skins(&[1, 2, 3, 4, 5]);
 
+/// A3's own song-info panel (skin 0), the one skins 3–5 used.
+pub const A3_SONG_INFO_PANEL: &str = "dance_song_info0000_v2";
+/// A3's pacemaker (skin 0 — the only one A3 had), used on every skin.
+pub const A3_PACEMAKER: &str = "dance_score_compare0000_v0";
+
 /// The full policy (every phase). A base may appear in several rows with
 /// disjoint skin sets (danger: skins 1–2 need nothing, 3–5 need markers).
 pub const TABLE: &[Entry] = &[
@@ -104,24 +120,28 @@ pub const TABLE: &[Entry] = &[
         arc_base: "dance_judge",
         skins: ALL,
         adapter: Adapter::None,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_fast_slow",
         arc_base: "dance_fast_slow",
         skins: ALL,
         adapter: Adapter::None,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_fullcombo",
         arc_base: "dance_fullcombo",
         skins: ALL,
         adapter: Adapter::None,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_game_over",
         arc_base: "dance_game_over",
         skins: ALL,
         adapter: Adapter::None,
+        fixed_arc: None,
     },
     // World's DanceDangerActor still has A3's skin branches: skins 1–2 draw
     // centred (no marker needed), skins 3–5 at the `danger_gauge` marker,
@@ -131,12 +151,14 @@ pub const TABLE: &[Entry] = &[
         arc_base: "dance_danger",
         skins: skins(&[1, 2]),
         adapter: Adapter::None,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_danger",
         arc_base: "dance_danger",
         skins: skins(&[3, 4, 5]),
         adapter: Adapter::Markers,
+        fixed_arc: None,
     },
     // Consumers that need a DLL adapter first.
     Entry {
@@ -144,41 +166,69 @@ pub const TABLE: &[Entry] = &[
         arc_base: "dance_gauge",
         skins: ALL,
         adapter: Adapter::Gauge,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_combo",
         arc_base: "dance_combo",
         skins: ALL,
         adapter: Adapter::Combo,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_score",
         arc_base: "dance_score",
         skins: ALL,
         adapter: Adapter::Score,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_stage",
         arc_base: "dance_stage_frame",
         skins: ALL,
         adapter: Adapter::StageFrame,
+        fixed_arc: None,
     },
     Entry {
         base: "dance_song_info",
         arc_base: "dance_song_info",
         skins: skins(&[2]),
         adapter: Adapter::SongInfo,
+        fixed_arc: None,
+    },
+    // Skins 3–5 had no song-info package of their own: A3 fell back to its
+    // own skin-0 panel, `dance_song_info0000` → `_v2` on an HD cabinet
+    // (World ships the same file byte-identical).
+    Entry {
+        base: "dance_song_info",
+        arc_base: "dance_song_info",
+        skins: skins(&[3, 4, 5]),
+        adapter: Adapter::SongInfoPanel,
+        fixed_arc: Some(A3_SONG_INFO_PANEL),
+    },
+    // The pacemaker: A3 had no per-skin art — every skin's `%04d` probe fell
+    // back to A3's own `dance_score_compare0000_v0` (World ships it
+    // byte-identical). World's NoteResultActor asks the record's package for
+    // the same export / labels / `%08d_usr` children / `dascco_*` textures and
+    // runs A3's digit + tint logic unchanged, so no adapter is needed.
+    Entry {
+        base: "dance_score_compare",
+        arc_base: "dance_score_compare",
+        skins: ALL,
+        adapter: Adapter::None,
+        fixed_arc: Some(A3_PACEMAKER),
     },
     Entry {
         base: "dance_message",
         arc_base: "dance_message",
         skins: ALL,
         adapter: Adapter::ReadyGo,
+        fixed_arc: None,
     },
     // dance_common (the layout root) is deliberately absent: World's layout
     // builder needs World's root markers; the legacy positions are applied by
     // a post-pass that reads the legacy root itself. dance_effect / bpm /
-    // filter / cover / option / score_compare have no legacy variants.
+    // filter / cover / option have no legacy variants.
 ];
 
 /// What the per-package helper does with one request.
@@ -186,8 +236,13 @@ pub const TABLE: &[Entry] = &[
 pub enum Decision {
     /// World's own behaviour (the original helper with skin 0).
     Stock,
-    /// Register `<arc_base>000N` under `base` with record skin N.
-    Legacy { arc_base: &'static str, skin: u8 },
+    /// Register `<arc_base>000N` (or `fixed_arc`) under `base` with record
+    /// skin N.
+    Legacy {
+        arc_base: &'static str,
+        skin: u8,
+        fixed_arc: Option<&'static str>,
+    },
 }
 
 /// Decide one package request. `skin` 0 or out of range ⇒ stock.
@@ -200,6 +255,7 @@ pub fn decide(base: &str, skin: u8, adapters: AdapterSet) -> Decision {
             return Decision::Legacy {
                 arc_base: e.arc_base,
                 skin,
+                fixed_arc: e.fixed_arc,
             };
         }
     }
@@ -224,6 +280,15 @@ pub fn legacy_name(arc_base: &str, skin: u8) -> String {
     format!("{}{:04}\0", arc_base, skin)
 }
 
+/// The package name for a legacy decision: the row's fixed arc, else
+/// [`legacy_name`]. NUL-terminated.
+pub fn package_name(arc_base: &str, skin: u8, fixed_arc: Option<&str>) -> String {
+    match fixed_arc {
+        Some(n) => format!("{}\0", n),
+        None => legacy_name(arc_base, skin),
+    }
+}
+
 /// Stable index of a base in the "legacy this arm" bitmask (`None` for bases
 /// the table never swaps).
 pub fn package_index(base: &str) -> Option<u32> {
@@ -239,6 +304,7 @@ pub fn package_index(base: &str) -> Option<u32> {
         "dance_stage",
         "dance_song_info",
         "dance_message",
+        "dance_score_compare",
     ];
     BASES.iter().position(|b| *b == base).map(|i| i as u32)
 }
@@ -257,6 +323,7 @@ mod tests {
             Adapter::Score,
             Adapter::StageFrame,
             Adapter::SongInfo,
+            Adapter::SongInfoPanel,
             Adapter::ReadyGo,
         ]
         .iter()
@@ -285,7 +352,8 @@ mod tests {
                     decide(base, skin, P0),
                     Decision::Legacy {
                         arc_base: base,
-                        skin
+                        skin,
+                        fixed_arc: None,
                     },
                     "{base} skin {skin}"
                 );
@@ -309,10 +377,18 @@ mod tests {
                 "dance_filter",
                 "dance_cover",
                 "dance_option",
-                "dance_score_compare",
             ] {
                 assert_eq!(decide(base, skin, P0), Decision::Stock, "{base} {skin}");
             }
+            assert_eq!(
+                decide("dance_score_compare", skin, P0),
+                Decision::Legacy {
+                    arc_base: "dance_score_compare",
+                    skin,
+                    fixed_arc: Some("dance_score_compare0000_v0"),
+                },
+                "the A3 pacemaker needs no adapter (skin {skin})"
+            );
         }
     }
 
@@ -333,22 +409,57 @@ mod tests {
     }
 
     #[test]
-    fn stage_maps_to_stage_frame_and_song_info_is_skin_2_only() {
+    fn stage_maps_to_stage_frame_and_song_info_band_is_skin_2() {
         let all = every_adapter();
         assert_eq!(
             decide("dance_stage", 1, all),
             Decision::Legacy {
                 arc_base: "dance_stage_frame",
-                skin: 1
+                skin: 1,
+                fixed_arc: None,
             }
         );
-        assert!(matches!(
+        assert_eq!(
             decide("dance_song_info", 2, all),
+            Decision::Legacy {
+                arc_base: "dance_song_info",
+                skin: 2,
+                fixed_arc: None,
+            }
+        );
+        // Skin 1 has no song info at all (World's own gate).
+        assert_eq!(decide("dance_song_info", 1, all), Decision::Stock);
+    }
+
+    #[test]
+    fn song_info_panel_is_a3s_own_v2_arc_for_skins_3_to_5() {
+        let all = every_adapter();
+        for skin in [3, 4, 5] {
+            let d = decide("dance_song_info", skin, all);
+            assert_eq!(
+                d,
+                Decision::Legacy {
+                    arc_base: "dance_song_info",
+                    skin,
+                    fixed_arc: Some("dance_song_info0000_v2"),
+                }
+            );
+            // The record keeps skin N (World's SongInfoActor takes the
+            // record's package only for a non-zero skin).
+            assert_eq!(
+                package_name("dance_song_info", skin, Some(A3_SONG_INFO_PANEL)),
+                "dance_song_info0000_v2\0"
+            );
+        }
+        // The band adapter alone does not unlock the panel, nor vice versa.
+        let band = AdapterSet::none().with(Adapter::SongInfo);
+        let panel = AdapterSet::none().with(Adapter::SongInfoPanel);
+        assert_eq!(decide("dance_song_info", 3, band), Decision::Stock);
+        assert_eq!(decide("dance_song_info", 2, panel), Decision::Stock);
+        assert!(matches!(
+            decide("dance_song_info", 4, panel),
             Decision::Legacy { .. }
         ));
-        for skin in [1, 3, 4, 5] {
-            assert_eq!(decide("dance_song_info", skin, all), Decision::Stock);
-        }
     }
 
     #[test]
@@ -363,7 +474,13 @@ mod tests {
     }
 
     #[test]
-    fn no_row_can_produce_a_0000_name() {
+    fn no_row_can_produce_a_bare_0000_name() {
+        // World's probe tries `_v3`, `_v0`, `_lite`, bare: a bare
+        // `<base>0000` lands on early-World `*0000_v3` art whose exports do
+        // not match World's actors. The suffixed path never builds one; the
+        // only deliberate `0000` names are fixed arcs of A3's own skin-0 art,
+        // and those always carry their `_vN` suffix (reached through the
+        // probe's bare rung — `dance_common0000_v2` is the proven precedent).
         for e in TABLE {
             assert_eq!(
                 e.skins & 1,
@@ -375,9 +492,26 @@ mod tests {
             for skin in 1..=SKIN_MAX {
                 if e.skins & (1 << skin) != 0 {
                     assert!(!legacy_name(e.arc_base, skin).contains("0000"));
+                    let name = package_name(e.arc_base, skin, e.fixed_arc);
+                    let name = name.trim_end_matches('\0');
+                    assert!(!name.ends_with("0000"), "{name}");
+                    if let Some(f) = e.fixed_arc {
+                        let (stem, ver) = f.rsplit_once("_v").expect(f);
+                        assert!(stem.starts_with(e.arc_base), "{f}");
+                        assert!(
+                            !ver.is_empty() && ver.bytes().all(|b| b.is_ascii_digit()),
+                            "{f}"
+                        );
+                    }
                 }
             }
         }
+        let fixed: Vec<&str> = TABLE.iter().filter_map(|e| e.fixed_arc).collect();
+        assert_eq!(
+            fixed,
+            ["dance_song_info0000_v2", "dance_score_compare0000_v0"],
+            "only A3's own song-info panel and pacemaker name a fixed arc"
+        );
     }
 
     #[test]
@@ -418,6 +552,11 @@ mod tests {
         assert_eq!(adapter_for("dance_danger", 2), Some(Adapter::None));
         assert_eq!(adapter_for("dance_danger", 3), Some(Adapter::Markers));
         assert_eq!(adapter_for("dance_stage", 4), Some(Adapter::StageFrame));
+        assert_eq!(adapter_for("dance_song_info", 2), Some(Adapter::SongInfo));
+        assert_eq!(
+            adapter_for("dance_song_info", 5),
+            Some(Adapter::SongInfoPanel)
+        );
         assert_eq!(adapter_for("dance_common", 2), None);
         assert_eq!(adapter_for("dance_judge", 0), None);
     }
@@ -431,7 +570,8 @@ mod tests {
             decide("dance_stage", 3, a),
             Decision::Legacy {
                 arc_base: "dance_stage_frame",
-                skin: 3
+                skin: 3,
+                fixed_arc: None,
             }
         );
         assert!(matches!(

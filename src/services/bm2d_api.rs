@@ -762,6 +762,13 @@ static LAYER_GET_MATRIX: OnceCell<Option<AfpLayerGetMatrixRawFn>> = OnceCell::ne
 type AfpMcLoadMovieFn = unsafe extern "C" fn(u32, u32) -> i32;
 static MC_LOAD_MOVIE: OnceCell<Option<AfpMcLoadMovieFn>> = OnceCell::new();
 
+/// `i32 afp_layer_get_info(u32 id, info*)` — the layer state the game's
+/// `CLayer` getters read (`IsVisible` = attribute bit 0 at +4, the play rate
+/// f32 at +8, the size `i16 w, h` at +0x10). Same independent-optional-cell
+/// treatment as [`LAYER_SET_COLOR`].
+type AfpLayerGetInfoFn = unsafe extern "C" fn(u32, *mut u8) -> i32;
+static LAYER_GET_INFO: OnceCell<Option<AfpLayerGetInfoFn>> = OnceCell::new();
+
 /// Resolve a named export from an already-loaded module, or None (logged).
 unsafe fn resolve_named_export(module: &str, name: &str) -> Option<*const ()> {
     use windows::core::PCSTR;
@@ -864,6 +871,16 @@ fn init_raw_layer_ops() {
         }
         let _ = LAYER_GET_MATRIX.set(get_matrix);
     }
+    if LAYER_GET_INFO.get().is_none() {
+        let get = unsafe { resolve_named_export("libafp-win64.dll", "afp_layer_get_info") }
+            .map(|f| unsafe { std::mem::transmute::<*const (), AfpLayerGetInfoFn>(f) });
+        if get.is_some() {
+            log_info!("BM2D_API: resolved afp_layer_get_info (raw layer state reads)");
+        } else {
+            log_warn!("BM2D_API: afp_layer_get_info not found — raw layer state reads disabled");
+        }
+        let _ = LAYER_GET_INFO.set(get);
+    }
     if MC_LOAD_MOVIE.get().is_none() {
         let load = unsafe { resolve_named_export("libafp-win64.dll", "afp_mc_load_movie") }
             .map(|f| unsafe { std::mem::transmute::<*const (), AfpMcLoadMovieFn>(f) });
@@ -874,6 +891,42 @@ fn init_raw_layer_ops() {
         }
         let _ = MC_LOAD_MOVIE.set(load);
     }
+}
+
+/// A layer's state as the game's `CLayer` getters read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerInfo {
+    /// Attribute bit 0 (`CLayer::IsVisible`).
+    pub visible: bool,
+    /// The play rate (`0.0` = paused).
+    pub rate: f32,
+    /// The layer size (`CLayer` vt+0x120).
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Non-owning: read a **game-owned** layer's state (`afp_layer_get_info`).
+/// `None` when the export is unavailable or the call fails.
+pub fn layer_get_info_raw(layer_id: u32) -> Option<LayerInfo> {
+    let get = LAYER_GET_INFO.get().and_then(|o| *o)?;
+    // Oversized: the game's own callers reserve 0x40 bytes.
+    let mut buf = [0u8; 0x100];
+    if unsafe { get(layer_id, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+    let i16_at = |o: usize| i16::from_le_bytes([buf[o], buf[o + 1]]) as i32;
+    Some(LayerInfo {
+        visible: u32_at(4) & 1 != 0,
+        rate: f32::from_bits(u32_at(8)),
+        width: i16_at(0x10),
+        height: i16_at(0x12),
+    })
+}
+
+/// Whether [`layer_get_info_raw`] can work.
+pub fn layer_info_available() -> bool {
+    LAYER_GET_INFO.get().is_some_and(|o| o.is_some())
 }
 
 /// Whether [`mc_load_movie`] can work (the export and the AFP-layer set).

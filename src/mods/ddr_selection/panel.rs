@@ -14,8 +14,9 @@
 //!   too late) and, when the shutter is still idle, from
 //!   `SelectMusicTerminateSequence` (scene 26). The detour sees the request
 //!   PRE-original, in the update whose state 0 reads the kind table: during
-//!   song select it resolves the song's skin right there (the confirm already
-//!   committed the song — `super::stage_panel_request_skin`), requests the era
+//!   song select it resolves the song's skin right there from the wheel's
+//!   highlighted song (`PlayerWork+0x54` is still the PREVIOUS song at that
+//!   point — `super::stage_panel_request_skin`), requests the era
 //!   packages and creates the session; later requests use the session the
 //!   25 → 26 arm created.
 //! * **Row patch, for one update only**: the default kind table's stage row
