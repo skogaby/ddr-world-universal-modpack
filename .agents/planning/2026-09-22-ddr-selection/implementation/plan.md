@@ -18,7 +18,7 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 5: Legacy stage panel, cut-in, stage voices (P2c) — cabinet-proven 2026-09-23 (run #2, rev 2: just-in-time hosting at the song-select request, adoption-gated suppressions, old builds hosted); + GLOBAL SETTINGS "Era Cut-In" ON/OFF toggle (maintainer request). Score-set contents and the SD root are follow-ups (see progress.md)
 - [x] Step 6: Legacy end banners + `_sel` movies (P2d) — cabinet-proven 2026-09-24 (runs #1–#3: CLEARED / FAILED on every skin, PRAY FOR ALL on skin 4 only — skin 1's clip has no art, maintainer decision; `_sel` movies incl. the 11 movie-less songs and the stage monitors; the stage-panel `afp_mc_get_param` log spam found in run #1 fixed). The in-lane game over needs no work (World shows it on EXTRA-stage fails only, A3 never on a normal stage — research `end-banners-sel-movies.md` §3)
 - [x] Step 7: Legacy element positions, stage frame, danger 3–5, World-only HUD hiding (P3a)
-- [ ] Step 8: Legacy life gauge (P3b)
+- [x] Step 8: Legacy life gauge (P3b)
 - [ ] Step 9: Legacy combo (P3c)
 - [ ] Step 10: Legacy score + song info (P3d)
 - [ ] Step 11: A3 announcer and crowd rules (P4)
@@ -195,6 +195,12 @@ Step 8: Legacy life gauge (P3b)
 - **Integration.** `song_reset` gauge restore unchanged.
 - **Demo.** Cabinet: NORMAL, LIFE4, RISKY, FLARE, FLOATING FLARE, GRADE per
   skin, 1P and versus.
+- **As built (2026-09-24).** `research/legacy-gauge.md` §5. Export alias =
+  a checked patch of each gauge init's clip-create LEA (→ `00_dance_gauge`)
+  scoped to the legacy `dance_gauge` records, not a CMovieClip::Create
+  dispatcher (overlay-element-styling's capture untouched); 2P mirror and the
+  skin-3 LIFE intro = post-original init detours; fills = a full-replacement
+  detour on World's fill. HD constants only.
 
 Step 9: Legacy combo (P3c)
 

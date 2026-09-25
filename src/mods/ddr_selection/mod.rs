@@ -41,6 +41,8 @@
 
 mod banner;
 pub mod banner_logic;
+mod gauge;
+pub mod gauge_math;
 mod intro;
 pub mod intro_logic;
 pub mod marker_keys;
@@ -157,6 +159,9 @@ fn adapters() -> AdapterSet {
     // marker — World's root places World's frame elsewhere.
     if stage_frame::capable() && markers::capable() {
         set = set.with(policy::Adapter::StageFrame);
+    }
+    if gauge::capable() {
+        set = set.with(policy::Adapter::Gauge);
     }
     set
 }
@@ -426,6 +431,7 @@ fn disarm(reason: &str) {
     // World's stage-frame names back (no-op when nothing is patched) and no
     // pending marker post-pass.
     stage_frame::restore();
+    gauge::restore();
     markers::reset();
     // Restore World's code sounds (no-op when nothing was silenced).
     sound::code_se::sync();
@@ -566,6 +572,7 @@ impl Mod for DdrSelectionMod {
         intro::init(ctx.signatures);
         markers::init(sites.records_shared_off, sites.records_side_off);
         stage_frame::init(ctx.signatures);
+        gauge::init(ctx.signatures);
         panel::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
@@ -606,6 +613,7 @@ impl Mod for DdrSelectionMod {
         }
         intro::start();
         markers::start();
+        gauge::start();
         panel::start();
         movie_sel::start();
         panel::set_enabled(true);

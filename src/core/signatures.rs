@@ -187,6 +187,39 @@ pub struct HudLayoutSideSites {
     pub judge_pos_vslot: usize,
 }
 
+/// ddr_selection's legacy life-gauge sites (`derive_ddr_sel_gauge`). The
+/// percent family (Normal / Grade / Flare / Immortal) shares one init and
+/// one update; LifeGaugeActor has its own init.
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelGaugeSites {
+    /// Percent-family `onInitialize` (RTTI slot 4) — post-original detour.
+    pub gauge_init: *const u8,
+    /// `LifeGaugeActor::onInitialize` (slot 4) — post-original detour.
+    pub life_init: *const u8,
+    /// The percent-family fill (`void(GaugeActor*)`, called by slot 6) — replaced
+    /// for legacy actors.
+    pub gauge_fill: *const u8,
+    /// `LEA R8,[rip+"dance_gauge"]` — the clip-create export name, in each init.
+    pub gauge_export_lea: *const u8,
+    pub life_export_lea: *const u8,
+    /// Per-side layout parent pointer (`**(actor+side_off)` = side).
+    pub side_off: usize,
+    /// Percent family: record skin, clip (`CMovieClip*`), displayed value
+    /// (f32 0..1), state, and the state → label vslot.
+    pub gauge_skin_off: usize,
+    pub gauge_clip_off: usize,
+    pub gauge_value_off: usize,
+    pub gauge_state_off: usize,
+    pub gauge_label_vslot: usize,
+    /// LifeGaugeActor: record skin and clip.
+    pub life_skin_off: usize,
+    pub life_clip_off: usize,
+    /// `CMovieClip`: the root MovieClip id (`+0x110`) and the SetScale vslot
+    /// (`vt+0xC0`, `(this, f32 sx, f32 sy)`).
+    pub clip_root_mc_off: usize,
+    pub clip_set_scale_vslot: usize,
+}
+
 /// ddr_selection's legacy stage-frame patch sites (`derive_ddr_sel_stage_frame`).
 #[derive(Clone, Copy, Debug)]
 pub struct DdrSelStageFrameSites {
@@ -3185,6 +3218,8 @@ impl SignatureStore {
         self.derive_ddr_sel_movie();
         self.derive_hud_layout();
         self.derive_ddr_sel_stage_frame();
+        // Consumes the gauge-family RTTI vtables (find_gauge_vtables, above).
+        self.derive_ddr_sel_gauge();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -6493,6 +6528,306 @@ impl SignatureStore {
         Some(DdrSelStageFrameSites {
             export_lea: self.get_address("ddr_sel_stage_frame_export_lea")?,
             texture_site: self.get_address("ddr_sel_stage_frame_texture_site")?,
+        })
+    }
+
+    /// Resolve ddr_selection's legacy life-gauge sites (RE:
+    /// `.agents/planning/2026-09-22-ddr-selection/research/legacy-gauge.md`).
+    /// All from the gauge-family RTTI vtables, no AOB: every percent-family
+    /// vtable (Normal / Grade / Flare / Immortal) must share slot 4 (init) and
+    /// slot 6 (update); in each init exactly one `LEA R8,[rip+"dance_gauge"];
+    /// MOV R9D,imm` (the clip create — the record-key and error-log LEAs are
+    /// not followed by `MOV R9D`); the fill = the one CALL target of the update
+    /// whose first 0x80 bytes load `"fill _usr"`; offsets read from the
+    /// instructions that use them (record skin store after `MOV r,[RAX+0x28]`,
+    /// clip store after the create, `LEA RAX,[RCX+value]` in the fill, the
+    /// update's `CALL [RAX+0x50]; MOV ESI,EAX; CMP [RDI+state],EAX` + the
+    /// following `CALL [R8+label]`, the init's `MOVSS XMM2,[1.0]; MOV RAX,[RCX];
+    /// MOVSS XMM1,XMM2; CALL [RAX+set_scale]`, the skin-3 block's root-MC load).
+    /// All-or-nothing.
+    fn derive_ddr_sel_gauge(&mut self) {
+        const TAG: &str = "ddr_sel_gauge";
+        let percent = [
+            "normal_gauge_vtable",
+            "grade_gauge_vtable",
+            "flare_gauge_vtable",
+            "immortal_gauge_vtable",
+        ];
+        let Some(vts) = percent
+            .iter()
+            .map(|n| self.get_address(n))
+            .collect::<Option<Vec<_>>>()
+        else {
+            log_warn!(
+                "  [-] {} -- a percent-family gauge vtable is unresolved",
+                TAG
+            );
+            return;
+        };
+        let Some(life_vt) = self.get_address("life_gauge_vtable") else {
+            log_warn!("  [-] {} -- LifeGaugeActor vtable unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) || (p as usize - base) + want.len() + 1 > size {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        unsafe {
+            let slot = |vt: *const u8, i: usize| *(vt as *const *const u8).add(i);
+            let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            let bytes = |p: *const u8, n: usize| std::slice::from_raw_parts(p, n);
+            let (init, update) = (slot(vts[0], 4), slot(vts[0], 6));
+            if vts
+                .iter()
+                .any(|v| slot(*v, 4) != init || slot(*v, 6) != update)
+                || !inside(init)
+                || !inside(update)
+            {
+                log_warn!(
+                    "  [-] {} -- percent-family vtables do not share init / update",
+                    TAG
+                );
+                return;
+            }
+            let life_init = slot(life_vt, 4);
+            if !inside(life_init) {
+                log_warn!("  [-] {} -- LifeGaugeActor init outside the module", TAG);
+                return;
+            }
+            // The clip-create export LEA (exactly one per init).
+            let export_lea = |f: *const u8| -> Option<*const u8> {
+                let hits: Vec<*const u8> =
+                    scan_pattern_all(f, 0x200, "4C 8D 05 ?? ?? ?? ?? 41 B9 ?? 00 00 00")
+                        .into_iter()
+                        .map(|m| m.address as *const u8)
+                        .filter(|p| cstr_is(decode_rip_relative(p.add(3)), b"dance_gauge"))
+                        .collect();
+                (hits.len() == 1).then(|| hits[0])
+            };
+            let (Some(g_lea), Some(l_lea)) = (export_lea(init), export_lea(life_init)) else {
+                log_warn!(
+                    "  [-] {} -- clip-create \"dance_gauge\" LEA not unique",
+                    TAG
+                );
+                return;
+            };
+            // Record skin: `MOV r32,[RAX+0x28]` then `MOV [RDI+disp32],r32`.
+            let skin_store = |f: *const u8| -> Option<usize> {
+                for i in 0..0x60usize {
+                    let p = f.add(i);
+                    if *p == 0x8B && (*p.add(1) & 0xC7) == 0x40 && *p.add(2) == 0x28 {
+                        let reg = (*p.add(1) >> 3) & 7;
+                        for j in 3..0x20usize {
+                            let q = p.add(j);
+                            if *q == 0x89 && *q.add(1) == (0x87 | (reg << 3)) {
+                                return Some(rd(q.add(2)));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            // Clip store after the create: `MOV [RDI+disp32],r64`.
+            let clip_store = |lea: *const u8| -> Option<usize> {
+                for i in 0..0x90usize {
+                    let q = lea.add(i);
+                    if *q == 0x48 && *q.add(1) == 0x89 && (*q.add(2) & 0xC7) == 0x87 {
+                        return Some(rd(q.add(3)));
+                    }
+                }
+                None
+            };
+            let (Some(g_skin), Some(l_skin), Some(g_clip), Some(l_clip)) = (
+                skin_store(init),
+                skin_store(life_init),
+                clip_store(g_lea),
+                clip_store(l_lea),
+            ) else {
+                log_warn!("  [-] {} -- skin / clip stores not recognised", TAG);
+                return;
+            };
+            // Side parent: `MOV RCX,[RCX+disp32]` right before the init's
+            // record-key LEA `LEA RDX,["dance_gauge"]`.
+            let side_off = {
+                let mut v = None;
+                for i in 0..0x40usize {
+                    let p = init.add(i);
+                    if bytes(p, 3) == [0x48, 0x8B, 0x89]
+                        && bytes(p.add(7), 3) == [0x48, 0x8D, 0x15]
+                        && cstr_is(decode_rip_relative(p.add(10)), b"dance_gauge")
+                    {
+                        v = Some(rd(p.add(3)));
+                        break;
+                    }
+                }
+                v
+            };
+            // The fill: the update's one CALL target loading "fill _usr".
+            let mut fills: Vec<*const u8> = Vec::new();
+            for i in 0..0xB00usize {
+                let p = update.add(i);
+                if *p != 0xE8 {
+                    continue;
+                }
+                let t = decode_call_rel32(p);
+                if !inside(t) || (t as usize - base) + 0x80 > size {
+                    continue;
+                }
+                let loads = scan_pattern_all(t, 0x80, "48 8D 15 ?? ?? ?? ??")
+                    .iter()
+                    .any(|m| cstr_is(decode_rip_relative(m.address.add(3)), b"fill _usr"));
+                if loads && !fills.contains(&t) {
+                    fills.push(t);
+                }
+            }
+            let [fill] = fills.as_slice() else {
+                log_warn!(
+                    "  [-] {} -- update has {} fill candidates (want 1)",
+                    TAG,
+                    fills.len()
+                );
+                return;
+            };
+            let fill = *fill;
+            let value_off = scan_pattern_all(fill, 0x40, "48 8D 81 ?? ?? 00 00")
+                .first()
+                .map(|m| rd(m.address.add(3)));
+            let clip_in_fill = scan_pattern_all(fill, 0x80, "48 8B 89 ?? ?? 00 00")
+                .first()
+                .map(|m| rd(m.address.add(3)));
+            let state = scan_pattern_all(update, 0x300, "FF 50 50 8B F0 39 87 ?? ?? 00 00 0F 84");
+            let (state_off, label_vslot) = match state.as_slice() {
+                [m] => {
+                    let so = rd(m.address.add(7));
+                    let lbl = scan_pattern_all(m.address, 0x30, "41 FF 50 ??")
+                        .first()
+                        .map(|x| *x.address.add(3) as usize);
+                    (Some(so), lbl)
+                }
+                _ => (None, None),
+            };
+            let scale = scan_pattern_all(
+                init,
+                0x300,
+                "F3 0F 10 15 ?? ?? ?? ?? 48 8B 01 F3 0F 10 CA FF 90 ?? ?? 00 00",
+            );
+            let scale_vslot = match scale.as_slice() {
+                [m] => Some(rd(m.address.add(17))),
+                _ => None,
+            };
+            // Skin-3 block: `CMP [RDI+skin],3` then a `MOV r32,[r64+root]` load.
+            let root_off = {
+                let mut v = None;
+                let cmp = [0x83, 0xBF];
+                for i in 0..0x600usize {
+                    let p = init.add(i);
+                    if bytes(p, 2) == cmp && rd(p.add(2)) == g_skin && *p.add(6) == 3 {
+                        for j in 7..0x40usize {
+                            let q = p.add(j);
+                            if matches!(*q, 0x41 | 0x44 | 0x45)
+                                && *q.add(1) == 0x8B
+                                && (*q.add(2) & 0xC0) == 0x80
+                            {
+                                v = Some(rd(q.add(3)));
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+                v
+            };
+            let (
+                Some(side_off),
+                Some(value_off),
+                Some(clip_in_fill),
+                Some(state_off),
+                Some(label_vslot),
+                Some(scale_vslot),
+                Some(root_off),
+            ) = (
+                side_off,
+                value_off,
+                clip_in_fill,
+                state_off,
+                label_vslot,
+                scale_vslot,
+                root_off,
+            )
+            else {
+                log_warn!(
+                    "  [-] {} -- side / value / state / label / SetScale / root-MC offsets not recognised",
+                    TAG
+                );
+                return;
+            };
+            let plausible = |v: usize| (0x40..0x400).contains(&v);
+            if clip_in_fill != g_clip
+                || ![
+                    side_off, g_skin, g_clip, value_off, state_off, l_skin, l_clip, root_off,
+                ]
+                .iter()
+                .all(|v| plausible(*v))
+                || label_vslot % 8 != 0
+                || scale_vslot % 8 != 0
+                || !(0x40..0x400).contains(&scale_vslot)
+            {
+                log_warn!(
+                    "  [-] {} -- implausible offsets (skin 0x{:X}/0x{:X}, clip 0x{:X}/0x{:X}/fill 0x{:X}, value 0x{:X}, state 0x{:X}, label 0x{:X}, scale 0x{:X}, root 0x{:X})",
+                    TAG, g_skin, l_skin, g_clip, l_clip, clip_in_fill, value_off, state_off, label_vslot, scale_vslot, root_off
+                );
+                return;
+            }
+            for (name, p) in [
+                ("ddr_sel_gauge_init", init),
+                ("ddr_sel_life_gauge_init", life_init),
+                ("ddr_sel_gauge_fill", fill),
+                ("ddr_sel_gauge_export_lea", g_lea),
+                ("ddr_sel_life_gauge_export_lea", l_lea),
+            ] {
+                self.resolved.insert(name.into(), p);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, (p as usize) - base);
+            }
+            for (name, v) in [
+                ("ddr_sel_gauge_side_off", side_off),
+                ("ddr_sel_gauge_skin_off", g_skin),
+                ("ddr_sel_gauge_clip_off", g_clip),
+                ("ddr_sel_gauge_value_off", value_off),
+                ("ddr_sel_gauge_state_off", state_off),
+                ("ddr_sel_gauge_label_vslot", label_vslot),
+                ("ddr_sel_life_gauge_skin_off", l_skin),
+                ("ddr_sel_life_gauge_clip_off", l_clip),
+                ("ddr_sel_clip_root_mc_off", root_off),
+                ("ddr_sel_clip_set_scale_vslot", scale_vslot),
+            ] {
+                self.publish_value(name, v);
+            }
+        }
+    }
+
+    /// Everything [`derive_ddr_sel_gauge`] produced, or `None`.
+    pub fn ddr_sel_gauge_sites(&self) -> Option<DdrSelGaugeSites> {
+        Some(DdrSelGaugeSites {
+            gauge_init: self.get_address("ddr_sel_gauge_init")?,
+            life_init: self.get_address("ddr_sel_life_gauge_init")?,
+            gauge_fill: self.get_address("ddr_sel_gauge_fill")?,
+            gauge_export_lea: self.get_address("ddr_sel_gauge_export_lea")?,
+            life_export_lea: self.get_address("ddr_sel_life_gauge_export_lea")?,
+            side_off: self.published_value("ddr_sel_gauge_side_off")?,
+            gauge_skin_off: self.published_value("ddr_sel_gauge_skin_off")?,
+            gauge_clip_off: self.published_value("ddr_sel_gauge_clip_off")?,
+            gauge_value_off: self.published_value("ddr_sel_gauge_value_off")?,
+            gauge_state_off: self.published_value("ddr_sel_gauge_state_off")?,
+            gauge_label_vslot: self.published_value("ddr_sel_gauge_label_vslot")?,
+            life_skin_off: self.published_value("ddr_sel_life_gauge_skin_off")?,
+            life_clip_off: self.published_value("ddr_sel_life_gauge_clip_off")?,
+            clip_root_mc_off: self.published_value("ddr_sel_clip_root_mc_off")?,
+            clip_set_scale_vslot: self.published_value("ddr_sel_clip_set_scale_vslot")?,
         })
     }
 

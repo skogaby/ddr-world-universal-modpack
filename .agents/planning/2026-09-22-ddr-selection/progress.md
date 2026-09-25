@@ -1,9 +1,9 @@
 # DDR SELECTION — progress
 
 Updated: 2026-09-24
-Status: Step 7 of 14 — DONE (cabinet-proven 2026-09-24, uncommitted); Step 8 not started
-NEXT ACTION: start Step 8 (legacy life gauge — `implementation/plan.md` Step 8): RE first (research doc per the Step 5–7 pattern; `research/hud-actors.md` §1 is the starting point), then implementation. When `dance_gauge` turns legacy, the `gauge` marker moves with it automatically (`marker_keys` gate).
-Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
+Status: Step 8 of 14 — DONE (cabinet-proven 2026-09-24, uncommitted); Step 9 not started
+NEXT ACTION: start Step 9 (legacy combo — `implementation/plan.md` Step 9): RE first (research doc per the Step 5–8 pattern; `research/hud-actors.md` §2 is the starting point; S-Marvelous owns a post-original detour on the combo digit refresh — promote it to `services/combo_hooks`), then implementation. When `dance_combo` turns legacy, the `combo` marker moves with it automatically (`marker_keys` gate).
+Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
 
 ## Done
 
@@ -12,7 +12,15 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## In flight
 
-- Step 7 (2026-09-24, uncommitted, cabinet-proven) — legacy element positions, legacy stage frame, danger 3–5, BPM / name hidden, per `research/hud-layout-stage-frame.md` (§11 = as built):
+- Step 8 (2026-09-24, uncommitted, cabinet-proven) — legacy life gauge for every gauge type, per `research/legacy-gauge.md` (§5 = as built):
+  - Signatures: `derive_ddr_sel_gauge` (no AOB — from the gauge RTTI vtables): `ddr_sel_gauge_init` / `ddr_sel_life_gauge_init` / `ddr_sel_gauge_fill`, the two export LEAs, offsets side 0x88 / skin 0xD4 / clip 0xB0 / value 0x94 / state 0x9C / label vslot 0x58, Life skin 0xB4 / clip 0xA8, CMovieClip root MC 0x110 / SetScale vslot 0xC0 (`DdrSelGaugeSites`). Identical on all five builds; sweep ALL GREEN.
+  - `gauge_math.rs` (pure, 6 tests; validator 92): A3's mode rule (skins 2–4 or a FLARE label ⇒ continuous; else segmented 63 × 6.984 px on skin 1, 26 × 17 px + partial cell on skin 5), both fills' scissor math incl. the 2P mirror, A3's constant bits checked.
+  - `gauge.rs` (engine): export-LEA patches (`dance_gauge` → near `00_dance_gauge`, both inits; applied by the package helper before it registers `dance_gauge000N`, failure ⇒ stock; restored on a stock request / disarm / disable); post-original percent-init detour `SetScale(-1, 1)` on 2P; post-original LifeGauge-init detour playing the skin-3 root `1p_in` / `2p_in`; full-replacement fill detour for legacy actors (World's fill otherwise). `bm2d_api::mc_set_param_ptr` (pointer params, 0x1023 scissor).
+  - `mod.rs::adapters()` gains `Gauge` ⇒ the existing `dance_gauge` policy row goes live; the `gauge` marker then moves too (Step 7 gate).
+  - HD constants only (World always creates the HD export) — A3's SD gauge not ported, like the stage frame.
+  - Gates: `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 92 tests, signature sweep ALL GREEN.
+
+- Step 7 (2026-09-24, committed, cabinet-proven) — legacy element positions, legacy stage frame, danger 3–5, BPM / name hidden, per `research/hud-layout-stage-frame.md` (§11 = as built):
   - **`src/services/hud_layout_hooks.rs`** (new, lib.rs 4h2b): the ONE owner of the `LayoutActor` marker builder + setter detours, promoted from center_arrows_single (builder pre / post, setter pre subscribers; `set_marker` runs the setter subscribers then the original ⇒ center-arrows' lane shift applies after our overwrite). center_arrows_single now subscribes (builder pre = its pass state, setter pre = its shift) and its disable only turns the subscribers off; its song-info dark-card detour stays in its own file (Step 10 will need it shared — deviation noted). No center-arrows validator exists (the plan assumed one) — its regression check is the cabinet run.
   - Signatures: AOBs `hud_layout_side_loop`, `hud_layout_reverse_store`, `hud_layout_judge_pos_call`, `ddr_sel_stage_frame_export`, `ddr_sel_stage_frame_texture` (all unique on all five builds). `derive_hud_layout` → `hud_layout_builder_entry` (the old center-arrows prologue-AOB / cluster − 0x1DC logic, moved) + all-or-nothing `hud_layout_style_off` 0x84 / `hud_layout_reverse_off` 0xE4 / `hud_layout_judge_pos_vslot` 0x298 (`HudLayoutSites`, `hud_layout_sites()`); `derive_ddr_sel_stage_frame` (RTTI StageFrameActor slot 4 / 8, strings `dance_stage` / `dast_stage_`, imm 0xB) → `ddr_sel_stage_frame_export_lea` / `_texture_site` (`DdrSelStageFrameSites`). Sweep ALL GREEN; `shape_diff`: old builds diverge only in frame displacements / after the read fields.
   - `marker_keys.rs` (pure, 10 host tests; validator 86): key → A3 marker (nesting, `{r}` reverse difficulty, lane groups), gates (package-gated keys stay World's until their adapter lands), World-only keys, root names (skin 1 = `dance_common0000_v2`), World's coord / arrow math, hidden coord.
@@ -73,6 +81,24 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
   - AGENTS.md row.
 - Front-loaded from Step 2 (maintainer request, 2026-09-22): pure `trigger.rs` (row values, AUTO table, governance incl. bot exclusion, dev-knob override; 10 tests), `options.rs` (Dynamic scalar row `ddr_selection` 0..=6, `PersistMode::Local`, overlay + in-game, `versus_mirror`), `derive_music_series_vslot` (publishes `music_series_vslot` from `flare_skill_classifier`+2: 0x88 old / 0xA0 new — sweep green), series read = `find_music_by_mcode(PlayerWork+0x54)` → entry vtable slot; label + preview textures (eng/jpn/kor) via `scripts/option_strings.py` (regeneration touched only the 6 new PNGs); `mod-config.json` `option_menu_settings` entry after `arrow_opacity`.
 - Readiness gates: `cargo check` clean, `cargo fmt` clean, `./build.sh` clean, signature sweep ALL GREEN (all derivations resolve on 20250805/20260224/20260721/20260825/20260915), `shape_diff`: `layout_package_helper` identical through 0x198 on every build; `dps_skin_table_read` diverges only at +0x153 on 20250805/20260224 (consumer reads +39/+49 only).
+
+## Cabinet test — Step 8 — PASSED 2026-09-24
+
+Deploy the DLL only (no data changes). DDR SELECTION on. Play every skin (1–5) with each gauge type you can pick: NORMAL, LIFE4, RISKY, FLARE (any level), FLOATING FLARE, GRADE — 1P and versus (2P side especially).
+
+Expect once per boot (sig log, 20260915): `[+] ddr_sel_gauge_init (derived) @ +0x73CB0`, `[+] ddr_sel_life_gauge_init (derived) @ +0x706A0`, `[+] ddr_sel_gauge_fill (derived) @ +0x74DD0`, `ddr_sel_gauge_skin_off (derived) = 0xD4`, …; then `DDR SELECTION: legacy life gauge ready (export alias, 2P mirror, A3 fills)`.
+
+Per legacy song: `gauge actors -> A3 export 00_dance_gauge`, `dance_gauge -> dance_gauge000N (skin N, side 0)` (+ side 1 in versus), `legacy gauge created (skin N, 1P)` (versus / 2P: `2P, mirrored`), `legacy gauge fill (skin N, 1P, Segmented { cells: 63, … } | Continuous, label L)`; skin 3 LIFE4 / RISKY: `legacy LIFE gauge intro 1p_in (played)`. The Step 7 summary now lists `1p:gauge` under `moved`.
+
+Check on screen:
+1. The era's life-gauge frame and bar replace World's on every skin; it sits at the era's position.
+2. **Skin 1 (1st-5th)**: the bar fills in whole cells (no partial cell) and jumps without smoothing; **skin 5 (2013-A)**: cells with a partially-drawn last cell; **skins 2–4**: a smooth bar.
+3. **2P**: the gauge is the mirror image of 1P's (fills from the right side towards the centre, like A3) — check the bar empties the correct way as you miss.
+4. Rainbow at full life, danger colours at low life; LIFE4 / RISKY show the era's life cells (4 or 8 frames) and lose them on misses; skin 3 LIFE gauges play their intro.
+5. FLARE / FLOATING FLARE / GRADE: the legacy bar with continuous fill (FLARE) — the FLARE colours / grade art are absent, as in A3; report what it looks like.
+6. Quick restart, quick fail, a fail by gauge (NORMAL + LIFE4), a stock song afterwards (World's gauge back, 2P not mirrored).
+
+Report any WARN containing `gauge`, `00_dance_gauge`, any `F:afpu-package` / crash, and anything drawn at the top-left corner.
 
 ## Cabinet test — Step 7 — PASSED 2026-09-24
 
@@ -165,6 +191,8 @@ Previous (rev 2) instructions, still valid:
 Deploy the DLL (no data changes). `ddr-selection` on, pick any era. Expect once per boot: `era bank built in N ms -- 74 cues, 207 waves, 17.2 MB (…)`, then at the next scene change `GameAudio: … claiming free sound-bank slot 4`, `CreateInMemoryWaveBank('dsel', …) hr=0x00000000`, `CreateSoundBank('dsel', …) hr=0x00000000`, `era bank 'dsel' registered in slot 4 (74/74 cues resolve)`. Play a song on a legacy skin: the full-combo splash plays `XAC_full_combo2`, the in-lane game over plays `Plate_spin3_st` (fail a song); after the song `N legacy clip sound(s) played from the era bank`. Report any `hr=0x8AC7…` or `do not resolve` line. (Rev 2: the per-cue summary `legacy clip sounds -- played from the era bank: [XAC_full_combo2 x1, …]` is logged at EVERY scene change while armed.)
 
 ## Deploy & test log
+
+- 2026-09-24 Step 8 cabinet run #1 (20260915, CrossOver): maintainer — the legacy life gauge works in every scenario tried, incl. various gauge / grade modes. Log: 10 legacy songs, `gauge actors -> A3 export 00_dance_gauge` each; created on skins 1–5, every 2P gauge `mirrored`; fills skin 1 `Segmented { cells: 63 }` (1P and 2P), skin 5 `Segmented { cells: 26, partial: true }`, skins 2–4 `Continuous`, FLARE labels (6, 15) `Continuous` on skins 1 and 5 (A3's rule). No gauge WARN, no `F:` lines. Not exercised in this log: the skin-3 LIFE4 / RISKY intro (`legacy LIFE gauge intro …` never logged — no skin-3 LIFE song played); low-risk, check opportunistically. **Step 8 ticked.**
 
 - 2026-09-24 Step 7 cabinet run #1 (20260915, CrossOver): maintainer — everything looked right (all skins, 1P / 2P, reverse, doubles, Center Arrows on / off, quick restart / fail, stock song). Log: 15 legacy songs on skins 1–5, each `legacy layout root … queued`, `stage frame -> A3 names`, and `legacy element positions … moved [stage, Np:danger_gauge, gameover, fullcombo, judge, fast_slow, filter, score_compare, arrow_raw, freeze_judge]; World's (package stock) [song_info, score, difficulty, gauge, combo]; missing []; hidden [bpm, name]` (both sides in versus); no DDR SELECTION WARN, no `F:` lines. Pacemaker at A3's spot accepted (no change requested). **Step 7 ticked.**
 

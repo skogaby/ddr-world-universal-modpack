@@ -26,7 +26,7 @@ note() { echo "[*] $*"; }
 
 # Top-level modules: name -> repo-relative path. Only dependency-free
 # modules (no `crate::` imports) can mount here.
-declare -a MODULE_NAMES=(policy trigger intro_logic panel_logic banner_logic sel_movie_logic marker_keys)
+declare -a MODULE_NAMES=(policy trigger intro_logic panel_logic banner_logic sel_movie_logic marker_keys gauge_math)
 declare -a MODULE_PATHS=(
   "src/mods/ddr_selection/policy.rs"
   "src/mods/ddr_selection/trigger.rs"
@@ -35,6 +35,7 @@ declare -a MODULE_PATHS=(
   "src/mods/ddr_selection/banner_logic.rs"
   "src/mods/ddr_selection/sel_movie_logic.rs"
   "src/mods/ddr_selection/marker_keys.rs"
+  "src/mods/ddr_selection/gauge_math.rs"
 )
 # Modules nested under `sound` (they reference each other via `super::`).
 declare -a SOUND_NAMES=(cues bank_build)

@@ -149,7 +149,8 @@ unsafe extern "C" fn helper_hook(
 }
 
 /// A package went through World's own path (`armed` = the armed skin, 0 when
-/// disarmed): World's stage-frame names back for a stock `dance_stage`; on an
+/// disarmed): World's stage-frame / gauge export names back for a stock
+/// `dance_stage` / `dance_gauge`; on an
 /// armed song, the legacy layout root pushed onto the load list next to
 /// World's `dance_common` (no record — World's builder keeps World's root;
 /// `markers.rs` reads the legacy one after it).
@@ -159,6 +160,7 @@ unsafe fn after_stock(this: *mut u8, base: *const c_char, armed: u8) {
     };
     match base_str {
         "dance_stage" => super::stage_frame::restore(),
+        "dance_gauge" => super::gauge::restore(),
         "dance_common" if armed != 0 && !this.is_null() => {
             let Some(root) = super::markers::on_common_request(this, armed) else {
                 return;
@@ -244,6 +246,10 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     // World's StageFrameActor asks the package for export `dance_stage` —
     // A3's names must be patched in first, or the package stays stock.
     if base_str == "dance_stage" && !super::stage_frame::apply(skin) {
+        return false;
+    }
+    // Same for the gauge actors' `dance_gauge` export (A3: `00_dance_gauge`).
+    if base_str == "dance_gauge" && !super::gauge::apply() {
         return false;
     }
 

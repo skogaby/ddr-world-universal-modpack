@@ -352,6 +352,17 @@ pub fn mc_set_param(mc_id: u32, param: i32, value: i32) -> bool {
     ret == 0
 }
 
+/// `afp_mc_set_param(mc, param, ptr)` for pointer-valued params (e.g.
+/// `0x1023` = the MovieClip's `{i32 x, y, w, h}` scissor rect, as the game's
+/// gauge fill writes it). `value` must stay valid for the call. Game thread.
+pub fn mc_set_param_ptr(mc_id: u32, param: i32, value: *const std::ffi::c_void) -> bool {
+    let api = API.lock().unwrap();
+    let Some(api) = api.as_ref() else {
+        return false;
+    };
+    unsafe { (api.mc_set_param)(mc_id, param, value as u64, 0) == 0 }
+}
+
 /// Set a MovieClip's component scale — `afp_mc_set_param(id, 0x1003)` =
 /// `pw_set_scale(sx, sy)` (RE'd from libafp's set-param jump table;
 /// `docs/playfield_styling_research.md` §4b). COMPONENT-based: writes the
