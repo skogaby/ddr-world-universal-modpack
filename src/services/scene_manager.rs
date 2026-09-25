@@ -1,8 +1,49 @@
-//! Scene Manager — Tracks the current game scene via hook on
-//! TransitionSequence::createNextSequence.
+//! Scene Manager — tracks the current game scene, fans scene changes out to
+//! subscribers, and applies scene redirects.
 //!
-//! Uses `retour::GenericDetour` for the hook. The scene ID is in RDX (arg 2),
-//! 1-indexed. We subtract 1 for 0-indexed scene IDs.
+//! ## Owned detours
+//!
+//! - `TransitionSequence::createNextSequence` (signature `scene_transition`) — the
+//!   scene-change seam. Required: if it does not resolve or install, [`init`]
+//!   returns false and [`is_available`] stays false.
+//! - `TransitionSequence::advanceToScene` (signature `advance_to_scene`) — the
+//!   redirect repair. The framework writes the ORIGINAL requested id into
+//!   `m_currentID` (`TS+0x68`) after `createNextSequence` returns, so after a
+//!   redirect the detour rewrites it to the redirected id. Optional: a miss logs a
+//!   warning and leaves [`redirect_repair_available`] false.
+//!
+//! ## Scene ids
+//!
+//! The game passes 1-indexed ids in RDX; this service subtracts 1 and every
+//! public API here (callbacks, redirects, [`current_scene`]) is 0-indexed. The
+//! one 1-indexed exception elsewhere in the crate is `agcs::Sequence::finish`
+//! (`sequence_finish`).
+//!
+//! ## Callbacks
+//!
+//! [`on_scene_change`] callbacks receive `(prev, next)` and fire from inside the
+//! `createNextSequence` detour, BEFORE the original builds the next sequence —
+//! the new scene's objects do not exist yet; defer any work that needs them. The
+//! detour updates state under the lock, snapshots the callback list, releases the
+//! lock, then dispatches each callback under `catch_unwind`, so callbacks may
+//! re-enter this service (`current_scene`, redirect registration). Because the
+//! list is snapshotted, a callback removed from another thread may fire one final
+//! time. Callbacks run on the game thread that drives the transition.
+//!
+//! ## Redirects
+//!
+//! [`add_redirect`] is persistent: every transition into `from` becomes `to`
+//! until [`remove_redirect`]. [`add_redirect_once`] is consumed by the first
+//! transition it applies to (Quick Restart's STAGE_RESULT → GAMEPLAY). Callbacks
+//! see the redirected id as `next`. Mods whose redirect hands control to the
+//! game's automatic `getNextID` tail must refuse to enable unless
+//! [`redirect_repair_available`] — without the repair the tail runs the wrong
+//! successor.
+//!
+//! [`current_transition_sequence`] exposes the last observed
+//! `TransitionSequence*` for mods that trigger transitions themselves.
+//!
+//! See `docs/scene_manager_research.md` and `docs/ddr_world_scene_ids.md`.
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;

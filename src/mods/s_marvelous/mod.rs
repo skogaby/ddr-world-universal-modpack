@@ -1,17 +1,75 @@
-//! S-Marvelous Judgement — a discrete presentation-layer judgement grade
-//! above Marvelous: a stock Marvelous whose timing delta is within the
-//! configured window (default ±12 ms, stock Marvelous is ±17 ms) is shown
-//! as S-Marvelous. The engine's internal grade space is never touched — to
-//! score/EX/gauge/combo/save/ghost an S-Marvelous IS a Marvelous.
+//! S-Marvelous Judgement (`s-marvelous`, default ON) — a display-only judgement grade above
+//! Marvelous: a stock Marvelous whose timing delta is within `window_ms` (default ±12 ms,
+//! clamped 1..=16 so it stays a strict subset of stock Marvelous' ±17 ms) is shown as
+//! S-Marvelous. The engine's grade space is never touched — to score / EX / gauge / combo /
+//! save / ghost an S-Marvelous IS a Marvelous — so nothing here taints through `score_guard`.
 //!
-//! Classification rides the shared `judge_submit` detour
-//! (`power_user_statistics::data_feed`, tap block — the delta only exists
-//! there); this module owns the policy: per-song arm/disarm latching, the
-//! per-side counters (`state`), and — in later plan steps — the display
-//! surfaces.
+//! ## Classification
 //!
-//! Design: `.agents/planning/2026-08-29-s-marvelous-judgement/design/
-//! detailed-design.md` (Approved 2026-08-29).
+//! The delta only exists inside `judge_submit`, so classification rides the shared tap in
+//! `power_user_statistics::data_feed` (pre-original; the grade dispatch is synchronous, so
+//! every display re-drive runs post-original from the same detour). This module owns the
+//! policy: [`state`] is the per-side counters plus the "combo has no loose Marvelous" bit;
+//! both sides arm at entry to a play scene (GAMEPLAY and the attract demo, whose autoplay
+//! runs the same actor chain) with the live window latched per song, disarm on leaving it,
+//! and reset on every `song_reset` (quick restart, training loops/scrubs).
+//! `state::combo_is_all_smarv` requires the side to be armed — a side the mod never
+//! classified must not read as all-S-Marvelous.
+//!
+//! ## Display surfaces (each optional, fail-open to the stock look)
+//!
+//! - [`flash`] — re-drives the NoteResultActor's own `dance_judge` clip to the synthesized
+//!   `in_smarvelous` label, and fans out to the other judge-event surfaces. [`afp_patches`]
+//!   registers the `dance_judge` AP2 patch; [`assets`] stages its word art (both glow mutes,
+//!   S-Marv copy and stock Marvelous word) and every other asset below.
+//! - [`receptor`] + pure [`receptor_color`] — violet receptor burst: the game's own
+//!   `JudgeEffectRenderer::push` with type 7, recoloured through `playfield_styling`'s
+//!   refcounted `render_sprite_final` fill hook (`fill_acquire_smarvelous`). The
+//!   `dance_effect` bomb stays stock.
+//! - [`combo`] — S-Marvelous digits + tint, a POST subscriber on `services::combo_hooks`.
+//! - [`splash`] — S-MFC full-combo splash (`fullcombo_actor_on_message` detour).
+//! - [`fast_slow`] — one-byte gate patch so a loose Marvelous shows FAST/SLOW; the flash
+//!   re-hides it on S-Marvelous (the highest tier is exempt).
+//! - Results: [`results_score`] (7-row score tab, exclusive MARVELOUS, Marvelous FAST/SLOW
+//!   share), [`results_graph`] (violet judge series, gradient transplant, timing-page
+//!   Marvelous bands, legend), [`results_emblem`] (S-MFC stage emblem + total badge). All
+//!   recompute from the stage record's per-note streams via [`records`] with the side's
+//!   last-armed window, fail-closed to stock counts.
+//! - Lamps: [`lamp`] (per-side S-MFC set) + pure [`lamp_codec`] + [`lamp_badge`] (violet
+//!   lamp re-bind on the wheel card, side-info table and difficulty picker).
+//!
+//! ## Server upload
+//!
+//! [`upload_hook`] registers a `/data` node producer with
+//! `custom_options_persistence::register_data_node_producer`: on per-stage saves of a side
+//! armed from song start (not course mode) it emits `/data/s_marv` with the S-Marvelous-aware
+//! duplicates computed by pure [`upload`]; stock bytes are never touched. The backend's
+//! `smarv_scores` load field, plus our own S-MFC emissions, feed [`lamp`].
+//!
+//! ## Cross-mod seams
+//!
+//! On a DDR SELECTION legacy song the mod stands down wherever a legacy package replaces
+//! World's: the flash, the splash re-drive and both AFP patch closures check
+//! `ddr_selection::legacy_package("dance_judge" / "dance_fullcombo")`, and a legacy combo
+//! never reaches World's refresh. `is_enabled()` lets Power User Statistics show its
+//! S-Marv tally.
+//!
+//! ## Degradation, assets, config
+//!
+//! Only `judge_submit` is required; without the tap the mod is inert. Every surface's
+//! signatures are optional and a missing one leaves only that surface stock.
+//! Art sources live in `data_mods/s_marvelous/`; the staged `*_ifs/` output (atlas clones,
+//! results sheets) is generated there at enable — never commit it. The results sheets are
+//! stock-name replacements LayeredFS serves passively, so they are purged at init (a
+//! config-disabled boot) and at disable.
+//!
+//! Config section `s_marvelous` (`window_ms`, `judgement_color`, `receptor_flash`) is
+//! seeded at enable and live-edited by three overlay GLOBAL SETTINGS rows (window applies
+//! next song, colour when `dance_judge` next loads, receptor flash on the next hit);
+//! `persist_section` rewrites the whole section. The retired `marvelous_shimmer` key is ignored.
+//!
+//! RE: `docs/s_marvelous_judgement_research.md`. Host tests (the actual AP2 recipes on
+//! real templates, plus the pure modules): `scripts/validate_s_marvelous.sh`.
 
 pub mod afp_patches;
 pub mod assets;

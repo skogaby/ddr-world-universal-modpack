@@ -4,98 +4,140 @@
 
 ## Development
 
-### Build / check / test
+### Build and checks
 
-```bash
-cargo check --target x86_64-pc-windows-msvc   # fast type check
-cargo test                                     # host tests (pure layers only)
-cargo fmt                                      # whole crate — never pass file args
-./build.sh                                     # release DLL via cargo-xwin
-./build_win7.sh                                # Windows 7 build (tier-3 target, -Z build-std)
-./scripts/deploy.sh                            # build + SCP to cabinet (/tmp/ssh{host,user,pass})
-```
+| Command | Purpose |
+|---|---|
+| `cargo check --target x86_64-pc-windows-msvc` | Fast type check. Works on any host. |
+| `./build.sh` | Release DLL (`cargo xwin`, msvc target) → `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll` |
+| `./build_win7.sh` | Windows 7 build (`-Z build-std`; avoids the `ProcessPrng` import) |
+| `./scripts/deploy.sh` | Build and `scp` to the cabinet. Reads `/tmp/sshhost`, `/tmp/sshuser`, `/tmp/sshpass`. |
+| `./scripts/build_release_archive.sh` | Win7 DLL + updater into `release/`: a zip, a bare updater exe, and a tester `install-update-YYYYMMDD.bat`. It fails if either binary imports `ProcessPrng`. |
+| `cargo fmt` | Run on the whole crate only. `cargo fmt -- <file>` still formats everything. |
 
-Readiness gate before handing off a build: `cargo check` clean → `cargo fmt` → `./build.sh` clean.
+**Host tests.** The DLL crate **cannot** be built by `cargo test` on an ARM host, because `retour` has no aarch64 backend. Pure modules are tested by the `scripts/validate_*.sh` harnesses instead. Each harness writes a throwaway crate that `#[path]`-mounts dependency-free source files and runs `cargo test` in it. This is why pure files must not use `crate::` imports.
 
-Note: plain `cargo test` cannot compile `retour` on ARM hosts — the pure modules that matter are either `#[cfg]`-clean or mounted by the `scripts/validate_*.sh` temp-crate harnesses (auto_calibration, custom_options, fast_bootup, judgement_offsets, mod_menu, movie_sync, overlay_draw, se_bank_synth, song_playback_speed).
+- Some harness legs need extra inputs:
+  - `$DDR_WORLD_INSTALL` for real game data
+  - a sibling `ddr-chart-tools` checkout, for se_bank_synth and song_playback_speed
+  - a sibling `bemaniutils` checkout, for s_marvelous dev legs
+- `updater/` and `tools/bot_sim/` are standalone crates that test natively:
+  - `cargo test --manifest-path updater/Cargo.toml`
+  - `scripts/validate_multiplayer_bot.sh`
 
-### Validation model
+**Signature sweep** (run whenever `signatures.rs` or a consumer-side fixed offset changes):
 
-Engine-facing code has no test harness by design — validation is a cabinet deploy plus log observation (spice2x log + `ddr_hook_crash.log`). `scripts/game_nav/` + `spice2x-cli/` automate a CrossOver cabinet over SpiceAPI (boot, card-in, navigate to song select/options/gameplay, screenshot) for headless checks. When chasing an apparent runtime bug, ship a diagnostic build with one-shot WARN/INFO logs on every fallback branch before rewriting.
+1. `scripts/validate_signatures.sh <dir-of-gamemdx-builds>` mounts the real scanner + signatures into a host crate. It maps each `gamemdx*.dll` the way the loader does (sections, relocations, libafp IAT emulation from one `libafp-win64*.dll` in the same dir), then runs `resolve_all` + `resolve_derived`.
+2. `scripts/sig_harness/report.py` maps misses to per-mod hard/soft losses. Version alternates are declared as `_vN` stems or in `ALT_GROUPS`. Exit 0 means every miss is covered.
+3. `scripts/sig_harness/shape_diff.py --json … --dir …` disassembles a window after every match on every build and reports the first divergence. A pattern that matches on every build proves nothing about bytes read at `match+N`.
+4. `scripts/aob_check.py` is a quick single-pattern uniqueness check.
 
-### Adding a mod
+**Engine-facing validation** is done by deploying to a cabinet and reading the spice2x log plus `ddr_hook_crash.log`. `scripts/game_nav/` automates a CrossOver cabinet over SpiceAPI: launch, card-in, song select, options, start a song, screenshot. When a runtime bug is unclear, ship a diagnostic build with one-shot logs on every fallback branch before rewriting anything.
 
-1. Implement `Mod` in `src/mods/<name>.rs` (or a subdirectory once multi-file).
-2. Add needed AOB signatures to `src/core/signatures.rs`; verify uniqueness across builds with `scripts/aob_check.py`; list hard requirements in `required_signatures()`.
-3. Construct + register in `src/lib.rs` (order matters only if you need `early_apply` or late binding).
-4. Register option rows (per-player: `custom_options::register_option`; cabinet-wide: `mod_menu::rows`).
-5. Split pure decision logic into its own file and give it host tests.
+### Adding things
 
-### Adding a shared hook consumer
+- **A mod:**
+  1. Implement `Mod` in `src/mods/<name>.rs` (or a subdirectory).
+  2. Add signatures to `src/core/signatures.rs` and run the sweep.
+  3. List hard requirements in `required_signatures()`.
+  4. Construct and register it in `src/lib.rs`.
+  5. If it should default OFF, add it to `DEFAULT_OFF_MODS`.
+  6. Split pure logic into a harness-mountable file.
+- **A hook consumer:** subscribe to the owning service (see `interfaces.md`). If the target is currently owned privately by one mod, promote it to a service dispatcher. Never add a second detour.
+- **Option rows:**
+  - Per-player rows use `custom_options::register_option`.
+  - Cabinet-wide overlay rows use `mod_menu::register_*_row`.
+  - Labels are generated textures: edit `scripts/option_strings.py` (en/ja/ko), run `scripts/gen_option_labels.py`, and regression-check with `scripts/check_option_takeover.py`. Never hand-edit a generated PNG.
+- **Shaders:** edit `shaders/src/*.hlsl`, then run `scripts/build_shaders.sh`. fxc 9.29 under the CrossOver bottle is the golden path; `--vkd3d`/Docker is a fallback only. Commit the `.d3dbc` blobs in `data_mods/shader_fixes/blobs/`. Containers are synthesized at runtime, and blob changes re-trigger synthesis through the fingerprint.
+- **Deploying assets:** a DLL-only deploy does not carry `data_mods/`. Features with shipped labels, blobs or art need the matching `data_mods/` files on the install.
 
-Never install a second detour on an already-hooked function — subscribe to the owning dispatcher (`judge_hook`, `render_notes_hook`, `analyze_hook`, `movie_policy`) or promote the existing single-owner detour into a dispatcher.
+### Other tooling
 
-### Asset / texture workflows
+- `tools/blender_ddr_addon/` — validate with `scripts/validate_blender_addon.sh <unpacked-data-root>` (headless Blender); package with `scripts/build_blender_addon.sh`.
+- `scripts/bot_sim.sh <ssq-dir>` — offline bot-quality simulation report.
+- `scripts/convert_movies.sh` — VC-1 → H.264 for Wine (idempotent, `--restore`).
+- `scripts/ddr_selection/import_a3_assets.{sh,bat}` — operator-side import of A3-only assets into `data_mods/ddr_selection_a3/`.
+- Format tools: `arc_tool.py` / `arctool`, `unpack_arc.py`, `unpack_all.py`, `ktmdl_dump.py`, `anm_dump.py`, `split_camanm.py`, `gsp_pack.py`, `kbf_to_font.py`.
 
-- LayeredFS drop-in: PNG under `data_mods/<mod>/..._ifs/tex/` mirroring the stock IFS path — converted + injected at runtime.
-- Options-menu label textures: edit `scripts/option_strings.py` (en/ja/ko) → `scripts/gen_option_labels.py` → regression-check with `scripts/check_option_takeover.py`. Never hand-edit generated PNGs.
-- Shaders: edit `shaders/src/*.hlsl` → `./scripts/build_shaders.sh` (fxc under the CrossOver bottle is the golden path) → commit the `.d3dbc` blobs under `data_mods/shader_fixes/blobs/`. Containers are synthesized at runtime, not committed.
-- Movies for Wine: `scripts/convert_movies.sh` (idempotent VC-1→H.264, `--restore`).
+### Planning convention (PDD)
 
-### Feature planning (PDD)
-
-In-flight features live in `.agents/planning/<date>-<name>/` (rough-idea → research → design → implementation plan → `progress.md` as the cross-session resume point). Completed sets move to `.agents/planning/_archive/`. Task files generated per step land in `.agents/tasks/`.
+- Features in flight live in `.agents/planning/<date>-<name>/`. That directory holds research, design, the implementation plan, and `progress.md`, which is the cross-session resume point.
+- `_archive/` holds completed features.
+- `.agents/tasks/` holds generated task files; `.agents/scratchpad/` holds working notes.
 
 ## Runtime
 
-### Boot flow
+### Boot
 
-```mermaid
-flowchart TD
-    A[spice2x loads DLL via -k] --> B[DllMain spawns init thread]
-    B --> C[wait for gamemdx.dll]
-    C --> D[batch AOB scan]
-    D --> E[config load + early_apply patches]
-    E --> F[derived address resolution]
-    F --> G[service init chain]
-    G --> H[mod registration + enable]
-    H --> I[mod-menu + label atlas flush]
-    I --> J[splash widgets 10s]
-```
+See `architecture.md` for the ordered sequence. It ends with a 10 s splash. The splash adds a red REBOOT warning when texture atlases were rebuilt during that boot.
 
-### Scene-change dispatch
+### Per-frame
 
-`createNextSequence` detour → record new scene (0-indexed) → apply any registered redirect → snapshot callbacks → **release lock** → fire callbacks (each `catch_unwind`). Mods key lifecycle off entry/exit of `GAMEPLAY` (28) and `SONG_SELECT` (25).
+The `overlay_draw` layer-dispatcher detour drives the frame pump in this order:
 
-### Judge dispatch
+1. `input_manager::poll`: every `on_frame` callback, then button events. The exclusive consumer (the mod menu) wins while it is open.
+2. The queued `run_on_render_thread` batch.
+3. The original render.
 
-`judgeNotes` detour → pre-callbacks ascending priority (per-song-offsets writes at Early; assist-tick reads at Normal) → original → post-callbacks (PUS data feed → calibration tap, real-speed first-judge recompute).
+### Scene change
 
-### Per-frame drivers
+1. The `createNextSequence` detour records the new 0-indexed scene and applies redirects.
+2. It snapshots the callbacks and releases the lock.
+3. It fires the callbacks, each under `catch_unwind`.
 
-`input_manager::poll()` dispatches frame callbacks first (movie-sync seek drain, preview restart executor, wheel polling, song-reset driver), then button events, honoring the exclusive consumer (mod menu) and suppression flags.
+Scene callbacks run **before** the original builds the next sequence. Lifecycles key off GAMEPLAY (28), the SONG_SELECT family (25/26), and results.
 
-### LayeredFS request flow
+### Judge
+
+`judgeNotes` runs pre-callbacks in ascending priority, then the original, then post-callbacks. The foot-panel swap wraps the original (pre Late / post Early).
+
+### LayeredFS request
 
 ```mermaid
 flowchart LR
-    O[avs_fs_open] --> P{path under a mod scope?}
-    P -->|texture PNG| T[ifs_textures: convert + cache + serve]
-    P -->|arc| AR[arc_handler: overlay + repack cached copy]
-    P -->|xml| X[xml_merger: .merged.xml]
-    P -->|other mod file| M[serve mod file]
-    P -->|no| S[passthrough to game]
-    AR -->|shader.arc| SS[shader_synthesis]
+    O[avs_fs_open] --> P{mod file exists?}
+    P -->|texture| T[ifs_textures convert + cache]
+    P -->|arc| A[arc_handler overlay/repack]
+    A -->|shader.arc| S[shader_synthesis]
+    P -->|xml| X[xml_merger]
+    P -->|other| M[serve mod file]
+    P -->|no| G[passthrough]
 ```
 
-### Song-rate lifecycle (largest runtime flow)
+### Song rate (largest runtime flow)
 
-Scene 26 arm (eligibility: ordinary solo/doubles, supported rate) → dance-bank create qualifies + binds a virtual XWB → generator thread streams stretched/resampled audio into the ring → XACT IO detours serve it → exactly-once commit (score policy → movie suppression/sync → snapshot → Q31 clock last) → gameplay runs at rate → teardown retires the binding. Failures at any point fail open to stock 100 %.
+1. The scene-26 arm checks eligibility.
+2. The dance-bank create binds a virtual XWB.
+3. The generator thread streams stretched or resampled audio into a ring, which the XACT IO detours serve.
+4. An exactly-once commit runs in the order: score policy → movie → snapshot → Q31 clock (last).
+5. Teardown retires the binding.
+
+Every failure falls back to stock 100 %.
 
 ### Score save policy
 
-Per-stage save of a tainted side (autoplay / quick-fail / assist-tick / training-altered / rate-played) is suppressed; the card-out logout save is forwarded but sanitised (records virginised, league stripped) so profile/customize changes persist without tainted scores. Sanitisation unavailable ⇒ full suppression (fail-closed).
+- Per-stage saves from tainted sides are suppressed.
+- The logout save is sanitised, or suppressed if sanitising isn't available.
+
+### Auto-updater (`updater/`)
+
+It runs from `gamestart.bat` before spice2x. The steps are:
+
+1. Game-dir gate.
+2. Stale self-update cleanup.
+3. Journal recovery.
+4. GitHub release lookup.
+5. `needs_update`: the tag **or** the asset sha256 differs. It compares for equality and never orders versions, so deleting a release rolls cabinets back and dev builds get downgraded.
+6. Download with digest check.
+7. Two-pass validated extraction.
+8. Merges of user-owned files: additive JSON, header-scoped `option_menu_settings`, cell-level CSV fill using the DLL's own CSV grammar.
+9. Pure plan (`Write` / `Prune` only when the file is unchanged / `KeepModified` / `WriteMerged` / `SelfUpdate`).
+10. Journaled apply with backup + reverse rollback; the manifest is written last.
+
+Exit codes: 0 means the game is startable, 1 means the rollback itself failed, 3 means `--check` found an update. `--from-zip <zip> [--tag]` runs the same pipeline on a local archive. The release script's `install-update-*.bat` uses it for testers.
 
 ### Crash diagnostics
 
-Panic → panic hook → durable `ddr_hook_crash.log`; hard fault → SEH filter logs code/address/module classification then continues the search (never swallows). Both survive spice2x's buffered logging.
+- A panic goes through the panic hook into the fsynced `ddr_hook_crash.log`.
+- A hard fault goes through the SEH filter, which classifies it as ours or the game's and continues the search.
+- To decode crash offsets, use the cabinet's own build (the `shape_diff.py` `Image` helper).

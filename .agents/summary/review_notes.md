@@ -4,27 +4,80 @@
 
 ## Consistency Check
 
-The generated documents were cross-checked; no contradictions found. Points verified:
+The generated documents were cross-checked against each other and against the source.
 
-- The mod list and registration order (components.md, interfaces.md) match `src/lib.rs` and the `pub mod` declarations in `src/mods/mod.rs`.
-- Detour-ownership tables in components.md and interfaces.md agree, including the shared-dispatcher assignments and byte-patch (non-detour) sites.
-- The fail-open-features / fail-closed-derivations / fail-closed-score-policy split is stated identically in codebase_info.md, architecture.md, and workflows.md.
-- Config sections in data_models.md match `src/mods/config.rs` and the shipped `mod-config.json`.
+- **Mod ids, defaults and registration order** in `components.md` and `interfaces.md` match `src/lib.rs` and `DEFAULT_OFF_MODS` / `LATE_BINDING_MODS` in `src/mods/mod_trait.rs`.
+- **Hook ownership** in `interfaces.md` matches a crate-wide grep of `GenericDetour` / `install_enabled`. The crate uses no `RawDetour` or `static_detour`.
+- **Config sections** in `data_models.md` match the structs in `src/mods/config.rs` and the section writers found by grepping `save_json_key` callers.
+- **Host-test claims** were verified on an arm64 host: plain `cargo test` of the DLL crate fails compiling `retour`. The previous AGENTS.md said `cargo test` ran host tests; that holds only on x86_64 hosts, and it was not verified there.
 
-## Codebase Inconsistencies Observed (not fixed — documentation-only run)
+No contradictions remain between the generated files.
 
-1. **`src/mods/mod.rs` doc comment is stale**: its "Included mods" prose names only a small subset of the registered mods. The `pub mod` declarations below it are authoritative.
-2. **`src/services/ntdll_state_shim.rs` is retained but uncalled** — intentional (documented as a pattern reference for Wine stub-import fixes), but a reader grepping for callers will find none.
-3. **`docs/native_wm_runtime_bottle_setup.md`** is part operator recipe, part RE trail — the only `docs/` file with a user-facing role. The rewritten README links to it for CrossOver movie support.
+## Module-Doc Refresh (done)
+
+The stale and thin module docs from the previous pass have been rewritten. Every edit was comment-only, and each new doc was checked against the current source.
+
+- **Mod entry files:** power_user_statistics (+ csv_export), webui_options (+ discovery), multiplayer_bot, per_song_judgement_offsets, real_speed_fix (+ real_speed), folder_expansion, series_expansion, note_types_expansion, skip_intros, s_marvelous, mod_menu, training_mode, ddr_selection, background_dancers, playfield_styling, music_wheel_song_length, non_native_os_support, shader_fixes, premium_free.
+- **Mod crate files:** `src/mods/mod.rs`, `src/mods/config.rs`.
+- **Services:** input_manager, scene_manager, series_filter_scroll, widget_renderer, audio_sync_diag, avs_layeredfs, song_rate (+ clock_patch, wavebank_hook, xact_runtime).
+- **Stale comments:** `src/lib.rs` (the step-8 config comment, the duplicate "10" label, the signature count) and the pattern count in `resolve_all`'s docstring.
+
+## Codebase Issues Observed (not fixed — code changes, left to the maintainer)
+
+**Possible behaviour bugs**
+
+| Area | Issue |
+|---|---|
+| `non_native_os_support.rs` | Not Wine-gated. The mod defaults ON and never checks `platform::running_under_wine()` (only `mfplat_vih_fix` does), so on native Windows the default `suppress` mode suppresses background movies. |
+| hooks using `.lock().unwrap()` | `scene_manager::scene_hook`, `widget_renderer::render_function_hook`, `series_filter_scroll` (`panel_builder_hook`, `set_position_hook`). `render_function_hook` and `set_position_hook` also have no `catch_unwind`. |
+| `folder_expansion` hooks | `.unwrap()` calls inside callbacks. |
+| `series_expansion::write_sso_string` | `assert!`s on config labels / texture names longer than 15 bytes; the config is not validated first. |
+| `real_speed_fix` | Does not override `is_active`, so the menu shows it ON when its anchor is missing. |
+| `skip_intros` | Never checks `scene_manager::redirect_repair_available()`; whether the title timeout needs it is unverified. |
+| power_user_statistics / webui_options | Re-enabling either at runtime re-registers its option ids (probable `Duplicate` WARNs). |
+| LayeredFS | `GetLongPathNameA` is installed best-effort, outside the all-or-nothing libavs transaction. The `_cache` path is hardcoded to `./data_mods/_cache` regardless of `layeredfs.mod_folder`. |
+
+**Stale user-facing strings and item docs**
+
+- `training_mode` `description()` still says "(v1 in progress)" and "skip/omit".
+- The `"Scene Style"` wording remains in the `BackgroundDancersConfig::style` doc, the `shader_synthesis.rs` heading and `ROW_KEY_STYLE`. The row label is "Lighting Style".
+- The `premium_free_stage_inc` signature description says "per-frame". It is the WaitSequence bump.
+- `pacemaker_swap.rs` says it patches 7 bytes; the code patches 11.
+- `s_marvelous/upload.rs` cites `rec+0x270` for the clear kind; the code reads `rec+0x54`.
+- `training_mode/strip_synth.rs` claims to be harness-tested, but `validate_training_mode.sh` does not mount it.
+- `song_rate/runtime.rs` and `lifecycle.rs` say scene callbacks run under scene_manager's lock. It is released before dispatch.
+- `foot_panel_swap` cites a PUS judge pre-callback that does not exist.
+- `note_types_expansion/hooks.rs` claims its own Analyze detour; it subscribes to `analyze_hook`.
+- Step-journal wording remains in several submodule and item docs:
+  - per_song_judgement_offsets `override_hook.rs` / `ui.rs` / `persistence.rs`
+  - training_mode `bounds.rs`
+  - song_rate `wavebank_hook.rs` / `runtime.rs`
+  - `config.rs` `OverlayMenuConfig::animate_background`
+- `docs/per_song_judgement_offsets.md` gives a fixed `Option` offset; the code derives it per build.
+- `docs/premium_free_stale_record_bug.md` says `diag.rs` was removed.
+
+**Minor code-level items**
+
+- `core::hooks::HookManager` is attached to every `ModEntry`, but no mod stores hooks in it.
+- `src/services/ntdll_state_shim.rs` is retained but never called (intentional pattern reference).
+
+**Repository hygiene**
+
+- `tests/` is gitignored, so the `tests/fixtures/anm/` JSON used by the `core/anm` fixture tests is local-only. Regenerate it with `scripts/gen_anm_fixtures.py`.
+- No ignore rule covers the `*_ifs/` output generated at enable time. It stays out of the repo only by convention.
 
 ## Completeness Notes
 
-- **`docs/` (RE research notes) were not summarized individually** — they are reference material keyed from the AGENTS.md Key Entry Points table; summarizing them here would duplicate that index.
-- **Binary assets and helper binaries** (`data_mods/` art, `scripts/arctool`, `tools/fxc/`, `spice2x-cli/`) were inventoried but not analyzed.
-- **Engine-facing runtime behavior** is documented from code + AGENTS.md; the ground truth for anything subtle is the per-feature RE note in `docs/` and the planning dirs in `.agents/planning/`.
-- All languages present (Rust, Python, Bash, HLSL) were analyzable; no gaps from unsupported languages.
+**Not summarized individually:**
+
+- The `docs/` RE notes. `components.md` maps each mod to its note(s). `docs/` has no index of its own.
+- Blender add-on internals, binary assets, and vendored binaries.
+
+**Languages:** Rust, Python, Bash and HLSL were all analyzable, so there are no gaps from unsupported languages.
 
 ## Recommendations
 
-- When a future run regenerates these docs, keep AGENTS.md's Key Entry Points table as the deep-detail layer and keep these summaries at the routing/overview layer — duplicating the table here would go stale quickly.
-- Consider refreshing the `src/mods/mod.rs` doc comment (or trimming it to point at `lib.rs`) in a normal code change.
+1. Triage the code issues above, starting with the non-Wine-gated movie suppression and the unwraps in hook callbacks.
+2. Sweep the remaining step-journal wording in submodule/item docs.
+3. Consider a short `docs/README.md` index; the theme buckets in the analysis are a ready starting point.
+4. Keep feature-specific detail out of AGENTS.md. Cross-cutting rules belong there, mechanisms belong in module docs, and investigations belong in `docs/`.

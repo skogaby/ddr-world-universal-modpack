@@ -1,26 +1,102 @@
 //! Multiplayer Bot — a computer-controlled VERSUS opponent for a single player.
 //!
-//! Plan Step 4 state — the user-facing feature end to end: the pure cores
-//! (`eligibility`, `skill`, `planner`, `session`), the engine adapter
-//! (`filler`) that feeds the `foot_panel_swap` service's cloned-vtable
-//! `BotFootPanel`, the two per-player option rows (BOT OPPONENT (1P ONLY) /
-//! BOT LEVEL) whose values land in [`option_on`] / [`mode`], and the
-//! windowed impersonation (`impersonation`) that turns the empty pad into a
-//! genuine second player from the song-select commit through the stage
-//! results, plus the extra-stage guard (`extra_stage_guard`) — the feature's
-//! only detour — that keeps the bot out of the game's extra-stage grant. A
-//! dev-only self-test (`self_test`) still arms the bot on the human's own
-//! lane for the `mismatch=0` build-portability probe.
+//! A player who cards in alone and turns on BOT OPPONENT plays a genuine 2P VERSUS song: the
+//! empty pad becomes a second player whose steps are judged by the game's own judge, drawn by
+//! the game's own versus HUD and shown on both results panes. The opponent plays at a skill
+//! level 1..=10, or — the **Target Score** value — replays the human's loaded pacemaker
+//! ghost note for note, so it finishes on the target's exact score. Mod id `multiplayer-bot`,
+//! default ON (not in `DEFAULT_OFF_MODS`); inert until a player turns the row on.
 //!
-//! **Target Score** (2026-09-14): the level row's eleventh value replays the
-//! human's loaded pacemaker ghost note for note (`ghost` = the pure sampler,
-//! `ghost_source` = the GhostActor reader; the planner reproduces freeze /
-//! shock N.G.s too). Both rows persist LOCALLY only (`PersistMode::Local` —
-//! the backend never stores them) and the level row renders text values
-//! (`Level 1`…`Level 10`, `Target Score`) through `ScalarFormat::Labeled`.
+//! ## Phantom-side governance — READ THIS BEFORE WRITING A CABINET-WIDE POLICY
 //!
-//! Host validation: `scripts/validate_multiplayer_bot.sh` (the `tools/bot_sim`
-//! crate mounts the pure files); offline tuning: `scripts/bot_sim.sh`.
+//! During a bot song BOTH sides read `stage_records::side_entered == Some(true)`, but the
+//! bot side's option values are whatever the last real player on that pad left in the JSON
+//! cache (`versus_mirror` never engages — it only acts at song select with both sides
+//! entered). Any policy that folds both sides' option values into one cabinet-wide decision
+//! ("P1 governs when both entered", "any entered side ON") MUST treat a side for which
+//! [`is_bot_side`] is `true` as not entered, or a human on P2 plays under the previous P1
+//! player's preferences. Current consumers: premium_free, training_mode, auto-calibration's
+//! census, assist_tick, announcer_mute and ddr_selection. Any new fold must add the same
+//! exclusion.
+//!
+//! ## Mechanism
+//!
+//! The only detour is `extra_stage_guard`. Everything else rides existing services:
+//!
+//! - **Impersonation** (`impersonation.rs`, pure edge rules in `session.rs`): at the
+//!   song-select → stage edge (0-idx 25 → 26/27/28; scene callbacks fire before the next
+//!   sequence is built) `eligibility::evaluate` must pass: exactly one entered side, SINGLE,
+//!   not a course, not event mode, not already versus, and the ENTERED side's row ON (the
+//!   level also comes from the human's side). `apply` then probes every pointer, refuses unless
+//!   the commit prepared both stage records for the same song, mirrors the chart identity onto
+//!   the bot side, copies the human's lane `Option` fields with the gauge forced NORMAL, writes
+//!   the name plate (`BOT LV<n>` / `TARGET`), sets `PlayerWork+0x4 = 1` and the `GameWork`
+//!   versus word, pans SEs by side (cosmetic), arms the controller and taints the bot side. The
+//!   game builds the second `GamePlayActor` natively. The first scene outside the play window
+//!   {26..=30} restores the snapshot; GAMEPLAY re-entry and an in-place `song_reset` re-seed
+//!   the bot. A 20 s render-thread watchdog WARNs if no scene change follows the flip.
+//! - **Controller**: `services::foot_panel_swap` is the one owner of the `judgeNotes`
+//!   foot-panel slot swap. `foot_panel_swap::arm_bot(bot, filler::fill)` sets that side's
+//!   controller to `Bot`, which outranks `Perfect` (a stale cached `autoplay = ON` on the bot's
+//!   pad loses). Its `BotFootPanel` reports press ages so the judge's event lands exactly where
+//!   the planner decided — offset-agnostic on every build. Never add another judge subscriber
+//!   that touches the foot-panel slot.
+//! - **Planner + skill**: `filler.rs` (game thread, judge pre-callback) turns the actor's
+//!   Results into `NoteView`s and runs `planner::plan_frame`, which enforces the judge's
+//!   ordering rules (one live event per panel per frame, per-panel monotonic events, a decided
+//!   Miss blocks the next same-panel note). Per-note decisions come from `skill.rs` (lean +
+//!   two-regime jitter + per-note miss, per level), or for Target Score from `ghost.rs` over
+//!   the bytes `ghost_source.rs` reads from the human's `GhostActor`. With no usable ghost the
+//!   song plays at [`GHOST_FALLBACK_LEVEL`] with one WARN and a toast. The filler also counts
+//!   planner-vs-judge grade mismatches for the restore tally.
+//! - **Extra-stage guard** (`extra_stage_guard.rs`): one detour on `extra_stage_grant` clears
+//!   the bot's entered byte around the original, so the grant's "every entered side AAA'd"
+//!   rule ignores the bot. The bot can never add a grant.
+//! - **Self-test** (`self_test.rs`, dev only: `layeredfs.developer_mode` plus
+//!   `DDR_BOT_SELF_TEST=<1..10>`): arms the bot on the human's own lane to prove the
+//!   controller on a build (`mismatch=0` in the tally).
+//!
+//! ## Score integrity
+//!
+//! The bot side carries `score_guard::set_autoplay_taint` for the whole window, so its
+//! per-stage save is suppressed; at restore the taint is re-synced to "autoplay is really on
+//! for that side". The human's play is never tainted by the bot. Init refuses (mod inactive)
+//! when `score_guard` is unavailable — fail-closed.
+//!
+//! ## Invariants
+//!
+//! - `apply` keeps a copy of every byte it writes; a failure after the first write (the
+//!   controller refusing to arm) undoes all of it. Every game pointer is
+//!   `memory::is_readable`-probed first.
+//! - Never gate on a side's row value alone — per-side values outlive the player; gate on the
+//!   entered side.
+//! - The impersonation's scene hook runs before the self-test's in the mod's one scene
+//!   callback, and never holds its state lock across a call into another service.
+//! - The filler is on the judge hot path: panic-free, allocation-free after a song's first
+//!   frame, one `try_lock` per frame.
+//!
+//! ## Degradation
+//!
+//! No required signatures. `init` makes the mod inactive (`is_active() == false`) unless
+//! `foot_panel_swap` (with its bot objects), `stage_records` (with the player `Option`
+//! offset), `scene_manager` and `score_guard` are all available. A missing gate input
+//! refuses every song with one WARN. A missing `extra_stage_grant` leaves the stock grant
+//! rule (one WARN). A missing ghost source makes every Target Score song fall back to
+//! [`GHOST_FALLBACK_LEVEL`]. Without `custom_options` there are no rows, so the bot stays off.
+//!
+//! ## Config and option rows
+//!
+//! No mod-config.json section. Per-player rows [`OPT_ID`] ("Bot Opponent (1P Only)") and
+//! child [`OPT_LEVEL_ID`] ("Bot Level", 1..=11, default [`DEFAULT_LEVEL`], shown when the
+//! parent is ON, rendered as `Level 1`…`Level 10` / `Target Score` text via
+//! `ScalarFormat::Labeled`), both `PersistMode::Local`: kept in the JSON cache, never on the
+//! wire; a cached level outside 1..=11 is clamped on load. Labels come from
+//! `scripts/option_strings.py`.
+//!
+//! RE: `docs/multiplayer_bot_research.md`, `docs/gauge_and_judge_scoring_research.md`. Host
+//! tests: `scripts/validate_multiplayer_bot.sh` (= `cargo test` in `tools/bot_sim/`, which
+//! `#[path]`-mounts the pure `eligibility`, `ghost`, `planner`, `session` and `skill` files).
+//! Offline simulator / tuning report: `scripts/bot_sim.sh <ssq-dir>`.
 
 pub mod eligibility;
 pub mod extra_stage_guard;

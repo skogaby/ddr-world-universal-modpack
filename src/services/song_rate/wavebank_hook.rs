@@ -1,8 +1,28 @@
-//! Ownership of the streaming wave-bank create/unregister hooks: the
-//! identity-protocol wrappers, and the bind/unbind composition the windows
-//! detours run around [`super::transaction::call_create`] (design req 23,
-//! 26). The composition helpers are cfg-agnostic so the host suites drive
-//! the full bind → create → commit/late-fail/unregister matrix.
+//! Ownership of the streaming wave-bank create/unregister detours and the
+//! bind/unbind composition they run around [`super::transaction::call_create`].
+//!
+//! [`init`] installs `song_rate_wavebank_create` and `song_rate_wavebank_unregister`
+//! as a pair: an unregister failure rolls the create detour back. It also stashes
+//! the `song_rate_file_table` global, which resolves each file id's FileManager
+//! row (resident bank bytes and virtual path).
+//!
+//! - Create: every dance-bank create publishes the selected song
+//!   (`selected_song`) and notifies per-song judgement offsets. The full
+//!   transaction then runs [`bind_for_create`] pre-original (qualify →
+//!   preflight → slot expose → registry publish); a stock outcome may bind a
+//!   song-select preview instead. A late-failed create retires the binding it
+//!   published ([`retire_after_create`]). Without the shared slot table,
+//!   maintenance queue and clock publication, the identity protocol runs.
+//! - Unregister: [`unregister_prelude`] retires the binding and releases its slot
+//!   BEFORE the original destroys the bank; the maintenance drain reclaims it.
+//!
+//! Detour bodies are log-free and panic-contained (the pre-original bind runs on
+//! the game thread during loading and may allocate; post-original code may not).
+//! Bank events feed `audio_sync_diag` and, after a non-identity arm, the bank
+//! timeline.
+//! [`readiness`] reports the boot conjunction the SONG SPEED row requires. The
+//! composition helpers are cfg-agnostic so host suites drive the whole
+//! bind → create → commit / late-fail / unregister matrix.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,10 +98,10 @@ pub struct IdentityReadiness {
     pub clock: bool,
     pub wavebank_create: bool,
     pub wavebank_unregister: bool,
-    /// The streaming binding integration (`binding::integration_available`).
-    /// Structurally false until plan Step 4 installs the XACT file-IO
-    /// callback detour pair — which keeps `integration_ready()` false and
-    /// the SONG SPEED row unregistered through the identity-only base.
+    /// The streaming binding integration (`binding::integration_available`):
+    /// true once the XACT file-IO callback detour pair is installed. While
+    /// false, `integration_ready()` stays false and the SONG SPEED row is not
+    /// registered.
     pub binding: bool,
     pub movie_policy: bool,
 }

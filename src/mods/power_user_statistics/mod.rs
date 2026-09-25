@@ -1,3 +1,105 @@
+//! Power User Statistics Mod — per-player timing statistics for players who want the numbers:
+//! a live ms-error / EX / calorie readout during gameplay, the pacemaker readout swapped for
+//! the latest step's ms error, and a per-song CSV of every step's timing.
+//!
+//! Mod id `power-user-statistics`, default ON (not in `DEFAULT_OFF_MODS`). Every feature is
+//! gated per player by its own option row, so enabling the mod shows nothing until a player
+//! turns a row on.
+//!
+//! ## Features
+//!
+//! - **Realtime Gameplay Statistics** (`timing_stats`): one native `TextWidget` per side,
+//!   created at the first GAMEPLAY entry, shown at that side's first judgement of the song
+//!   and kept through the post-song loader and the stage results (0-idx 29 → 30); any other
+//!   destination hides it. Content is DETAILED (EX loss, current / max / abs-mean / mean ms
+//!   error, live calories) or STREAMLINED (Δ, Max Δ, EX loss, then per-grade counts), in a
+//!   SIDE COLUMN or BOTTOM LINE layout.
+//! - **Pacemaker → MS Error** (`pacemaker_to_mserror` + child `pacemaker_threshold`): an
+//!   11-byte JMP patch in the `NoteResultActor` pacemaker render case (msg 0x1036) replaces
+//!   the score delta with the side's latest ms error, forces the readout visible even with no
+//!   ghost / rival data, and draws it white while `|error| < threshold` (0 = always colored).
+//! - **Export Step Data (CSV)** (`step_data_export`): per-step expected / actual / delta rows,
+//!   written when the song leaves GAMEPLAY.
+//! - **Realtime calories**: the `Cal:` line of the DETAILED readout, read from the game's own
+//!   per-stage kcal accumulator.
+//!
+//! Every user-facing signed ms value shows POSITIVE = FAST, NEGATIVE = SLOW; the feed keeps
+//! the raw `actual − expected` delta and negates only at the display boundary
+//! (`readout::display_ms`, re-exported as `data_feed::display_ms`). Miss and O.K. are not
+//! timing samples — they count toward EX loss and the grade tallies only, and the pacemaker
+//! readout keeps the last real step's error across a Miss.
+//!
+//! ## Submodules
+//!
+//! - `data_feed.rs` — owns the ONE `judge_submit` detour (see below) and the per-side
+//!   `MsErrorAccum` buffers + lock-free `latest_ms_error`.
+//! - `timing_stats_widget.rs` — the widgets, their scene lifecycle, the GLOBAL SETTINGS layout
+//!   rows, the config seed / whole-section persist, and the `bottom_text` hide.
+//! - `readout.rs` — pure layout / content / geometry / alignment / composition model and the
+//!   display sign helpers (host-tested).
+//! - `pacemaker_swap.rs` — the 0x1036 patch, its hand-assembled stub and the white-zone color
+//!   redirect.
+//! - `csv_export.rs` — song identity snapshot and the CSV writer.
+//! - `calorie_feed.rs` — detour on the `CalcCalorieActor` tick (`calc_calorie_tick`) caching
+//!   each side's live kcal.
+//!
+//! ## The shared `judge_submit` detour
+//!
+//! `data_feed::install` is the only installer of the `judge_submit` detour and is idempotent
+//! (returns `true` if already installed). This mod, `timing_offsets` (auto-calibration) and
+//! `s_marvelous` all call it from their `init`, so each of those features works with this mod
+//! disabled. The detour body is the only place the per-step ms error exists, so it also hosts
+//! the other features' hot-path taps: the calibration accumulator (`calibration_arm` /
+//! `calibration_reset` / `calibration_take`) and the S-Marvelous classification feed
+//! (pre-original) plus its display fan-out (post-original — after the stock handler's
+//! `in_marvelous` play). Never add a second detour on `judge_submit`; add a tap here instead.
+//! The detour is never removed: disabling this mod stops the widget, the pacemaker patch and
+//! the CSV flush, not the feed.
+//!
+//! ## Invariants
+//!
+//! - The feed and the widget text update run inside the judge hot path: buffer access there
+//!   is `try_lock` only (a contended lock drops that sample's buffer update, never blocks),
+//!   and the S-Marv / calibration taps are lock-free so contention can never drop them.
+//! - Widget creation, show / hide and re-layout happen on the render thread
+//!   (`widget_renderer::run_on_render_thread`).
+//! - Buffers reset at GAMEPLAY entry and on an in-place `song_reset` (the aborted attempt must
+//!   not reach the CSV); the cached kcal resets only at GAMEPLAY entry — the
+//!   `CalcCalorieActor` survives an in-place reset and keeps accumulating.
+//! - **Calibration suppression** (`set_calibration_suppress`, set / cleared per song by
+//!   `timing_offsets::calibration`): while set, the widget never shows and the pacemaker swap
+//!   behaves as if its option were OFF, because the live ms error is the very signal being
+//!   calibrated. Data collection (buffers, CSV) is unaffected.
+//! - **`bottom_text`:** in the BOTTOM LINE layout the widgets sit where the stock CREDIT /
+//!   PASELI / ONLINE text draws, so during the widget phase this mod hides it under its own
+//!   `HideReason::PowerUserStatistics` bit (independent of the operator's `hide-bottom-text`
+//!   mod); released at disable.
+//! - **`s_marvelous`:** the STREAMLINED content shows an S-Marv count only while that mod is
+//!   enabled (`s_marvelous::is_enabled()`), and Marv is then exclusive of S-Marv.
+//!
+//! ## Degradation
+//!
+//! No required signatures; `init` always succeeds. Missing `judge_submit` disables the
+//! widget (nothing to feed it); missing `pacemaker_render_input` disables the swap (a missing
+//! `note_result_actor_vtable` only disables the force-visible write, and underivable color
+//! loads fall back to zeroing the value in the white zone); missing `calc_calorie_tick` leaves
+//! the calorie line at 0. If `custom_options` is unavailable `enable` registers nothing and
+//! starts neither the widget nor the swap.
+//!
+//! ## Config and option rows
+//!
+//! Per-player rows (`custom_options`, all `PersistMode::Full`): `timing_stats`,
+//! `pacemaker_to_mserror`, `pacemaker_threshold` (0..=50 ms, default 10, shown only when the
+//! parent is ON) and `step_data_export`; labels come from `scripts/option_strings.py`.
+//! Cabinet-wide widget geometry lives in the DLL-owned `power_user_statistics` section of
+//! mod-config.json (`widget_scale_percent`, `widget_layout`, `widget_content`,
+//! `widget_offset_x` / `_y`, `widget_alignment`, `horizontal_offset_x` / `_y`), seeded at
+//! enable and edited from the GLOBAL SETTINGS `pus_widget_*` rows, which rewrite the whole
+//! section on every edit.
+//!
+//! RE notes: `docs/pacemaker_display_research.md`, `docs/calorie_weight_profile_research.md`.
+//! Host tests: `scripts/validate_power_user_statistics.sh` (mounts `readout.rs`).
+
 pub mod calorie_feed;
 pub mod csv_export;
 pub mod data_feed;

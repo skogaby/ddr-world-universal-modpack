@@ -99,7 +99,7 @@ fn init() {
     // shader-fixes / mod-menu theme synthesis rides that open) and then
     // `musicdb.xml` (custom series/folder merges) within a few hundred ms
     // of gamemdx loading, on the game's own thread, concurrently with this
-    // init thread. With LayeredFS installed after the ~127-signature AOB
+    // init thread. With LayeredFS installed after the full AOB
     // scan + early_apply + resolve_derived, a fast cabinet (Win7 tester,
     // 2026-09-03: real p4io, LAN server) beat the hook to shader.arc and
     // every animated menu background silently degraded to stock. LayeredFS
@@ -619,7 +619,8 @@ fn init() {
     }
     profiling::tick("register_all");
 
-    // 8. Enable mods per the config loaded in step 2b.
+    // 8. Enable mods per the config loaded at step 0 (its `mods` section,
+    // read in step 2c).
     {
         let mut reg = registry.lock().unwrap();
         reg.enable_with_config(&mod_config);
@@ -666,7 +667,7 @@ fn init() {
     profiling::tick("init_complete");
     profiling::dump_scan_stats();
 
-    // 10. Splash screen + debug overlay (deferred until renderer captures font pointer)
+    // 11. Splash screen + debug overlay (deferred until renderer captures font pointer)
     std::thread::spawn(move || {
         // Wait for widget renderer to be ready
         for _ in 0..300 {

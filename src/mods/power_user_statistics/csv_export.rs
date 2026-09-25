@@ -1,4 +1,23 @@
 //! CSV Export — writes per-player step data to CSV on song end.
+//!
+//! Data comes from `data_feed`: at GAMEPLAY entry (and on an in-place `song_reset`) the
+//! buffers are reset with a per-step `Vec` only for sides whose `step_data_export` option is
+//! ON, and the `judge_submit` detour pushes one `StepRecord` per TIMED grade (Marvelous..Boo;
+//! Miss and O.K. carry no measurement and produce no row). On each side's first judgement
+//! `snapshot_song_identity` latches the song basename (`std::string` at DPS `+0xA0`, the DPS
+//! being the actor's parent at `+0x08`), the difficulty byte (DPS `+0x50`) and the song-rate
+//! snapshot — the latched copy is what the rate columns use, because the live rate
+//! publication resets to identity at gameplay exit, before the flush.
+//!
+//! `flush` runs from the mod's scene callback when the scene leaves GAMEPLAY. A side is
+//! written only if it has steps, an identity AND its option is still ON at flush time.
+//! Output: `./step_data_exports/` (relative to the game's working directory), one file per
+//! side named
+//! `<UTC YYYY-MM-DD_HH-MM-SS>_<basename>_<difficulty name>_<difficulty index>_P<n>.csv`,
+//! CRLF rows `Expected,Actual,Delta (Ms Error),Song Rate Requested (%),Song Rate Effective`.
+//! `Expected` / `Actual` are raw chart / hit times in ms; `Delta` uses the user-facing sign
+//! (POSITIVE = FAST, i.e. `Expected − Actual`, via `data_feed::display_ms`). A write failure
+//! logs one WARN for that side.
 
 use std::io::Write;
 use std::path::Path;

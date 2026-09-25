@@ -1,31 +1,37 @@
-//! Real Speed Calculation Fix — Real Speed display divides by Core BPM
-//! instead of Max BPM (the R24/R25/R26 divisor-swap patches in
-//! `real_speed.rs`).
+//! Real Speed Calculation Fix (`real-speed-fix`, default ON) — makes the REAL
+//! SPEED scroll mode (speed type 0: "arrows travel at N") derive its
+//! multiplier from the chart's Core BPM instead of its Max BPM, so songs with
+//! a short high-BPM burst no longer play the whole chart slow.
 //!
-//! # Retired: the logf(0) guard (R15/R16), 2026-09-01
+//! ## Mechanism
 //!
-//! The original hex-edit modpack shipped two additional patches attributed
-//! by its research notes to "the scroll-speed display function": R16
-//! (redirect a log call through a zero-guarded wrapper) and R15 (a JMP
-//! rel8 displacement rewrite `0x48 → 0x37`). Porting them here as
-//! `logf_stub.rs` reproduced both faithfully — and R15 turned out to be
-//! the root cause of the "pacemaker → ms-error shows no digit at exactly
-//! 0" bug: the `real_speed_logf_anchor` AOB actually lands inside
-//! `NoteResultActor::onMessage` case 0x1036 (the PACEMAKER readout, not
-//! any scroll-speed code — the attribution was wrong in the original
-//! mod's notes, verified on 20250805/20260616/20260721/20260825, single
-//! match in the same function on all four). R15 rewrote the zero-branch's
-//! `LEA R13D,[RSI+1]; JMP +0x48` to jump into the log10f path instead,
-//! recomputing the sign-slot index as `trunc(guarded_log(0) + XMM6)` with
-//! XMM6 STALE (only the nonzero branch loads it with 1.0f) — observed 0 at
-//! runtime → sign slot = powf(10,0) = 1 = the ONES slot, so the ± sign
-//! overwrote the 0 digit (live-confirmed via CE register captures:
-//! R13D=0, R9D=1 despite the LEA provably setting R13D=1).
+//! Three byte patches inside `ddr::player::Option::SetScrollSpeed`, anchored
+//! on the `real_speed_bpm_anchor` AOB (`divsd xmm0,[rcx]`) and applied by
+//! `real_speed.rs`. The stock setter computes the normalized multiplier as
+//! `clamp(trunc(target·100 / Max BPM), 25, 800)`; the patches swap the
+//! divisor for Core BPM and leave the rest of the derivation untouched (see
+//! `real_speed.rs` for the per-patch bytes). The original bytes are saved at
+//! `enable()` and written back at `disable()`. The patch changes what the
+//! setter produces, so a toggle takes effect the next time the game runs it.
 //!
-//! The guard itself is also useless in this codebase's flow: the nonzero
-//! branch only reaches log10f with |value| ≥ 1, and stock's zero branch
-//! never calls it. Both patches removed outright; the Core-BPM divisor
-//! swap below is the entire mod.
+//! ## Interaction with song rate
+//!
+//! At a committed non-identity song rate, `services/song_rate/real_speed`
+//! (owned by the Song Playback Speed mod, not by this one) recomputes the
+//! multiplier for Real-Speed sides from `Core BPM × effective rate` and
+//! writes it over the setter's outputs (the GamePlayActor multiplier cluster
+//! and `Option+0x10`) at each side's first judge dispatch. That recompute
+//! always uses Core BPM whatever this toggle says, so the toggle only matters
+//! at 100 %, where the song-rate path does nothing.
+//!
+//! ## Degradation
+//!
+//! `required_signatures` is empty: a missing `real_speed_bpm_anchor` logs one
+//! WARN at init and `enable()` patches nothing (stock Max-BPM behavior).
+//!
+//! RE notes: `docs/binary_modpack_research.md` §4. The hex-edit modpack's
+//! R15/R16 "logf guard" is deliberately not ported: it actually patched the
+//! pacemaker readout (`docs/pacemaker_display_research.md`).
 
 pub mod real_speed;
 

@@ -4,73 +4,91 @@
 
 ## What This Is
 
-A Rust hook DLL (`cdylib`) for the DanceDanceRevolution World arcade game (64-bit, MDX-003 data). It is injected into the live game process via spice2x's `-k` flag and installs inline function hooks against `gamemdx.dll` and sibling Konami DLLs (`libafp-win64`, `libafputils-win64`, `libavs-win64`, `arkmdxbio2`) to add gameplay, quality-of-life, and cosmetic mods that render through the game's own UI pipeline.
+A Rust hook DLL (`cdylib`, crate `ddr-world-hook`) for the DanceDanceRevolution World arcade game (64-bit). spice2x injects it into the live game process with `-k`. It installs inline detours and checked byte patches against `gamemdx.dll` and sibling Konami DLLs, and renders everything through the game's own UI and 3D pipelines. Widgets, option rows, previews and the 3D background are native engine objects, not an external overlay.
+
+The repository also holds:
+
+- **`updater/`** — a standalone auto-updater binary (separate crate).
+- **`tools/`** — a Blender add-on for the game's 3D formats, an offline bot simulator, and the pinned HLSL compiler.
+- **`scripts/`** — Python/bash tooling for asset generation, format work, host-test harnesses and cabinet automation.
 
 ## Technology Stack
 
 | Aspect | Value |
 |--------|-------|
-| Language | Rust (nightly, pinned via `rust-toolchain.toml`) |
-| Crate type | `cdylib` |
-| Targets | `x86_64-pc-windows-msvc` (primary), `x86_64-win7-windows-msvc` (tier-3, `build_win7.sh`) |
-| Hooking | `retour` (static-detour feature — the reason for nightly) |
-| Win32 bindings | `windows` 0.58 |
-| Image processing | `image`, `texpresso` (DXT5) |
-| Config | `serde`/`serde_json` (`mod-config.json`) |
-| Scanning | `aho-corasick` prefilter over AOB patterns |
-| Cross-compilation | `cargo-xwin` from macOS/Linux (`build.sh`) |
-| Auxiliary tooling | Python 3 (`scripts/*.py`), bash validation harnesses (`scripts/validate_*.sh`), HLSL via fxc 9.29 (`tools/fxc/`, committed blobs) |
+| Language | Rust nightly (pinned in `rust-toolchain.toml`; needed by `retour` static-detour and `trim-paths`) |
+| Targets | `x86_64-pc-windows-msvc`; `x86_64-win7-windows-msvc` (tier-3, `-Z build-std`) for release builds |
+| Cross-compilation | `cargo-xwin` from macOS/Linux |
+| Hooking | `retour` `GenericDetour`; checked patch transactions in `src/core/memory_patch.rs` |
+| Win32 | `windows` 0.58 (curated feature list) |
+| Assets | `image`, `texpresso` (DXT5), in-crate ARC/IFS/AFP/AP2/kbin/AVSLZ/XACT/SSQ/ANM codecs |
+| Config | `serde_json` over the single `mod-config.json` |
+| Auxiliary | Python 3 scripts, bash harnesses, HLSL built with fxc 9.29 under CrossOver, Blender add-on (Python) |
 
 ## Target Game Modules
 
-| Module | What is hooked/read |
-|--------|--------------------|
-| `gamemdx.dll` | The game itself — nearly all AOB signatures, detours, and byte patches |
-| `libavs-win64-ea3.dll` | AVS filesystem (LayeredFS's five hooks), property-tree ordinals (persistence) |
-| `libafp-win64.dll` / `libafputils-win64.dll` | AFP/BM2D animation runtime (named exports + one detour) |
-| `arkmdxbio2.dll` (or `arkmdxp3`/`arkmdxp4`) | Cabinet I/O — input polling exports |
-| `ess.dll` | e-amusement save/load senders (persistence + score policy) |
-| `mfplat.dll` | One Wine-only detour (VC-1 subtype fix) |
+| Module | Role |
+|--------|------|
+| `gamemdx.dll` | The game. Almost every signature, detour and patch targets it |
+| `libavs-win64(-ea3).dll` | AVS filesystem (LayeredFS), property-tree exports (persistence), `ea3_boot` (soft-id override) |
+| `libafp-win64.dll` / `libafputils-win64.dll` | AFP/BM2D animation runtime (named exports plus the stream-create detour) |
+| `arkmdxbio2.dll` (or `arkmdxp3`/`arkmdxp4`) | Cabinet IO: input, lamps, machine type |
+| `ess.dll` | e-amusement save/load senders |
+| `xactengine2_10.dll` | XACT audio engine (diagnostic and audio-clock observers) |
+| `mfplat.dll` | Wine-only VC-1 subtype fix |
 
 ## Key Characteristics
 
-- **Binary neutrality** — no hardcoded offsets. Every address comes from an AOB signature (`src/core/signatures.rs`), an RTTI/vtable walk, or a RIP-relative derivation from a scanned landmark, so the DLL survives game data updates.
-- **Fail-open by design** — a missing signature or failed service init logs a warning and disables just that feature; the rest of the modpack (and the game) keeps working. Derivations are fail-closed (they publish nothing on validation failure) while features are fail-open.
-- **Native rendering** — widgets, option rows, previews, and overlays are real game objects (bitmap-font strings, sprites, AFP movie clips, command-list records), not an external overlay.
-- **In-process discipline** — three distinct allocator heaps, no panics across `extern "C"`, one detour per target function (shared dispatchers where multiple consumers need the same hook), store-then-enable hook installation.
-- **Pure layers are host-tested** — format/DSP/decision code (`src/core/xact`, `src/core/ssq`, option framework, song-rate engine, calibration math, etc.) runs under `cargo test` or temp-crate harnesses (`scripts/validate_*.sh`); engine-facing code is validated by live cabinet deployment.
+- **Binary neutrality.** Nothing is hardcoded. Every address comes from an AOB signature (`src/core/signatures.rs`), an RTTI/vtable walk, or a validated derivation from a scanned landmark. `scripts/validate_signatures.sh` sweeps every supported `gamemdx` build offline.
+- **Fail-open features, fail-closed derivations.** A missing signature disables only its consumer. A derivation that cannot validate publishes nothing. Score-integrity policy fails closed.
+- **In-process discipline:**
+  - allocator matching across three heaps
+  - no panics across `extern "C"`
+  - one detour per target function, with shared dispatcher services where several features need the same hook
+- **Pure logic is split out** into dependency-free files that host tests mount through temp-crate harnesses (`scripts/validate_*.sh`). Engine-facing code is validated on a live cabinet.
 
 ## Codebase Map
 
 ```mermaid
 graph TD
-    subgraph Repo
-        LIB[src/lib.rs<br/>DLL entry + init sequence]
-        CORE[src/core/<br/>scanner, signatures, hooks,<br/>memory, formats: arc/ifs/afp/ssq/xact]
-        SVC[src/services/<br/>game-system integrations]
-        MODS[src/mods/<br/>one module per mod]
+    subgraph DLL crate
+        LIB[src/lib.rs<br/>DllMain + init sequence]
+        CORE[src/core/<br/>scanner, signatures, hooks, memory,<br/>frame pump, formats]
+        SVC[src/services/<br/>game-system integrations,<br/>single-owner hook services]
+        MODS[src/mods/<br/>one module per mod + config]
         WID[src/widgets/<br/>TextWidget, ImageWidget]
         TYPES[src/types/<br/>scenes, buttons, GameNote]
-        SCRIPTS[scripts/<br/>asset gen, validation harnesses,<br/>deploy, game_nav automation]
-        SHADERS[shaders/src/<br/>HLSL sources → committed blobs]
-        DATAMODS[data_mods/<br/>shipped runtime assets]
-        DOCS[docs/<br/>RE research notes]
-        AGENTS[.agents/<br/>planning, learnings, steering, summary]
     end
-    LIB --> CORE
-    LIB --> SVC
-    LIB --> MODS
-    MODS --> SVC
-    MODS --> WID
-    SVC --> CORE
+    UPD[updater/<br/>standalone auto-updater crate]
+    TOOLS[tools/<br/>blender_ddr_addon, bot_sim, fxc]
+    SCRIPTS[scripts/<br/>validate_*, sig_harness, gen_*,<br/>format tools, game_nav, release]
+    SHADERS[shaders/src/<br/>HLSL]
+    DATA[data_mods/<br/>shipped runtime assets]
+    DOCS[docs/<br/>RE research notes]
+    AG[.agents/<br/>summary, steering, learnings, planning]
+
+    LIB --> CORE & SVC & MODS
+    MODS --> SVC & WID & TYPES
     WID --> SVC
-    MODS --> TYPES
-    SVC --> TYPES
-    SHADERS -.build_shaders.sh.-> DATAMODS
-    SCRIPTS -.generate.-> DATAMODS
+    SVC --> CORE & TYPES
+    SHADERS -. build_shaders.sh .-> DATA
+    SCRIPTS -. generate .-> DATA
+    TOOLS -. bot_sim mounts pure mod files .-> MODS
+    UPD -. mounts csv grammar .-> MODS
 ```
 
 ## Analysis Coverage
 
-- **Analyzed:** all Rust source under `src/`, `Cargo.toml`/`rust-toolchain.toml`, shell/Python tooling under `scripts/` and the repo root, HLSL under `shaders/src/`, `mod-config.json`, shipped data under `data_mods/`.
-- **Not analyzed in depth:** the contents of `docs/` (reverse-engineering notes — treated as reference material, not code), binary assets (PNG/ARC/blob files), the checked-in helper binaries (`scripts/arctool`, `tools/fxc/`, `spice2x-cli/`).
+- **Analyzed:**
+  - all Rust under `src/`, `updater/` and `tools/bot_sim/`
+  - `Cargo.toml` and `rust-toolchain.toml`
+  - the build, deploy and release scripts
+  - the harness mechanism of `scripts/validate_*.sh` and `scripts/sig_harness/`
+  - HLSL under `shaders/src/`
+  - `mod-config.json`, `.gitignore`, and the layout of `data_mods/`
+- **Inventoried, not analyzed in depth:**
+  - the contents of `docs/` (reference RE notes)
+  - the Blender add-on's internals
+  - binary assets
+  - vendored helper binaries (`scripts/arctool`, `spice2x-cli/`, `tools/fxc/`)
+- **Languages:** Rust, Python, Bash and HLSL are all readable. No gaps from unsupported languages.

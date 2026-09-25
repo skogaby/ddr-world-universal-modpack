@@ -1,22 +1,74 @@
-//! Mod Menu — In-game overlay for viewing and toggling mods.
+//! Mod Menu (`mod-menu`, default ON) — the in-game overlay modal for toggling mods and editing
+//! cabinet-wide and per-player settings. Its widgets are native game objects drawn through
+//! `widget_renderer`, not a separate overlay.
 //!
-//! Triple-0 gesture activation (press 0 three times on either pinpad).
-//! Tabbed shell (overlay-menu rewrite design §4.1): MODS (registry toggles)
-//! and GLOBAL SETTINGS (cabinet-wide contributed rows grouped per owning
-//! mod); PLAYER SETTINGS and THEME arrive in later steps.
+//! ## Opening and input
 //!
-//! Module layout:
-//! - `mod.rs` — lifecycle (`Mod` impl), the triple-0 open gesture, open/close,
-//!   and the shared `ModMenuState`.
-//! - `model.rs` — the PURE row/tab/navigation model (host-tested via
-//!   `scripts/validate_mod_menu.sh`).
-//! - `tabs.rs` — snapshot assembly + tab row-list rebuilds (impure glue
-//!   between the registry/contributed registrations and the model).
-//! - `rows.rs` — the public row-registration API (`ScalarRowSpec`/
-//!   `EnumRowSpec`), the contributed-row store, and the edit paths.
-//! - `input.rs` — exclusive input handling while open and the hold-to-repeat
-//!   thread.
-//! - `render.rs` — widget allocation, layout constants, and refresh.
+//! Pressing 0 three times on either pinpad within 1.25 s opens the menu (and the same
+//! gesture closes it); the side whose press completed the gesture becomes the PLAYER
+//! SETTINGS default side. Opening is refused until `widget_renderer` is live. While open the
+//! menu is `input_manager`'s exclusive consumer and suppresses game input: pinpad 1 / 3
+//! switch tabs, MENU UP / DOWN move the cursor, MENU LEFT / RIGHT edit (START held = coarse
+//! scalar step, a repeat thread handles holds). The last tab and row are restored on the
+//! next open. Other mods check `is_open()` so their own widgets never climb over the menu.
+//!
+//! ## Tabs (`model::TabId`)
+//!
+//! - **TOGGLE MODS** — one boolean per registry mod (except this one). A toggle runs the
+//!   registry callback, then `rows::toggle_registry_mod` persists every mod's `requested`
+//!   (operator intent, not the effective `enabled`) through `config::save_mod_states`.
+//! - **GLOBAL SETTINGS** — contributed rows, grouped under an auto header per enabled
+//!   owning mod (ungrouped rows at the tail).
+//! - **PLAYER SETTINGS** — the `custom_options` overlay-placed options for the selected
+//!   side, live-mirrored (value-changed observer + scene callback, coalesced repaint). A
+//!   side is editable only while entered and outside the attract/boot band
+//!   (`tabs::editable_sides_now`); edits marshal to the render thread and re-check that gate.
+//! - **APPEARANCE** — THEME, ANIMATED BACKGROUND and MENU OPACITY.
+//!
+//! ## Contributed-row API (`rows.rs`, re-exported here)
+//!
+//! `register_scalar_row` / `register_enum_row` add a row owned by `parent_row_key` (the
+//! mod id); re-registration by key is idempotent. `set_row_show_when(child, parent, value)`
+//! makes a row a child of another row of the same owner, shown only while the parent is
+//! shown and holds `value`. `remove_rows_for` drops a mod's rows from its `disable()`. The
+//! owning mod is authoritative: `on_change` fires first, then the store mirrors the value.
+//!
+//! ## Themes and animated backgrounds
+//!
+//! `theme::THEMES` holds twelve themes — BUBBLES (the default and the fallback for unknown
+//! ids), TERMINAL, WAVEFORM, SPECTRUM, TUNNEL, XMB, SQUARES, CARD SWIRL, BLOBS, PS2,
+//! PRIME CUBE (shader-backed, HLSL in `shaders/src/themes/`) and the static MINIMAL.
+//! `chrome_loader` synthesizes the gradient panel and strip textures off-thread (via pure
+//! `chrome`), caches them under `data_mods/_cache/mod_menu/` and binds them on the render
+//! thread, falling back to a solid strip and then to text only. The animated background is
+//! emitted by `services/overlay_draw` at the menu's hidden anchor widget, which
+//! `render::allocate_widgets` creates first so the quad draws under the panel and text;
+//! `update_background_feed` switches it on only while the menu is open, ANIMATED BACKGROUND
+//! is on, the theme is shader-backed and the synthesized theme programs exist.
+//!
+//! ## Threads and config
+//!
+//! Every widget allocation, repaint and hide — and every PLAYER SETTINGS apply — is marshaled
+//! to the render thread (`widget_renderer::run_on_render_thread`). The background feed and
+//! `is_open()` read lock-free atomics (`MENU_OPEN` mirrors the state's open flag), so the
+//! emitter's hot path never takes the state mutex. The `overlay_menu` section (`theme`,
+//! `animate_background`, `opacity`, `last_tab`, `last_row`) is owned by `chrome_loader`,
+//! which rewrites it whole on close and on APPEARANCE edits.
+//!
+//! ## Submodules
+//!
+//! - `model.rs` — pure row / tab / navigation model and tab builders.
+//! - `tabs.rs` — snapshot assembly, tab rebuilds, the PLAYER SETTINGS session gate.
+//! - `rows.rs` — the contributed-row API, the row store, and the edit paths.
+//! - `input.rs` — exclusive input handling and the hold-to-repeat thread.
+//! - `render.rs` — widget allocation, layout and repaint.
+//! - `chrome.rs` / `chrome_loader.rs` — pure chrome synthesis / the impure texture
+//!   pipeline and `overlay_menu` persistence.
+//! - `theme.rs` — pure theme table and id resolution.
+//!
+//! RE: `docs/overlay_draw_research.md`, `docs/custom_shader_backgrounds_research.md`.
+//! Host tests: `scripts/validate_mod_menu.sh` (model, chrome, theme) and
+//! `scripts/validate_overlay_draw.sh` (record encoders, shader layout).
 
 pub(crate) mod chrome;
 mod chrome_loader;

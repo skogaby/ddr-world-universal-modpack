@@ -1,109 +1,105 @@
-//! Enable Background Dancers — revives the pre-World 3D background dancers:
-//! during every gameplay song a randomly chosen A3 stage and randomly chosen
-//! A3 dancer(s) animate behind the lane, rendered by the game's OWN model
-//! passes from the character / stage / motion / camera arcs the stock World
-//! install still ships but never opens.
+//! Background Dancers — revives the pre-World 3D background: during every
+//! gameplay song an A3 stage and A3 dancer(s) (random, or the players'
+//! choice) animate behind the lane, rendered by the game's OWN model passes
+//! from the character / stage / motion / camera arcs the stock World install
+//! still ships but never opens. **DEFAULT OFF** (`DEFAULT_OFF_MODS`).
 //!
-//! Architecture (design `.agents/planning/2026-09-16-enable-background-dancers/`):
 //! World's engine kept the whole 3D pipeline (KTMDL loader, `MODEL:*` passes,
-//! `agcs::scene::SceneGraph`, camera); Konami deleted only the game-side scene
-//! layer. `services::scene3d` supplies that layer's engine contact points and
-//! this mod supplies the game logic (selection, the A3 choreography/camera
-//! rules, the per-song lifecycle). Zero rendering detours; nothing is patched.
+//! `agcs::scene::SceneGraph`, camera); Konami deleted only the game-side
+//! scene layer. `services::scene3d` supplies that layer's engine contact
+//! points (render items, the mod-owned scene node, the seqlocked
+//! `frame_board`, camera slot 0, `arc_set`, the `viewport_pass` compositor);
+//! this mod supplies the game logic. No rendering detours; the only code
+//! patch is STAGE SCREENS' layer-select byte. RE:
+//! `docs/background_dancers_research.md`, `docs/3d_model_format_research.md`.
 //!
-//! ## Shape (plan Steps 7–10)
+//! **Per song:** at the first entry into the song window {26, 27, 28} the
+//! pick is resolved (developer pin → option rows → seeded random), its arcs
+//! are loaded through the engine FileManager and parsed on one std thread,
+//! and every resident model becomes a render item + scene node. The scene is
+//! shown from the DancePlaySequence's step-5 edge and posed as a pure
+//! function of the music count, turned into DANCE time through the chart's
+//! tempo map (A3's `bpm_sync` / `stop_slow` rules). Every frame the director
+//! publishes poses onto the frame board and writes the camera from A3's
+//! stage-mode sequencing; the 2D background is made transparent. Window exit
+//! tears the scene down and restores every override.
 //!
-//! At the first entry into the song window {26, 27, 28} ([`lifecycle`]) a
-//! seeded random pick ([`selection`], [`session::Pick`]) chooses one A3
-//! stage row + one dancer per entered side (+ the accessory parts whose
-//! arcs exist), applies the Background Movies mode to every entered side's
-//! movie size for the song ([`movie_mode`], [`movie_size`]), hands the pick's arcs to
-//! the engine's FileManager and parses them on one background thread
-//! ([`session::parse_pick`] → `core::anm`: stage `_play_loop`s, dance
-//! clips, the body `.b2it`, the part / shadow bone tables, the stage's
-//! `.camanm` sets). Every resident model becomes a render item + scene node
-//! (stage parts, bodies, parts, one `pl_shadow00` per dancer). The scene is
-//! shown from the DancePlaySequence's step-5 edge (`song_reset::dps_step`)
-//! and clocked by the content-domain music count ([`clock`]) turned into
-//! DANCE TIME through the chart's tempo map ([`tempo`], sourced from the
-//! song's SSQ by [`tempo_source`]: half a second of the 120-BPM clips per
-//! chart beat, phase-pinned to the measure grid, 1/12 speed through STOPs —
-//! the two A3 `ConfigBank` switches, both ON by default via the
-//! `background_dancers` config section); every frame
-//! the [`director`] evaluates each body once and publishes bodies, parts
-//! (`E · bone · body`), shadows (the A3 ground-bone rule) and stage loops
-//! onto the `scene3d::frame_board` the nodes copy from, and writes the
-//! camera slot from the A3 stage-mode camera sequencing ([`schedule`] over
-//! the shuffled main / `_non` camanm lists). [`background_hide`] makes the
-//! 2D background transparent for the song. Torn down at window exit
-//! (nodes → destroy vector → dtors → arcs; movie size + hide restored).
-//! `DEFAULT_OFF_MODS`: the maintainer flips the default once cabinet-proven.
+//! **Background Movies** (for every entered side whose VIDEO SIZE shows a
+//! movie): OFF (VIDEO SIZE OFF + the `MovieSuppressor::BackgroundDancers`
+//! contributor of `services::movie_policy` for the window), THUMBNAIL,
+//! STAGE SCREENS (default: the movie plays on stages whose materials sample
+//! `offscreen1`; screen-less stages fall back to THUMBNAIL), FULLSCREEN (NO
+//! STAGE: once the movie really plays, stage + shadows hide and the movie
+//! camera set films the dancers) and MOVIE ONLY (NO DANCERS). A RANDOM
+//! stage draw follows the song's movie state (screen stages when the movie
+//! will play on screens, screen-less stages otherwise); a chosen stage is
+//! never filtered. Missing dependencies degrade to THUMBNAIL with one WARN.
 //!
-//! ## Background movies (2026-09-22)
+//! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
+//! Outlines** (INK or LAYERED inverted-hull twins, per-kind widths): applied
+//! per song at item build by re-pointing each item's private material copies
+//! at the `<material>_lit` / `_cel` containers that
+//! `services/avs_layeredfs/shader_synthesis.rs` packs when `shader-fixes` is
+//! also on (hull twins run their program 0). Not served ⇒ stock / no
+//! outlines, one WARN. The shadow, `_bg` skydome parts, blended materials
+//! and screen materials always stay stock.
 //!
-//! GLOBAL SETTINGS row "Background Movies" (`background_dancers.movie_mode`,
-//! next song) decides what a song with a background movie does, for every
-//! entered player whose VIDEO SIZE shows one: OFF (VIDEO SIZE OFF for the
-//! song + the shared BuildGraph suppressor; the stage as usual), THUMBNAIL
-//! (the original behaviour: the movie's small window over the stage), STAGE
-//! SCREENS (the default since 2026-09-23 — below), FULLSCREEN (NO STAGE) —
-//! the DDR 5th Mix look — or MOVIE ONLY (NO DANCERS). The game
-//! already draws a fullscreen movie into the 3D target ahead of the model
-//! passes, so FULLSCREEN only has to leave the movie fullscreen and not
-//! draw the stage: [`movie_backdrop`] probes the live DancePlaySequence's
-//! MovieActor every frame, and while its movie really plays the stage parts
-//! and floor shadows are published hidden and the camera director films the
-//! dancers with the MOVIE camera set ([`movie_camera`]: loose `.camanm`
-//! clips in `data_mods/background_dancers/movie_camera/`, generated by
-//! `scripts/gen_movie_cameras.py` — close, front-facing shots; `_1p` / `_2p`
-//! variants per dancer count) instead of the stage's own cameras. RE:
-//! `docs/background_dancers_research.md` §7.
+//! **Choice, previews, custom content:** two in-game `custom_options` rows
+//! (`PersistMode::Local`) — BACKGROUND DANCER (per player) and BACKGROUND
+//! STAGE (cabinet-wide, `versus_mirror`ed) — with a live 3D preview in the
+//! row's box at song select (`viewport_pass` clones; RANDOM ⇒ a static
+//! badge; no compositor ⇒ rows only). With `custom_content` on (next
+//! launch), each MODEL FOLDER under
+//! `data_mods/custom_models/{dancers,stages}/<Friendly Name>/` (`pl_<key>/`,
+//! `mapset_<key>/`; flat export or unpacked-arc layout) is packed into a
+//! fingerprinted cache arc under `data_mods/_cache/custom_models/` — a ready
+//! `.arc` is still accepted — and mounted in `scene3d::arc_set`; entries are
+//! labelled by folder name, keys colliding with stock are refused, and the
+//! custom block follows the stock block of the catalog.
 //!
-//! STAGE SCREENS (2026-09-23, RE §8) is DDR A3's look: on a stage with video
-//! screens (a material textured `offscreen1` — the ten stock monitor /
-//! replicant stages and any custom stage exported with the convention) the
-//! movie plays ON the screens: [`screen_route`] rewrites the MovieActor's
-//! layer choice from entry 9 to entry 10 (the OFFSCREEN1 render target the
-//! screens sample) for the song and frames the movie with A3's contain fit;
-//! a stage without screens plays the song as THUMBNAIL. A RANDOM stage
-//! (no BACKGROUND STAGE chosen) follows the song: under STAGE SCREENS a
-//! song whose movie plays draws only from the screen stages, so the movie
-//! is always on screens ([`song_movie`], `movie_mode::random_pool_filter`);
-//! in every other case RANDOM draws only from the stages without screens,
-//! so it never lands on black screens. An explicitly chosen stage is never
-//! filtered.
+//! **Threads:** engine calls happen on the game thread only (scene
+//! callbacks, the mod's `input_manager::on_frame` callback,
+//! `run_on_render_thread`); the parse thread and the enable-time custom scan
+//! use `std` only. The scene node's `visit` / dtor run on the engine's
+//! job-graph worker: NO engine API, locks, allocation or logging there;
+//! `visit(2)` is the only writer of an attached item's pose (copied from the
+//! frame board). `scene3d::viewport_pass::reap()` is called exactly once per
+//! frame, from this file.
 //!
-//! ## Player choice (2026-09-21)
+//! **Config** `background_dancers` (DLL-written, rewritten whole by
+//! `style.rs` on every GLOBAL SETTINGS edit): `style`, `outlines`,
+//! `outline_style`, `outline_px`, `outline_px_stage`, `bpm_sync`,
+//! `stop_slow`, `movie_mode`, `custom_content`, plus the operator-set
+//! `outline_layer_colors` (re-emitted when present). All apply next song
+//! except `custom_content` (next launch). Legacy `shader_fixes.dancer_*` /
+//! `lit_models` seed `style` / `outlines` when absent.
 //!
-//! Two in-game option rows under PLAYFIELD STYLING OPTIONS — BACKGROUND
-//! DANCER (per player) and BACKGROUND STAGE (cabinet-wide, mirrored in
-//! versus) — let a player pick a specific dancer / stage instead of RANDOM
-//! ([`options`] over the sorted, labelled [`catalog`]; local persistence
-//! only). The pick order at window entry is developer pin → option rows →
-//! random (`selection::resolve_choice`); the per-song INFO names each
-//! element's source.
+//! **Degradation:** `required_signatures` = the all-or-nothing `scene3d`
+//! group anchor + FileManager (a miss skips the mod). Without the
+//! `startup.arc` rlists or any stage/dancer arc the mod reports inactive.
+//! Everything else is per-song fail-open, one WARN/INFO each. `is_active()`
+//! = "this mod CAN work", never "something rendered this boot". Developer
+//! knobs (`layeredfs.developer_mode`): `DDR_DANCERS_PIN`,
+//! `DDR_DANCERS_STATIC`, `DDR_DANCERS_VIEWPORT_SMOKE`.
 //!
-//! ## Custom dancers & stages (2026-09-22)
+//! **Host tests:** `scripts/validate_background_dancers.sh` mounts the pure
+//! files marked † below plus the pure `scene3d` / `core::anm` layers; its
+//! `core::anm` fixture leg needs `$DDR_WORLD_INSTALL`.
 //!
-//! With `background_dancers.custom_content` on (GLOBAL SETTINGS row "Custom
-//! Dancers & Stages", default ON, next launch) the tables also carry the
-//! community content under the ONE custom-models base
-//! (`data_mods/custom_models/dancers/<Friendly Name>/pl_<key>.arc`,
-//! `data_mods/custom_models/stages/<Friendly Name>/mapset_<key>.arc`, optional
-//! sidecar rlists beside them — [`custom_content`] plans, [`custom_scan`]
-//! walks + mounts through `scene3d::arc_set`). They take part in random
-//! picks, the two rows (labelled by their folder name) and the previews
-//! exactly like the stock rows; the stock block of the catalog never moves.
+//! ## Submodules
 //!
-//! ## Degradation
-//!
-//! `required_signatures` names the `scene3d` group's anchor; the group is
-//! all-or-nothing, so a miss on any build skips the mod cleanly. Without the
-//! `startup.arc` rlists or without any stage/dancer arc in the install the
-//! mod reports inactive. Everything else is per-song fail-open (a part, a
-//! shadow, a camera set, the movie-size override — each degrades alone with
-//! one WARN/INFO). `is_active()` = "this mod CAN work" (the service resolved
-//! and the tables loaded), never "something rendered this boot".
+//! - Tables + choice: [`lifecycle`] (tables, song window, gameplay wrapper),
+//!   [`selection`]†, [`pick`]†, [`catalog`]†, [`options`], [`custom_content`]†
+//!   (pure planner), [`custom_scan`] (folder walk, packing, mounts).
+//! - Scene: [`session`] (parse + instance build), [`instance_plan`]†,
+//!   [`scene_window`] (load / build / teardown, shared with previews),
+//!   [`director`] + [`director_math`]†, [`schedule`]†, [`clock`]†,
+//!   [`tempo`]† + [`tempo_source`], [`background_hide`].
+//! - Movies: [`movie_mode`]†, [`movie_size`], [`movie_backdrop`],
+//!   [`movie_camera`]†, [`screen_route`], [`song_movie`].
+//! - Look: [`style`] (rows, live values, config), [`outline`]†.
+//! - [`preview`] (`layout`†, `state`†, camera, scene, badge);
+//!   [`viewport_smoke`] (dev compositor smoke).
 
 pub mod background_hide;
 pub mod catalog;

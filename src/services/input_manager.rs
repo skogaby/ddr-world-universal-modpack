@@ -1,4 +1,64 @@
-//! Input Manager — Polls arkmdxbio2.dll exports for button state.
+//! Input Manager — cabinet input for the modpack: polls the `arkmdxbio2` I/O
+//! exports into `InputEvent`s, suppresses game-side input while the mod menu is
+//! open, and injects synthetic input (pinpad pulses, card scans, SMX pads).
+//!
+//! ## Owned detours
+//!
+//! Installed by [`init`] from exports resolved by name in the ark module:
+//! - `arkMDXGetStart/Up/Down/Left/Right` and `arkMDXGet10Key` — suppression
+//!   detours. While [`set_input_suppressed`] is on, game-side callers read zeroed
+//!   out-params; the modpack's own poll bypasses this via the `IN_MODPACK_POLL`
+//!   re-entry flag. A failed menu-button install leaves that button unsuppressed.
+//!
+//! Installed lazily by [`poll`], once, on the first frame where the ark IO
+//! singleton is live AND an injection provider or pinpad-pulse consumer has
+//! registered. Targets are read from the live `MdxHWIO` vtable; the panel and
+//! 10-key slots are derived per boot from the export wrappers' dispatch
+//! displacement, and every target is range-checked against the ark module:
+//! - the four stage-panel impls (Up/Down/Left/Right) — SMX panel injection;
+//! - the IO dispatcher (+0x28) — menu override words and card-scan episodes.
+//!   Installed only when the derived layout matches the verified one (10-key at
+//!   +0x308, panels at +0x310..+0x328), because it writes `MdxHWIO` fields at
+//!   offsets verified only for that layout;
+//! - the 10-key impl (+0x308 on the verified layout) — pinpad injection.
+//!
+//! ## Polling and dispatch
+//!
+//! [`poll`] is driven once per engine frame by the frame pump
+//! (`widget_renderer::dispatch_frame`, from overlay_draw's layer-dispatcher
+//! detour), on the render/game thread, before that frame's queued render-thread
+//! jobs. Order:
+//! 1. [`on_frame`] callbacks — snapshotted outside the lock, each dispatched
+//!    under `catch_unwind`, and run BEFORE the ark gate so they work even when
+//!    ark I/O init failed.
+//! 2. The gate: no exports, or a null IO singleton (ark not initialized), ends
+//!    the poll here. The lazy injection install runs inside the gate.
+//! 3. Per player: menu buttons, 10-key and (opt-in via [`set_panel_polling`])
+//!    stage panels become Pressed/Released edges. Events are emitted outside the
+//!    lock: the exclusive consumer ([`set_exclusive_consumer`], the mod menu)
+//!    sees each event first and swallows it by returning true (a panic counts as
+//!    swallowed); otherwise every [`on_input_event`] callback receives it. Each
+//!    call is `catch_unwind`-contained. Callbacks may re-enter this service.
+//!
+//! Work that callbacks enqueue with `widget_renderer::run_on_render_thread`
+//! runs in the same frame. Keep idle callback paths O(1).
+//!
+//! ## Injection
+//!
+//! - [`request_pinpad_pulse`] — a one-shot pinpad key tap, visible to the game
+//!   and the modpack's poll. The consumer calls [`request_pinpad_injection`]
+//!   first so the 10-key detour installs.
+//! - [`request_card_scan`] — a card-on-reader episode replayed through the IO
+//!   dispatcher; it only lands while SMX injection is active and the game has
+//!   that player's reader armed.
+//! - [`set_injection_provider`] / [`set_injection_active`] — the SMX provider,
+//!   ORed additively into the menu, panel and pinpad reads.
+//!
+//! Degradation: [`init`] returns false when the ark module or the required
+//! exports are missing ([`is_available`] false, `poll` is a no-op after its frame
+//! callbacks). Each lazy detour degrades independently with one warning.
+//!
+//! See `docs/input_system_research.md` and `docs/input_polling_research.md`.
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;

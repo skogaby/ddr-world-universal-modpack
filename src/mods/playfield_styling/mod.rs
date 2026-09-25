@@ -1,49 +1,74 @@
 //! Playfield Styling — per-player scale & opacity for the gameplay
 //! playfield: scrolling arrows (normal / freeze / shock + electric overlay),
-//! the receptor row, the sprite-based receptor hit flash, the measure
-//! guideline, and mines (when `note_types_expansion` is active).
+//! the receptor row, the receptor hit flash, the measure guideline, the lane
+//! filter / cover / danger bands, and mines (when `note_types_expansion` is
+//! active).
 //!
-//! Two always-visible rows on the game's native Options screen (Mods tab):
-//!   - `ARROW SCALE`   — 25–150 %, default 100
-//!   - `ARROW OPACITY` — 0–100 %,  default 100
+//! Two per-player `custom_options` scalar rows:
+//!   - `arrow_scale`   (ARROW SCALE)   — 25–125 %, default 100
+//!   - `arrow_opacity` (ARROW OPACITY) — 0–100 %,  default 100
 //!
 //! The playfield scales about the **lane center X + receptor row Y**: the
 //! receptor row shrinks in place, staying horizontally centered on the stock
 //! lane; arrows converge toward the center line as they scroll. Purely
 //! visual — zero effect on timing, judging, or scoring. Values latch at
-//! GAMEPLAY entry (one snapshot per side per song).
+//! GAMEPLAY entry (one snapshot per side per song) and clear at exit.
 //!
 //! ## Mechanism (design:
-//! `.agents/planning/20260716-arrow-receptor-styling/design/detailed-design.md`)
+//! `.agents/planning/20260716-arrow-receptor-styling/design/detailed-design.md`,
+//! RE: `docs/playfield_styling_research.md`)
 //!
-//! Three legs:
-//!   1. `fill_hook.rs`  : one detour on the shared per-quad sprite fill
-//!      (`render_sprite_final`) — every lane quad flows through it with
-//!      lane-relative `(x, y, w, h)` args + a color ptr. The detour scales
-//!      the geometry about the lane center and composes opacity into a
-//!      copied color.
-//!   2. `services::cull_window` (promoted from this mod's former
-//!      `cull_patch.rs`): verified 4-byte disp32 redirects on the note
-//!      collector's (and guideline draw's) 720.0f cull loads, pointing at
-//!      a mod-owned float. This mod contributes its latched `min(scale)`
-//!      per song so shrunken playfields never pop arrows in mid-screen
-//!      (player_perspective contributes its hallway draw distance; the
-//!      effective bound is `max(720, distance)/min(scale, 1)` — the two
-//!      transforms stack, so the composition is multiplicative). The shared
-//!      720.0 constant itself is NEVER patched (14 unrelated readers).
-//!   3. `guideline_hook.rs`: capture detour on the guideline draw (Y-base
+//!   1. `fill_hook.rs` — one detour on the shared per-quad sprite fill
+//!      (`render_sprite_final`): every lane quad flows through it with
+//!      lane-relative `(x, y, w, h)` + a color ptr; the detour scales the
+//!      geometry about the lane center and composes opacity into a copied
+//!      color. Mine quads call the same fill and inherit the transform.
+//!   2. `services::cull_window` — verified disp32 redirects of the note
+//!      collector's and guideline draw's 720.0f cull loads onto a mod-owned
+//!      float (the shared 720.0 constant itself is never patched). This mod
+//!      contributes its latched `min(scale)` per song so shrunken playfields
+//!      never pop arrows in mid-screen; player_perspective contributes its
+//!      draw distance; effective bound = `max(720, distance) / min(scale, 1)`
+//!      (the two transforms stack, so the composition is multiplicative).
+//!   3. `guideline_hook.rs` — capture detour on the guideline draw (Y-base
 //!      pre-scale, exact for both scroll directions) + transform detour on
 //!      its single-caller bulk emitter.
+//!   4. `lane_hook.rs` — the AFP clips that bypass the fill: lane FILTER /
+//!      COVER / DANGER bands (captured at the CMovieClip pool-create
+//!      wrapper, scaled horizontally in place via matrix RMW) and the
+//!      receptor HIT FLASH (`dance_effect`, captured from NoteResultActor at
+//!      `note_result_setup`, translated toward the fill's fixed points and
+//!      scaled on its root MC). Applied
+//!      DEFERRED to the song's first fill call, when the HUD build is done.
+//!      Best-effort: outside the all-or-nothing gate below.
+//!
+//! ## Shared hooks (never install a second detour on these targets)
+//!
+//! - `fill_hook` is refcounted with `s_marvelous` (violet receptor-burst
+//!   recolour): `fill_acquire_smarvelous` / `fill_release_smarvelous`.
+//! - `guideline_hook` and `lane_hook`'s note-result (hit-flash) detour are
+//!   shared with `player_perspective`: `guideline_acquire_perspective` /
+//!   `guideline_release_perspective`, `flash_acquire_perspective` /
+//!   `flash_release_perspective`. Each detour installs on the first acquire
+//!   and is removed on the last release, so either mod may be
+//!   config-disabled. With this mod off, player_perspective drives the lane
+//!   state itself (`lane_scene_transition`, `lane_apply_pending`) and reads
+//!   side presence through `read_presence`.
+//! - [`cull_bound`] re-exports the live cull window for
+//!   `note_types_expansion::mine_render`, whose own top-cull check must
+//!   widen in lockstep.
 //!
 //! ## Degradation (requirement A6 — all-or-nothing)
 //!
-//! The full gate set — fill detour + collector cull patch (byte-verified) +
-//! guideline detours/patch — must ALL install, or the mod self-disables and
-//! registers NO option rows (no inert UI). All load-bearing resolution
-//! happens in `init` via the `derive_playfield_styling` signature chain;
-//! `required_signatures()` returns `&[]` and `is_active()` self-reports
-//! (the `overlay_element_styling` precedent), so the mod stays visible in
-//! the mod menu but inert when the set is incomplete.
+//! The load-bearing set — fill detour + cull-window patch (byte-verified) +
+//! guideline detours — must ALL install, or `enable()` rolls back and
+//! registers NO option rows (no inert UI). Resolution happens in `init` via
+//! the `derive_playfield_styling` signature chain; `required_signatures()`
+//! returns `&[]` and `is_active()` self-reports (the
+//! `overlay_element_styling` precedent), so the mod stays visible in the mod
+//! menu but inert when the set is incomplete. The lane captures are
+//! optional (`cmovieclip_pool_create` / `note_result_setup`; a miss is one
+//! WARN).
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 

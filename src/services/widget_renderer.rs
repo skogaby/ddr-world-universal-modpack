@@ -1,10 +1,49 @@
-//! Widget Renderer — Native widget lifecycle via game render list integration.
+//! Widget Renderer — native widget lifecycle via the game's render list, plus
+//! the per-frame render-thread pump every mod schedules work on.
 //!
-//! Instead of manually calling render_function from a hook, we create proper
-//! agcs::BmpString wrappers and insert them into the game's own render list.
-//! The game then renders our widgets naturally through its normal pipeline.
+//! ## Widgets
 //!
-//! See docs/widget_registration_system.md for the full architecture.
+//! Widgets are not drawn by us: [`create_text_widget`] builds a real
+//! `agcs::BmpString` wrapper (game allocator + the wrapper constructor derived
+//! from xrefs to `widget_factory`) and links it into the game's own render list
+//! (`*scene_manager + 0xB0`), so the game renders it through its normal
+//! pipeline. [`create_image_widget`] does the same for sprites. Render-list
+//! nodes come from a finite game-side pool that `destroy()` never returns;
+//! [`free_node_count`] reports the remaining budget.
+//!
+//! ## Owned detours
+//!
+//! - `render_function` (required) — one-time capture of the font pointer.
+//!   [`is_available`] is true once it has been captured; text-widget creation
+//!   returns `None` before then (image widgets only need the sprite vtable).
+//! - `wrapper_render` (optional) — the one-shot free-pool diagnostic, then the
+//!   overlay_draw anchor hooks (`on_wrapper_render`, `on_anchor_render`, and the
+//!   post-original `on_anchor_rendered`), so the animated background is emitted
+//!   at the anchor wrapper's native position in the walk.
+//!
+//! [`init`] returns false when `widget_factory`, the `BmpString` vtable (RTTI)
+//! or the `render_function` detour is unavailable.
+//!
+//! ## Frame pump
+//!
+//! [`run_on_render_thread`] enqueues a closure onto a `core::frame_pump::FramePump`
+//! and never runs it inline. [`dispatch_frame`] is called once per engine frame
+//! from overlay_draw's layer-dispatcher detour: it runs `input_manager::poll`,
+//! then the queued batch, then the original render. Work enqueued during the poll
+//! (input and frame callbacks) runs the same frame; work enqueued by a batch job
+//! or during rendering runs no earlier than the next frame. The poll and each job
+//! are `catch_unwind`-contained (one warning on the first panic), and a reentrant
+//! dispatch only forwards the original.
+//!
+//! [`frame_dispatch_available`] (the layer-dispatcher detour is installed) is the
+//! scheduling gate and is independent of [`is_available`] (font captured):
+//! scheduled work can run on boots where widgets cannot be created.
+//!
+//! Never hold a state `Mutex` across a [`run_on_render_thread`] schedule: a
+//! closure that takes the same lock deadlocks against it. Widget creation and
+//! mutation belong on the render thread; background threads may only read.
+//!
+//! See `docs/widget_registration_system.md` for the full architecture.
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;
@@ -60,8 +99,7 @@ pub(crate) static RENDERER: Lazy<Mutex<RendererInner>> = Lazy::new(|| {
 
 static mut RENDER_HOOK: Option<GenericDetour<RenderFn>> = None;
 
-/// render_function hook — only used for one-time font pointer capture
-/// and deferred arc loading (after BM2D is initialized).
+/// render_function hook — only used for one-time font pointer capture.
 unsafe extern "C" fn render_function_hook(widget: *mut u8) {
     {
         let mut r = RENDERER.lock().unwrap();

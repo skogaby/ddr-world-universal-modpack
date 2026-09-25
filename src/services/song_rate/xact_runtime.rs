@@ -1,4 +1,23 @@
-//! Fixed transaction primitives for the identity-only XACT hook path.
+//! Fixed-size, lock-free transaction primitives for the wave-bank hook path.
+//! Everything here is safe inside the XACT detours: no locks, no logging and no
+//! allocation after construction.
+//!
+//! - [`XactSlots`] — a small table of transaction slots, each moving
+//!   Free → Entered → Exposed → Committed → ReleasePending (or Quarantined) by
+//!   CAS, keyed by owner thread, call nonce/depth and file id. An exposed slot
+//!   carries the [`RedirectToken`] (generation, percent, participant mask, stage,
+//!   exact rate) that the commit consumes exactly once.
+//! - [`enter_frame`] / [`current_frame`] / [`attach_slot_to_current`] — a
+//!   thread-local stack of create-call frames with unique nonces, so a slot is
+//!   only ever consumed by the create call that exposed it (reentrant creates
+//!   included; overflow is reported rather than guessed).
+//! - [`MaintenanceQueue`] — a bounded lock-free queue of fixed-size reclamation
+//!   records for the background maintenance drain (a full queue reports
+//!   [`QueueFull`]; nothing blocks).
+//! - [`BankTimeline`] — a bounded diagnostic record of observed bank
+//!   creates/unregisters, logged by the drain.
+//!
+//! Pure and host-tested (`xact_runtime_tests`).
 
 use std::cell::RefCell;
 use std::cell::UnsafeCell;

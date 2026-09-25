@@ -1,11 +1,84 @@
-//! NoteTypesExpansion Mod — Framework for introducing new note types (mines,
-//! lifts, rolls, ...) into DDR World's note pipeline.
+//! Note Types Expansion (`note-types-expansion`, default ON) — a framework for
+//! adding note kinds the engine does not have, and its one implementation:
+//! ITG-style **mines** read from an extra SSQ chunk. Charts without mine
+//! chunks play exactly as stock.
 //!
-//! This module is a broker: it owns cross-cutting concerns for all sub-types
-//! (config surface, SSQ chunk parsing glue, hook registration, per-chart
-//! state lifecycle) and each note-type implementation plugs in through the
-//! NoteTypeRegistry. Sub-type modules (mines, future lifts, etc.) live as
-//! siblings of this file.
+//! ## Framework
+//!
+//! A note kind implements the [`note_type::NoteType`] trait (its own chunk
+//! format, sidecar state, injection, judge-tick behavior, reset) and is
+//! registered in the shared [`registry::NoteTypeRegistry`], which rejects
+//! duplicate `note_kind()` bytes. This module owns the cross-cutting glue:
+//!
+//! - **Injection** (`hooks.rs`) — a post subscriber on the
+//!   `services::analyze_hook` dispatcher (which owns the Analyze detour).
+//!   After a successful parse it reads the SsqReader's raw blob, builds a
+//!   `TempoConverter` and calls each type's `on_chart_loaded` with the
+//!   difficulty's `param2` code. Injected notes are appended to the game's
+//!   note vector, which is then re-sorted by `(beat_count, music_count)`.
+//! - **Judge** — `judge_hook` pre at `Priority::Early` marks every unjudged
+//!   Result of a registered kind as judged, so the vanilla judge loop and the
+//!   autoplay/bot `AutoFootPanel` skip it. The post at `Priority::Late` runs
+//!   `on_judge_tick` with the foot panel read from the actor, after
+//!   `foot_panel_swap`'s post (`Early`) has put the player's own panel back.
+//! - **Reset** — per-chart state is cleared when an Analyze finds no chunk
+//!   for any registered type (so a sidecar left by the boot-time analysis
+//!   pass or an attract demo cannot leak into the next song), and by a scene
+//!   callback when a scene above `ATTRACT_SCENE_MAX` transitions back into the
+//!   attract range.
+//!
+//! ## Mines
+//!
+//! - `mines.rs` — parses the `MINE_DATA` chunk (kind 20, `param2` =
+//!   difficulty code; `docs/ssq_mine_chunk_format.md`), injects one single-
+//!   panel note (kind `MINE` = 20) per set panel bit, and keeps a sorted
+//!   sidecar. Each mine resolves on the frame the playhead crosses it, like a
+//!   native shock arrow. A press on its panel (unless an arrow at the same
+//!   tick absorbed it) goes through the engine's shock-NG submit
+//!   (`judge_submit`, code `0x1031`) for NG, combo break and gauge damage.
+//!   Otherwise the mine is avoided: OK count and combo are credited directly.
+//!   Either way the shock-arrow-count score denominator is bumped. The actor
+//!   field offsets come from the `judge_submit` body at install.
+//! - `mine_render.rs` — the engine's note collector drops non-ARROW kinds,
+//!   so a `render_notes_hook` post at `Priority::Normal` draws each mine as
+//!   a silver arrow glyph plus an additive lightning overlay, using the
+//!   engine's own `set_direction` / `get_offset_y` / `render_sprite_final`.
+//!   `player_perspective`'s post at `Late` then sees the mine records inside
+//!   its window. The top cull uses
+//!   `playfield_styling::cull_bound()` (the live `services::cull_window`
+//!   bound), so shrunken or perspective playfields cull mines in lockstep
+//!   with arrows. RE: `docs/mine_render_architecture.md`.
+//! - `texture_loader.rs` — loads the arrow-shape-matched
+//!   `data_mods/note_types_expansion/tex/note_types_mine00_{s,m,l}.png`
+//!   through the engine's file pipeline (asynchronously). The render pass
+//!   skips any frame whose texture is not ready yet.
+//! - `notes_vec.rs` — the bulk append into the game-owned note vector.
+//! - `ssq_chunk` / `timing` are re-exports of `core::ssq`.
+//!
+//! ## Invariants
+//!
+//! - **Allocator:** the note vector is freed by the game at chart end, so it
+//!   is grown only through the AGCS app heap (`agcs_heap_malloc` /
+//!   `agcs_heap_free` on `*app_heap_handle`) — never the CRT heap, never
+//!   Rust's allocator. Any other heap crashes in the vector's destructor.
+//! - Mines are chart data, not a player option, so nothing here taints
+//!   `score_guard`.
+//! - Both judge callbacks take the registry `Mutex` on every dispatch. The
+//!   pre walks the actor's Results (writing only unjudged registered-kind
+//!   entries); the post is a range query over the sorted sidecar.
+//! - Analyze/render registration happens once in `init` (the subscriptions
+//!   are permanent). `disable()` empties the registry (injection and judge
+//!   become no-ops) and drops the judge and scene subscriptions.
+//!
+//! ## Degradation
+//!
+//! Any of the required signatures missing ⇒ mod unregistered. If the Analyze
+//! or render dispatcher is unavailable, the mod registers but `enable()` does
+//! nothing (one WARN). No judge dispatcher ⇒ mines inject and render but are
+//! never judged. Undetected actor offsets skip the matching score/combo
+//! bumps. A malformed mine chunk or a failed append clears that chart's
+//! sidecar and leaves the note vector untouched (the append is
+//! transactional).
 
 pub mod hooks;
 pub mod mine_render;

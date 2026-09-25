@@ -1,33 +1,23 @@
-//! Mod implementations — each mod is a struct implementing the `Mod` trait.
+//! Mods — one module per user-facing feature, each a struct implementing the
+//! [`Mod`](mod_trait::Mod) trait.
 //!
-//! The mod system provides:
-//! - **mod_trait** — The `Mod` trait that all mods implement, plus `ModRegistry`
-//!   for registration, enable/disable lifecycle, and config integration.
-//! - **config** — JSON persistence for mod enable/disable state.
-//! - **mod_menu** — In-game overlay for toggling mods at runtime.
+//! Layout:
+//! - `mod_trait.rs` — the `Mod` trait (`id` / `name` / `init` / `enable` /
+//!   `disable` / `is_active`, optional `early_apply`), `ModRegistry` (the
+//!   config-gated enable pass and the `requested` vs `enabled` bookkeeping),
+//!   `DEFAULT_OFF_MODS` (mods that default OFF when absent from the config
+//!   `mods` map) and `LATE_BINDING_MODS` (enabled after every other mod).
+//! - `config.rs` — the whole `mod-config.json` schema, its boot-time load and
+//!   the section writers.
+//! - `mod_menu/` — the in-game overlay menu (MODS / GLOBAL SETTINGS / PLAYER
+//!   SETTINGS / APPEARANCE tabs).
+//! - Every other entry is one mod: a single file, or a subdirectory once it
+//!   outgrows one (`note_types_expansion/` is the reference). Each mod's
+//!   entry file documents its own mechanism, config and degradation.
 //!
-//! ## Included mods
-//!
-//! - **fast_bootup** — Hooks the loading screen's per-frame update to process
-//!   multiple file entries per tick instead of one.
-//! - **skip_intros** — Redirects the intro/warning scene to attract mode.
-//! - **timer_freeze** — Patches the timer update function to freeze the display.
-//! - **autoplay** — Hooks the note judging function to auto-hit all notes.
-//! - **series_expansion** — Extends the valid series range for custom songs.
-//! - **song_limit_expansion** — Expands XML read buffers to support ~8x more songs.
-//! - **note_types_expansion** — Framework for new note types (mines, lifts, rolls).
-//! - **assist_tick** — Clap sound at each arrow's chart timestamp (StepMania's
-//!   assist tick), played through the game's own audio engine.
-//! - **decorative_option_headers** — Non-selectable group-heading rows on the
-//!   options MODS tab (placement via `custom_options.option_menu_settings`).
-//! - **per_song_judgement_offsets** — Per-side, per-song overrides of the
-//!   stock JUDGEMENT OFFSET, keyed by the highlighted song on the wheel.
-//! - **anytime_speedmod** — Removes the ~10 s in-song speed-mod adjustment
-//!   window so the nav buttons work for the whole song (cabinet-wide).
-//! - **custom_resolution** — Native 16:9 rendering at 1080p/1440p/4K and the
-//!   4:3 SD-cabinet output (640×480) through boot-time immediate patches.
-//! - **gameplay_timing_fixes** — Deterministic DAC-authority music clock (no
-//!   play-to-play onset jitter, no in-song drift) + assist-tick alignment.
+//! Construction and registration order live in `src/lib.rs` (the order is
+//! load-bearing for `early_apply` mods). This file deliberately keeps no
+//! per-mod list — see `.agents/summary/components.md` for the catalogue.
 
 pub mod announcer_mute;
 pub mod anytime_speedmod;

@@ -1,4 +1,26 @@
-//! Permanent identity-first patch for the authoritative gameplay music count.
+//! Permanent identity-first patch for the authoritative gameplay music count,
+//! plus the seqlock publication of the running rate.
+//!
+//! [`init`] (`lib.rs` step 3b) replaces the 8-byte `lea r14d,[rax+rbx]; lea
+//! r12,[rdi+0x58]` at the `song_rate_clock_patch` signature with a `jmp` to a
+//! near stub, verifying the original bytes first. The stub recomputes the music
+//! count as `round((rax + rbx) × factor / 2^31)`, clamped to `i32`, then replays
+//! the displaced `lea r12`. The Q31 factor lives in an 8-aligned slot inside the
+//! stub and starts at [`IDENTITY_Q31`], so an installed patch is behavior-neutral
+//! until a rate commits. When `audio_clock::wants_engine()`, the stub is built
+//! with a call-out prologue that lets the audio clock replace `rbx` first.
+//!
+//! [`RatePublication`] is the seqlock behind [`snapshot`]. `publish_committed`,
+//! called only from the wave-bank transaction's commit, is the sole writer of
+//! `committed = true` and stores the non-identity factor strictly after the
+//! snapshot fields. `reset_identity` restores the identity factor first and
+//! defers the field reset if a write is in flight. [`RateSnapshot`] is the rate
+//! identity every consumer reads.
+//!
+//! Fail-open: an unresolved signature or failed patch leaves the site stock and
+//! [`is_installed`] false, which keeps song rate unavailable. Stub building and
+//! installation go through a `PatchBackend`, so `clock_patch_tests` exercises
+//! them on the host.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 

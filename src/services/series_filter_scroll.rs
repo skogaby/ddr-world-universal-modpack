@@ -1,9 +1,33 @@
-//! Series Filter Scroll — Drives scroll behavior for the VERSION filter panel.
+//! Series Filter Scroll — scrolls the song-select filter menu's VERSION panel so
+//! the entries series_expansion adds beyond the stock grid stay reachable.
 //!
-//! Hooks the filter category panel builder to capture VERSION FilterButton entries.
-//! Hides entries outside the visible window via set_mask. Hooks the BM2D
-//! set_position vtable method to inject a scroll Y offset — this works around
-//! the grid layout engine overwriting base_y 774 times/frame.
+//! ## Owned detours
+//!
+//! - `filter_panel_builder` (signature, required) — captures each VERSION
+//!   (category 2) `FilterButton` as it is built. When the configured entry count
+//!   is reached, activation is scheduled on the render thread; a per-frame job
+//!   then follows the cursor, shows only the visible rows via `bm2d_api::set_mask`,
+//!   and publishes a scroll Y offset.
+//! - BM2D `set_position` (BM2D vtable +0x30 via `bm2d_api`, required) — subtracts
+//!   the scroll offset from the Y of tracked VERSION layers. The offset is
+//!   injected here because the grid layout engine rewrites every entry's base Y
+//!   every frame.
+//! - `FilterButton::~FilterButton` (signature `filterbutton_dtor`, optional) —
+//!   closing the filter overlay frees the buttons without a scene change, so the
+//!   first destructor deactivates the scroll and drops the cached pointers. When
+//!   it is missing, only the scene-change callback (leaving SONG_SELECT) and the
+//!   per-frame liveness check clear them.
+//!
+//! ## Contract with series_expansion
+//!
+//! [`init`] (run from `lib.rs` only when BM2D is available) installs the detours
+//! and returns false if a required one fails. The service does nothing until the
+//! consumer calls [`configure`] with the panel layout (columns, row height,
+//! visible rows, total stock + custom entries); series_expansion does so from its
+//! `enable` when [`is_available`]. Without a configuration the builder detour
+//! passes through.
+//!
+//! See `docs/filter_scroll_research.md`.
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;

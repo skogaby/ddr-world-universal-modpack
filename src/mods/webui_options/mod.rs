@@ -1,3 +1,91 @@
+//! WebUI Options Mod — in-game pickers for the profile settings the stock game only lets a
+//! player change through Konami's web portal: the customize cosmetics (APPEAL BOARD,
+//! BACKGROUND ×2, CHARACTER P1/P2, LANE ×2, LANE COVER ×2), each with a live preview in the
+//! options modal, plus the DISPLAY BURNED CALORIES / PLAYER WEIGHT workout-profile rows.
+//!
+//! Mod id `webui-options`, default ON (not in `DEFAULT_OFF_MODS`). It is one of the
+//! `LATE_BINDING_MODS` in `src/mods/mod_trait.rs`: its `enable` does filesystem discovery and
+//! preview-asset generation, so the registry enables it after every other mod. Nothing it
+//! hooks is needed before the player reaches song select.
+//!
+//! ## Mechanism
+//!
+//! Zero detours. Every category is a field in the game's own per-player `Customize` object
+//! (`PlayerWork + customize_offset + field`, holding a u32 asset id); the game's native
+//! `<customize>` profile load fills it at card-in and the game applies it. This mod only adds
+//! the missing edit + save directions:
+//!
+//! - **Discovery** (`discovery.rs`): at enable, each category's asset ids are scanned from
+//!   `.arc` filenames on disk; a category with no assets gets no row.
+//! - **Rows**: one `custom_options` scalar per category (game's native options menu only, not
+//!   the overlay). The stored value is the 0-based index into the discovered id list; the
+//!   display is a short prefix plus the 1-based position (`ScalarFormat::PrefixedIndex`, e.g.
+//!   `Character #3`). No per-value textures.
+//! - **Seed**: on every SONG_SELECT (scene 25) entry, `seed_registry_from_game` reads each
+//!   side's `Customize` fields, reverse-maps id → index (index 0 when the id isn't present on
+//!   this cabinet) and writes the menu registry with `set_value_silent`. It never writes game
+//!   memory and fires no `on_change`.
+//! - **Apply**: a menu edit (`on_change`) runs `try_apply_all`, the only writer of `Customize`,
+//!   which writes every category's selected asset id for that side.
+//!
+//! ## Persistence (`PersistMode::SaveOnly`)
+//!
+//! The cosmetic and profile rows are emitted on the network save only (as `mod_<option id>`
+//! wire fields): never read from a network load and never written to or primed from the
+//! mod-config.json cache. The game's own profile load is the single source of truth and the
+//! scene-25 seed mirrors it into the menu. The cosmetic rows' `save_transform`
+//! (`persist_save_transform`) converts the stored index back to the stable asset id, so the
+//! `categories` state must be populated before any row is registered.
+//!
+//! ## Submodules
+//!
+//! - `discovery.rs` — the static category table (option id, `Customize` field offset, scan
+//!   directory / filename prefix, preview recipe) and the filesystem asset-id scan.
+//! - `preview_gen.rs` — builds each category's base `seop_image_<id>` chrome from its shipped
+//!   `_TEMPLATE` (marker boxes cleared) before the row registers; marker lookup, gamma and
+//!   source-arc search shared with the overlay.
+//! - `preview_overlay.rs` — draws the focused value's real art as native sprites over the
+//!   chrome while a side's options modal is open, loading a bounded prefetch window on demand
+//!   through `asset_loader`.
+//! - `bg_preview_overlay.rs` — animated previews for the two BACKGROUND rows, as mod-owned AFP
+//!   layers over private alias packages (`bm2d_api` + `bm2d_package`).
+//! - `profile_fields.rs` — the `is_disp_weight` toggle and its `weight` (kg) child, read from /
+//!   written to the `PlayerWork` header; registered once per process.
+//!
+//! ## Invariants
+//!
+//! - Never write `Customize` or `PlayerWork` outside a user edit: the seed must stay read-only
+//!   and silent, or an id the cabinet lacks would overwrite the server-loaded value.
+//! - Don't hold the `STATE` lock across `register_option` (registration can fire callbacks
+//!   that re-enter it). Every `PlayerWork` walk is null-guarded, so an uncarded side is a
+//!   no-op.
+//! - The previews must not reintroduce per-value textures: chrome plus on-demand overlay is
+//!   what keeps the song-select / CAUTION preload small (`docs/scene_load_analysis.md`).
+//!
+//! ## Degradation
+//!
+//! `player_work_table` and `customize_offset` are required signatures (the registry skips the
+//! mod without them; a zero `customize_offset` fails `init`). Without `custom_options`
+//! `enable` does nothing. No discovered assets still registers the profile rows. Without
+//! `asset_loader` the previews are chrome-only; without the AFP-layer wrappers or
+//! `bm2d_package` the BACKGROUND rows are chrome-only.
+//!
+//! ## Config
+//!
+//! This mod has no config section of its own. It reads three optional keys from
+//! `custom_options` in mod-config.json at enable: `lane_gamma_correction` (Photoshop-convention
+//! gamma for the lane preview art, overriding the per-layer default; the pre-brightened lane
+//! cache regenerates when it changes), `preview_window` (half-width N of the prefetch window
+//! for both overlays, clamped 0..=10, default `preview_overlay::DEFAULT_WINDOW_N`) and
+//! `animate_backgrounds` (default true; false shows the BACKGROUND preview as a paused first
+//! frame). A legacy top-level `webui_options` block (the old offline value cache) is migrated
+//! into `custom_options.{p1,p2}` once by `config::migrate_webui_options_to_custom_options` at
+//! persistence init.
+//!
+//! VIDEO SIZE is not here: it is the standalone `movie_size_customization` mod. RE notes:
+//! `docs/player_customization_system_research.md`, `docs/calorie_weight_profile_research.md`,
+//! `docs/option_preview_image_box.md`, `docs/bm2d_background_preview_research.md`.
+
 pub mod bg_preview_overlay;
 pub mod discovery;
 pub mod preview_gen;

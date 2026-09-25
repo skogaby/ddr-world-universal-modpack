@@ -143,13 +143,26 @@ pub fn on_scene_enter(_prev: i32, next: i32) {
     }
 }
 
+/// Is `scene` the scene a card-in play's result commit runs under? The
+/// commit fires AFTER the scene id has advanced past GAMEPLAY (2P run
+/// 2026-09-01), so this is the session window SONG_SELECT..=THANK_YOU, not
+/// GAMEPLAY itself. Deliberately a closed range, never `>= SONG_SELECT`:
+/// the attract demo's GamePlayActors commit on the demo's exit, and that
+/// exit lands on scenes numbered ABOVE the window (37, 41, 17 → loop) — the
+/// open bound printed a false BUG-1 pair on every demo cycle (field log
+/// 2026-09-25). 24 (the select loader) is also excluded: only a
+/// results-skipping quick fail commits under it, and with no results screen
+/// the stale-results symptom bug 1 is about cannot occur (the record is
+/// virginised at the next song select).
+const fn is_play_session_commit_scene(scene: i32) -> bool {
+    scene >= scene::SONG_SELECT && scene <= scene::THANK_YOU
+}
+
 /// Pre-original tap on the result commit: report the early-outs. Attract-
 /// demo GamePlayActors carry `actor+0x280 = 1` by design (the demo never
-/// commits) — only a real GAMEPLAY-scene skip is a bug-1 signature.
+/// commits) — only a skip inside a real play session is a bug-1 signature.
 pub fn on_result_commit_pre(actor: *const u8) {
-    // The commit runs after the scene id has already advanced past GAMEPLAY
-    // (2P run 2026-09-01), so gate on "inside a play session" instead.
-    if scene_manager::current_scene() < scene::SONG_SELECT {
+    if !is_play_session_commit_scene(scene_manager::current_scene()) {
         return;
     }
     let off1 = GPA_SKIP_BYTE.load(Ordering::Acquire);
@@ -176,7 +189,12 @@ pub fn on_result_commit_pre(actor: *const u8) {
 
 /// Post-original tap on the result commit: WARN if the commit left a record
 /// that does not look like a fresh play (the only way results can be stale).
+/// Same session gate as the pre tap (attract-demo commits and a quick fail
+/// out before the first judged note legitimately leave empty streams).
 pub fn on_result_commit_post(side: i32, stage: i32, rec: *const u8, grades: Option<usize>) {
+    if !is_play_session_commit_scene(scene_manager::current_scene()) {
+        return;
+    }
     unsafe {
         let errors = vec_len(rec, REC_ERRORS_VEC) / 2;
         if grades.is_none() || grades == Some(0) || errors == 0 {
@@ -200,4 +218,26 @@ unsafe fn vec_len(rec: *const u8, off: usize) -> usize {
         return 0;
     }
     e - b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_play_session_commit_scene;
+    use crate::types::scenes::scene;
+
+    #[test]
+    fn commit_gate_covers_the_play_session_window_only() {
+        // Normal post-song commit (29), results, total results, logout tail.
+        for s in scene::SONG_SELECT..=scene::THANK_YOU {
+            assert!(is_play_session_commit_scene(s), "scene {s}");
+        }
+        // Attract-demo exits (field log 2026-09-25) and the attract loop.
+        for s in [scene::ATTRACT_DEMO, 17, 37, 41, scene::TITLE_SCREEN] {
+            assert!(!is_play_session_commit_scene(s), "scene {s}");
+        }
+        // Results-skipping quick fail lands on the select loader.
+        assert!(!is_play_session_commit_scene(
+            scene::CAUTION_TO_SONG_INTERSTITIAL
+        ));
+    }
 }

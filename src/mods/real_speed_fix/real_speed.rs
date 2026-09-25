@@ -1,5 +1,21 @@
-//! Real Speed Core BPM — patches SetScrollSpeed to divide by Core BPM
-//! instead of Max BPM (R24/R25/R26 patches).
+//! Real Speed Core BPM — the R24/R25/R26 divisor swap inside
+//! `ddr::player::Option::SetScrollSpeed`, relative to the
+//! `real_speed_bpm_anchor` match (the stock `divsd xmm0,[rcx]` that divides
+//! by Max BPM):
+//!
+//! - **R24** (`anchor − 0x1C`, 2 bytes): the preceding `JA +5` becomes
+//!   `JMP +0x64`, which lands on the R26 cave.
+//! - **R26** (`anchor + 0x4A`, 12 bytes in the function's int3-padded tail):
+//!   `movsd xmm2,[rbx+0x88]` loads Core BPM, then `JA`/`JMP` rel8
+//!   return to the original JA-taken target and fall-through. `movsd` leaves
+//!   the flags alone, so the original branch decision is preserved.
+//! - **R25** (`anchor + 3`, 1 byte): the ModR/M `01 → C2` turns the divide
+//!   into `divsd xmm0,xmm2`, i.e. by Core BPM.
+//!
+//! [`enable`] saves all 15 original bytes before writing and [`disable`]
+//! writes them back. The patches are raw writes with no byte verification
+//! at the R24/R26 sites; the AOB pins only the R25 `divsd` and the `lea`
+//! after it.
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 

@@ -1,37 +1,42 @@
-//! Shader Fixes Mod — the user-facing surface of the runtime shader-container
-//! synthesis (`services::avs_layeredfs::shader_synthesis`).
+//! Shader Fixes — the operator surface of the runtime shader-container
+//! synthesis. The synthesis itself lives in
+//! `services/avs_layeredfs/shader_synthesis.rs` (container layout in
+//! `shader_layout.rs`); this mod only owns the switch and one config key.
 //!
-//! The synthesis itself runs at arc-open time during boot (it must — the
-//! game reads `data/arc/shader.arc` exactly once, regardless of mod-enable
-//! timing) and consumes this mod's config directly:
+//! The synthesis runs lazily inside the LayeredFS arc handler when the game
+//! opens `data/arc/shader.arc` — exactly once per session, during boot,
+//! regardless of mod-enable timing — and reads config directly:
 //!
 //! - `mods["shader-fixes"]` — master switch. Disabled ⇒ NOTHING is
-//!   synthesized (anti-aliasing off AND no perspective shader programs AND
-//!   no lit model containers) ⇒ the game runs literal stock shader
-//!   bytecode. The player-perspective mod's runtime ≥2-programs gate then
-//!   degrades hallway cleanly; the dancers render unlit as stock World does.
+//!   synthesized (no anti-aliasing, no perspective programs, no mod-menu
+//!   theme programs, no 3D-scene style variants) ⇒ the game runs literal
+//!   stock shader bytecode. Player Perspective's runtime ≥2-programs gate
+//!   then degrades hallway cleanly; the background dancers render unlit.
 //! - `shader_fixes.anti_aliasing` — the cabinet-wide ARROW ANTI-ALIASING
 //!   toggle (default ON): program 0 of the arrow/judge containers uses the
 //!   index-aware anti-aliasing pixel shaders, smoothing scaled lane art
 //!   (Playfield/Overlay Styling). At 1:1 the AA output is identical to
 //!   stock. Perspective programs carry the AA PS regardless (a hallway lane
 //!   is always being scaled — exactly the case AA exists for).
-//! - The 3D scene's shading (stock / lit / cel + outlines) is NOT this mod's
-//!   knob any more: it lives in `background_dancers.style` / `.outlines`
-//!   (SCENE STYLE / SCENE OUTLINES rows under the Background Dancers header,
-//!   per song). The synthesis packs every style variant container whenever
+//! - The 3D scene's shading is NOT this mod's knob: it is Background
+//!   Dancers' "Lighting Style" / "Scene Outlines" rows
+//!   (`background_dancers.style` / `.outlines`, per song —
+//!   `background_dancers/style.rs`). The synthesis packs every
+//!   `<material>_lit` / `<material>_cel` variant container whenever
 //!   `shader-fixes` and `background-dancers` are both on; the legacy
 //!   `shader_fixes.dancer_lighting` / `dancer_outlines` / `lit_models` keys
-//!   are read by the dancers mod for migration only.
+//!   are still parsed, read by the dancers mod for migration only.
 //!
-//! This mod's own job is just the operator surface: one mod-overlay enum
-//! row (`ARROW ANTI-ALIASING` OFF/ON) persisted to the `shader_fixes` config
-//! section (the write emits only `anti_aliasing` — the legacy scene keys are
-//! dropped on the first write, their migrated values living on in
-//! `background_dancers`). Changes apply on the NEXT LAUNCH (boot-time
-//! synthesis; the fps_unlock precedent). Operator kill switches preserved:
-//! `layeredfs.blocklist: ["shader_fixes"]` still works (no blobs found ⇒
-//! no synthesis).
+//! This mod's own job: one mod-overlay enum row (`Arrow Anti-Aliasing`
+//! OFF/ON) whose edits rewrite the DLL-written `shader_fixes` section via
+//! `config::save_json_key`. The write emits only `anti_aliasing`, so the
+//! legacy scene keys are dropped on the first write (their migrated values
+//! live on in `background_dancers`). Changes apply on the NEXT LAUNCH
+//! (boot-time synthesis). `is_active()` reflects only the toggle; the enable
+//! line logs what the synthesis actually served. Operator kill switch:
+//! `layeredfs.blocklist: ["shader_fixes"]` (no blobs found ⇒ no synthesis).
+//! Blob sources: `shaders/src/*.hlsl` → `data_mods/shader_fixes/blobs/`
+//! (`scripts/build_shaders.sh`). RE: `docs/shader_replacement_research.md`.
 
 use std::sync::Arc;
 

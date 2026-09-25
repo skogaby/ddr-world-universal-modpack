@@ -19,27 +19,40 @@
 //! * colon — a net-new `muca_card_len_c` texture.
 //!
 //! Both net-new textures are injected into the `select_music_card_v3` IFS
-//! by the atlas cloner at enable (FRESH atlas mode — the 80×24 label
-//! doesn't fit a stock donor cell; donor `muca_card_bpm_question` supplies
-//! only the encoding conventions).
+//! by the atlas cloner at enable (FRESH atlas mode — the label doesn't fit a
+//! stock donor cell; donor `muca_card_bpm_question` supplies only the
+//! encoding conventions). Their PNGs live under
+//! `data_mods/music_wheel_song_length/select_music_card_v3_ifs/tex/`
+//! (`muca_card_len_t` is 92×24: the 80-px label art plus its baked-in gap —
+//! never add a spacer glyph). A missing PNG renders that glyph blank (one
+//! WARN).
 //!
 //! ## Data + staleness policy
 //!
-//! Primary length source: the song's SSQ chart data, read from disk and
-//! parsed on a background worker the FRAME the selection changes (the
-//! song code is an inline field of the selection's `music::Info`, readable
-//! immediately). Length = the last step's time across all charts, via the
-//! tempo chunk (`note_types_expansion::timing::TempoConverter` — the same
-//! bit-exact math the gameplay engine uses). This gives ~single-frame
-//! latency, matching the original hex-edit mod's chart-derived semantics.
+//! Primary length source: `services::chart_length` — the song's SSQ chart
+//! length (last step event across every chart, through the tempo chunk,
+//! rounded up to a whole second), parsed on that service's latest-wins
+//! background worker and cached by song code. This mod only drives it: the
+//! FRAME the selection changes it reads the song code (an inline field of
+//! the selection's `music::Info`) and calls `chart_length::request`, then
+//! polls `chart_length::get` each frame (~single-frame latency, matching
+//! the original hex-edit mod's chart-derived semantics).
 //!
-//! Fallback: when the SSQ is missing/unparseable, the audio length from
+//! Fallback: when the chart parse FAILS, the audio length from
 //! `song_rate::selected_song()` (the wavebank publication emitted when the
-//! wheel settles and the preview loads — slower, ~0.5 s) is used, gated on
-//! an exact `code_digest` match against the current selection. The display
-//! BLANKS the instant the highlighted-song pointer at
-//! `selectmusic_model+0x1B0` changes (polled per frame — the same global
-//! the game's own card tick polls); a stale result is never shown.
+//! wheel settles and the preview loads — slower) is used, gated on an exact
+//! `song_code_digest` match against the current selection. The display
+//! BLANKS the instant the highlighted-song pointer inside the select-music
+//! model changes (the typed `selectmusic_highlight_slot` offset — build
+//! dependent — polled per frame, the same field the game's own card tick
+//! polls); a stale result is never shown.
+//!
+//! ## Config
+//!
+//! `music_wheel_song_length.{offset_x, offset_y, spacing, scale}` — glyph
+//! placement relative to the `bpm_usr` anchor (SpriteLayer offset / spacing
+//! / fixed-scale fields). Operator-only, read once at `init`, never written;
+//! absent keys use the shipped placement.
 //!
 //! ## Lifecycle & threading
 //!
@@ -48,10 +61,11 @@
 //! is created lazily and lives for the process lifetime; leaving scene 25
 //! (or the `music_info` clip dying) blanks it — an empty names list
 //! releases every CBitmap back to the game's pool, and the per-frame
-//! layout call stops until the card returns. The parent-wrapper pointer is
-//! re-validated (active slot + name) every frame before any use; a stale
-//! pointer at worst reads static pool memory (the CMovieClip pool is a
-//! static array) and resolves no anchor, which hides the glyphs.
+//! layout call stops until the card returns. The parent clip is found by
+//! content (`bm2d_api::find_wrapper_by_children`) and re-validated (active
+//! slot + name) every frame before any use; a stale pointer at worst reads
+//! static pool memory (the CMovieClip pool is a static array) and resolves
+//! no anchor, which hides the glyphs.
 //!
 //! RE notes: `.agents/planning/2026-08-16-music-wheel-song-length/research.md`.
 

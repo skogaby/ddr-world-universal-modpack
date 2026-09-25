@@ -1,87 +1,77 @@
-//! Training Mode (v1: section practice) — Step-2 surface.
+//! Training Mode (`training-mode`, default ON) — section practice: loop a chosen section of
+//! a song, scrub the timeline, and restart from the section start, with a chart-strip
+//! timeline HUD.
 //!
-//! The thin real consumer of the song-rate training-arm surface: while the
-//! mod is enabled, EVERY eligible song (ordinary solo/doubles, any rate —
-//! including 100%) gets a song-rate binding armed, so gestures can seek
-//! even on songs entered without bounds pre-set. At 100% the binding is an
-//! identity passthrough (`plan_identity_bank` +
-//! `ServeMode::IdentityPassthrough` — byte-identical audio, no producer
-//! thread, Q31 identity, no movie suppression, no score taint). Arming
-//! alone is not an alteration and never taints (design §4.1/§4.2); an
-//! armed-but-untouched 100% song submits normally.
+//! ## Mechanism
 //!
-//! Eligibility is NOT duplicated here: the mod keeps a STANDING request
-//! (`song_rate::runtime::set_training_arm`) and the scene-26 classifier
-//! applies the identical gate set it applies to rate arms — course/Dan
-//! and unknown sessions fail closed to identity inside `classify_scene26`
-//! (training design §4.1; the request weakens nothing). Versus arms since
-//! the 2026-08-31 lift: P1 governs (the classifier's versus policy) and
-//! the three bound rows are MIRRORED across sides via `versus_mirror`
-//! (P1 seeds; last writer wins), so both players share one training
-//! session — every alteration (bounds, gestures, loops) moves the ONE
-//! shared timeline and taints BOTH entered sides' scores. TIMELINE
-//! PLACEMENT mirrors too (one strip — divergent placements were a
-//! fiction); AUTOPLAY is the autoplay mod's genuinely per-side row and
-//! stays independent.
+//! While enabled the mod holds a standing song-rate training-arm request
+//! (`song_rate::runtime::set_training_arm`), so every song the scene-26 classifier deems
+//! eligible gets a song-rate binding the gestures can seek on — even at 100 %, where the
+//! binding is an identity passthrough (byte-identical audio, no movie suppression). Eligibility
+//! is the classifier's, not duplicated here: course/Dan and unknown sessions stay identity.
+//! Every timeline move goes through `song_reset` (in-place resets and seeks):
 //!
-//! Step 2 adds the A/B pinpad markers ([`bounds`] — the middle row 4-5-6,
-//! single-press since 2026-08-18: 4 sets A, 6 sets B, 5 clears, gameplay
-//! only, each confirmed by a short bottom-center text toast — the shared
-//! [`crate::services::toast`] service) and
-//! restart-from-A: `quick_restart_or_fail::trigger_restart` consults
-//! [`active_section_start`] and seeks to A behind the
-//! [`TRAINING_LEAD_MS`] silent approach instead of restarting at 0.
+//! - **Section bounds** — the per-player rows LOOP SONG (parent) and its `ShowWhen` children
+//!   SONG START TIME / SONG END TIME (absolute seconds, re-ranged and re-seeded to each
+//!   highlighted song, kept at least `section_math::MIN_SECTION_S` apart). A section is only
+//!   playable as a loop: with LOOP SONG off the retained start/end values are ignored by
+//!   every reader.
+//!   A nonzero start becomes a bind-time pre-shift (`refresh_pre_shift`): the binding is
+//!   created already shifted and the driver aligns the clock on the first anchored frame,
+//!   behind the `TRAINING_LEAD_MS` silent approach.
+//! - **Looping** — with the loop latched, the end cascade is parked and the driver resets to
+//!   the section start each time the live count reaches the end bound; a gauge death is
+//!   revived the same way. Quick fail / quick restart are the exits.
+//! - **Gestures** (gameplay only, after `song_reset::run_in_song`): pinpad 4 sets A, 6 sets
+//!   B, 5 restores the row-derived bounds (markers need a latched loop; one hint toast per
+//!   song otherwise); 7 / 9 rewind / fast-forward by `rw_increment_ms` / `ff_increment_ms`
+//!   with no approach lead, one scrub in flight.
+//! - **Restart from A** — `quick_restart_or_fail` consults [`active_section_start`] and seeks
+//!   there instead of restarting at 0.
+//! - **Timeline HUD** — the TIMELINE PLACEMENT row (OFF / LEFT / RIGHT, the only row that
+//!   persists with the profile) alone decides whether the chart strip shows; the A/B veil
+//!   and lines draw only while the loop is latched.
 //!
-//! Step 3 adds the section-bound rows: SONG START TIME (s) / SONG END
-//! TIME (s) (`training_start_time` / `training_end_time`, 0–200 s, fine
-//! 5 / coarse 30, defaults 0 and 200 — both absolute timestamps per the
-//! R2 amendment of 2026-08-14, mutually nudged so the play window keeps
-//! `MIN_SECTION`), session-scoped via `PersistMode::Session` — they
-//! serialize nothing and reset to their defaults at card-in, because
-//! section practice is a per-session tool, not a profile preference.
-//! Values land in per-side atomics in [`bounds`] for the gameplay-entry
-//! bound resolution.
+//! ## Invariants
 //!
-//! Step 4 adds LOOP SONG (`training_loop_song`, a plain Session bool —
-//! NOT song-scoped; it survives song switches and resets at card-in):
-//! LOOP ON parks the end cascade (raised `+0x94`) and the [`driver`]'s
-//! loop leg fires the shipped in-place reset back to the section start
-//! at a fire bound clamped strictly below BOTH live thresholds, grinding
-//! the section until quick-fail/quick-restart. Since the 2026-09-04
-//! revision LOOP SONG is the PARENT of the two bound rows (they show only
-//! while it reads ON, values retained-but-ignored otherwise) and the
-//! 4/5/6 marker gestures are loop-only; the v1 "LOOP OFF + section end
-//! writes the CMA thresholds for an early natural end" behavior is
-//! retired — a section is only playable as a loop.
+//! - **Score taint.** Arming alone never taints; an untouched song submits normally. Any
+//!   alteration — row bounds or loop latched at resolution, marker gestures, scrubs, and
+//!   every completed `song_reset` landing at t > 0 or during a session-active song — calls
+//!   `taint_entered_sides` (`score_guard::set_training_taint`; both sides when the entered
+//!   state is unreadable). Restart-from-A resets the taint at its trigger, so the reset
+//!   subscriber is the re-taint that keeps it fail-closed.
+//! - **Versus.** P1 governs (the classifier's policy) and `versus_mirror` mirrors every
+//!   row in `MIRRORED_OPTIONS` — `training_start_time`, `training_end_time`,
+//!   `training_loop_song` and `training_progress_pos` — so both players share one timeline
+//!   and one HUD, and every alteration taints both entered sides.
+//! - **Bot side.** The Multiplayer Bot's phantom side reads as entered but its rows are an
+//!   unmirrored stale cache: it never governs the pre-shift or the bound resolution.
+//! - **Threads.** Gestures arrive on input callbacks; the driver and the HUD's engine-facing
+//!   work run on the game / render thread; strip synthesis runs on a background thread over
+//!   owned buffers only.
 //!
-//! Step 5 adds score containment (design §4.7/R5): every point a training
-//! session alters the current song taints the entered/pressing side in
-//! `score_guard` — bound engagement and the loop latch at resolution
-//! ([`bounds::try_resolve_row_bounds`]), marker gestures
-//! (`bounds::set_marker`), and any completed in-place reset landing at
-//! t > 0 or during a session-active song (the
-//! [`song_reset::on_song_reset`] subscriber registered in `enable()` —
-//! the restart-from-A / altered-song-replay re-taint). The shipped
-//! per-stage suppression + sanitised-logout machinery enforces it
-//! verbatim; an armed-but-untouched song (and an honest press-1 replay)
-//! stays clean.
+//! ## Degradation and config
 //!
-//! Step 7 adds FF/RW scrobbling (the amended R12): single-press pinpad
-//! **7 = rewind** / **9 = fast-forward** by
-//! `training_mode.{rw,ff}_increment_ms` (default 5000 ms, normalized
-//! 250..=60000 at enable) during eligible gameplay, dispatched through
-//! the shipped seek transaction with NO approach lead — a pure timeline
-//! adjuster, music-player style (maintainer amendment 2026-08-15; the
-//! Step-6 timeline cursor tracks it, and each scrub flashes a
-//! [`scrub_indicator`] icon: RW left / FF right, the toast's fade
-//! envelope). Any scrub taints the pressing side (AC 7); one transaction
-//! in flight across scrub + loop driver.
+//! No required signatures. Enable refuses outright when the song-rate streaming integration
+//! is not ready. Missing row injection leaves the gesture surface; missing input/scene
+//! managers leave only the arm. The HUD's colour anchors are optional and degrade the strip,
+//! never the session. Config section `training_mode` (`ff_increment_ms`, `rw_increment_ms`,
+//! default 5000, normalized to 250..=60000 at enable) is operator-only. The bound and loop
+//! rows are `PersistMode::Session` (reset at card-in); disabling the mod hides every row and
+//! clears the arm, the pre-shift and all session state.
 //!
-//! The TRAINING OPTIONS group heading that originally shipped here
-//! (Step 8 of
-//! `.agents/planning/2026-08-13-training-mode/implementation/plan.md`)
-//! now lives in the decorative-option-headers mod, which owns every
-//! header row on the MODS tab.
+//! ## Submodules
+//!
+//! - [`bounds`] — markers, gestures, scrub dispatch, row-derived bound resolution, the loop
+//!   latch and the scene callback.
+//! - [`driver`] — per-frame, per-song driver: bound resolution, the silent-start adjust and
+//!   the loop leg.
+//! - [`section_math`] — pure bound, scrub, end-policy and gesture-gate math.
+//! - `strip_hud` / [`strip_synth`] — the timeline HUD's live sourcing / pure image synthesis.
+//! - `scrub_indicator` — the RW / FF flash icons.
+//!
+//! RE: `docs/training_mode_research.md`, `docs/chart_strip_hud_research.md`. Host tests
+//! (`section_math`): `scripts/validate_training_mode.sh`.
 
 pub mod bounds;
 pub mod driver;

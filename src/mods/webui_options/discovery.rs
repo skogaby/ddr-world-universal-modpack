@@ -1,3 +1,17 @@
+//! WebUI cosmetic category table and asset discovery.
+//!
+//! [`CATEGORIES`] is the static definition of every cosmetic row: its option id, display name
+//! and value prefix, the `Customize` field offset it edits, the directory and filename prefix
+//! its assets live under, and its preview recipe ([`PreviewLayer`]s for `preview_overlay`, or
+//! `bg_overlay` for the two BACKGROUND rows driven by `bg_preview_overlay`).
+//!
+//! [`discover_all`] runs at mod enable. For each category it scans `<scan_dir>` relative to the
+//! game's working directory, then `<scan_dir>` inside every `./data_mods/<folder>/`, and takes
+//! the leading decimal digits after the prefix of each `<prefix><digits>….arc` filename as an
+//! asset id. Ids are deduplicated (suffixed variants such as `_result.arc` share their base
+//! id) and sorted ascending; that order is the 0-based index the row stores. A category with
+//! no ids is dropped and gets no row. Pure filesystem work: no game memory, no hooks.
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;

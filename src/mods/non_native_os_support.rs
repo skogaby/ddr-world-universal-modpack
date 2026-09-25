@@ -1,92 +1,58 @@
-//! Non-Native OS Support — Wine/CrossOver-only workaround(s).
+//! Non-Native OS Support — the CrossOver/Wine background-movie workaround.
 //!
-//! DDR World assumes a real Windows cabinet. Under CrossOver/Wine (macOS/Linux)
-//! some of those assumptions break; this mod bundles the workarounds that must live
-//! in-process. It currently contains a single sub-fix (the background-movie crash
-//! stub); the scaffolding (best-effort resolve in `init`, independent self-disable,
-//! `is_active()` = union of installed hooks) is kept so further OS workarounds can be
-//! added the same way.
+//! Background movies / music videos are `.wmv` files played through a
+//! DirectShow filter graph (`quartz.dll`). Under Wine two independent
+//! failure modes exist:
 //!
-//! ## Background-movie DirectShow graph stub (movie-crash fix)
-//!
-//! Background movies / music videos are `.wmv` files played through a Windows
-//! **DirectShow** filter graph (`quartz.dll`). Under Wine two independent
-//! failure modes exist, and the mod handles both:
-//!
-//! - **Crash** (spice2x audio hooks enabled): spice2x IAT-patches
+//! - **Crash** (spice2x audio hooks on): spice2x IAT-patches
 //!   `CoCreateInstance` process-wide and wraps `MMDeviceEnumerator` /
-//!   `IAudioClient`; Wine's builtin `winmm` consumes those wrappers internally
-//!   while `devenum` enumerates audio renderers during
-//!   `IGraphBuilder::RenderFile`'s intelligent-connect, and faults
-//!   (`quartz` → `devenum` → `winmm` access-violation) the moment a
-//!   movie-backed song starts — including autonomously in the attract-mode
-//!   demo loop. Running spice2x with `-audiohookdisable` removes the crash at
-//!   the source (verified live 2026-08-19; the game's own audio is WASAPI and
-//!   unaffected).
-//! - **Decode failure → soft-lock** (no crash, e.g. with `-audiohookdisable`):
-//!   CrossOver's GStreamer stack has no VC-1 decoder (VideoToolbox doesn't do
-//!   VC-1), so `RenderFile` on stock movies fails with `VFW_E_CANNOT_RENDER`
-//!   (0x80040218); `BuildGraph`'s error path never writes player state 3 and
-//!   the song waits forever on the movie-ready gate. Movies transcoded to
-//!   H.264 (any container; VideoToolbox decodes them) render fine.
+//!   `IAudioClient`; Wine's builtin `winmm` consumes those wrappers while
+//!   `devenum` enumerates audio renderers during `RenderFile`, and faults the
+//!   moment a movie-backed song starts (attract demo included). spice2x
+//!   `-audiohookdisable` removes it at the source (the game's own audio is
+//!   WASAPI and unaffected).
+//! - **Decode failure → soft-lock**: Wine's GStreamer stack has no VC-1
+//!   decoder, so `RenderFile` on stock movies fails; `BuildGraph`'s error
+//!   path never writes player state 3 and the song waits forever on the
+//!   movie-ready gate. H.264 transcodes (`scripts/convert_movies.sh`) render.
 //!
-//! The shared `services::movie_policy` service owns the sole detour on gamemdx
-//! `DShowPlayer::BuildGraph` (AOB signature `movie_build_graph` — the **only**
-//! user of `CLSID_FilterGraph` in the binary;
-//! Ghidra 0x18023AE40 on 20260616 / 0x180256EB0 on 20260324). Two modes,
-//! selected by `non_native_os_support.movie_mode` in mod-config.json (read at
-//! enable):
+//! This mod is a contributor to `services::movie_policy`, which owns the sole
+//! detour on gamemdx `DShowPlayer::BuildGraph` (AOB `movie_build_graph`).
+//! `enable()` sets `MovieSuppressor::NonNativeOs` with the mode read from
+//! `non_native_os_support.movie_mode` (operator-only config, never written;
+//! read at enable, unknown values WARN and mean `suppress`):
 //!
-//! - `"suppress"` (default): the detour **never calls the original** —
-//!   `CoCreateInstance`/`RenderFile` never run — and instead fakes the success
-//!   epilogue's one observable side effect: it writes player state (+0x8) = 3
-//!   ("opened") and returns 0. Crash-safe under every spice2x configuration;
-//!   all movies absent.
-//! - `"fallback"`: the detour calls the original first; a SUCCEEDED build
-//!   plays normally, a FAILED one gets the same faked epilogue (no movie, no
-//!   stall). This lets converted H.264 movies play while unconverted VC-1
-//!   files degrade gracefully — conversion can proceed incrementally.
-//!   Requires `-audiohookdisable` under Wine (the crash path above is the
-//!   original stub's raison d'être and still exists with audio hooks on).
-//!   Fallback mode also installs `services::mfplat_vih_fix` (Wine-gated):
-//!   with the native Windows Media runtime installed in the bottle
-//!   (qasf/wmvcore/wmasf/wmvdecod/wmadmod — see
-//!   `docs/native_wm_runtime_bottle_setup.md`), stock VC-1 movies decode
-//!   natively once Wine mfplat's `MFInitMediaTypeFromVideoInfoHeader`
-//!   FOURCC-subtype bug is worked around; without the runtime the fix is
-//!   inert and VC-1 keeps degrading to no-movie.
+//! - `"suppress"` (default): the original never runs; the hook fakes the
+//!   success epilogue's one load-bearing side effect (player state `+0x8` =
+//!   3, "opened") and returns 0. Crash-safe under every spice2x
+//!   configuration; all movies absent.
+//! - `"fallback"`: the original runs first (on a path absolutized for Wine's
+//!   source-filter probe) and only a FAILED build gets the faked epilogue —
+//!   playable movies play, unplayable ones degrade to no-movie. Requires
+//!   spice2x `-audiohookdisable` under Wine. Fallback also installs
+//!   `services::mfplat_vih_fix` (itself Wine-gated, fail-open), which works
+//!   around Wine mfplat's `MFInitMediaTypeFromVideoInfoHeader` FOURCC-subtype
+//!   bug so stock VC-1 decodes natively once Microsoft's WM runtime is set up
+//!   in the bottle — recipe and root-cause trail in
+//!   `docs/native_wm_runtime_bottle_setup.md`. Without the runtime VC-1 keeps
+//!   degrading to no-movie.
 //!
-//! In both modes the state-3 write is load-bearing: the `Dx9Movie::update`
-//! status machine only advances past "opening" when `getState()` reads 3, and
-//! the demo/gameplay sequences poll that status before starting the song (a
-//! plain error-returning stub soft-locks the attract demo). The `opened` byte
-//! (+0x14) stays 0, so the per-frame get-frame path early-returns before
-//! touching any (null) COM pointer — the movie "plays" silently delivering no
-//! frames. RE record: `.agents/planning/20260721-non-native-os-support/`.
+//! Full suppression by another contributor (`SongRate`, `BackgroundDancers`)
+//! always wins over fallback. The state-3 write is load-bearing (an
+//! error-returning stub soft-locks the attract demo); the `opened` byte
+//! (`+0x14`) stays 0 so per-frame code takes its guarded early return.
 //!
-//! ## Removed: network-status / EACoin(PASELI) online fixes
+//! **Not Wine-gated.** The mod defaults ON (not in `DEFAULT_OFF_MODS`) and
+//! does not consult `platform::running_under_wine` — only `mfplat_vih_fix`
+//! does. On native Windows the default `suppress` mode therefore removes
+//! every background movie; `fallback` is near-stock there (real builds
+//! succeed). Real-hardware operators who want movies disable the mod
+//! (`"non-native-operating-system-support": false` or the mod menu).
 //!
-//! Earlier revisions also carried two **networking** sub-fixes for CrossOver — an
-//! `arkGetNetworkStatus` CHECKING→ONLINE promotion (boot online) and a libavs
-//! `ea3_get_status` DOWN→ONLINE promotion (PASELI availability). Both worked around
-//! the same root cause: Wine can't create the raw ICMP socket AVS keepalive needs.
-//! spice2x's **`-icmphook`** flag now fakes that keepalive game-agnostically at the
-//! socket layer, so DDR World boots fully online — PASELI included — with no hook
-//! DLL injected. The in-process promotions are therefore redundant and have been
-//! removed; use `-icmphook` instead. Their RE records are retained (marked
-//! superseded) at `.agents/planning/20260721-raw-socket-network-fix/` (network) and
-//! `.agents/planning/20260722-eacoin-paseli-online-cascade/` (PASELI).
-//!
-//! ## How it degrades
-//!
-//! The shared service resolves/installs best-effort at boot. If unavailable, this
-//! mod logs a warning and stays inert; `is_active()` reports true only while its
-//! own Non-Native OS contributor is set. Config-gated
-//! like any other mod (default ON via the pack's omitted-key-enables convention;
-//! disable via `"non-native-operating-system-support": false` or the mod menu). The
-//! movie stub is the one behavioral trade-off — suppress mode makes backgrounds
-//! static — so operators on real hardware should leave the mod off to keep their
-//! music videos.
+//! Degradation: without the shared movie hook the mod logs one WARN and stays
+//! inert; `is_active()` = hook available ∧ this contributor set. The former
+//! networking sub-fixes (online / PASELI status promotions) are gone —
+//! spice2x `-icmphook` fakes the AVS keepalive Wine could not send.
 
 use crate::mods::config;
 use crate::mods::mod_trait::{Mod, ModContext};

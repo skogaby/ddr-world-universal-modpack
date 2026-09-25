@@ -1,11 +1,67 @@
-//! AVS LayeredFS — Transparent file replacement via AVS filesystem hooks.
+//! AVS LayeredFS — transparent file replacement via AVS filesystem hooks.
 //!
-//! Hooks Konami's AVS filesystem layer (`libavs-win64.dll`) to intercept file
-//! accesses at runtime, enabling transparent replacement and injection of game
-//! assets from a `data_mods/` folder without repacking container files.
+//! Hooks Konami's AVS filesystem layer (`libavs-win64.dll`) so game file opens are
+//! served from the `data_mods/` folder when a mod provides, overlays or extends
+//! them — without repacking any container on disk. Always on (not a mod, no menu
+//! toggle); unmodified files pass straight through.
 //!
-//! This is an always-on service (not toggleable via mod menu). Once initialized,
-//! hooks are transparent — unmodified files pass through with negligible overhead.
+//! ## Init order
+//!
+//! [`init`] runs at `lib.rs` step 0b, right after the config store and BEFORE the
+//! gamemdx wait and the signature scan. `Application::onBoot` reads
+//! `startup.arc`, `shader.arc` (the only shader read of the session) and
+//! `musicdb.xml` within a few hundred ms of gamemdx loading, on the game's own
+//! thread; installing any later loses that race and shader synthesis and musicdb
+//! merges silently fall back to stock. Never move it below `resolve_all`. It
+//! depends only on libavs exports and the mod folder.
+//!
+//! ## Hooks
+//!
+//! `file_hooks` detours `avs_fs_open`, `avs_fs_lstat`, `avs_fs_mount`,
+//! `avs_fs_read` and `avs_fs_convert_path` all-or-nothing (a failed install
+//! rolls the others back and the service stays unavailable). It also detours
+//! `kernel32!GetLongPathNameA`, best-effort, to work around AVS's fixed 128-byte
+//! path buffer on long `_cache` paths. Hook bodies are panic-contained and pass
+//! through on failure.
+//!
+//! ## Request routing (`file_hooks::find_mod_replacement`)
+//!
+//! A normalized path is matched against the mod folders (direct file, then with
+//! `.ifs` expanded to `_ifs`), then:
+//! - `.arc` — `arc_handler` repacks the archive with a sibling `<name>_arc/`
+//!   overlay folder plus, for `shader.arc`, the containers `shader_synthesis`
+//!   builds from the stock blobs and `data_mods/shader_fixes/blobs/`;
+//! - a direct match — served as is;
+//! - `.xml` — `xml_merger` applies `.merged.xml` appends (e.g. `musicdb.xml`);
+//!   `texturelist.xml` / `afplist.xml` are also parsed (and afplists extended) by
+//!   `ifs_textures`;
+//! - other IFS members — `ifs_textures` serves converted textures and AFP/geo
+//!   replacements by MD5 name;
+//! - otherwise — passthrough to the original path.
+//!
+//! Built output (converted textures, repacked arcs, merged XML) lives in
+//! `data_mods/_cache/`; `cache_hasher` input hashes decide when a merge or
+//! repack must be rebuilt. It is machine-owned: never hand-edit or commit it.
+//!
+//! ## Config (`layeredfs` section, operator-only)
+//!
+//! `verbose` (extra logging), `developer_mode` (no folder-content caching; live
+//! filesystem checks), `mod_folder` (default `./data_mods`), `allowlist` /
+//! `blocklist` (mod folder names to include / skip).
+//!
+//! ## Submodules
+//!
+//! - `avs_resolver` — libavs export resolution across AVS versions.
+//! - `file_hooks` — the detours and request routing above.
+//! - `mod_paths` — mod folder scan, path normalization, lookup.
+//! - `arc_handler` — `.arc` overlay and repack.
+//! - `shader_synthesis` / `shader_layout` — runtime shader-container synthesis and
+//!   its pure layout rules.
+//! - `xml_merger` — `.merged.xml` merging; `kbin` — binary XML decoding.
+//! - `ifs_textures`, `atlas_cloner`, `texture_packer`, `afplist_ext` — IFS texture
+//!   and AFP replacement, atlas cloning and packing, afplist geo-list extension.
+//! - `ramfs_demangler` — maps RAM-mounted IFS virtual paths back to real paths.
+//! - `avslz` — AVSLZ compression; `cache_hasher` — cache invalidation hashes.
 
 pub(crate) mod afplist_ext;
 pub(super) mod arc_handler;

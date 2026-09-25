@@ -1,7 +1,33 @@
-//! Centralized config store — reads mod-config.json once, provides typed access.
+//! Centralized config store — the whole `mod-config.json` schema (one
+//! `ConfigFile` with a typed section per feature) plus its writers.
 //!
-//! All consumers read from `config::get()` instead of parsing the file independently.
-//! Only `save_mod_states()` writes back, and it preserves all non-mods keys.
+//! Read once at boot ([`init`], early in `src/lib.rs`'s init sequence) into a
+//! process-lifetime cell; every consumer reads the typed view through
+//! [`get`] instead of parsing the file itself. A missing or unparseable file
+//! yields defaults (one WARN). Writes go to disk only — the cached view keeps
+//! its boot values, so owners mirror live values themselves.
+//!
+//! Writers (each re-reads the file, replaces its own part, and preserves
+//! every other top-level key):
+//! - [`save_mod_states`] — the `mods` map (the registry's persisted
+//!   toggles; `mod-menu` itself is never written).
+//! - [`save_json_key`] — replaces one whole top-level section; the path used
+//!   by every DLL-written feature section (`background_dancers`,
+//!   `shader_fixes`, `overlay_menu`, `timing_offsets`, …).
+//! - [`save_custom_options_values`] — one side's `custom_options.{p1,p2}`
+//!   value block (gate keys and the other side kept; skipped when unchanged).
+//! - [`migrate_webui_options_to_custom_options`] — one-shot move of the
+//!   legacy `webui_options` cache into `custom_options`.
+//!
+//! Rules:
+//! - A `save_json_key` writer replaces its WHOLE section, so it must emit
+//!   every key of that section (including operator-set optional keys it does
+//!   not edit), or the write drops them.
+//! - Operator-only sections (documented as such on their struct) are never
+//!   written by the DLL.
+//! - Retired keys stay parseable and are ignored (or read only as a
+//!   migration source), so old files keep loading.
+//! - Which section each writer owns: `.agents/summary/data_models.md`.
 
 use super::folder_expansion::FolderConfig;
 use super::series_expansion::SeriesConfig;

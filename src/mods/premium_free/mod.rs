@@ -1,20 +1,21 @@
-//! Premium Free Mod — Freezes the per-stage counter (unlimited stages).
+//! Premium Free — freezes the session stage counter (unlimited stages).
 //!
-//! Gated by the overlay mod menu (controls whether the mod is active at all).
-//! When active, registers a bool-toggle in the custom options framework so
-//! players can enable/disable it from the in-game options screen. The stage
-//! counter is cabinet-global, so the APPLIED freeze is resolved from the
-//! ENTERED side(s)' values (P1 governs when both are in) and re-resolved on
-//! every option change and scene change; in versus the row is mirrored via
-//! `services/versus_mirror` (P1 seeds at song select, last writer wins) so
-//! both players see one value. A profile load on one side never overwrites
-//! the other side's preference (the pre-2026-09-01 unconditional cross-side
-//! `set_value` did, so the freeze followed whichever 2P profile loaded LAST).
+//! The mod-menu toggle decides whether the mod is active at all; when it is,
+//! a per-player bool row `premium_free` (custom options) turns the freeze on.
+//! The stage counter is cabinet-global, so the APPLIED freeze is resolved
+//! from the ENTERED side(s)' values (P1 governs when both are in; `p1 || p2`
+//! while entered state is unknown; the Multiplayer Bot's phantom side never
+//! governs) and re-resolved on every option change and every scene change.
+//! In versus the row is mirrored via `services/versus_mirror` (P1 seeds at
+//! song select, last writer wins); a profile load on one side never
+//! overwrites the other side's preference.
 //!
-//! Binary mechanism: the per-frame stage counter increment is a 3-byte
-//! `INC dword [RCX+0xc]` instruction at the `premium_free_stage_inc` anchor
-//! + 3. Replacing those 3 bytes with NOPs leaves the counter at its current
-//! value forever.
+//! Binary mechanism: the stage bump is a 3-byte `INC dword [RCX+0xC]`
+//! (`GameWork+0xC`) at the `premium_free_stage_inc` anchor + 3, executed by
+//! the WaitSequence (0-indexed scene 31) — after results, so the results
+//! screen reads the just-played record. NOPing those 3 bytes (bytes checked
+//! at `init`) leaves the counter at its current value; the INC's disp8 is
+//! also the counter offset this mod reads.
 //!
 //! ## Stale-record fix (frozen stage index)
 //!
@@ -25,19 +26,20 @@
 //! guard always passes (a new stage's record is virgin, mcode == -1), but with
 //! a frozen index, re-picking the SAME song at a DIFFERENT difficulty skips
 //! the re-init: the record keeps the previous play's difficulty, and the
-//! per-stage network save then submits the new score under the old difficulty
-//! (cabinet-confirmed 2026-07-10 via CE write-watch on the record).
+//! per-stage network save then submits the new score under the old difficulty.
 //!
 //! Fix: on each transition into SONG_SELECT while the freeze is active, write
-//! `mcode = -1` into the frozen-stage record of both players. That restores
-//! the vanilla invariant ("the current stage's record is virgin during song
-//! selection"), so the game's own commit path re-initializes the record with
-//! the fresh difficulty. Timing is safe: the previous play's save payload is
-//! marshaled from the record during the results screen, well before the
-//! song-select transition. All layout constants come from the shared
-//! `stage_records` service, which decodes them from the matched
-//! `stage_record_accessor` signature bytes — nothing hardcoded. If that decode
-//! failed, this mod fails closed (the freeze can never activate).
+//! `mcode = -1` into the frozen-stage record of both players (course mode
+//! excluded — its record's init is unconditional). That restores the vanilla
+//! invariant ("the current stage's record is virgin during song selection"),
+//! so the game's own commit path re-initializes the record with the fresh
+//! difficulty. Timing is safe: the previous play's save payload is marshaled
+//! from the record during the results screen, well before the song-select
+//! transition. All layout constants come from the shared `stage_records`
+//! service, decoded from the matched `stage_record_accessor` signature bytes.
+//! Fail-closed: without that decode `init` fails, and without
+//! `scene_manager` `enable()` refuses (no option row ⇒ the freeze can never
+//! activate). RE: `docs/premium_free_stale_record_bug.md`.
 //!
 //! ## Same-credit ghost cache (`ghost_cache`)
 //!
@@ -45,9 +47,15 @@
 //! DB points a same-credit PB at `record[stage]`, which the fix above
 //! virginises and the game re-prepares — the ghost copy yields an empty
 //! vector). `ghost_cache` snapshots each committed grade stream keyed by
-//! chart and re-injects it when the game resolves nothing. World port of
-//! the DDR A3 `pfree_ghost` hook; see the module docs.
-//!
+//! `(side, mcode, style, difficulty)` (keep-if-better) and re-injects it
+//! ONLY when the freeze is active, the game resolved a LOCAL-SLOT ghost
+//! (`id < 0`) and that copy came back empty — never on `id == 0`, which is
+//! the game's own "no pacemaker" verdict (TARGET OFF, no PB, BPL, …). Course
+//! mode is skipped; the cache is cleared at EAM_EXIT / attract entry. World
+//! port of the DDR A3 `pfree_ghost` hook; fail-open (a miss costs only the
+//! ghost repair). `diag` holds freeze-gated diagnostic taps run from the
+//! same scene callback.
+
 mod diag;
 mod ghost_cache;
 

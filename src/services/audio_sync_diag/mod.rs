@@ -1,6 +1,48 @@
-//! Boot-only observation of game/audio requests and gameplay-clock progression.
-//! No audio calls, clock writes, packet tracing, or actor-tree traversal.
-//! See `docs/audio_sync_diagnostics.md` for validity flags and limitations.
+//! Audio-sync diagnostics — boot-only, passive observation of game/audio
+//! requests and gameplay-clock progression, recorded to
+//! `audio-sync-diagnostics-v2.csv` in the game working directory.
+//!
+//! Gated by the `diagnostics.audio_sync` config flag, read once at boot: when it
+//! is off, [`init`] returns before any allocation, subscription or hook. No audio
+//! calls, clock writes, packet tracing or actor-tree traversal.
+//!
+//! ## What it records
+//!
+//! A bounded recorder feeds a writer thread (size-capped output; a full file or a
+//! writer failure stops recording while every observer stays passthrough). Rows
+//! cover song prepare/ready/start/stop requests and update broadcasts, scene
+//! changes (`scene_manager` subscription), the gameplay clock at the `judgeNotes`
+//! tail (`judge_hook` calls [`judge_tail`]), per-frame spans from the frame pump
+//! and input callbacks ([`span`], [`frame_observer`], [`record_frame`]), judged
+//! hits from power_user_statistics' submit tap ([`record_hit`]), wave-bank
+//! create/release from song_rate ([`record_bank`]) and audio-clock onsets
+//! ([`record_onset`]). The published channel bitmask records which sources were
+//! actually available; unattested layouts leave their fields blank.
+//!
+//! ## Owned detours
+//!
+//! In this file, installed by [`init`] only when each signature matches exactly
+//! once: `song_play_by_bank`, `song_is_prepared`, `song_stop_by_handle`,
+//! `audio_start_prepared` and `update_broadcast`. Each miss drops only its
+//! channel.
+//!
+//! [`xact`] owns the XACT engine detours. `xact::init_factory` runs early in
+//! `lib.rs` (before `resolve_all`) and detours the game's engine factory wrapper
+//! so the engine internals (schedule, streaming submit, sound stop, cue destroy,
+//! output cursor, plus the source-node produce and in-memory submit that
+//! `audio_clock` needs) are installed in the window before the engine's
+//! `Initialize`. It runs when EITHER the diagnostics are on OR
+//! `audio_clock::wants_engine()` (the `gameplay-timing-fixes` mod is enabled in
+//! config); CSV recording stays gated on the diagnostics alone. An engine that is
+//! already loaded is never patched late.
+//!
+//! Submodules: `model` (recorder and row model), `spans` (frame/callback span
+//! scopes), `xact` (engine observers; `xact_sites` / `xact_model` hold its site
+//! identity gates and pure payload logic).
+//!
+//! See `docs/audio_sync_diagnostics_v2.md` (validity flags, row schema,
+//! limitations). Host tests: `scripts/validate_audio_sync_diag.sh` and
+//! `scripts/validate_xact_diagnostics.sh`.
 
 pub mod model;
 pub mod spans;

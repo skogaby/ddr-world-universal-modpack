@@ -1,10 +1,88 @@
-//! Folder Expansion Mod — Config-driven custom genre folders for DDR World.
+//! Folder Expansion (`folder-expansion`, default ON, late-binding) — config-driven
+//! custom genre folders in the song-select folder carousel, plus a difficulty
+//! unlock on the stock folders.
 //!
-//! Creates custom FolderProperty objects in the game's folder carousel,
-//! hooks the has-songs predicate to ensure custom folders are always visible,
-//! and optionally patches difficulty restrictions on all folders.
+//! ## Config
 //!
-//! Config: `mod-config.json` `"folder_expansion"` key — see FolderConfig for schema.
+//! `mod-config.json` `folder_expansion` (operator-edited; the DLL never writes
+//! it): `custom_folders: [{bit_index, key, voice_key}]` and
+//! `hide_difficulty_pane` (bool, default false). A song joins a folder when its
+//! musicdb `<property>` bitmask has bit `bit_index` set. `key` names the
+//! folder's assets, `voice_key` its select voice (may be empty). Validation at
+//! init: `key`/`voice_key` ≤ 15 bytes (they are written as SSO strings),
+//! `bit_index` ≤ 31 and unique. A missing section or a failed validation makes
+//! `init` return false, so the mod is not registered.
+//!
+//! ## Hooks and patches (all owned here)
+//!
+//! - **`folder_register`** detour — when the stock `folder_init` pass reaches
+//!   ALL MUSIC (type 7), builds one `FolderProperty` per configured entry
+//!   (type ids `0x10 + i`, genre mode flag 3, property + filter functors for
+//!   `bit_index`) and registers them first, so they sit before ALL MUSIC.
+//!   Every stock folder except Dan Ranking (type 10, whose flag cluster
+//!   doubles as view-axis state) gets `max_difficulty = 4` and its difficulty
+//!   flags rewritten to unlocked before the original runs. Custom folders keep
+//!   the ctor default of 4.
+//! - **`folder_has_songs`** detour (only with ≥1 custom folder) — forwards to
+//!   the original and forces `true` for native genre bits 0–9 and every
+//!   configured `bit_index`.
+//! - **Gameplay-object alloc size + ctor** (`gameplay_obj_alloc_size` /
+//!   `gameplay_obj_ctor`, only with ≥1 custom folder) — the gameplay sequence
+//!   object holds one shared_ptr slot per non-ALL-MUSIC folder. The
+//!   `MOV ECX,<size>` imm32 is grown by `0x10` per custom folder, and a ctor
+//!   detour zeroes the extra tail after the original constructor runs.
+//! - **`difficulty_limit` AFP patch** (`hide_difficulty_pane`) — registered
+//!   with `afp_patcher`; empties the root frame so the pane renders nothing.
+//!
+//! ## Allocators
+//!
+//! `FolderProperty` objects come from the game CRT heap (`game_malloc`): the
+//! shared_ptr that `folder_register` creates frees them with the game's
+//! `free`. The functor output buffers and the folder-data shared_ptr buffer are
+//! our own `memory::alloc_zeroed`.
+//!
+//! ## Layout detection and derivations
+//!
+//! Of the folder functions only `folder_register` (+ `_v2`) and
+//! `folder_has_songs` are AOB-scanned. `signatures.rs` derives `folder_init`
+//! (the function calling `folder_register` most), `folder_store_ptr`,
+//! `folder_property_ctor` and both functor ctors from them, and the
+//! gameplay-object size imm32 and ctor from the `gameplay_obj_alloc` AOB. At
+//! init this module reads the `FolderProperty` layout from `folder_init`'s
+//! first registration block: struct size, key/voice-key string offsets, both
+//! functor slots, the shared_ptr-move helper, the mode-flag offset and the
+//! create-folder-data function. The difficulty offsets come from the property ctor, which has two
+//! known shapes: enable flags (unlock = write 1s) or restriction flags
+//! (unlock = write 0s). Nothing about the layout is hardcoded.
+//!
+//! ## Assets
+//!
+//! For each custom folder, `enable()` clones the `firststep` folder's geo
+//! shapes (label-rewritten to `key`), AFP + BSI (exported name patched) and
+//! an `afplist.merged.xml` out of `data/arc/bm2d/select_music_folder_v3.arc`.
+//! It then builds cloned atlases (via `avs_layeredfs::atlas_cloner`, cache
+//! under `data_mods/_cache`) from art the operator supplies under
+//! `data_mods/custom_folders/{select_music_folder_v3_ifs,
+//! select_music_folder_lang_eng_v3_ifs}/tex/`, named like the `firststep`
+//! textures with `firststep` replaced by `key` (`mufo_folder_back_<key>_on.png`,
+//! …). The
+//! output lands in `data_mods/custom_folders/` and LayeredFS is rescanned.
+//! `.cache_meta.json` there (hash of the config + source ARC mtime) skips
+//! regeneration on a warm boot. This is the slow part of `enable()`, which is
+//! why the mod is in `LATE_BINDING_MODS`.
+//!
+//! ## Degradation
+//!
+//! A missing required signature ⇒ mod unregistered. A failed layout detection
+//! or a missing `game_malloc` ⇒ no custom folders, while the difficulty unlock
+//! still applies. Undetected difficulty offsets ⇒ no unlock. Missing
+//! gameplay-object addresses ⇒ custom folders are still created, but the
+//! overflow is unprotected (WARN "may crash"). Each asset-generation step
+//! WARNs and skips on failure; the folder itself is still registered.
+//! `disable()` drops the detours; the enlarged alloc size stays.
+//!
+//! RE notes: `docs/folder_system_research.md`,
+//! `docs/genre_filter_expansion_research.md`.
 
 use crate::core::memory;
 use crate::core::scanner::decode_call_rel32;

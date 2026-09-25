@@ -1,6 +1,22 @@
-//! Series Expansion Mod — Extends the series filter system for custom songs.
+//! Series Expansion (`series-expansion`, default ON) — adds VERSION filter
+//! entries for custom songs whose musicdb `<series>` value is beyond the stock
+//! range (1..=21, WORLD = 21), so they can be filtered by version instead of
+//! being mapped into 1st–5thMIX.
 //!
-//! Patches:
+//! ## Config
+//!
+//! `mod-config.json` `series_expansion.custom_series[{series_value, label,
+//! texture_name}]` (operator-edited, never written by the DLL). A missing
+//! section or an empty list makes `init` return false (mod not registered).
+//! `label` is the chip/version text and `texture_name` the filter-label key
+//! (`sefi_version_<texture_name>`). Both are written as SSO strings: longer
+//! than 15 bytes panics at init. `init` rebuilds the `0x88`-stride VERSION
+//! filter table in a near allocation: the nine stock entries (from the
+//! `VANILLA_ENTRIES` constant), then the custom entries sorted by
+//! `series_value` (group 8, like WORLD), then a sentinel.
+//!
+//! ## Byte patches (saved and restored on disable)
+//!
 //! 1. Series mapper default: xor eax,eax → mov eax,esi (pass through raw value)
 //! 2. Predicate LEA R8: redirect to extended table (filtering)
 //! 3. UI loop LEA RBX: point to last custom entry's key field (FilterButton creation)
@@ -14,6 +30,50 @@
 //!    `series >= 22 → category 0`. Category 0's bucket is never summed into
 //!    the flare skill totals, so custom-series songs are excluded from flare
 //!    ranking instead of counting toward GOLD. See docs/flare_ranking_research.md.
+//!
+//! Also applied at enable: the thumbnail ARC loop bound (`CMP RSI,0x15`)
+//! raised to the highest custom `series_value` (never further; too many AVS
+//! opens crash the filesystem), and a detour on the per-category filtersort
+//! entry-count function (`filter_entry_count_table`) that reports stock + N
+//! for the VERSION category, so custom selections persist in the saved
+//! `version` bitfield. The inline comments in `enable()` number these steps
+//! differently from the list above.
+//!
+//! ## Flare-ranking exclusion rule
+//!
+//! Only the `CalcFlareSkill` walk is patched: it feeds the totals, per-stage
+//! gain and profile numbers. The other classification sites (score-window
+//! tab, sort comparator, category label) are UI-only and stay stock, so
+//! custom songs still show under the GOLD tab there. The stock 3-entry tables
+//! are copied (not hardcoded) into a near-allocated 4-entry block, and the
+//! disp32s are module-base-relative (`target − module_base`, not `rip_disp`).
+//!
+//! ## Filter panel UI
+//!
+//! Custom labels are cloned-atlas textures built from
+//! `data_mods/custom_series/select_music_option_v3_ifs/tex/sefi_version_<texture_name>.png`
+//! (donor slot `sefi_version_world`) into a `texturelist.merged.xml` for
+//! LayeredFS. Through `afp_patcher` the mod injects `scroll_usr`/`move_usr`/
+//! `tri_l_usr`/`tri_r_usr` children into `filter_switch_base01..05`, and it
+//! calls `services/series_filter_scroll::configure` (2 columns × 9 visible
+//! rows) so the VERSION panel scrolls to the entries past the stock grid.
+//!
+//! ## Verification and degradation
+//!
+//! Five required signatures (mapper bounds, predicate LEA, UI entry loop,
+//! thumbnail loop, filter entry-count); a miss ⇒ mod unregistered. Bytes the
+//! AOBs don't pin are checked before patching: the mapper default must read
+//! `xor eax,eax`, which aborts init otherwise. `filter_label_builder_count`
+//! matches every 9-entry filter builder, so only the one seeding its string
+//! with `"DDR "` is patched, and only if its table LEA at `−0x64` targets the
+//! vanilla table. Optional pieces fail open with one WARN: no label-lookup
+//! signature ⇒ custom-series chips can crash `sprintf_s`; no
+//! `flare_skill_classifier` or unexpected stock tables ⇒ custom series count
+//! toward GOLD; missing label PNGs ⇒ entries without custom labels; a scroll
+//! service without BM2D ⇒ no scrolling.
+//!
+//! RE notes: `docs/series_filter_internals.md`, `docs/filter_ui_extension.md`,
+//! `docs/filter_scroll_research.md`, `docs/flare_ranking_research.md`.
 
 use crate::core::afp;
 use crate::core::memory;

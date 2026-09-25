@@ -1,51 +1,91 @@
-//! DDR SELECTION — revive DDR A3's legacy gameplay skins in DDR World.
+//! DDR SELECTION (`ddr-selection`, **default OFF** via `DEFAULT_OFF_MODS`) — revive DDR A3's
+//! legacy gameplay skins per song: skins 1..=5 = 1st-5th, MAX-EXTREME, SuperNOVA, X, 2013-A.
+//! World kept most of the plumbing and the legacy `…000N` packages; it removed the `%04d`
+//! package-name append and everything that wrote the skin id. This mod puts them back and
+//! re-hosts A3's behaviour on World's own actors.
 //!
-//! A3 let a player play a song with the gameplay UI of the DDR era it came
-//! from (skins 1..=5 = 1st-5th, MAX-EXTREME, SuperNOVA, X, 2013-A). World
-//! kept almost all of the plumbing and the legacy skin data; it removed the
-//! `%04d` package-name append and everything that wrote the skin id.
+//! ## Decision
 //!
-//! Mechanism (design: `.agents/planning/2026-09-22-ddr-selection/`):
+//! The per-player option row ([`options`]: OFF / AUTO / five eras, `PersistMode::Local`,
+//! `versus_mirror`ed, effective next song) feeds the pure [`trigger`]: the entered side's row
+//! governs (P1 in versus; a multiplayer-bot side never governs); AUTO maps the song's raw
+//! musicdb `<series>` to A3's DDR SELECTION folder buckets. A refused mode (course, event
+//! chain) stays stock. At the song-select → play edge (25 → 26..=28, before the play
+//! sequence's `LayoutActor` exists) `arm` writes the skin to `GameWork+0xA8`, which World's
+//! own sequence hands to the `LayoutActor` and whose three surviving `CMP [GameWork+0xA8],1`
+//! gates hide the song info and option icons on 1st-5th; the first scene outside {26..=30}
+//! disarms. The pure [`policy`] table then decides, per
+//! World package, whether it turns legacy: only when its World consumer's [`policy::Adapter`]
+//! resolved on this boot (World's HUD actors NULL-deref on a missing export), and a probe
+//! miss falls back to the unsuffixed World base, never `<base>0000`.
 //!
-//! * At the song-select → play edge (scene 25 → 26/27/28, before the next
-//!   sequence is built) the mod resolves the song's skin and
-//!   writes it to `GameWork+0xA8` (`gamework_skin_off`) — World's own play
-//!   sequence hands it to the gameplay `LayoutActor`, and World's three live
-//!   `CMP [GameWork+0xA8],1` gates hide the song-info panel and the option
-//!   icons on the 1st-5th skin, as in A3.
-//! * [`package_helper`] replaces the `LayoutActor` per-package helper and
-//!   restores A3's append for the packages [`policy`] allows, so World loads
-//!   the legacy `…000N` packages it still ships, under their own names
-//!   (never colliding with the stage loader's stock entries).
-//! * The skin is cleared on the first scene outside {26..=30} (A3 reset it
-//!   when the stage results finished) and by World's own credit reset.
+//! ## Surfaces
 //!
-//! Trigger: the per-player DDR SELECTION option row ([`options`]; OFF /
-//! AUTO / 5 eras, resolved by the pure [`trigger`]); the developer knob
-//! `DDR_SELECTION_FORCE=<1..5>` (requires `layeredfs.developer_mode`)
-//! overrides it. Courses and event chains stay stock.
+//! - [`package_helper`] — full replacement of World's `LayoutActor` per-package helper:
+//!   stock packages get the original with skin 0, legacy ones A3's `<arc_base>000N` append.
+//!   The whole-package swaps (judge, FAST/SLOW, full combo, game over, danger 1–2,
+//!   pacemaker) need nothing else.
+//! - [`panel`] + [`panel_logic`] — A3's stage panel with era cut-in and stage call, hosted
+//!   in World's ShutterActor stage kind from the song-select confirm (resolved there from the
+//!   wheel highlight); [`banner`] + [`banner_logic`] — CLEARED / FAILED / PRAY FOR ALL in the
+//!   banner kinds, on the same `ShutterActor::onUpdate` detour.
+//! - [`intro`] + [`intro_logic`] — READY! / HERE WE GO!! from `dance_message000N`, World's
+//!   READY? panel dismissed.
+//! - [`markers`] + [`marker_keys`] — A3's element positions via `services::hud_layout_hooks`;
+//!   [`stage_frame`] — the stage frame names.
+//! - [`gauge`] + [`gauge_math`], [`combo`] + [`combo_math`] (over `services::combo_hooks`),
+//!   [`score`] + [`score_math`], [`song_info`] + [`song_info_logic`] — life gauge, combo,
+//!   score / difficulty, skin 2's band and skins 3–5's A3 panel.
+//! - [`option_icons`] + [`option_icons_logic`] — A3's option-icon sprites (skins 2–5);
+//!   [`options_force`] + [`options_force_logic`] — 1st-5th's forced classic options.
+//! - [`movie_sel`] + [`sel_movie_logic`] — A3's `_sel` background movies.
+//! - [`sound`] — the mod-owned `dsel` era bank, the AFP-clip sound route, `code_se` flips
+//!   silencing World's doubled code sounds, and A3's announcer / crowd over
+//!   `services::call_voice_hooks`. [`settings`] — the Era Cut-In row.
 //!
-//! Current scope (Steps 1–10): the whole-package swaps (judge, FAST/SLOW, full
-//! combo, game over, danger for skins 1–2), the era sounds ([`sound`]: the
-//! `dsel` bank, the AFP-clip routing, World's doubled code sounds silenced),
-//! the legacy READY / HERE WE GO ([`intro`]; World's READY? panel and voice
-//! suppressed), A3's pre-song stage panel with the era cut-in and stage
-//! call ([`panel`], hosted in World's ShutterActor kind 3 from the stage-panel
-//! request at the song-select confirm; World's 5 s READY? dwell skipped while
-//! A3's root is live), A3's CLEARED / FAILED / PRAY FOR ALL end banners
-//! ([`banner`], hosted in World's banner kinds on the same ShutterActor
-//! detour) and the A3 DDR SELECTION `_sel` background movies ([`movie_sel`]);
-//! Steps 7–9: the era's element positions ([`markers`]), stage frame, life
-//! gauge ([`gauge`]) and combo ([`combo`], A3's `ComboActor` re-hosted through
-//! `services::combo_hooks`); Step 10: score / difficulty ([`score`]) and
-//! skin 2's song-info band and skins 3–5's A3 panel ([`song_info`]); Step 11:
-//! A3's announcer and crowd ([`sound::call_voice`] over
-//! `services::call_voice_hooks`); A3's in-gameplay option icons
-//! ([`option_icons`]); Step 12: 1st-5th's forced classic options
-//! ([`options_force`]).
+//! ## Invariants
 //!
-//! Fail-open: every derivation is all-or-nothing and listed in
-//! `required_signatures`; a disarmed or stock package runs World's code.
+//! - **Scoped patches.** Every code / data patch is live only as long as it applies: one call
+//!   (combo / score init, the `SceneManageActor::onInitialize` movie byte), one update
+//!   (ShutterActor kind rows), while the current `LayoutActor`'s record is legacy (stage
+//!   frame, gauge export, song info — applied by the helper before it registers the package,
+//!   which stays stock if a patch fails), or while a `code_se` site's per-song gate holds.
+//!   Longer-lived patches are restored on the next stock request, at disarm and at disable.
+//! - **Layer before package.** Mod-created layers on a `LayoutActor` package are destroyed
+//!   in the GAMEPLAY-exit scene callback, before the sequence tears the actor down; mod-held
+//!   package tickets are released only after World's layer on them is gone.
+//! - **Threads.** Everything engine-facing runs on the game thread, except the AFP sound
+//!   route (inside libafp's display pass: lock-, allocation- and log-free), the bank build
+//!   (background thread, owned buffers) and [`leaked_forced_options`] (atomics only).
+//! - **Cross-mod seams.** [`legacy_package`] tells other mods that edit a World template
+//!   (S-Marvelous) to stand down for this song; [`leaked_forced_options`] lets the save
+//!   trampoline (`custom_options_persistence`) rewrite the `/data/option` nodes if a save is
+//!   ever built while 1st-5th's options are forced. No surface taints through `score_guard`.
+//!
+//! ## Degradation
+//!
+//! Only the core group is in `required_signatures` — the package helper and skin-table read
+//! plus the `derive_ddr_selection` sites (`ddr_selection_sites`); without it the mod is
+//! unavailable. Every other derivation is optional and all-or-nothing per surface (intro,
+//! panel, banners, movie, stage frame, gauge, combo, score, song info / panel, option icons,
+//! option forcing, `code_se`, call voice, the AFP sound callback, the AUTO series lookup): a
+//! missing one leaves that surface World's with one WARN — where the surface is an adapter,
+//! the packages it guards stay stock. A disarmed or stock package always runs World's code.
+//!
+//! ## Assets, config, developer force
+//!
+//! A3-only data is never committed: `scripts/ddr_selection/import_a3_assets.{sh,bat}` copies
+//! it from an operator's A3 install into `data_mods/ddr_selection_a3/` per
+//! `a3_assets.manifest` (`always` entries such as World's blanked `dance_combo0005_v0.arc`,
+//! `missing` entries only when the World install lacks them). Config section `ddr_selection`
+//! (`era_cutin`, default ON) is written whole by [`settings`]. `DDR_SELECTION_FORCE=<1..5>` with
+//! `layeredfs.developer_mode` forces that skin on every song, overriding the rows (mode
+//! refusals still apply).
+//!
+//! RE: `docs/ddr_selection_research.md` and the research notes under
+//! `.agents/planning/2026-09-22-ddr-selection/`. Host tests (every pure `*_logic` / `*_math`
+//! module, [`policy`], [`trigger`], the sound manifest, bank builder and rules):
+//! `scripts/validate_ddr_selection.sh`.
 
 mod banner;
 pub mod banner_logic;

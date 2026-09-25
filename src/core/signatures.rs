@@ -3281,7 +3281,7 @@ impl SignatureStore {
 
     /// Scan for all known signatures. Call once at startup.
     ///
-    /// All ~50 patterns are resolved in a single pass over the module
+    /// Every pattern in `SIGNATURES` is resolved in a single pass over the module
     /// using the multi-pattern Aho-Corasick engine. Per-signature
     /// `[+]/[-]` log lines are emitted in `SIGNATURES` array order so
     /// log output is comparable across boots.
