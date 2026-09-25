@@ -23,7 +23,7 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 10: Legacy score + song info (P3d) — cabinet-proven 2026-09-25 (score / difficulty, skin-2 band, skins 3–5 A3 `dance_song_info0000_v2` panel; EX mode untested)
 - [x] Step 11: A3 announcer and crowd rules (P4) — cabinet-proven 2026-09-25
 - [x] Extra (maintainer request 2026-09-25): A3 in-gameplay option icons — cabinet-proven 2026-09-25 (`research/option-icons.md`)
-- [ ] Step 12: 1st-5th option forcing (P5)
+- [x] Step 12: 1st-5th option forcing (P5) — cabinet-proven 2026-09-25
 - [ ] Step 13: S-Marvelous legacy art (P6)
 - [ ] Step 14: Release integration
 
@@ -275,6 +275,15 @@ Step 12: 1st-5th option forcing (P5)
 - **Integration.** Real-speed and per-song offsets unaffected.
 - **Demo.** Cabinet: forced options visible in play, profile unchanged after
   logout, bot game.
+- **As built (2026-09-25).** `research/option-forcing.md` §4. A3 forced in
+  its getters (stored values untouched; in-song speed change allowed from
+  ×1.00 — A3's `ControlSpeedActor` copies through the forcing getters). World:
+  eleven field writes (World enums) on every entered side (bot included) at
+  every scene change into {26, 27, 28} with skin 1 armed, snapshot first,
+  restore on the first scene outside and at disarm / disable; no detours or
+  patches. `derive_ddr_sel_option_force` (RTTI, getter stubs) on all five
+  builds; pure `options_force_logic.rs`, engine `options_force.rs`; save-tree
+  fallback in the save trampoline via `replace_option_s32`.
 
 Step 13: S-Marvelous legacy art (P6)
 

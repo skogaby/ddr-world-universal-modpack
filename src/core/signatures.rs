@@ -3407,6 +3407,7 @@ impl SignatureStore {
         self.derive_ddr_sel_score();
         self.derive_ddr_sel_song_info();
         self.derive_ddr_sel_option_icons();
+        self.derive_ddr_sel_option_force();
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
@@ -7288,6 +7289,92 @@ impl SignatureStore {
             }
             self.publish_value("ddr_sel_option_speed_derived_off", *speed_derived);
         }
+    }
+
+    /// DDR SELECTION's 1st-5th option forcing (Step 12): the eleven World
+    /// `ddr::player::Option` fields A3 forced on skin 1, each verified by its
+    /// `MOV EAX,[RCX+off]; RET` getter stub on the RTTI vtable, plus the
+    /// effective-speed getter (`type == 1 ⇒ +0x0C`, so a forced type 1 +
+    /// hispeed 100 plays at ×1.00). Publishes `ddr_sel_force_<name>_off`.
+    /// Optional and independent of the option-icon group (RE:
+    /// `.agents/planning/2026-09-22-ddr-selection/research/option-forcing.md`).
+    fn derive_ddr_sel_option_force(&mut self) {
+        const TAG: &str = "ddr_sel_option_force";
+        let Some(opt_vt) = self.find_vtable_by_rtti(".?AVOption@player@ddr@@", TAG) else {
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let in_mod = |p: *const u8, n: usize| (p as usize).wrapping_sub(base) + n <= size;
+        // (getter vslot, field offset, name) — `options_force_logic::FIELDS`.
+        const WANTED: [(usize, usize, &str); 11] = [
+            (0x208, 0x08, "speed_type"),
+            (0x220, 0x0C, "hispeed"),
+            (0x2A8, 0x54, "scroll_moving"),
+            (0x250, 0x28, "visibility"),
+            (0x268, 0x34, "lane_cover"),
+            (0x280, 0x40, "stepzone"),
+            (0x238, 0x1C, "scroll_direction"),
+            (0x2B8, 0x5C, "arrow_color"),
+            (0x2C0, 0x60, "arrow_design"),
+            (0x260, 0x30, "lane_filter"),
+            (0x278, 0x3C, "guideline"),
+        ];
+        unsafe {
+            for (slot, want, name) in WANTED {
+                let f = *(opt_vt as *const *const u8).add(slot / 8);
+                let got = if in_mod(f, 4) {
+                    let b = std::slice::from_raw_parts(f, 4);
+                    (b[0] == 0x8B && b[1] == 0x41 && b[3] == 0xC3).then_some(b[2] as usize)
+                } else {
+                    None
+                };
+                if got != Some(want) {
+                    log_warn!(
+                        "  [-] {} -- Option getter +0x{:X} ({}) is {:?} (want +0x{:X})",
+                        TAG,
+                        slot,
+                        name,
+                        got,
+                        want
+                    );
+                    return;
+                }
+            }
+            // Effective speed: `CALL [RAX+0x208]; CMP EAX,1; JNE; MOV EAX,[RBX+0x0C]`.
+            let eff = *(opt_vt as *const *const u8).add(0x218 / 8);
+            if !in_mod(eff, 0x20) {
+                log_warn!("  [-] {} -- effective-speed getter outside the module", TAG);
+                return;
+            }
+            let eb = std::slice::from_raw_parts(eff, 0x20);
+            let shape = eb.windows(12).any(|w| {
+                w[0..6] == [0xFF, 0x90, 0x08, 0x02, 0, 0]
+                    && w[6..9] == [0x83, 0xF8, 0x01]
+                    && w[9] == 0x75
+                    && w[11] == 0x8B
+            }) && eb.windows(3).any(|w| w == [0x8B, 0x43, 0x0C]);
+            if !shape {
+                log_warn!("  [-] {} -- effective-speed getter shape", TAG);
+                return;
+            }
+            self.resolved
+                .insert("ddr_sel_force_option_vtable".into(), opt_vt);
+            log_info!(
+                "  [+] ddr_sel_force_option_vtable (derived) @ +0x{:X}",
+                opt_vt as usize - base
+            );
+            for (_, off, name) in WANTED {
+                self.publish_value(&format!("ddr_sel_force_{}_off", name), off);
+            }
+        }
+    }
+
+    /// A field offset [`derive_ddr_sel_option_force`] verified (`name` =
+    /// `options_force_logic::Field::name`), or `None`.
+    pub fn ddr_sel_option_force_offset(&self, name: &str) -> Option<usize> {
+        self.get_address("ddr_sel_force_option_vtable")?;
+        self.published_value(&format!("ddr_sel_force_{}_off", name))
     }
 
     /// Everything [`derive_ddr_sel_option_icons`] produced, or `None`.

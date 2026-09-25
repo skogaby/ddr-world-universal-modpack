@@ -1,9 +1,9 @@
 # DDR SELECTION — progress
 
 Updated: 2026-09-25
-Status: Step 11 of 14 — COMPLETE; A3 option icons (maintainer request) cabinet-proven 2026-09-25 incl. in-song speed changes. Next: Step 12 (all uncommitted)
-NEXT ACTION: Step 12 (1st-5th option forcing, design §4.8, `research/sounds-options-folder.md` §B) — RE first (re-verify the Option field offsets / enums against the published `ddr_sel_option_*_off` derivations), write findings, implement, gate, stop for the cabinet test.
-Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/option-icons.md` for the option icons, `research/announcer-crowd.md` for Step 11, `research/legacy-score.md` for Step 10, `research/legacy-combo.md` for Step 9, `research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
+Status: Step 12 of 14 — COMPLETE, cabinet-proven 2026-09-25 (uncommitted; Steps 1–11 + option icons committed `0ce64a9`). Next: Step 13
+NEXT ACTION: Step 13 (S-Marvelous legacy art, design §4.9 P6) — RE first: enumerate each legacy skin's judge / full-combo / combo templates (`dance_judge000N_v0`, `dance_fullcombo000N_v0`, `dance_combo000N`) against S-Marvelous' World recipes (`src/mods/s_marvelous/assets.rs`, `core/ap2`), write findings, then the draft generator + runtime generalisation; stop for the maintainer at the art hand-finishing point.
+Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-design.md`, then the research files (`research/option-forcing.md` for Step 12, `research/option-icons.md` for the option icons, `research/announcer-crowd.md` for Step 11, `research/legacy-score.md` for Step 10, `research/legacy-combo.md` for Step 9, `research/legacy-gauge.md` for Step 8, `research/hud-layout-stage-frame.md` for Step 7, `research/stage-panel.md` for Step 5, `research/end-banners-sel-movies.md` for Step 6); this file is the live state.
 
 ## Done
 
@@ -11,6 +11,14 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 - Pre-implementation RE (2026-09-22): helper `FUN_18006b710` byte shape identical on 20250805/20260224/20260721/20260825/20260915 (prologue AOB unique on all five); `GameWork+0xA8` read site (DPS identity table) unique on all five, offset 0xA8 everywhere; no reader of `LayoutActor+0x190` other than `onInitialize`; record insert `FUN_18006ec30` and list push `FUN_18006db60` COPY their inputs (a mod-owned `std::string` view is safe); `FUN_1801aca30` dedupes by name; `LayoutActor` slot 5 releases every pushed name.
 
 ## In flight
+
+- Step 12 (2026-09-25, cabinet-proven) — 1st-5th option forcing, per `research/option-forcing.md` (§4 = as built):
+  - RE: A3 forced 9 options in its `CourseOption` getters while `GameWork+0xB0 == 1` (stored values untouched); A3's `ControlSpeedActor` copies the Option through those getters ⇒ in-song speed change allowed, starting at ×1.00 (answers the open question — no maintainer choice left); versus + bot forced (cabinet-global skin). World: the 11 getter stubs are byte-identical on all five builds, the enum name tables identical; lane transparency 100 = no filter (menu writes `100 − darkness`); ess builds all 11 `/data/option` nodes as s32.
+  - Signatures (no AOB): `derive_ddr_sel_option_force` — RTTI Option vtable, the 11 getter stubs + the effective-speed getter shape (`type 1 ⇒ +0x0C`); publishes `ddr_sel_force_option_vtable` + 11 `ddr_sel_force_<name>_off`. All five builds; sweep ALL GREEN, nothing never-resolving.
+  - `options_force_logic.rs` (pure, 6 tests; validator 141): the World value table (`FIELDS`: node, getter slot, offset, forced value, plausible range), window {26,27,28} ∧ skin 1, per-side `action(window, entered, snapshotted)`.
+  - `options_force.rs`: `sync(next, skin)` from the mod's scene callback after arm / disarm — snapshot + force (range-checked; implausible ⇒ side left alone + WARN), re-assert (logs only when a field had drifted), restore on the first scene outside; `restore_all` at disarm / disable; `leaked(side)` for the save trampoline.
+  - `mod.rs`: `leaked_forced_options(side)`; `custom_options_persistence.rs` save trampoline rewrites the 11 nodes via `replace_option_s32` when a side is still forced (unreachable by design).
+  - Gates: `cargo check` clean, `cargo fmt`, `./build.sh` 0 warnings, validator 141 tests, signature sweep ALL GREEN, nothing never-resolving.
 
 - A3 option icons (2026-09-25, cabinet-proven incl. the in-song speed fix; maintainer request — the last A3 graphic not covered) per `research/option-icons.md` (§4 = as built):
   - RE: A3 drew a row of 11 `BM2D::CSprite`s (speed always, then boost / appear / turn / dark / scroll / arrow / cut / freeze / jump shown when off-default, gauge when named) from the texture-only `dance_option_icon0000_v0` (World ships it byte-identical) at the `option` marker (`option_icon_<n>p[_reverse]_usr`), pitch w − 2, scale w / 36, priority 8, group side + 2. World kept the CSprite class + pool; World's OptionIconActor builds an AFP clip with World art instead.
@@ -117,6 +125,25 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
   - AGENTS.md row.
 - Front-loaded from Step 2 (maintainer request, 2026-09-22): pure `trigger.rs` (row values, AUTO table, governance incl. bot exclusion, dev-knob override; 10 tests), `options.rs` (Dynamic scalar row `ddr_selection` 0..=6, `PersistMode::Local`, overlay + in-game, `versus_mirror`), `derive_music_series_vslot` (publishes `music_series_vslot` from `flare_skill_classifier`+2: 0x88 old / 0xA0 new — sweep green), series read = `find_music_by_mcode(PlayerWork+0x54)` → entry vtable slot; label + preview textures (eng/jpn/kor) via `scripts/option_strings.py` (regeneration touched only the 6 new PNGs); `mod-config.json` `option_menu_settings` entry after `arrow_opacity`.
 - Readiness gates: `cargo check` clean, `cargo fmt` clean, `./build.sh` clean, signature sweep ALL GREEN (all derivations resolve on 20250805/20260224/20260721/20260825/20260915), `shape_diff`: `layout_package_helper` identical through 0x198 on every build; `dps_skin_table_read` diverges only at +0x153 on 20250805/20260224 (consumer reads +39/+49 only).
+
+## Cabinet test — Step 12 (1st-5th option forcing) — PASSED 2026-09-25 (every check as expected)
+
+Deploy the DLL only. DDR SELECTION on. Before the test, set some non-classic options on your profile (e.g. real speed or ×2.5, BOOST, SUDDEN+ or STEALTH, REVERSE, RAINBOW arrows, a non-classic arrow design, lane filter DARK, guideline CENTER, step zone OFF).
+
+Expect once per boot (sig log): `[+] ddr_sel_force_option_vtable (derived) @ +0x…` and `ddr_sel_force_<name>_off` = speed_type 0x8, hispeed 0xC, scroll_moving 0x54, visibility 0x28, lane_cover 0x34, stepzone 0x40, scroll_direction 0x1C, arrow_color 0x5C, arrow_design 0x60, lane_filter 0x30, guideline 0x3C. No `1st-5th option forcing` / `option field … is` WARN.
+
+Per 1st-5th song: `DDR SELECTION: P1 1st-5th options forced at scene 26 (N field(s) changed; player's: speed_type=… hispeed=… …)` (the `player's:` list = your profile values), per stage-loader / gameplay scene nothing more unless a field drifted (`re-asserted`), and after the song `DDR SELECTION: P1 player's options restored (left the play window)` (or `(disarm)`).
+
+Check:
+1. On screen during a 1st-5th song: ×1.00 scroll, no BOOST, all arrows visible (no SUDDEN/HIDDEN/STEALTH), step zone shown, normal (downward-up) scroll, FLAT-coloured CLASSIC arrows, no lane filter, no guideline.
+2. In-song speed change (anytime speed mod) still works, starting from ×1.00 (A3 did the same).
+3. Back at song select: the OPTIONS menu shows your own options again; play a World-era song — your own options apply.
+4. Log out and card back in: the profile options are unchanged (no `forced 1st-5th options LEAKED into a save` WARN).
+5. Quick restart during a 1st-5th song: still forced (a `re-asserted` line only if a field changed); quick fail: restored.
+6. Versus on a 1st-5th song: both players forced and restored. Bot game (BOT OPPONENT on): `P2 (bot) 1st-5th options forced` (or the bot side simply playing forced), both restored.
+7. MAX-EXTREME … 2013-A songs: no forcing (no `options forced` line).
+
+Report any WARN containing `1st-5th`, `Option read looks wrong`, `Option unreadable`, any `F:` line / crash.
 
 ## Cabinet test — A3 option icons — PASSED 2026-09-25 (run #2 with the speed fix)
 

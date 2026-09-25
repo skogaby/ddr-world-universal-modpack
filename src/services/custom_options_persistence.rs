@@ -1074,6 +1074,27 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
         }
     }
 
+    // ── DDR SELECTION 1st-5th option forcing leak fix (same layer) ─────────
+    // Unreachable by design: the forced fields are restored on the first
+    // scene after gameplay, before the per-stage marshal. If a side is still
+    // forced, put the player's own values back into the built /data/option.
+    if let Some(nodes) = crate::mods::ddr_selection::leaked_forced_options(side as usize) {
+        log_warn!(
+            "DDR SELECTION: P{} forced 1st-5th options LEAKED into a save -- rewriting {} /data/option nodes to the player's values",
+            side + 1,
+            nodes.len()
+        );
+        for (node, value) in nodes {
+            if !replace_option_s32(kbin_ctx, node, value) {
+                log_error!(
+                    "DDR SELECTION: P{} <{}> tree fix FAILED -- the profile may carry the forced value",
+                    side + 1,
+                    String::from_utf8_lossy(node.strip_suffix(b"\0").unwrap_or(node))
+                );
+            }
+        }
+    }
+
     // ── Network persistence: append <mod_{id}> kbin children to the request ──
     if PERSIST_NETWORK.load(Ordering::SeqCst) {
         emit_network_children(kbin_ctx, &snapshot, side, playside_raw);

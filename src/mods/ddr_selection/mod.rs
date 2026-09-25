@@ -41,7 +41,8 @@
 //! skin 2's song-info band and skins 3–5's A3 panel ([`song_info`]); Step 11:
 //! A3's announcer and crowd ([`sound::call_voice`] over
 //! `services::call_voice_hooks`); A3's in-gameplay option icons
-//! ([`option_icons`]).
+//! ([`option_icons`]); Step 12: 1st-5th's forced classic options
+//! ([`options_force`]).
 //!
 //! Fail-open: every derivation is all-or-nothing and listed in
 //! `required_signatures`; a disarmed or stock package runs World's code.
@@ -60,6 +61,8 @@ mod movie_sel;
 mod option_icons;
 mod option_icons_logic;
 mod options;
+mod options_force;
+mod options_force_logic;
 mod package_helper;
 mod panel;
 pub mod panel_logic;
@@ -496,6 +499,7 @@ fn disarm(reason: &str) {
     gauge::restore();
     song_info::restore();
     option_icons::release_all("disarm");
+    options_force::restore_all("disarm");
     markers::reset();
     // Restore World's code sounds (no-op when nothing was silenced).
     sound::code_se::sync();
@@ -540,6 +544,27 @@ fn on_scene_change(prev: i32, next: i32) {
         // but the song never reached the play edge (or resolved stock there).
         disarm("left the song window");
     }
+    // After this edge's arm / disarm: 1st-5th's forced options cover
+    // {26, 27, 28} and are restored on the first scene outside.
+    options_force::sync(next, armed_skin());
+}
+
+/// The player's own values of the eleven forced option fields when a save
+/// is built while `side` is still forced (unreachable by design; the save
+/// trampoline then rewrites these `/data/option` s32 nodes). Any thread.
+pub fn leaked_forced_options(
+    side: usize,
+) -> Option<[(&'static [u8], i32); options_force_logic::COUNT]> {
+    let values = options_force::leaked(side)?;
+    let mut out = [(&b"\0"[..], 0); options_force_logic::COUNT];
+    for ((slot, f), v) in out
+        .iter_mut()
+        .zip(options_force_logic::FIELDS.iter())
+        .zip(values.iter())
+    {
+        *slot = (f.node, *v);
+    }
+    Some(out)
 }
 
 /// Read the developer knob once (enable time).
@@ -642,6 +667,8 @@ impl Mod for DdrSelectionMod {
         score::init(ctx.signatures);
         song_info::init(ctx.signatures);
         option_icons::init(ctx.signatures);
+        // (WARNs itself; 1st-5th songs then keep the player's options.)
+        let _ = options_force::init(ctx.signatures);
         panel::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
