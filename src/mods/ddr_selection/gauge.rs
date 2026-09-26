@@ -3,7 +3,8 @@
 //! World's gauge actors (the percent family `Normal` / `Grade` / `Flare` /
 //! `Immortal`, and `LifeGaugeActor`) are A3's with four things removed; this
 //! module puts them back for a song whose `dance_gauge` record is legacy
-//! (`dance_gauge000N`, record skin N at the actor's `+skin` field):
+//! (`dance_gauge000N`, or a theme's `dance_gauge0000_vN`; record skin N at
+//! the actor's `+skin` field):
 //!
 //! * **Export name.** World creates `dance_gauge`, A3's packages export
 //!   `00_dance_gauge` — a checked code patch of each init's clip-create LEA
@@ -14,8 +15,8 @@
 //!   init NULL-derefs on a package without its export).
 //! * **2P mirror.** A3 drew the 2P percent gauge at `SetScale(-1, 1)`;
 //!   World at `(1, 1)` — post-original detour on the percent-family init.
-//! * **Fill.** A3's segmented fill (skins 1 and 5, non-FLARE) and its
-//!   2P-mirrored continuous fill (skins 2–4, FLARE) replace World's
+//! * **Fill.** A3's segmented fill (skins 1, 5 and the themes, non-FLARE) and
+//!   its 2P-mirrored continuous fill (skins 2–4, FLARE) replace World's
 //!   continuous one — full-replacement detour on World's fill, pure math in
 //!   [`super::gauge_math`]. The fill reads only the displayed value, so
 //!   `song_reset`'s gauge restore stays valid.
@@ -41,6 +42,7 @@ use crate::services::bm2d_api;
 use crate::{log_info, log_warn};
 
 use super::gauge_math::{self, FillClip};
+use super::policy;
 
 /// A3's export in `dance_gauge000N`.
 const EXPORT: &[u8] = b"00_dance_gauge\0";
@@ -234,7 +236,8 @@ pub fn restore() {
     }
 }
 
-/// The actor's legacy skin (1..=5) and side, or `None` for a World gauge.
+/// The actor's legacy skin (1..=[`policy::SKIN_MAX`]) and side, or `None`
+/// for a World gauge.
 unsafe fn legacy_actor(actor: *mut u8, skin_off: usize, st: &State) -> Option<(u8, u8)> {
     if actor.is_null() || super::armed_skin() == 0 {
         return None;
@@ -243,7 +246,7 @@ unsafe fn legacy_actor(actor: *mut u8, skin_off: usize, st: &State) -> Option<(u
         return None;
     }
     let skin = memory::read_i32(actor.add(skin_off));
-    if !(1..=5).contains(&skin) {
+    if !(1..=policy::SKIN_MAX as i32).contains(&skin) {
         return None;
     }
     let parent = memory::read_ptr(actor.add(st.s.side_off));

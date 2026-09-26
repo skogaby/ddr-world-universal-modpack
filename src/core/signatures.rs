@@ -426,6 +426,33 @@ pub struct DdrSelSongInfoPanelSites {
     pub x_offset_sub: *const u8,
 }
 
+/// ddr_selection's theme stage-panel score sets (`derive_ddr_sel_score_set`):
+/// World's own-best record lookup and the `PlayerWork` score db it takes.
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelScoreSetSites {
+    /// `const Entry* best_record(ScoreDb*, u32 mcode, int style, int diff)` —
+    /// a pure tree lookup; null when the song has no node, else the 0x30-byte
+    /// chart entry (`+0` score, `+4` rank, `+8` clear kind).
+    pub best_record: *const u8,
+    /// `PlayerWork` offset of the score db (`0x178` on 20260324+, `0x188` on
+    /// 20250805 / 20260224).
+    pub pw_score_db_off: usize,
+}
+
+/// ddr_selection's theme gameplay name (`derive_ddr_sel_name`): A3's
+/// dancer-name `agcs::BmpString` goes into the screen graph's slot-8 render
+/// list, gated on font 6 being loaded.
+#[derive(Clone, Copy, Debug)]
+pub struct DdrSelNameSites {
+    /// The screen-graph global (`*G` = the graph; `*G + 0xB0` is the widget
+    /// list the mod's overlays use, `*G + gameplay_list_off` A3's).
+    pub screen_graph_global: *const u8,
+    /// The gameplay render list's offset in the graph (`0xC8`).
+    pub gameplay_list_off: usize,
+    /// `Font* font_by_id(int id)`.
+    pub font_by_id: *const u8,
+}
+
 /// ddr_selection's legacy stage-frame patch sites (`derive_ddr_sel_stage_frame`).
 #[derive(Clone, Copy, Debug)]
 pub struct DdrSelStageFrameSites {
@@ -1109,6 +1136,38 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "rival_set_dancer_name",
         pattern: "48 83 EC 18 83 39 03 4C 8B D1 75 09 48 8D 41 58 48 83 C4 18 C3 48 8B 49 38 48 8B 41 08 80 B8 E5 00 00 00 00 75 1A 39 50 18 73 06 48 8B 40 10 EB 06 48 8B C8 48 8B 00 80 B8 E5 00 00 00 00 74 E6 49 8B 42 38",
         description: "Rival/ranking set dancer-name getter (set, mcode, style, diff) -> const char* — rival set: its +0x58 name; ranking set: the chart's record-holder name from the +0x38 holder map. Consumer: multiplayer_bot::target_name.",
+    },
+    // ── Multiplayer Bot — the results window's remembered tab ──
+    // `sequence::result::WindowActor` remembers each player's last results
+    // tab in `PlayerWork`: two i32 tab KINDS, one for a "main" window
+    // (`WindowActor+0x5C` = versus || side == GameWork primary side) and one
+    // for a solo non-primary window. The tab builder (vslot 4) opens the
+    // window on that kind (−1 unset ⇒ kind 0 CALORIES for a main window,
+    // kind 6 SIMPLE RESULTS otherwise; kind 1 = DETAILS); the window-out
+    // message 0x1003 (vslot 8: 20260825 `FUN_1800c6100` @ `0x1800c6252`,
+    // 20250805 `0x1800bc382`, 20260721 `0x1800c5b82`, 20260915 `0x1800c6202`)
+    // writes the current kind back:
+    //
+    //   80 7B 5C 00             CMP  byte [RBX+0x5C],0      ; main window?
+    //   48 63 43 60             MOVSXD RAX,[RBX+0x60]       ; WindowActor side
+    //   48 63 8B C8 00 00 00    MOVSXD RCX,[RBX+0xC8]       ; current tab index
+    //   C6 43 68 00             MOV  byte [RBX+0x68],0
+    //   48 8D 15 d32            LEA  RDX,[rip+player_work_table]   (+22)
+    //   48 8B 14 C2 / 48 8B 83 D0 00 00 00 / 44 8B 04 88 / 48 8B 02
+    //   74 12                   JZ   solo
+    //   44 89 40 m8             MOV  [PW+main],R8D          ; disp8 at +49
+    //   EB 10 / E8 .. CC / E8 .. CC
+    //   44 89 40 s8             MOV  [PW+solo],R8D          ; disp8 at +67
+    //
+    // main/solo = 0x60/0x64 on 20260324+, 0x70/0x74 on 20250805 / 20260224 —
+    // `derive_results_tab_memory` cross-checks the table LEA against
+    // `player_work_table` and publishes both. Consumer: multiplayer_bot's
+    // impersonation (the bot's pane opens on DETAILS; snapshot + restore).
+    // Unique on 20250805 / 20260721 / 20260825 / 20260915 (Ghidra).
+    SignatureDefinition {
+        name: "results_tab_memory_writeback",
+        pattern: "80 7B 5C 00 48 63 43 60 48 63 8B C8 00 00 00 C6 43 68 00 48 8D 15 ?? ?? ?? ?? 48 8B 14 C2 48 8B 83 D0 00 00 00 44 8B 04 88 48 8B 02 74 12 44 89 40 ?? EB 10 E8 ?? ?? ?? ?? CC E8 ?? ?? ?? ?? CC 44 89 40",
+        description: "Results WindowActor window-out (msg 0x1003) write-back of the current tab kind into PlayerWork — disp8 at +49 = the main-window field, +67 = the solo field (derived as results_tab_main_off / results_tab_solo_off). Consumer: multiplayer_bot::impersonation.",
     },
     // The song-end result commit — GamePlayActor vtable +0x28 (20260721
     // `FUN_18005d970`, 20260526 `FUN_18005d180`). Copies the actor's live
@@ -3182,6 +3241,62 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "41 B8 0B 00 00 00 48 8D 15 ?? ?? ?? ?? 49 8D 4B ?? E8 ?? ?? ?? ?? 90 48 8B 1D ?? ?? ?? ?? 48 8B 13 80 7A",
         description: "StageFrameActor's stage-texture fn (texture fn+0x46 on every build; the fn is the CALL at msg+0x24 of RTTI slot 8, FUN_18007a390 on 20260825): `MOV R8D,0xB; LEA RDX,[\"dast_stage_\"]; LEA RCX,[R11-0x40]; CALL string::assign` — the texture-name prefix World's stage suffix (01..05 / final / extra / …) is appended to. ddr_selection rewrites imm32 (+2) and disp32 (+9) to A3's `stage_frame000N_stage_` (22 chars) while the dance_stage record is legacy. derive_ddr_sel_stage_frame checks the fn, the imm and the string. Unique on all five builds (the 17-byte head alone also hits a `music_title` assign).",
     },
+    // ── DDR SELECTION theme gameplay name (A3's BmpString) ──────────────
+    //
+    // RE: `src/mods/ddr_selection/score_name.rs` module doc. Both feed
+    // derive_ddr_sel_name (all-or-nothing; a miss ⇒ no theme name).
+    //
+    // World's "create a gameplay 2D object" helper (20260825 FUN_1801ce8e0
+    // @ +0x52, 20250805 0x1801b88d2): the screen-graph global load and its
+    // slot-8 render list (`*G + 0xC8`, the `agcs::ScreenRoot` A3's ScoreActor
+    // pushed the dancer name onto), then the free-pool pop:
+    //
+    //   48 8B 0D d32        MOV RCX,[rip+screen_graph]   ; +3 disp32
+    //   48 85 C9 75 05      TEST RCX,RCX ; JNZ
+    //   48 8B CE EB 07      MOV RCX,RSI ; JMP
+    //   48 8B 89 C8 00 00 00  MOV RCX,[RCX+0xC8]         ; +20 list offset
+    //   48 8B 51 18 48 3B 51 20   free head / sentinel
+    //
+    // Unique on all five builds (the `+0xB0` twin is the mod's widget list).
+    SignatureDefinition {
+        name: "ddr_sel_gameplay_list_push",
+        pattern: "48 8B 0D ?? ?? ?? ?? 48 85 C9 75 05 48 8B CE EB 07 48 8B 89 C8 00 00 00 48 8B 51 18 48 3B 51 20",
+        description: "World's gameplay 2D-object create helper: `MOV RCX,[rip+screen_graph]; …; MOV RCX,[RCX+0xC8]; MOV RDX,[RCX+0x18]; CMP RDX,[RCX+0x20]` — the screen graph global (+3 disp32) and its slot-8 render list offset (+20). derive_ddr_sel_name publishes both. Consumer: ddr_selection::score_name.",
+    },
+    // `Font* font_by_id(int id)` (20260825 FUN_18020b0d0, 20250805
+    // 0x1801f2ba0; A3 FUN_18014f310): walks the loaded-font list and returns
+    // the font whose vfunc+0x28 id matches, or null. A3 created the dancer
+    // name only when font 6 (`2d_font_player`) was loaded. Unique on all
+    // five builds.
+    SignatureDefinition {
+        name: "ddr_sel_font_by_id",
+        pattern: "40 57 48 83 EC 20 48 8B 05 ?? ?? ?? ?? 8B F9 48 85 C0 75 06 48 83 C4 20 5F C3 48 8B 00 48 89 5C 24 30 48 8B 18 48 3B D8 74 ?? 66 0F 1F 44 00 00 48 8B 4B 10 48 8B 01 FF 50 28 3B C7",
+        description: "Font* font_by_id(int id) — the loaded-font list walk (null when the id is not loaded). Consumer: ddr_selection::score_name (A3's font-6 gate).",
+    },
+    // ── DDR SELECTION theme danger on doubles ───────────────────────────
+    //
+    // RE: `docs/ddr_selection_a3_themes_research.md` (danger, site A).
+    // DanceDangerActor::onInitialize (RTTI slot 4; FUN_180068ce0 + 0xAC on
+    // 20260825) picks the danger clip:
+    //
+    //   83 BF B4 00 00 00 00   CMP dword [RDI+0xB4],0   ; the record skin
+    //   48 8D 35 d32           LEA RSI,["danger_single"]
+    //   4C 8D 3D d32           LEA R15,["danger_double"]
+    //   4C 8B C6               MOV R8,RSI
+    //   75 07                  JNZ +7                    ; ← match + 0x18
+    //   45 84 ED               TEST R13B,R13B            ; style == doubles
+    //   4D 0F 45 C7            CMOVNZ R8,R15
+    //
+    // A record skin ≠ 0 skips the doubles choice; ddr_selection::danger NOPs
+    // the JNZ while a theme's `dance_danger` is registered (World's skin-0
+    // rule on the theme's package). Feeds derive_ddr_sel_danger (optional; a
+    // miss ⇒ theme doubles shows `danger_single`). Unique on all five builds
+    // (RVA 0x6573c / 0x6478c / 0x68dac / 0x68d8c / 0x6955c).
+    SignatureDefinition {
+        name: "ddr_sel_danger_double_skip",
+        pattern: "83 BF B4 00 00 00 00 48 8D 35 ?? ?? ?? ?? 4C 8D 3D ?? ?? ?? ?? 4C 8B C6 75 07 45 84 ED 4D 0F 45 C7",
+        description: "DanceDangerActor::onInitialize's danger-clip choice (FUN_180068ce0+0xAC on 20260825): `CMP [RDI+0xB4],0 (record skin); LEA RSI,[\"danger_single\"]; LEA R15,[\"danger_double\"]; MOV R8,RSI; JNZ +7; TEST R13B,R13B; CMOVNE R8,R15`. derive_ddr_sel_danger checks the match lies in the RTTI slot-4 function and both strings, and publishes the JNZ (match+0x18) as `ddr_sel_danger_double_jnz`; ddr_selection::danger rewrites it `75 07` → `90 90` while a theme's dance_danger is registered.",
+    },
     // ── Multiplayer Bot (multiplayer_bot) ───────────────────────────────
     SignatureDefinition {
         name: "extra_stage_grant",
@@ -3490,6 +3605,14 @@ impl SignatureStore {
         // Cross-checks its table disp against `player_work_table` (derived
         // above); consumes `rival_set_dancer_name` (a plain AOB).
         self.derive_target_name_sites();
+        // Decodes the own-best call inside `ghost_id_lookup` (a plain AOB).
+        self.derive_ddr_sel_score_set();
+        // Two plain AOBs (the gameplay render list, the font getter).
+        self.derive_ddr_sel_name();
+        // One plain AOB, identity-gated by the DanceDangerActor RTTI vtable.
+        self.derive_ddr_sel_danger();
+        // Cross-checks its table LEA against `player_work_table`.
+        self.derive_results_tab_memory();
         // Consumes `cmovieclip_create` (identity gate of the bg_root site) —
         // must stay after derive_cmovieclip_create.
         self.derive_scene3d();
@@ -8747,6 +8870,251 @@ impl SignatureStore {
             self.published_value("pw_chart_style_off")?,
             self.published_value("pw_chart_mcode_off")?,
             self.published_value("pw_chart_diff_off")?,
+        ))
+    }
+
+    /// DDR SELECTION theme panel: the own-best record lookup, decoded from
+    /// case 0 of the `ghost_id_lookup` switch (bytes the AOB pins; RE
+    /// `docs/ddr_selection_theme_score_sets.md` §1):
+    ///
+    /// ```text
+    /// +144  44 8B 47 04      MOV  R8D,[RDI+4]         ; GameWork style
+    /// +148  48 8D 8A d32     LEA  RCX,[RDX+score_db]  ; PlayerWork + 0x178 (0x188 old)
+    /// +155  44 8B CB 8B D6   MOV  R9D,EBX / MOV EDX,ESI
+    /// +160  E8 rel32         CALL best_record         ; 20260825 FUN_1801e2c40
+    /// ```
+    ///
+    /// Gates: the exact bytes around the displacement, a plausible 8-aligned
+    /// `score_db`, and the callee's prologue (tree header `+8`, `_Isnil`
+    /// `+0x201`, identical on 20250805 / 20260825). Publishes
+    /// `ddr_sel_best_record` + `ddr_sel_pw_score_db_off`; a miss ⇒ the theme
+    /// panel's record fields stay hidden (one WARN).
+    fn derive_ddr_sel_score_set(&mut self) {
+        const TAG: &str = "ddr_sel_score_set";
+        const HEAD: [u8; 7] = [0x44, 0x8B, 0x47, 0x04, 0x48, 0x8D, 0x8A];
+        const TAIL: [u8; 6] = [0x44, 0x8B, 0xCB, 0x8B, 0xD6, 0xE8];
+        const CALLEE_PROLOGUE: [u8; 19] = [
+            0x48, 0x83, 0xEC, 0x18, 0x4C, 0x8B, 0x51, 0x08, 0x49, 0x8B, 0x42, 0x08, 0x80, 0xB8,
+            0x01, 0x02, 0x00, 0x00, 0x00,
+        ];
+        let Some(m) = self.get_address("ghost_id_lookup") else {
+            log_warn!("  [-] {} -- ghost_id_lookup unresolved", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: usize, len: usize| {
+            p.wrapping_sub(base) < size && p.wrapping_sub(base).saturating_add(len) <= size
+        };
+        if !inside(m as usize, 165) {
+            log_warn!("  [-] {} -- lookup body outside module", TAG);
+            return;
+        }
+        unsafe {
+            let bytes = |off: usize, len: usize| std::slice::from_raw_parts(m.add(off), len);
+            if bytes(144, HEAD.len()) != HEAD || bytes(155, TAIL.len()) != TAIL {
+                log_warn!("  [-] {} -- own-best call site shape differs", TAG);
+                return;
+            }
+            let db = std::ptr::read_unaligned(m.add(151) as *const u32) as usize;
+            if !(0x100..0x400).contains(&db) || db % 8 != 0 {
+                log_warn!("  [-] {} -- implausible score-db offset 0x{:X}", TAG, db);
+                return;
+            }
+            let callee = decode_call_rel32(m.add(160));
+            if !inside(callee as usize, CALLEE_PROLOGUE.len())
+                || std::slice::from_raw_parts(callee, CALLEE_PROLOGUE.len()) != CALLEE_PROLOGUE
+            {
+                log_warn!("  [-] {} -- best-record callee prologue differs", TAG);
+                return;
+            }
+            self.resolved.insert("ddr_sel_best_record".into(), callee);
+            log_info!(
+                "  [+] ddr_sel_best_record (derived) @ +0x{:X} (PlayerWork score db +0x{:X})",
+                callee as usize - base,
+                db
+            );
+            self.publish_value("ddr_sel_pw_score_db_off", db);
+        }
+    }
+
+    /// The theme panel's best-record lookup (see `derive_ddr_sel_score_set`).
+    pub fn ddr_sel_score_set_sites(&self) -> Option<DdrSelScoreSetSites> {
+        Some(DdrSelScoreSetSites {
+            best_record: self.get_address("ddr_sel_best_record")?,
+            pw_score_db_off: self.published_value("ddr_sel_pw_score_db_off")?,
+        })
+    }
+
+    /// DDR SELECTION theme gameplay name: decode `ddr_sel_gameplay_list_push`
+    /// (screen-graph global at +3, the list offset at +20 — pinned by the
+    /// pattern) and require `ddr_sel_font_by_id`. Publishes
+    /// `ddr_sel_screen_graph_global` + `ddr_sel_gameplay_list_off`; a miss ⇒
+    /// no theme name (one WARN).
+    fn derive_ddr_sel_name(&mut self) {
+        const TAG: &str = "ddr_sel_name";
+        let (Some(m), Some(_)) = (
+            self.get_address("ddr_sel_gameplay_list_push"),
+            self.get_address("ddr_sel_font_by_id"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- ddr_sel_gameplay_list_push / ddr_sel_font_by_id unresolved",
+                TAG
+            );
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        unsafe {
+            let global = decode_rip_relative(m.add(3));
+            if (global as usize).wrapping_sub(base) >= size {
+                log_warn!("  [-] {} -- screen-graph global outside module", TAG);
+                return;
+            }
+            let off = std::ptr::read_unaligned(m.add(20) as *const u32) as usize;
+            // One of the graph's created lists (slots 7..=10: `slot·0x18 + 8`).
+            if !(0xB0..=0xF8).contains(&off) || (off - 8) % 0x18 != 0 {
+                log_warn!("  [-] {} -- implausible list offset 0x{:X}", TAG, off);
+                return;
+            }
+            self.resolved
+                .insert("ddr_sel_screen_graph_global".into(), global);
+            log_info!(
+                "  [+] ddr_sel_screen_graph_global (derived) @ +0x{:X} (gameplay list +0x{:X})",
+                global as usize - base,
+                off
+            );
+            self.publish_value("ddr_sel_gameplay_list_off", off);
+        }
+    }
+
+    /// The theme gameplay name's sites (see `derive_ddr_sel_name`).
+    pub fn ddr_sel_name_sites(&self) -> Option<DdrSelNameSites> {
+        Some(DdrSelNameSites {
+            screen_graph_global: self.get_address("ddr_sel_screen_graph_global")?,
+            gameplay_list_off: self.published_value("ddr_sel_gameplay_list_off")?,
+            font_by_id: self.get_address("ddr_sel_font_by_id")?,
+        })
+    }
+
+    /// DDR SELECTION theme danger on doubles: validate
+    /// `ddr_sel_danger_double_skip` — the match must lie in the first 0x200
+    /// bytes of DanceDangerActor's RTTI slot 4 (`onInitialize`), its LEAs at
+    /// +7 / +14 must load `"danger_single"` / `"danger_double"` and +0x18
+    /// must be `JNZ +7` (pinned by the pattern). Publishes the JNZ as
+    /// `ddr_sel_danger_double_jnz`; a miss ⇒ none (theme doubles shows
+    /// `danger_single`, one WARN).
+    fn derive_ddr_sel_danger(&mut self) {
+        const TAG: &str = "ddr_sel_danger";
+        let Some(m) = self.get_address("ddr_sel_danger_double_skip") else {
+            log_warn!("  [-] {} -- ddr_sel_danger_double_skip unresolved", TAG);
+            return;
+        };
+        let Some(vt) = self.find_vtable_by_rtti(
+            ".?AVDanceDangerActor@dance@sequence@@",
+            "danger_actor_vtable",
+        ) else {
+            log_warn!("  [-] {} -- DanceDangerActor RTTI vtable not found", TAG);
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8| (p as usize).wrapping_sub(base) < size;
+        let cstr_is = |p: *const u8, want: &[u8]| -> bool {
+            if !inside(p) || (p as usize - base) + want.len() + 1 > size {
+                return false;
+            }
+            unsafe { std::slice::from_raw_parts(p, want.len()) == want && *p.add(want.len()) == 0 }
+        };
+        unsafe {
+            let init = *(vt as *const *const u8).add(4);
+            if !inside(init) || (m as usize).wrapping_sub(init as usize) >= 0x200 {
+                log_warn!(
+                    "  [-] {} -- site not inside DanceDangerActor::onInitialize",
+                    TAG
+                );
+                return;
+            }
+            if !cstr_is(decode_rip_relative(m.add(10)), b"danger_single")
+                || !cstr_is(decode_rip_relative(m.add(17)), b"danger_double")
+            {
+                log_warn!(
+                    "  [-] {} -- LEAs not \"danger_single\" / \"danger_double\"",
+                    TAG
+                );
+                return;
+            }
+            let jnz = m.add(0x18);
+            if std::slice::from_raw_parts(jnz, 2) != [0x75, 0x07] {
+                log_warn!("  [-] {} -- +0x18 is not JNZ +7", TAG);
+                return;
+            }
+            self.resolved
+                .insert("ddr_sel_danger_double_jnz".into(), jnz);
+            log_info!(
+                "  [+] ddr_sel_danger_double_jnz (derived) @ +0x{:X} (onInitialize+0x{:X})",
+                jnz as usize - base,
+                jnz as usize - init as usize
+            );
+        }
+    }
+
+    /// The theme danger patch site (see `derive_ddr_sel_danger`): the `JNZ
+    /// +7` that skips the doubles clip for a record skin ≠ 0.
+    pub fn ddr_sel_danger_double_jnz(&self) -> Option<*const u8> {
+        self.get_address("ddr_sel_danger_double_jnz")
+    }
+
+    /// Decode the results window's remembered-tab fields from
+    /// `results_tab_memory_writeback` (byte map on the signature): the table
+    /// LEA at +22 must land on `player_work_table`, and the two store disp8s
+    /// (main +49, solo +67) must be 4-aligned, adjacent (solo = main + 4)
+    /// and above the chart-identity triple. Publishes `results_tab_main_off`
+    /// / `results_tab_solo_off`; a miss ⇒ nothing (the bot pane opens on the
+    /// stock tab, one WARN).
+    fn derive_results_tab_memory(&mut self) {
+        const TAG: &str = "results_tab_memory";
+        let (Some(m), Some(pwt)) = (
+            self.get_address("results_tab_memory_writeback"),
+            self.get_address("player_work_table"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- results_tab_memory_writeback / player_work_table unresolved",
+                TAG
+            );
+            return;
+        };
+        unsafe {
+            if decode_rip_relative(m.add(22)) != pwt {
+                log_warn!(
+                    "  [-] {} -- table LEA disagrees with player_work_table",
+                    TAG
+                );
+                return;
+            }
+            let main = *m.add(49) as usize;
+            let solo = *m.add(67) as usize;
+            if main % 4 != 0 || solo != main + 4 || !(0x18..0x80).contains(&main) {
+                log_warn!(
+                    "  [-] {} -- implausible tab fields (main 0x{:X}, solo 0x{:X})",
+                    TAG,
+                    main,
+                    solo
+                );
+                return;
+            }
+            self.publish_value("results_tab_main_off", main);
+            self.publish_value("results_tab_solo_off", solo);
+        }
+    }
+
+    /// `PlayerWork` remembered results-tab KIND fields `(main, solo)` —
+    /// `(0x60, 0x64)` on 20260324+, `(0x70, 0x74)` on 20250805 / 20260224
+    /// (see `derive_results_tab_memory`).
+    pub fn results_tab_memory_offsets(&self) -> Option<(usize, usize)> {
+        Some((
+            self.published_value("results_tab_main_off")?,
+            self.published_value("results_tab_solo_off")?,
         ))
     }
 

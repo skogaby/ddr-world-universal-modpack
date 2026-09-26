@@ -12,7 +12,9 @@
 //! `target_name` can tell whose ghost the human's pacemaker will load, with
 //! the `plate_label` TARGET BOT label armed above it — else `TARGET`), then
 //! `PlayerWork+0x4 = 1` and `GameWork+0x0 = 1`. A Target session also
-//! holds `s_marvelous::state::set_excluded` on the bot side. The game
+//! holds `s_marvelous::state::set_excluded` on the bot side, and every
+//! session sets the bot pad's remembered results tab to DETAILS (restored
+//! with the snapshot). The game
 //! does the rest natively: the GAMEPLAY loader copies `+0x4` into the
 //! `DancePlaySequence` ctor struct and creates a `GamePlayActor` per entered
 //! side; every play-window reader of `GameWork+0x0` is a display selector
@@ -88,6 +90,21 @@ const CHART_20260324: ChartOffsets = ChartOffsets {
 
 static CHART: OnceLock<ChartOffsets> = OnceLock::new();
 
+/// Results tab KIND "DETAILS" (the per-judgement counts + FAST/SLOW:
+/// PlaydataTab with its `detail_result` template). 0 = CALORIES (the stock
+/// default of a never-set versus window), 6 = SIMPLE RESULTS.
+const RESULTS_TAB_DETAILS: i32 = 1;
+
+/// `PlayerWork` field the results WindowActor opens a MAIN window on (and
+/// writes back at window-out) — `+0x60` on 20260324+, `+0x70` on the two
+/// old builds; derived (`results_tab_memory_offsets`). A bot window is
+/// always main (the versus word is set for the whole session).
+static RESULTS_TAB_MAIN: OnceLock<usize> = OnceLock::new();
+
+fn results_tab_field() -> Option<usize> {
+    RESULTS_TAB_MAIN.get().copied()
+}
+
 fn chart() -> ChartOffsets {
     CHART.get().copied().unwrap_or(CHART_20260324)
 }
@@ -111,6 +128,18 @@ pub fn init(signatures: &SignatureStore) {
         }
         None => log_warn!(
             "MultiplayerBot: PlayerWork chart offsets underived -- using the 20260324+ layout (+0x50/+0x54/+0x5C)"
+        ),
+    }
+    match signatures.results_tab_memory_offsets() {
+        Some((main, _solo)) => {
+            let _ = RESULTS_TAB_MAIN.set(main);
+            log_info!(
+                "MultiplayerBot: results tab memory at PlayerWork+0x{:X} -- bot pane opens on DETAILS",
+                main
+            );
+        }
+        None => log_warn!(
+            "MultiplayerBot: results tab memory underived -- bot pane opens on the stock tab"
         ),
     }
 }
@@ -149,6 +178,10 @@ struct Snapshot {
     name: [u8; NAME_LEN],
     versus_word: i32,
     pan_byte: Option<u8>,
+    /// The bot side's remembered results tab `(PlayerWork offset, kind)`
+    /// before the flip forced DETAILS — `None` when the field is underived
+    /// (the pane then opens on the stock tab).
+    results_tab: Option<(usize, i32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -403,6 +436,9 @@ fn apply(plan: eligibility::Plan) {
                 name,
                 versus_word: memory::read_i32(p.gw.add(GW_VERSUS)),
                 pan_byte: game_audio::versus_pan(),
+                results_tab: results_tab_field()
+                    .filter(|&off| memory::is_readable(p.pw_b.add(off), 4))
+                    .map(|off| (off, memory::read_i32(p.pw_b.add(off)))),
             },
             pw_style: memory::read_i32(p.pw_b.add(p.chart.style)),
             pw_mcode: memory::read_i32(p.pw_b.add(p.chart.mcode)),
@@ -459,6 +495,11 @@ fn apply(plan: eligibility::Plan) {
         memory::write_i32(p.opt_b.add(OPT_GAUGE), 0);
         // 6. Name plate.
         std::ptr::copy_nonoverlapping(plate.as_ptr(), p.pw_b.add(PW_NAME), NAME_LEN);
+        // 6b. Results pane opens on DETAILS (the window builder reads this
+        // remembered-tab kind; the bot window is a versus "main" window).
+        if let Some((off, _)) = written.snap.results_tab {
+            memory::write_i32(p.pw_b.add(off), RESULTS_TAB_DETAILS);
+        }
         // 7. The two load-bearing words.
         memory::write_u8(p.pw_b.add(PW_ENTERED), 1);
         memory::write_i32(p.gw.add(GW_VERSUS), 1);
@@ -569,6 +610,9 @@ fn undo(p: &Ptrs, w: &Written) {
     unsafe {
         memory::write_i32(p.gw.add(GW_VERSUS), w.snap.versus_word);
         memory::write_u8(p.pw_b.add(PW_ENTERED), w.snap.entered_byte);
+        if let Some((off, kind)) = w.snap.results_tab {
+            memory::write_i32(p.pw_b.add(off), kind);
+        }
         std::ptr::copy_nonoverlapping(w.snap.name.as_ptr(), p.pw_b.add(PW_NAME), NAME_LEN);
         std::ptr::copy_nonoverlapping(w.option.as_ptr(), p.opt_b.add(OPT_COPY_START), OPT_COPY_LEN);
         memory::write_i32(p.rec_b.add(REC_STYLE), w.rec_style);
@@ -594,6 +638,13 @@ fn restore() {
         Some(pw_b) if memory::is_readable(pw_b, chart().probe_len()) => unsafe {
             memory::write_u8(pw_b.add(PW_ENTERED), a.snap.entered_byte);
             std::ptr::copy_nonoverlapping(a.snap.name.as_ptr(), pw_b.add(PW_NAME), NAME_LEN);
+            // The window-out wrote the bot pane's last tab here; put the
+            // pad's own remembered tab back.
+            if let Some((off, kind)) = a.snap.results_tab {
+                if memory::is_readable(pw_b.add(off), 4) {
+                    memory::write_i32(pw_b.add(off), kind);
+                }
+            }
         },
         _ => log_warn!(
             "MultiplayerBot: bot PlayerWork unreadable at restore -- entered byte / name NOT restored on side {}",

@@ -4,7 +4,8 @@
 //! Dependency-free (mounted by `scripts/validate_ddr_selection.sh`).
 //!
 //! A transcription of A3 `CallVoiceActor::onUpdate` (`FUN_1800369e0` in
-//! `gamemdx_20240402`) for skins 1..=5 over the actor's fields, which World's
+//! `gamemdx_20240402`) for skins 1..=5 and A3's own skin 0 (the themes,
+//! 6..=8) over the actor's fields, which World's
 //! actor keeps at A3's offsets and its own `onMessage` keeps filling (RE:
 //! `.agents/planning/2026-09-22-ddr-selection/research/announcer-crowd.md`).
 //! [`step`] is one frame of a running actor (step state 1 / 2 — the caller
@@ -17,6 +18,9 @@
 pub const LOW: f32 = 0.2;
 pub const CROWD_QUIET: f32 = 0.4;
 pub const HIGH: f32 = 0.8;
+/// A3's skin-0 cheer threshold (`DAT_1802888ac`): above it the crowd plays
+/// `STG_APP02`, else `STG_APP03` (or boos near failing).
+pub const CHEER: f32 = 0.7;
 /// State-voice / crowd periods (added to the next-due times).
 pub const STATE_PERIOD: i32 = 0x8000;
 pub const CROWD_PERIOD: i32 = 0x10000;
@@ -76,8 +80,9 @@ pub struct Step {
     pub next_crowd: i32,
     pub milestone: i32,
     pub was_low: bool,
-    /// At most a combo callout, a state voice and a crowd SE.
-    pub plays: [Option<Play>; 3],
+    /// At most a combo callout, a state voice, a crowd SE and (A3's skin 0 —
+    /// the themes) a crowd voice, in A3's play order.
+    pub plays: [Option<Play>; 4],
 }
 
 const SN2_COMBO: [&str; 10] = [
@@ -125,21 +130,30 @@ pub fn all_cues() -> Vec<&'static str> {
         "2nd_KANSEI_B\0",
         "STG_APP03\0",
         "STG_APP02\0",
+        "STG_BOO\0",
+        "vo_ingame_cheer\0",
+        "vo_ingame_boo\0",
     ]);
     v
 }
 
-/// Skins 4 / 5 (X, 2013-A) use A3's own announcer; A3's `skin - 1 > 2`.
+/// Skins 4 / 5 (X, 2013-A) and the themes use A3's own announcer; A3's
+/// `skin - 1 > 2` (its skin 0 — the themes — included).
 fn a3_voice(skin: u8) -> bool {
     !(1..=3).contains(&skin)
 }
 
-/// One frame for `skin` ∈ 1..=5 (`None` otherwise — the caller runs World's).
+/// A3's own UI (its skin 0): the themes. Its crowd adds a cheer / boo voice.
+fn skin_zero(skin: u8) -> bool {
+    skin > 5
+}
+
+/// One frame for `skin` ∈ 1..=8 (`None` otherwise — the caller runs World's).
 pub fn step(f: &Fields, skin: u8) -> Option<Step> {
-    if !(1..=5).contains(&skin) {
+    if !(1..=8).contains(&skin) {
         return None;
     }
-    let mut plays: [Option<Play>; 3] = [None; 3];
+    let mut plays: [Option<Play>; 4] = [None; 4];
     let c = f.combo[0].max(f.combo[1]);
     let quiet = c % 100 >= COMBO_QUIET_FROM;
 
@@ -211,7 +225,24 @@ pub fn step(f: &Fields, skin: u8) -> Option<Step> {
 
     // Crowd SE.
     let mut next_crowd = f.next_crowd;
-    if !f.se_off && f.time > next_crowd {
+    if !f.se_off && f.time > next_crowd && skin_zero(skin) {
+        // A3's skin-0 column: cheer high, boo near failing on a short
+        // combo, quiet in between; the voice guarded like a state voice.
+        next_crowd = next_crowd.wrapping_add(CROWD_PERIOD);
+        let crowd = if !(g <= CHEER) {
+            Some(("STG_APP02\0", "vo_ingame_cheer\0"))
+        } else if g <= CROWD_QUIET && c < CROWD_MIN_COMBO {
+            (g < LOW).then_some(("STG_BOO\0", "vo_ingame_boo\0"))
+        } else {
+            Some(("STG_APP03\0", "vo_ingame_cheer\0"))
+        };
+        if let Some((se, voice)) = crowd {
+            plays[2] = Some(Play::Se(se));
+            if !quiet {
+                plays[3] = Some(Play::Guarded(voice));
+            }
+        }
+    } else if !f.se_off && f.time > next_crowd {
         next_crowd = next_crowd.wrapping_add(CROWD_PERIOD);
         if !(g <= CROWD_QUIET && c < CROWD_MIN_COMBO) {
             plays[2] = Some(Play::Se(match skin {
@@ -279,7 +310,7 @@ mod tests {
     #[test]
     fn only_legacy_skins() {
         assert!(step(&base(), 0).is_none());
-        assert!(step(&base(), 6).is_none());
+        assert!(step(&base(), 9).is_none());
     }
 
     #[test]
@@ -493,5 +524,93 @@ mod tests {
         s.sort();
         s.dedup();
         assert_eq!(s.len(), all.len());
+    }
+
+    /// A crowd-due frame (no state voice due).
+    fn crowd_due(g: f32, combo: i32) -> Fields {
+        let mut f = base();
+        f.time = 0xFC7D;
+        f.next_state = 0x7FFF_0000;
+        f.gauge = [g, 0.0];
+        f.combo = [combo, 0];
+        f.milestone = (combo / 50 + 1) * 50;
+        f
+    }
+
+    #[test]
+    fn cheer_threshold_is_a3s_bits() {
+        assert_eq!(CHEER.to_bits(), 0x3F33_3333);
+    }
+
+    #[test]
+    fn themes_crowd_is_a3s_skin_0_column() {
+        for skin in 6..=8 {
+            let c = |g, combo| names(&step(&crowd_due(g, combo), skin).unwrap());
+            assert_eq!(c(0.8, 20), [('s', "STG_APP02"), ('g', "vo_ingame_cheer")]);
+            // 0.7 itself is not above the cheer threshold.
+            assert_eq!(c(0.7, 20), [('s', "STG_APP03"), ('g', "vo_ingame_cheer")]);
+            assert_eq!(c(0.5, 5), [('s', "STG_APP03"), ('g', "vo_ingame_cheer")]);
+            // Low gauge, short combo: quiet between 0.2 and 0.4 …
+            assert!(c(0.3, 5).is_empty());
+            assert!(c(0.2, 5).is_empty());
+            // … boos below 0.2.
+            assert_eq!(c(0.1, 5), [('s', "STG_BOO"), ('g', "vo_ingame_boo")]);
+            // A combo of 13 lifts the quiet rule.
+            assert_eq!(c(0.3, 13), [('s', "STG_APP03"), ('g', "vo_ingame_cheer")]);
+            assert_eq!(c(0.1, 13), [('s', "STG_APP03"), ('g', "vo_ingame_cheer")]);
+            // Every due crowd advances the timer, even a quiet one.
+            let s = step(&crowd_due(0.3, 5), skin).unwrap();
+            assert_eq!(s.next_crowd, 0xFC7C + 0x10000);
+            // Near a combo callout the voice waits; the SE does not.
+            assert_eq!(c(0.8, 191), [('s', "STG_APP02")]);
+            // The SE switch silences the whole crowd.
+            let mut f = crowd_due(0.8, 20);
+            f.se_off = true;
+            assert!(names(&step(&f, skin).unwrap()).is_empty());
+        }
+    }
+
+    #[test]
+    fn themes_voice_like_skins_4_and_5() {
+        for skin in 6..=8 {
+            let mut f = base();
+            f.combo = [100, 0];
+            f.milestone = 100;
+            assert_eq!(
+                names(&step(&f, skin).unwrap()),
+                [('v', "vo_ingame_combo_100")]
+            );
+            f.combo = [150, 0];
+            f.milestone = 150;
+            assert_eq!(
+                names(&step(&f, skin).unwrap()),
+                [('g', "vo_ingame_combo_gen")]
+            );
+            let mut f = base();
+            f.time = 0xBE71;
+            f.gauge = [0.9, 0.0];
+            assert_eq!(names(&step(&f, skin).unwrap()), [('g', "vo_ingame_high")]);
+            f.gauge = [0.1, 0.0];
+            let s = step(&f, skin).unwrap();
+            assert_eq!(names(&s), [('g', "vo_ingame_low_easy")]);
+            assert!(s.was_low);
+        }
+    }
+
+    #[test]
+    fn the_crowd_voice_comes_last_in_a_frame() {
+        // State voice and crowd due together: A3's order (the crowd voice's
+        // guard then sees the state voice's handle).
+        let mut f = crowd_due(0.9, 20);
+        f.time = 0x1_0000;
+        f.next_state = 0xBE70;
+        assert_eq!(
+            names(&step(&f, 7).unwrap()),
+            [
+                ('g', "vo_ingame_high"),
+                ('s', "STG_APP02"),
+                ('g', "vo_ingame_cheer")
+            ]
+        );
     }
 }

@@ -1,5 +1,5 @@
 //! The DDR SELECTION option row: one per-player `custom_options` SCALAR row
-//! (0..=6 = OFF / AUTO / 1st-5th / MAX-EXTREME / SuperNOVA / X / 2013-A)
+//! (0..=9 = OFF / AUTO / the five eras / the three themes — [`trigger::row_label`])
 //! rendered through [`ScalarFormat::Dynamic`] (text values — no per-value
 //! chip textures), persisted LOCALLY (`PersistMode::Local` — the JSON cache,
 //! never the wire), shown in both the in-game options menu and the overlay's
@@ -112,7 +112,7 @@ pub fn register() -> bool {
     versus_mirror::register(&[OPT_ID]);
     ROW_LIVE.store(true, Ordering::Release);
     log_info!(
-        "DDR SELECTION: option row live (OFF / AUTO / 5 eras; per player, mirrored in versus; local persistence; next song)"
+        "DDR SELECTION: option row live (OFF / AUTO / 5 eras / 3 themes; per player, mirrored in versus; local persistence; next song)"
     );
     true
 }

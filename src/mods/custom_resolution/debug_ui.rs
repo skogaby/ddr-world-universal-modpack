@@ -19,23 +19,19 @@
 //! ([`plan::debug_ui_scale`], pure/host-tested). Nothing else about the debug
 //! drawers changes; with the factor at 1.0 nothing is installed.
 //!
-//! The machine-type export is resolved LAZILY on the first font/sprite
-//! creation (the ark is guaranteed loaded by then — it is the caller), never
-//! at `early_apply` time. Unresolvable ⇒ assume the 720-line table, one WARN.
+//! The machine type (`services::cabinet`) is read LAZILY on the first
+//! font/sprite creation (the ark is guaranteed loaded by then — it is the
+//! caller), never at `early_apply` time. Unresolvable ⇒ assume the 720-line table, one WARN.
 //! Both detours are fail-open: any oddity (null out-pointer, unreadable
 //! object) leaves the game's value alone.
 
-use std::ffi::CString;
 use std::ptr::addr_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use retour::GenericDetour;
-use windows::core::PCSTR;
-use windows::Win32::System::LibraryLoader::GetProcAddress;
 
 use crate::core::hooks;
 use crate::core::memory;
-use crate::core::module_resolver::resolve_ark_module;
 use crate::core::signatures::SignatureStore;
 use crate::{log_info, log_warn};
 
@@ -45,8 +41,6 @@ use super::plan;
 type FontScaleFn = unsafe extern "C" fn(i32, *mut f32, *mut f32);
 /// `(const char* name, sprite** out)`.
 type SpriteCreateFn = unsafe extern "C" fn(*const u8, *mut *mut u8);
-/// `arkMDXGetMachineType(i32* out)`.
-type GetTypeFn = unsafe extern "C" fn(*mut i32);
 
 static mut FONT_DETOUR: Option<GenericDetour<FontScaleFn>> = None;
 static mut SPRITE_DETOUR: Option<GenericDetour<SpriteCreateFn>> = None;
@@ -143,13 +137,7 @@ fn machine_type() -> Option<i32> {
 }
 
 fn resolve_machine_type() -> Option<i32> {
-    let ark = resolve_ark_module()?;
-    let cname = CString::new("arkMDXGetMachineType").ok()?;
-    let addr = unsafe { GetProcAddress(ark.handle, PCSTR(cname.as_ptr() as *const u8)) }?;
-    let getter: GetTypeFn = unsafe { std::mem::transmute(addr) };
-    let mut out: i32 = -1;
-    unsafe { getter(&mut out) };
-    (out >= 0).then_some(out)
+    crate::services::cabinet::machine_type()
 }
 
 /// The multiplier for this boot, or `None` when it is the identity.

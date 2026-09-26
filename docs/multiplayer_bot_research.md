@@ -373,3 +373,19 @@ data-feed tap re-hides the cabinet-wide FAST/SLOW gate patch on its Marvelous
 (`flash::on_excluded_marvelous`); its results pane shows `scre_tab_num_minus` in the shared
 7-row sheet's S-MARV slot (the label word is baked into ONE sheet texture both panes share). The
 ghost's Marvelous floor then reads 0 — the full stock band.
+
+### 12.5 The bot pane opens on DETAILS
+
+`sequence::result::WindowActor` (ctor `FUN_1800c3a30` @20260825; `+0x5C` "main window" =
+`GameWork+0 == 1 || side == GameWork+8`, set by the ResultSequence setup) builds its tab kinds in
+vslot 4 (`FUN_1800c3c90`): [3 in the `GameWork+0x18 == 0x9733` event], 0 CALORIES (when
+`PlayerWork+0x28`), 6 SIMPLE RESULTS (PlaydataTab `result`), 1 DETAILS (PlaydataTab
+`detail_result`), 7 PLAY GRAPH, 4, 2 (not in battle modes / course), 5 (`PlayerWork+0x1678 == 1`).
+It opens on the kind remembered in `PlayerWork` — main window `+0x60`, else `+0x64` (`+0x70` /
+`+0x74` on 20250805 / 20260224) — with −1 (the `PlayerWork::reset` value) mapping to 0 CALORIES
+for a main window and 6 for the other; the 0x9733 event forces 3 and course mode forces 1/0. The
+window-out message `0x1003` (vslot 8) writes the current kind back. A bot window is always main
+(versus), so a fresh pad opened on CALORIES. The flip snapshots the bot's main-window field,
+writes 1, and the restore (after the window-out) puts the snapshot back. Signature
+`results_tab_memory_writeback` (the vslot-8 store pair), `derive_results_tab_memory` publishes
+`results_tab_{main,solo}_off` after checking the table LEA against `player_work_table`.

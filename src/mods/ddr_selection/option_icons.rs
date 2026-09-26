@@ -1,4 +1,5 @@
-//! A3's in-gameplay option icons on the legacy skins 2–5 (SuperNOVA had
+//! A3's in-gameplay option icons on the legacy skins 2–5 and the themes
+//! (A3's own skin-0 UI, where the icons came from; SuperNOVA had
 //! them too; 1st-5th never shows any — World's own `GameWork+0xA8 == 1`
 //! gate skips the actor, like A3).
 //!
@@ -228,7 +229,7 @@ unsafe fn legacy_skin(st: &DdrSelOptionIconSites, holder: *mut u8) -> u8 {
         return 0;
     }
     let skin = memory::read_i32(rec.add(RECORD_SKIN));
-    if (2..=5).contains(&skin) {
+    if (2..=super::policy::SKIN_MAX as i32).contains(&skin) {
         skin as u8
     } else {
         0

@@ -3,7 +3,7 @@
 //! World's `ScoreActor` is A3's with its export names, texture names and
 //! difficulty display changed and a player-name clip added; this module puts
 //! A3's back for an actor whose `dance_score` record is legacy
-//! (`dance_score000N`, record skin N):
+//! (`dance_score000N` or a theme's `dance_score0000_vN`, record skin N):
 //!
 //! * **Exports** (init PRE / POST detour): for the one init call, checked
 //!   patches of World's three clip creates (`MOV R9D,7; LEA R8,[name]`) make
@@ -12,7 +12,9 @@
 //!   buffer; skin 2 at A3's priority 3), `dance_name` → a small stand-in
 //!   export (the legacy UIs had no player name; hidden after the init — World
 //!   never releases that clip, exactly like its own name clip). POST restores
-//!   the bytes and runs A3's EX indicator (`ex_tex` visible in EX mode).
+//!   the bytes and runs A3's EX indicator (`ex_tex` visible in EX mode); on a
+//!   theme it hides the frame's `name_usr` and hands it to `score_name.rs`
+//!   (A3's dancer name).
 //! * **Digits** (full-replacement detour on World's digit refresh, slot 7):
 //!   World's smoothing and place walk with A3's textures
 //!   (`dance_score000N_score_num_*`, `…_0_gray` leading zeros, commas) — a
@@ -38,6 +40,7 @@ use crate::core::signatures::{DdrSelScoreSites, SignatureStore};
 use crate::services::{bm2d_api, hud_layout_hooks};
 use crate::{log_info, log_warn};
 
+use super::policy;
 use super::score_math as sm;
 
 const PARAM_VISIBLE: i32 = 0x1007;
@@ -47,6 +50,8 @@ const TRAVERSE_SIBLINGS: i32 = 6;
 const ATTR_VISIBLE: u32 = 1;
 const CLIP_LAYER_OFF: usize = 0x08;
 const RECORD_SKIN_OFF: usize = 0x28;
+/// The dancer-name placeholder in a theme's difficulty frame.
+const NAME_PLACEHOLDER: &str = "name_usr";
 /// World's difficulty message (A3 `0x1052`).
 const MSG_DIFFICULTY: i32 = 0x104F;
 /// Near-buffer layout: fixed names, then the per-call difficulty export.
@@ -322,7 +327,7 @@ unsafe fn init_pre(actor: *mut u8, st: &State) -> bool {
         return true;
     }
     let skin = memory::read_i32(rec.add(RECORD_SKIN_OFF));
-    if !(1..=5).contains(&skin) {
+    if !(1..=policy::SKIN_MAX as i32).contains(&skin) {
         return true;
     }
     let skin = skin as u8;
@@ -383,7 +388,10 @@ fn for_siblings(layer: u32, path: &str, mut f: impl FnMut(u32)) {
     }
 }
 
-/// Init POST: World's bytes back, then A3's EX indicator and no name clip.
+/// Init POST: World's bytes back, then A3's EX indicator, no World name clip,
+/// and the difficulty frame's `name_usr` placeholder hidden (only the themes'
+/// frames have one — A3 hid it once it had bound the dancer name there) and
+/// handed to `score_name` (a theme: A3's dancer name).
 unsafe fn init_post(actor: *mut u8, st: &State) {
     let Some(e) = lookup(actor) else {
         return;
@@ -398,6 +406,22 @@ unsafe fn init_post(actor: *mut u8, st: &State) {
     if let Some(name) = clip_layer(actor, st.s.name_clip_off) {
         bm2d_api::layer_play_raw(name, 0.0);
         bm2d_api::layer_set_attribute_raw(name, ATTR_VISIBLE, 0);
+    }
+    if let Some(difficulty) = clip_layer(actor, st.s.difficulty_clip_off) {
+        let mut first = None;
+        for_siblings(difficulty, NAME_PLACEHOLDER, |id| {
+            first.get_or_insert(id);
+            bm2d_api::mc_set_param(id, PARAM_VISIBLE, 0);
+            bm2d_api::mc_set_param(id, PARAM_DIRTY, 1);
+        });
+        // A3 drew the dancer name there instead (`score_name.rs`).
+        if let (Some(placeholder), true, Ok(side)) = (
+            first,
+            policy::is_theme(e.skin) && e.patched == Some(true),
+            usize::try_from(e.side),
+        ) {
+            super::score_name::bind(side, difficulty, placeholder);
+        }
     }
     if let Some(score) = clip_layer(actor, st.s.score_clip_off) {
         let ex = *actor.add(st.s.ex_off) != 0;

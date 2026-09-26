@@ -1,0 +1,103 @@
+# Task: Theme danger on doubles (scoped patch)
+
+## Description
+On doubles, the three themes show A3's full-width `danger_double` clip; the eras keep their
+authentic `danger_single` (design R10). World's DanceDangerActor init still has A3's branch: a record
+skin ≠ 0 skips the doubles choice. One scoped 2-byte patch removes that skip while a theme's
+`dance_danger` is registered.
+
+## Background
+Design §4.12 and Appendix A.5; research `docs/ddr_selection_a3_themes_research.md` (danger). World
+DanceDangerActor init = RTTI `.?AVDanceDangerActor@dance@sequence@@` vtable slot 4 (`FUN_180068ce0`
+on 20260825). Site A (init + 0xAC on 20260825):
+
+```text
+83 BF B4 00 00 00 00        CMP dword [RDI+0xB4],0      ; the record skin
+48 8D 35 d32                LEA RSI,["danger_single"]
+4C 8D 3D d32                LEA R15,["danger_double"]
+4C 8B C6                    MOV R8,RSI
+75 07                       JNZ +7                       ; ← match + 0x18
+45 84 ED                    TEST R13B,R13B               ; style == doubles
+4D 0F 45 C7                 CMOVNZ R8,R15
+```
+
+Unique on all five builds (RVA = file offset + 0xC00): 20250805 `0x6573c`, 20260224 `0x6478c`,
+20260721 `0x68dac`, 20260825 `0x68d8c`, 20260915 `0x6955c`. For a record skin ≥ 6 the position and
+layer branches already take skin 0's paths. The second clip (site B) is never read and is not
+reproduced (Appendix A.5). Verified in the stock install: `dance_danger0000_v0` carries both
+`danger_single` and `danger_double` (World's clip create NULL-derefs a missing export).
+
+## Reference Documentation
+**Required:**
+- Design: .agents/planning/2026-09-25-ddr-selection-a-a3-themes/design/detailed-design.md (§4.12,
+  §6.1, Appendix A.5)
+
+**Additional References (if relevant to this task):**
+- docs/ddr_selection_a3_themes_research.md (the danger section: sites A / B)
+
+**Note:** Read any document listed above before beginning implementation.
+
+## Technical Requirements
+1. `src/core/signatures.rs` (additions only): the signature `ddr_sel_danger_double_skip` (the
+   `+0xB4` displacement pinned, the string LEAs wildcarded) and `derive_ddr_sel_danger`. The
+   derivation requires the match inside the first 0x200 bytes of DanceDangerActor slot 4, the LEAs at
+   +7 / +14 loading `"danger_single"` / `"danger_double"` and `75 07` at +0x18. It publishes
+   `ddr_sel_danger_double_jnz` (accessor `ddr_sel_danger_double_jnz()`). It is optional and not in
+   `required_signatures`.
+2. `policy::wants_danger_doubles(base, decision)`, pure: `true` iff `base` is `dance_danger` and the
+   decision is `Legacy` with a theme skin.
+3. `src/mods/ddr_selection/danger.rs` (new):
+   - `init(signatures)` checks the stock `75 07` at the site;
+   - `sync(want: bool)` sets `90 90` / `75 07` through `memory::apply_checked_patch`, idempotent,
+     with one INFO per apply / restore;
+   - `restore()` = `sync(false)`;
+   - failures give one WARN and are then inert.
+4. `package_helper.rs`:
+   - `register_legacy`, for `dance_danger`, calls `danger::sync(policy::wants_danger_doubles(…))`
+     after every other check and before the record insert;
+   - `after_stock("dance_danger")` calls `danger::restore()`;
+   - a failed sync never holds the package stock.
+5. `mod.rs`: `danger::init` in `init`; `danger::restore()` in `disarm` (which `disable` calls).
+6. Readiness gate: `cargo check`, `cargo fmt`, `./build.sh`, `scripts/validate_ddr_selection.sh`, the
+   signature sweep ALL GREEN and `shape_diff.py` showing `75 07` at match + 0x18 on every build.
+
+## Dependencies
+- Plan Step 1 (the theme `dance_danger` row: `dance_danger0000_v0`, `Adapter::None`).
+
+## Implementation Approach
+1. Failing test: `wants_danger_doubles` for theme / era / stock decisions and other bases.
+2. The signature and derivation; the offline AOB count on the five builds.
+3. `danger.rs`, then the helper / arm wiring.
+4. Gate, sweep, `shape_diff.py`; record the cabinet procedure.
+
+## Acceptance Criteria
+
+1. **Policy**
+   - Given `dance_danger` decided for skins 6 / 7 / 8, skins 1..=5, skin 0, and another base on a
+     theme
+   - When `wants_danger_doubles` is asked
+   - Then only the three theme `dance_danger` decisions return `true`
+
+2. **Theme doubles**
+   - Given a doubles song on a theme
+   - When the danger actor initialises
+   - Then it creates `danger_double` (the full-width flash)
+
+3. **Eras and stock unchanged**
+   - Given a doubles era song right after a theme doubles song, or a stock song
+   - When the danger actor initialises
+   - Then the site is back to `75 07` (the era shows `danger_single`)
+
+4. **Fail-open**
+   - Given the site unresolved or not in the stock shape
+   - When a theme song plays
+   - Then the theme `dance_danger` still registers, doubles shows the single-lane clip, and one
+     WARN is logged
+
+## Metadata
+- **Complexity**: Low
+- **Labels**: ddr-selection, danger, byte-patch, signatures
+- **Required Skills**: Rust, x86-64, in-process hooking conventions of this repo
+- **Generated By**: code-task-generator 2026-09-26 (breakdown pre-approved: the maintainer asked for autonomous execution between cabinet tests)
+- **Source Plan**: .agents/planning/2026-09-25-ddr-selection-a-a3-themes/implementation/plan.md
+- **Plan Step**: Step 7: Danger on doubles (scoped patch)

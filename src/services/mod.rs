@@ -140,6 +140,7 @@ pub mod avs_layeredfs;
 pub mod bm2d_api;
 pub mod bm2d_package;
 pub mod bottom_text;
+pub mod cabinet;
 pub mod call_voice_hooks;
 pub mod chart_length;
 pub mod combo_hooks;

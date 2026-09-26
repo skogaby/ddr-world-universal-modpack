@@ -6,7 +6,8 @@
 //! A port of A3's two gauge fills (`gamemdx_20240402`): the continuous fill
 //! `FUN_1800544b0` (skins 2–4 and every FLARE state) and the segmented fill
 //! `FUN_180054050` (skins 1 and 5, non-FLARE — skin 0 too in A3, which World
-//! replaced with its own art and continuous fill). Both write the `fill _usr`
+//! replaced with its own art and continuous fill; the themes, A3's own skin-0
+//! UI, take it again). Both write the `fill _usr`
 //! clip's `{x, y, w, h}` scissor (MovieClip param `0x1023`) in screen space
 //! and mirror it for the 2P gauge (A3 draws the 2P gauge at `SetScale(-1,1)`).
 //! The segmented fill also crops the partial cell `fill _2_usr` (skin 5).
@@ -36,26 +37,27 @@ pub const CELL_W: f32 = 17.0;
 pub const SKIN1_CELLS: i32 = 63;
 pub const CELLS: i32 = 26;
 
-/// The fill A3 uses for `skin` (1..=5) with the gauge's current state
-/// label (World's `vt+0x58(state)`: 1 normal, 2 rainbow, 3 danger, 4 grade,
-/// 5 check, 6..=16 the FLARE labels): `skin - 2 < 3` or a FLARE label ⇒
-/// continuous, else segmented.
+/// The fill A3 uses for `skin` (1..=5 eras, 6..=8 themes) with the gauge's
+/// current state label (World's `vt+0x58(state)`: 1 normal, 2 rainbow,
+/// 3 danger, 4 grade, 5 check, 6..=16 the FLARE labels): `skin - 2 < 3` or a
+/// FLARE label ⇒ continuous, else segmented (skin 1's 63 thin cells; skin 5
+/// and A3's own skin 0 — the themes — 26 cells with the partial cell).
 pub fn fill_mode(skin: u8, label: i32) -> FillMode {
     if (2..=4).contains(&skin) || (6..=16).contains(&label) {
         return FillMode::Continuous;
     }
-    if skin == 1 {
-        FillMode::Segmented {
+    match skin {
+        1 => FillMode::Segmented {
             cells: SKIN1_CELLS,
             cell_w: SKIN1_CELL_W,
             partial: false,
-        }
-    } else {
-        FillMode::Segmented {
+        },
+        // 5 and the themes (A3's "skins 0 / 5").
+        _ => FillMode::Segmented {
             cells: CELLS,
             cell_w: CELL_W,
             partial: true,
-        }
+        },
     }
 }
 
@@ -225,5 +227,27 @@ mod tests {
         let x = 499 - 6 * 17 - 442;
         assert_eq!(f.partial, Some([(442 - 17) + x, 26, 17, 10]));
         assert_eq!(f.main[0], x - 17);
+    }
+
+    #[test]
+    fn themes_fill_like_a3_skin_0() {
+        // A3's "skins 0 / 5" segmented fill: 26 cells of 17 px with the
+        // partial cell; every FLARE label continuous.
+        for skin in 6..=8 {
+            for label in [1, 2, 3, 4, 5] {
+                assert_eq!(
+                    fill_mode(skin, label),
+                    FillMode::Segmented {
+                        cells: CELLS,
+                        cell_w: CELL_W,
+                        partial: true,
+                    },
+                    "skin {skin} label {label}"
+                );
+            }
+            for label in 6..=16 {
+                assert_eq!(fill_mode(skin, label), FillMode::Continuous);
+            }
+        }
     }
 }

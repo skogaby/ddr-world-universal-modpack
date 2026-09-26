@@ -42,7 +42,9 @@ pub enum Mode {
 pub fn mode_for_skin(skin: u8) -> Option<Mode> {
     match skin {
         2 => Some(Mode::Band),
-        3..=5 => Some(Mode::Panel),
+        // Skins 3–5 and the themes: A3's own skin-0 panel (the themes from
+        // their own generation's `dance_song_info0000_vN`).
+        3..=8 => Some(Mode::Panel),
         _ => None,
     }
 }
@@ -234,10 +236,10 @@ mod tests {
         assert_eq!(mode_for_skin(0), None);
         assert_eq!(mode_for_skin(1), None);
         assert_eq!(mode_for_skin(2), Some(Mode::Band));
-        for s in 3..=5 {
+        for s in 3..=8 {
             assert_eq!(mode_for_skin(s), Some(Mode::Panel));
         }
-        assert_eq!(mode_for_skin(6), None);
+        assert_eq!(mode_for_skin(9), None);
     }
 
     #[test]

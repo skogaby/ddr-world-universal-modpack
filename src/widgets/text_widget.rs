@@ -261,6 +261,30 @@ impl TextWidget {
         unsafe { memory::write_i32(desc.add(0xA8), alignment as i32) };
     }
 
+    /// Vertical block alignment (`desc+0xAC`; A3's dancer name: 3).
+    pub fn set_vertical_alignment(&self, valign: i32) {
+        if self.destroyed {
+            return;
+        }
+        let desc = self.line_desc();
+        unsafe { memory::write_i32(desc.add(0xAC), valign) };
+    }
+
+    /// The horizontal layout box (`desc+0x68` left, `+0x6C` right) the
+    /// alignment works in, and its enable flag (`desc+0xB4`) — A3's
+    /// `FUN_180100480` binding of a string to a placeholder.
+    pub fn set_box(&self, left: f32, right: f32, enabled: bool) {
+        if self.destroyed {
+            return;
+        }
+        let desc = self.line_desc();
+        unsafe {
+            memory::write_f32(desc.add(0x68), left);
+            memory::write_f32(desc.add(0x6C), right);
+            memory::write_i32(desc.add(0xB4), enabled as i32);
+        }
+    }
+
     /// Outline: all four diagonal stamps (`OUTLINE_ALL`) at `width` logical
     /// units in the given colour. The emitter multiplies the outline alpha
     /// by the text alpha (`FUN_18020d5f0`), so a fading widget's outline

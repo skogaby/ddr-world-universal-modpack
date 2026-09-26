@@ -1,7 +1,14 @@
 //! The legacy stage panel: A3's pre-song stage-choice composite, its era
 //! cut-in and its stage call, hosted in World's ShutterActor kind 3 (design
 //! D28, §4.5; RE `.agents/planning/2026-09-22-ddr-selection/research/`
-//! `stage-panel.md`).
+//! `stage-panel.md`). Two variants ([`panel_logic::Variant`]): the eras'
+//! legacy fill on `common_choice_v2`'s root, and — for the themes — A3's own
+//! skin-0 fill on the theme generation's root (`common_choice_v0` / `_v2` /
+//! `_v1`): the band texture on the root's own `choice_stage_usr`, the root's
+//! own background and jacket frame, the stage call at once, no cut-in, and
+//! A3's per-player score sets (`score_set.rs` / `score_set_logic.rs`) — the
+//! theme session's only packages are the sets' glyphs / digits
+//! (`common_texture_v0`) and area names (`common_area_lang_<lang>_vN`).
 //!
 //! World's kind 3 is the jacket / stage / difficulty screen between song
 //! select and the lanes (`shutter_play` of `common_shutter_v3`). Hosting A3's
@@ -20,7 +27,8 @@
 //!   packages and creates the session; later requests use the session the
 //!   25 → 26 arm created.
 //! * **Row patch, for one update only**: the default kind table's stage row
-//!   gets `pkg = "common_choice_v2"`, `root = "shutter_choice_hd_root"`,
+//!   gets `pkg = "common_choice_v2"` (a theme: its own root package),
+//!   `root = "shutter_choice_hd_root"`,
 //!   `SE in = ""` just before World's kind-art loader reads it and is restored
 //!   right after (the loader copies the row) — World's own named-package path
 //!   (the one its galaxy-brave shutter uses) then loads and creates A3's root
@@ -60,7 +68,8 @@
 //! three pointers laid out like the 0x40 rows), the same named-package branch
 //! and state machine — everything above applies unchanged.
 //!
-//! Layer-before-package: the four era packages are ours (tickets); the root
+//! Layer-before-package: the four era packages (a theme: the two score-set
+//! packages) are ours (tickets); the root
 //! layer that references them is World's and dies at the drain's state 8. The
 //! tickets are released only once that layer id is invalid and a grace period
 //! passed (the release queue is polled from the same detour, every frame).
@@ -85,6 +94,7 @@ use crate::types::buttons::{button, Player};
 use crate::{log_info, log_warn};
 
 use super::panel_logic::{self as logic, Action, CutinView, Frame, Jacket, Panel, StageCtx};
+use super::score_set_logic;
 
 type UpdateFn = unsafe extern "C" fn(*mut u8);
 
@@ -108,7 +118,6 @@ const RELEASE_GRACE_FRAMES: u32 = 60;
 /// Value seeded into the READY?-dwell timer (the quick-restart value).
 const DWELL_SEED: f32 = 1000.0;
 
-static ROOT_PACKAGE_C: &CStr = c"common_choice_v2";
 static ROOT_CLIP_C: &CStr = c"shutter_choice_hd_root";
 static BM2D_DIR: &CStr = c"bm2d";
 static BANNER_DIR: &CStr = c"banner";
@@ -131,6 +140,8 @@ static HOSTED: AtomicBool = AtomicBool::new(false);
 /// on the arm alone doubled World's READY? when nothing was hosted).
 static ROOT_LIVE: AtomicBool = AtomicBool::new(false);
 static ROW_PATCHED: AtomicBool = AtomicBool::new(false);
+/// The root-package pointer the row patch wrote (restore expects it).
+static ROW_PKG: AtomicUsize = AtomicUsize::new(0);
 /// Old layout: the `jacket_usr` SetVisible CALL is NOPed.
 static JACKET_CALL_NOPED: AtomicBool = AtomicBool::new(false);
 /// Its stock bytes (read at init).
@@ -161,14 +172,51 @@ struct Tickets {
     shutter: Option<LoadTicket>,
     cutin: Option<LoadTicket>,
     cutin_bg: Option<LoadTicket>,
+    /// Theme score sets: `common_texture_v0` (name glyphs, score digits).
+    texture: Option<LoadTicket>,
+    /// Theme score sets: `common_area_lang_<lang>_vN` (area names).
+    area: Option<LoadTicket>,
 }
 
 impl Tickets {
+    const fn none() -> Self {
+        Tickets {
+            choice: None,
+            shutter: None,
+            cutin: None,
+            cutin_bg: None,
+            texture: None,
+            area: None,
+        }
+    }
+
     fn into_vec(self) -> Vec<LoadTicket> {
-        [self.choice, self.shutter, self.cutin, self.cutin_bg]
-            .into_iter()
-            .flatten()
-            .collect()
+        [
+            self.choice,
+            self.shutter,
+            self.cutin,
+            self.cutin_bg,
+            self.texture,
+            self.area,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Every requested ticket is ready (one that could not be requested has
+    /// nothing to wait for: its fields stay hidden).
+    fn ready(&self) -> bool {
+        [
+            &self.choice,
+            &self.shutter,
+            &self.cutin,
+            &self.cutin_bg,
+            &self.texture,
+            &self.area,
+        ]
+        .iter()
+        .all(|t| t.as_ref().is_none_or(bm2d_package::is_ready))
     }
 }
 
@@ -188,6 +236,10 @@ struct Banner {
 
 struct Session {
     skin: u8,
+    /// Era (A3's legacy fill) or theme (A3's own skin-0 fill).
+    variant: logic::Variant,
+    /// The package the row patch names for the root (static).
+    root_pkg: &'static CStr,
     /// The era cut-in plays before the panel (GLOBAL SETTINGS, latched here).
     cutin_enabled: bool,
     /// Where the session was created (logs): the song-select request or the
@@ -458,37 +510,21 @@ pub fn arm(skin: u8, origin: &'static str) {
         }
         return;
     }
-    let Some(names) = logic::packages(skin) else {
+    let (Some(variant), Some(root_pkg)) = (
+        logic::variant(skin),
+        logic::root_package_cstr(skin).and_then(|n| CStr::from_bytes_with_nul(n.as_bytes()).ok()),
+    ) else {
         return;
     };
-    let Ok(root_pkg) = CString::new(logic::ROOT_PACKAGE) else {
-        return;
-    };
-    if !super::package_helper::probe_arc(BM2D_DIR, &root_pkg) {
+    let root_name = root_pkg.to_str().unwrap_or("?");
+    if !super::package_helper::probe_arc(BM2D_DIR, root_pkg) {
         if warn_once(W_PACKAGE) {
             log_warn!(
                 "DDR SELECTION: {} not found -- World's stage panel stays",
-                logic::ROOT_PACKAGE
+                root_name
             );
         }
         return;
-    }
-    // A legacy end banner (`banner.rs`) makes World load `common_shutter000N`
-    // by name and release it without a refcount: while World's copy is still
-    // registered, a ticket of ours would only borrow it and World's release
-    // would destroy it under the panel's layers.
-    if let Ok(c) = CString::new(names.shutter.as_str()) {
-        if bm2d_package::lookup_unowned(&c).is_some()
-            && !bm2d_package::held_by_tickets(&names.shutter)
-        {
-            if warn_once(W_PACKAGE) {
-                log_warn!(
-                    "DDR SELECTION: {} is still World's (a legacy end banner) -- World's stage panel for this song",
-                    names.shutter
-                );
-            }
-            return;
-        }
     }
     let request = |name: &str| -> Option<LoadTicket> {
         let t = bm2d_package::request_load("bm2d", name);
@@ -497,21 +533,82 @@ pub fn arm(skin: u8, origin: &'static str) {
         }
         t
     };
-    // The cut-in's packages only when it plays (GLOBAL SETTINGS; latched for
-    // this panel — an edit applies from the next song).
-    let cutin_enabled = super::settings::era_cutin();
-    let tickets = Tickets {
-        choice: request(&names.choice),
-        shutter: request(&names.shutter),
-        cutin: cutin_enabled.then(|| request(&names.cutin)).flatten(),
-        cutin_bg: cutin_enabled.then(|| request(names.cutin_bg)).flatten(),
+    let (tickets, cutin_enabled, detail) = match variant {
+        logic::Variant::Era => {
+            let Some(names) = logic::packages(skin) else {
+                return;
+            };
+            // A legacy end banner (`banner.rs`) makes World load
+            // `common_shutter000N` by name and release it without a
+            // refcount: while World's copy is still registered, a ticket of
+            // ours would only borrow it and World's release would destroy it
+            // under the panel's layers.
+            if let Ok(c) = CString::new(names.shutter.as_str()) {
+                if bm2d_package::lookup_unowned(&c).is_some()
+                    && !bm2d_package::held_by_tickets(&names.shutter)
+                {
+                    if warn_once(W_PACKAGE) {
+                        log_warn!(
+                            "DDR SELECTION: {} is still World's (a legacy end banner) -- World's stage panel for this song",
+                            names.shutter
+                        );
+                    }
+                    return;
+                }
+            }
+            // The cut-in's packages only when it plays (GLOBAL SETTINGS;
+            // latched for this panel — an edit applies from the next song).
+            let cutin_enabled = super::settings::era_cutin();
+            let tickets = Tickets {
+                choice: request(&names.choice),
+                shutter: request(&names.shutter),
+                cutin: cutin_enabled.then(|| request(&names.cutin)).flatten(),
+                cutin_bg: cutin_enabled.then(|| request(names.cutin_bg)).flatten(),
+                ..Tickets::none()
+            };
+            if tickets.choice.is_none() || tickets.shutter.is_none() {
+                queue_release(tickets.into_vec(), None, 0);
+                return;
+            }
+            let detail = format!(
+                "{} + {}, {}, {}",
+                root_name,
+                names.choice,
+                names.shutter,
+                if cutin_enabled {
+                    names.cutin.as_str()
+                } else {
+                    "era cut-in off"
+                }
+            );
+            (tickets, cutin_enabled, detail)
+        }
+        // A3's own UI: everything is in the theme's root package; no cut-in.
+        // The score sets' glyphs / digits and area names are the only
+        // packages (A3 held them resident; World loads neither).
+        logic::Variant::Theme => {
+            let area_name = super::score_set::area_package(skin).filter(|n| {
+                CString::new(n.as_str())
+                    .is_ok_and(|c| super::package_helper::probe_arc(BM2D_DIR, &c))
+            });
+            let tickets = Tickets {
+                texture: request(score_set_logic::TEXTURE_PACKAGE),
+                area: area_name.as_deref().and_then(|n| request(n)),
+                ..Tickets::none()
+            };
+            let detail = format!(
+                "{} -- A3's own skin-0 panel, no cut-in; score sets {} + {}",
+                root_name,
+                score_set_logic::TEXTURE_PACKAGE,
+                area_name.as_deref().unwrap_or("no area package")
+            );
+            (tickets, false, detail)
+        }
     };
-    if tickets.choice.is_none() || tickets.shutter.is_none() {
-        queue_release(tickets.into_vec(), None, 0);
-        return;
-    }
     *lock(&SESSION) = Some(Session {
         skin,
+        variant,
+        root_pkg,
         cutin_enabled,
         origin,
         tickets,
@@ -533,17 +630,10 @@ pub fn arm(skin: u8, origin: &'static str) {
     });
     HOSTED.store(true, Ordering::Release);
     log_info!(
-        "DDR SELECTION: legacy stage panel armed at {} (skin {}: {} + {}, {}, {})",
+        "DDR SELECTION: legacy stage panel armed at {} (skin {}: {})",
         origin,
         skin,
-        logic::ROOT_PACKAGE,
-        names.choice,
-        names.shutter,
-        if cutin_enabled {
-            names.cutin.as_str()
-        } else {
-            "era cut-in off"
-        }
+        detail
     );
 }
 
@@ -574,7 +664,7 @@ fn disarm_session() {
 fn disarm_session_with(diagnose: bool) {
     HOSTED.store(false, Ordering::Release);
     if ROW_PATCHED.load(Ordering::Acquire) {
-        patch_row(false);
+        patch_row(None);
     }
     set_root_live(false);
     let session = lock(&SESSION).take();
@@ -606,15 +696,7 @@ fn retire(s: &mut Session) {
         let _ = bm2d_api::destroy_layer(c.layer);
     }
     let banner = s.banner.as_mut().and_then(|b| b.handle.take());
-    let tickets = std::mem::replace(
-        &mut s.tickets,
-        Tickets {
-            choice: None,
-            shutter: None,
-            cutin: None,
-            cutin_bg: None,
-        },
-    );
+    let tickets = std::mem::replace(&mut s.tickets, Tickets::none());
     let root_layer = std::mem::take(&mut s.root_layer_for_release);
     queue_release(tickets.into_vec(), banner, root_layer);
 }
@@ -636,33 +718,37 @@ fn queue_release(
     RELEASE_PENDING.store(true, Ordering::Release);
 }
 
-/// The stage row: `true` = A3's root, `false` = stock. Checked patch.
-fn patch_row(legacy: bool) -> bool {
+/// The stage row: `Some(root package)` = A3's root from that package (a
+/// static name), `None` = stock. Checked patch.
+fn patch_row(legacy: Option<&'static CStr>) -> bool {
     let (Some(sites), Some(stock)) = (SITES.get(), STOCK_ROW.get()) else {
         return false;
     };
-    let ours = [
-        ROOT_PACKAGE_C.as_ptr() as usize,
-        ROOT_CLIP_C.as_ptr() as usize,
-        stock[3],
-    ];
+    let ours = |pkg: usize| [pkg, ROOT_CLIP_C.as_ptr() as usize, stock[3]];
     let stock3 = [stock[0], stock[1], stock[2]];
     let bytes = |v: [usize; 3]| -> Vec<u8> { v.iter().flat_map(|p| p.to_le_bytes()).collect() };
-    let (from, to) = if legacy {
-        (bytes(stock3), bytes(ours))
-    } else {
-        (bytes(ours), bytes(stock3))
+    let (from, to, pkg) = match legacy {
+        Some(pkg) => {
+            let pkg = pkg.as_ptr() as usize;
+            (bytes(stock3), bytes(ours(pkg)), pkg)
+        }
+        None => (
+            bytes(ours(ROW_PKG.load(Ordering::Acquire))),
+            bytes(stock3),
+            0,
+        ),
     };
     match unsafe { memory::apply_checked_patch(sites.0.stage_row as *mut u8, &from, &to) } {
         Ok(()) => {
-            ROW_PATCHED.store(legacy, Ordering::Release);
+            ROW_PKG.store(pkg, Ordering::Release);
+            ROW_PATCHED.store(legacy.is_some(), Ordering::Release);
             true
         }
         Err(e) => {
             if warn_once(W_ROW) {
                 log_warn!(
                     "DDR SELECTION: stage row patch ({}) failed: {:?}",
-                    if legacy { "apply" } else { "restore" },
+                    if legacy.is_some() { "apply" } else { "restore" },
                     e
                 );
             }
@@ -760,7 +846,7 @@ unsafe fn before_update(pre: &shutter::Snapshot) -> bool {
         );
         return false;
     }
-    if !patch_row(true) {
+    if !patch_row(Some(s.root_pkg)) {
         return false;
     }
     s.row_consumed = true;
@@ -770,11 +856,15 @@ unsafe fn before_update(pre: &shutter::Snapshot) -> bool {
 /// Post-original of the update that read our row: restore it (the loader
 /// copied it) and say what World did with it.
 unsafe fn after_row_read(actor: *mut u8) {
-    patch_row(false);
+    let pkg = lock(&SESSION)
+        .as_ref()
+        .map(|s| s.root_pkg.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    patch_row(None);
     let post = shutter::snapshot_of(actor).ok();
     log_info!(
         "DDR SELECTION: World's kind-art loader read the stage row ({} / {}) -- shutter now state {:?}, pending kind {:?}; row restored",
-        logic::ROOT_PACKAGE,
+        pkg,
         logic::ROOT_CLIP,
         post.map(|p| p.state),
         post.map(|p| p.pending_kind)
@@ -862,15 +952,8 @@ fn observe(
         ready_fired: song_reset::intro_cascade_step().unwrap_or(0) >= super::intro_logic::CMA_READY,
         skip_pressed,
         // A ticket that could not be requested has nothing to wait for (the
-        // arm refuses without the choice / shutter ones).
-        art_ready: [
-            &s.tickets.choice,
-            &s.tickets.shutter,
-            &s.tickets.cutin,
-            &s.tickets.cutin_bg,
-        ]
-        .iter()
-        .all(|t| t.as_ref().is_none_or(bm2d_package::is_ready)),
+        // era arm refuses without the choice / shutter ones).
+        art_ready: s.tickets.ready(),
     }
 }
 
@@ -977,8 +1060,14 @@ unsafe fn adopt(s: &mut Session, actor: *mut u8, stage: i32) {
     s.root_layer_for_release = clip.layer;
     bm2d_api::layer_set_priority_raw(clip.layer, logic::clayer_priority(logic::ROOT_PRIORITY));
     s.root_data_release = bm2d_api::mc_frame_by_label(clip.mc, c"data_release").filter(|&f| f > 0);
+    // The era fill loads the era's stage clip into `choice_stage_usr2`; A3's
+    // skin-0 fill keeps the root's own `choice_stage_usr` and hides `…2`.
+    let stage_placeholder = match s.variant {
+        logic::Variant::Era => "choice_stage_usr",
+        logic::Variant::Theme => "choice_stage_usr2",
+    };
     for path in [
-        "choice_stage_usr",
+        stage_placeholder,
         "caution_usr",
         "fullcombo_challenge_usr",
         "p1_score_set_mc",
@@ -1006,6 +1095,9 @@ unsafe fn fill(s: &mut Session, actor: *mut u8) {
     let Some(clip) = s.root else {
         return;
     };
+    if s.variant == logic::Variant::Theme {
+        return fill_theme(s, clip);
+    }
     let ctx = stage_ctx();
     let choice_pkg = s.tickets.choice.as_ref().and_then(package_id);
     let shutter_pkg = s.tickets.shutter.as_ref().and_then(package_id);
@@ -1097,6 +1189,64 @@ unsafe fn fill(s: &mut Session, actor: *mut u8) {
         s.voice.as_deref().unwrap_or("none"),
         loaded.join(", "),
         cutin
+    );
+}
+
+/// A3's skin-0 fill (`FUN_180030d10`, skin-0 branch) on the adopted theme
+/// root: the band texture on the root's own `choice_stage_usr`, the root's
+/// own background and jacket frame (the song jacket goes in at the swap),
+/// the stage call at once (A3 played it without waiting for a label).
+fn fill_theme(s: &mut Session, clip: shutter::KindClip) {
+    let ctx = stage_ctx();
+    let band = logic::theme_stage_texture(&ctx);
+    set_texture(clip.layer, "choice_stage_usr/scene_choice_stage_usr", &band);
+    s.jacket = Jacket::Song;
+    s.stage_mc = bm2d_api::layer_find_child(clip.layer, "choice_stage_usr").or(Some(clip.mc));
+    s.voice_label = 0;
+    s.voice = logic::stage_voice(s.skin, &ctx);
+    log_info!(
+        "DDR SELECTION: A3 stage panel filled (skin {}, {}, stage {} -> {}{}, voice {})",
+        s.skin,
+        s.root_pkg.to_string_lossy(),
+        ctx.stage,
+        band,
+        if logic::special_stage(&ctx) {
+            " (special stage)"
+        } else {
+            ""
+        },
+        s.voice.as_deref().unwrap_or("none")
+    );
+    fill_score_sets(s, clip.layer, ctx.stage);
+}
+
+/// A3 `FUN_180032240` for both sides (`score_set.rs` reads World's records,
+/// `score_set_logic.rs` decides): a package not ready by now hides the
+/// fields it carries.
+fn fill_score_sets(s: &Session, layer: u32, stage: i32) {
+    let ready = |t: &Option<LoadTicket>| t.as_ref().is_some_and(bm2d_package::is_ready);
+    let ctx =
+        super::score_set::FillCtx::new(stage, ready(&s.tickets.texture), ready(&s.tickets.area));
+    let mut summary = Vec::with_capacity(2);
+    for side in 0..2 {
+        let inputs = super::score_set::side_inputs(side, &ctx);
+        for w in score_set_logic::fill_side(&inputs) {
+            if let Some(t) = &w.texture {
+                set_texture(layer, &w.path, t);
+            }
+            set_visible(layer, &w.path, w.visible);
+        }
+        summary.push(super::score_set::describe(&inputs));
+    }
+    log_info!(
+        "DDR SELECTION: theme score sets filled ({}{}{})",
+        summary.join("; "),
+        if ctx.glyphs_ready {
+            ""
+        } else {
+            "; glyphs not ready"
+        },
+        if ctx.area_ready { "" } else { "; no area" }
     );
 }
 

@@ -38,6 +38,8 @@ pub const AFP_EMBEDDED: &[&str] = &[
     "sn2_gov",
     "end_door",
     "banner_in",
+    // common_shutter_v0 (the DDR A theme's FAILED shutter)
+    "ACE_TEPPAN3",
     // common_choice000N / common_choice_v2 stage panel
     "ACE_shutter_choice_exc",
     "ACE3_shutter_choice_savior",
@@ -135,7 +137,10 @@ mod tests {
 
     #[test]
     fn afp_set_matches_the_inventory() {
-        assert_eq!(AFP_EMBEDDED.len(), 22);
+        // 22 for the eras' clips + `ACE_TEPPAN3` (the DDR A theme's
+        // FAILED shutter; every other theme cue is shared with the eras).
+        assert_eq!(AFP_EMBEDDED.len(), 23);
+        assert!(AFP_EMBEDDED.contains(&"ACE_TEPPAN3"));
         assert!(AFP_EMBEDDED.contains(&"XAC_full_combo2"));
         assert!(AFP_EMBEDDED.contains(&"Plate_spin3_st"));
     }

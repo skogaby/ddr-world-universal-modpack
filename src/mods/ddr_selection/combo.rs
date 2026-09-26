@@ -5,9 +5,9 @@
 //! (`dance_combo` of `dance_combo000N`) and laid it out from code: the digits
 //! grow with the count, the clip is re-centred on the `combo` marker for the
 //! digits shown, the centre moves the FAST/SLOW indicator, skin 1 lays its
-//! digits out at half the cell width, skins 4–5 swap to the worst grade's
-//! sheet, and the clip shows from combo 4 and replays on every step. This
-//! module re-hosts that inside World's object for an actor whose
+//! digits out at half the cell width, skins 4–5 and the themes swap to the
+//! worst grade's sheet, and the clip shows from combo 4 and replays on every
+//! step. This module re-hosts that inside World's object for an actor whose
 //! `dance_combo` record is legacy (World's object and vtable stay — `song_reset`
 //! and the finalize's record write-back keep working):
 //!
@@ -52,6 +52,7 @@ use crate::services::{bm2d_api, combo_hooks};
 use crate::{log_info, log_warn};
 
 use super::combo_math as cm;
+use super::policy;
 
 const PARAM_VISIBLE: i32 = 0x1007;
 const PARAM_DIRTY: i32 = 0x101E;
@@ -106,8 +107,9 @@ static LOGGED_CREATE: AtomicBool = AtomicBool::new(false);
 static LOGGED_SHOW: AtomicBool = AtomicBool::new(false);
 static LOGGED_SMARV: AtomicBool = AtomicBool::new(false);
 static WARNED_CLIP: AtomicBool = AtomicBool::new(false);
-/// Per skin 1..=5: 0 unchecked, 1 usable, 2 damaged.
-static PACKAGE_STATE: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+/// Per skin 1..=[`policy::SKIN_MAX`]: 0 unchecked, 1 usable, 2 damaged.
+static PACKAGE_STATE: [AtomicU8; policy::SKIN_MAX as usize + 1] =
+    [const { AtomicU8::new(0) }; policy::SKIN_MAX as usize + 1];
 
 /// One legacy actor.
 #[derive(Clone, Copy)]
@@ -310,24 +312,25 @@ fn switch(to_legacy: bool) -> bool {
 
 // ── Package check (skin 5) ──────────────────────────────────────────
 
-/// Whether `dance_combo000N` resolves to a real package. World's copy of
-/// `dance_combo0005_v0.arc` is blanked (its member decompresses to zeros);
-/// the A3 import puts a good copy in `data_mods/ddr_selection_a3/`. The first
-/// arc the game's probe would open (LayeredFS mod file first, then `data/`)
-/// is read and its member's IFS magic checked once per skin per boot. No arc
-/// at all ⇒ `true` (the game's own probe then refuses).
-pub fn package_usable(skin: u8) -> bool {
-    let i = skin as usize;
-    if !(1..=5).contains(&i) {
+/// Whether `name` (the package the helper is about to register for `skin`:
+/// `dance_combo000N`, or a theme's `dance_combo0000_vN`) resolves to a real
+/// package. World's copy of `dance_combo0005_v0.arc` is blanked (its member
+/// decompresses to zeros); the A3 import puts a good copy in
+/// `data_mods/ddr_selection_a3/`. The first arc the game's probe would open
+/// (LayeredFS mod file first, then `data/`) is read and its member's IFS
+/// magic checked once per skin per boot. No arc at all ⇒ `true` (the game's
+/// own probe then refuses).
+pub fn package_usable(skin: u8, name: &str) -> bool {
+    let Some(state) = PACKAGE_STATE.get(skin as usize).filter(|_| skin != 0) else {
         return false;
-    }
-    match PACKAGE_STATE[i].load(Ordering::Acquire) {
+    };
+    match state.load(Ordering::Acquire) {
         1 => return true,
         2 => return false,
         _ => {}
     }
-    let (ok, path) = check_package(skin);
-    PACKAGE_STATE[i].store(if ok { 1 } else { 2 }, Ordering::Release);
+    let (ok, path) = check_package(name);
+    state.store(if ok { 1 } else { 2 }, Ordering::Release);
     if !ok {
         log_warn!(
             "DDR SELECTION: {} is damaged (World ships a blanked dance_combo0005) -- skin {} combo stays World's; run the A3 import (ddr_selection_import/import_a3_assets.bat or .sh with your A3 install)",
@@ -338,10 +341,9 @@ pub fn package_usable(skin: u8) -> bool {
     ok
 }
 
-fn check_package(skin: u8) -> (bool, Option<String>) {
+fn check_package(base: &str) -> (bool, Option<String>) {
     use crate::services::avs_layeredfs::mod_paths;
-    let base = format!("dance_combo{:04}", skin);
-    for name in cm::arc_candidates(&base) {
+    for name in cm::arc_candidates(base) {
         let rel = format!("arc/bm2d/{}", name);
         let path = mod_paths::find_first_modfile(&rel).or_else(|| {
             let stock = format!("data/{}", rel);
@@ -558,7 +560,7 @@ fn init_pre(actor: *mut u8) -> bool {
             memory::read_i32(holder),
         )
     };
-    if !(1..=5).contains(&skin) {
+    if !(1..=policy::SKIN_MAX as i32).contains(&skin) {
         return false;
     }
     let patched = !BROKEN.load(Ordering::Acquire) && switch(true);

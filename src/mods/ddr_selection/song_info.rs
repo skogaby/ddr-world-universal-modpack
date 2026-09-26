@@ -1,4 +1,5 @@
-//! Legacy song info — skin 2's (MAX-EXTREME) band and skins 3–5's A3 panel.
+//! Legacy song info — skin 2's (MAX-EXTREME) band and A3's skin-0 panel (skins
+//! 3–5 and the themes).
 //!
 //! World's `SongInfoActor` creates `dance_song_info_single` / `_double` (the
 //! jacket + title card) from the record's package, then a `SongInfoChild`
@@ -12,7 +13,9 @@
 //! * skins 3–5 — no package of their own: A3's own skin-0 panel
 //!   `dance_song_info0000_v2` (World ships it byte-identical) at priority 5,
 //!   title / artist centred in `music_name_usr` / `artist_name_usr` in white
-//!   `2d_font_songtitle_m`.
+//!   `2d_font_songtitle_m`;
+//! * the themes (6..=8) — the same panel from their own generation's
+//!   `dance_song_info0000_vN` (A3's own UI), same patches.
 //!
 //! Mechanism (the Step 7 / 8 pattern): checked code patches, live exactly
 //! while the current `LayoutActor`'s `dance_song_info` record is legacy —

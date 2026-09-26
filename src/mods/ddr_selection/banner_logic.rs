@@ -104,17 +104,17 @@ pub struct Art {
     pub pray_fallback: bool,
 }
 
-/// Whether `common_shutter000N`'s `00_prayforall` draws the PRAY FOR ALL
-/// art: skin 4 only (skin 1's is sounds without art — see the module doc).
+/// Whether the skin's `00_prayforall` draws the PRAY FOR ALL art: skin 4
+/// among the eras (skin 1's is sounds without art — see the module doc), and
+/// every theme (A3's own `common_shutter_vN`, all three with art).
 pub fn has_pray_for_all(skin: u8) -> bool {
-    skin == 4
+    skin == 4 || super::policy::is_theme(skin)
 }
 
-/// A3's banner for a legacy song end (`None` outside skins 1..=5).
+/// A3's banner for a legacy song end (`None` outside skins
+/// 1..=[`super::policy::SKIN_MAX`]).
 pub fn art(skin: u8, outcome: Outcome, mcode: i32) -> Option<Art> {
-    if !(1..=5).contains(&skin) {
-        return None;
-    }
+    package(skin)?;
     Some(match outcome {
         Outcome::Failed => Art {
             root: "shutter_failed",
@@ -137,11 +137,29 @@ pub fn art(skin: u8, outcome: Outcome, mcode: i32) -> Option<Art> {
     })
 }
 
-/// The era package the banner art comes from (A3 `common_shutter%04d`).
-pub fn package(skin: u8) -> Option<String> {
-    (1..=5)
-        .contains(&skin)
-        .then(|| format!("common_shutter{:04}", skin))
+/// The banner packages by skin 1..=8, NUL-terminated (the engine hands the
+/// pointers to World's kind-art loader, which keeps them until its done
+/// callback — static): A3's `common_shutter%04d` for the eras, the theme
+/// generation's own `common_shutter_vN` for the themes.
+const PACKAGES: [&str; 8] = [
+    "common_shutter0001\0",
+    "common_shutter0002\0",
+    "common_shutter0003\0",
+    "common_shutter0004\0",
+    "common_shutter0005\0",
+    "common_shutter_v0\0",
+    "common_shutter_v2\0",
+    "common_shutter_v1\0",
+];
+
+/// The package the banner art comes from, NUL-terminated (static).
+pub fn package_cstr(skin: u8) -> Option<&'static str> {
+    PACKAGES.get((skin as usize).checked_sub(1)?).copied()
+}
+
+/// The package the banner art comes from.
+pub fn package(skin: u8) -> Option<&'static str> {
+    package_cstr(skin).map(|s| s.trim_end_matches('\0'))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,7 +366,7 @@ mod tests {
             assert!(!f.pray_fallback, "PRAY FOR ALL is a CLEARED banner only");
         }
         assert_eq!(art(0, Outcome::Cleared, 1), None);
-        assert_eq!(art(6, Outcome::Failed, 1), None);
+        assert_eq!(art(9, Outcome::Failed, 1), None);
     }
 
     #[test]
@@ -369,8 +387,8 @@ mod tests {
 
     #[test]
     fn package_names() {
-        assert_eq!(package(1).as_deref(), Some("common_shutter0001"));
-        assert_eq!(package(5).as_deref(), Some("common_shutter0005"));
+        assert_eq!(package(1), Some("common_shutter0001"));
+        assert_eq!(package(5), Some("common_shutter0005"));
         assert_eq!(package(0), None);
     }
 
@@ -552,5 +570,33 @@ mod tests {
         let overlay = 114 - 97;
         let root = 642 - 575;
         assert!(overlay + RELEASE_MARGIN_FRAMES < root);
+    }
+
+    #[test]
+    fn themes_use_their_own_shutter_and_pray_for_all() {
+        for (skin, pkg) in [
+            (6, "common_shutter_v0"),
+            (7, "common_shutter_v2"),
+            (8, "common_shutter_v1"),
+        ] {
+            assert_eq!(package(skin), Some(pkg));
+            assert_eq!(package_cstr(skin), Some(format!("{pkg}\0").as_str()));
+            let c = art(skin, Outcome::Cleared, 1).unwrap();
+            assert_eq!((c.root, c.overlay), ("shutter_clear", Overlay::Cleared));
+            let f = art(skin, Outcome::Failed, TOHOKU_EVOLVED_MCODE).unwrap();
+            assert_eq!((f.root, f.overlay), ("shutter_failed", Overlay::Failed));
+            // Every theme's `00_prayforall` has art (A3's own Tohoku rule).
+            let p = art(skin, Outcome::Cleared, TOHOKU_EVOLVED_MCODE).unwrap();
+            assert_eq!(p.overlay, Overlay::PrayForAll);
+            assert!(!p.pray_fallback);
+        }
+        for skin in 1..=5 {
+            assert_eq!(
+                package_cstr(skin),
+                Some(format!("common_shutter{:04}\0", skin).as_str())
+            );
+        }
+        assert_eq!(package_cstr(0), None);
+        assert_eq!(package_cstr(9), None);
     }
 }

@@ -7,7 +7,11 @@
 //! `agcs::BmpString` wrapper (game allocator + the wrapper constructor derived
 //! from xrefs to `widget_factory`) and links it into the game's own render list
 //! (`*scene_manager + 0xB0`), so the game renders it through its normal
-//! pipeline. [`create_image_widget`] does the same for sprites. Render-list
+//! pipeline. [`create_text_widget_with_font`] picks the font, whether the
+//! system outline is applied ([`WidgetStyle`]) and the graph's list + node
+//! sort key ([`RenderList`] — e.g. DDR SELECTION's theme dancer name in the
+//! gameplay list `+0xC8`, below the shutter, as A3 drew it).
+//! [`create_image_widget`] does the same for sprites. Render-list
 //! nodes come from a finite game-side pool that `destroy()` never returns;
 //! [`free_node_count`] reports the remaining budget.
 //!
@@ -375,6 +379,46 @@ pub fn create_text_widget() -> Option<TextWidget> {
     create_text_widget_with_wrapper().map(|(w, _)| w)
 }
 
+/// How a text widget starts out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetStyle {
+    /// Font 0 look: the game's system-text outline ([`create_text_widget`]).
+    System,
+    /// The `agcs::BmpString` constructor's own defaults (no outline change) —
+    /// the game's per-font text, e.g. A3's dancer name.
+    Native,
+}
+
+/// Which of the screen graph's render lists (`agcs::ScreenRoot`s at
+/// `*scene_manager + offset`) a widget joins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderList {
+    /// `+0xB0`: the list every DLL overlay uses — drawn above the game's
+    /// 2D layers, the shutter included.
+    Overlay,
+    /// Another list of the same graph, with the node's sort key
+    /// (`wrapper+0xC`; the list draws its children in key order).
+    Screen { offset: usize, sort_key: u32 },
+}
+
+/// The render-list graph global the widgets register through (null before
+/// init). Callers that derive their own copy compare against it.
+pub fn scene_manager_global() -> *const u8 {
+    SCENE_MGR_GLOBAL_MIRROR.load(Ordering::Acquire)
+}
+
+/// Like [`create_text_widget_with_wrapper`], in font `font_id` with `style`,
+/// registered in `list`. The caller gates on the font being loaded (the
+/// factory resolves it by id at every render). Returns the widget and its
+/// wrapper address.
+pub fn create_text_widget_with_font(
+    font_id: i32,
+    style: WidgetStyle,
+    list: RenderList,
+) -> Option<(TextWidget, usize)> {
+    create_text_widget_inner(font_id, style, list)
+}
+
 /// Like [`create_text_widget`], but also returns the WRAPPER address (the
 /// `agcs::BmpString` the render walk dispatches `wrapper_render` on). The
 /// overlay-draw animated background uses this as its emission-anchor
@@ -382,7 +426,18 @@ pub fn create_text_widget() -> Option<TextWidget> {
 /// above everything the widget layer drew earlier (incl. full-screen
 /// loading art) and below the menu widgets registered after it.
 pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
-    let r = RENDERER.lock().unwrap();
+    create_text_widget_inner(0, WidgetStyle::System, RenderList::Overlay)
+}
+
+fn create_text_widget_inner(
+    font_id: i32,
+    style: WidgetStyle,
+    list: RenderList,
+) -> Option<(TextWidget, usize)> {
+    let r = match RENDERER.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
     if !r.font_captured
         || r.wrapper_constructor_addr.is_null()
         || r.game_alloc_fn.is_null()
@@ -408,14 +463,14 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
             return None;
         }
 
-        // Call the wrapper_constructor: `agcs::BmpString::ctor(buffer, fontId=0,
+        // Call the wrapper_constructor: `agcs::BmpString::ctor(buffer, fontId,
         // const char* initialText)`. It allocates child_array, calls
         // widget_factory (which resolves the font by ID at every render —
         // the captured font_ptr is only an availability gate), patches the
         // line_desc callbacks, then `setText(initialText, UTF8)`. The 3rd
         // arg is TEXT, not the font: stock callers pass "" / "PAIRING: OK".
         let ctor: WrapperConstructorFn = std::mem::transmute(ctor_addr);
-        let wrapper = ctor(wrapper, 0, EMPTY_TEXT.as_ptr());
+        let wrapper = ctor(wrapper, font_id, EMPTY_TEXT.as_ptr());
         if wrapper.is_null() {
             log_warn!("WidgetRenderer: wrapper constructor returned null");
             return None;
@@ -435,26 +490,45 @@ pub fn create_text_widget_with_wrapper() -> Option<(TextWidget, usize)> {
         // Default to the game's own system-text outline (25 % grey, width 1)
         // so DLL text matches the footer text it sits beside; callers that
         // want something else call `set_outline` afterwards.
-        widget.set_system_outline();
+        if style == WidgetStyle::System {
+            widget.set_system_outline();
+        }
 
         // Register in the game's render list
-        if !register_in_render_list(scene_mgr_global, wrapper) {
+        let (list_off, sort_key) = match list {
+            RenderList::Overlay => (OVERLAY_LIST_OFF, None),
+            RenderList::Screen { offset, sort_key } => (offset, Some(sort_key)),
+        };
+        if !register_in_list(scene_mgr_global, list_off, wrapper) {
             log_warn!("WidgetRenderer: failed to register widget in render list");
+        } else if let Some(key) = sort_key {
+            // The node's sort key (A3 wrote it right after its own push).
+            memory::write_u32(wrapper.add(0x0C), key);
         }
 
         Some((widget, wrapper as usize))
     }
 }
 
-/// Register a wrapper in the game's native render list.
+/// The overlay widget list's offset in the render-list graph.
+const OVERLAY_LIST_OFF: usize = 0xB0;
+
+/// Register a wrapper in the game's native (overlay) render list.
 unsafe fn register_in_render_list(scene_mgr_global: *const u8, wrapper: *mut u8) -> bool {
+    register_in_list(scene_mgr_global, OVERLAY_LIST_OFF, wrapper)
+}
+
+/// Register a wrapper in the graph's render list at `list_off` (the same
+/// `agcs::ScreenRoot` layout for every list — World's own push
+/// `FUN_180217fe0` on 20260825).
+unsafe fn register_in_list(scene_mgr_global: *const u8, list_off: usize, wrapper: *mut u8) -> bool {
     // Step 4: Get render list manager
     let scene_mgr = *(scene_mgr_global as *const *const u8);
     if scene_mgr.is_null() {
         return false;
     }
 
-    let render_list_mgr = *(scene_mgr.add(0xB0) as *const *mut u8);
+    let render_list_mgr = *(scene_mgr.add(list_off) as *const *mut u8);
     if render_list_mgr.is_null() {
         return false;
     }

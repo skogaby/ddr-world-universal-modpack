@@ -26,12 +26,12 @@ meet World's unadapted actor, which NULL-derefs.
 
 ## Checklist
 
-- [ ] Step 1: Theme identity, whole-package swaps, song-info panel, stage frame — and the cross-generation texture spike
-- [ ] Step 2: Theme HUD: life gauge, combo, score, option icons
-- [ ] Step 3: READY, end banners, announcer / crowd, AUTO with the cabinet read
-- [ ] Step 4: Stage panel: theme variant and A3's skin-0 fill
-- [ ] Step 5: Stage-panel score sets (RE first)
-- [ ] Step 6: Gameplay player name (RE first)
+- [x] Step 1: Theme identity, whole-package swaps, song-info panel, stage frame — and the cross-generation texture spike — cabinet-proven 2026-09-25 (spike passed: no texture bleed across generations)
+- [x] Step 2: Theme HUD: life gauge, combo, score, option icons — cabinet-proven 2026-09-25
+- [x] Step 3: READY, end banners, announcer / crowd, AUTO with the cabinet read — cabinet-proven 2026-09-25
+- [x] Step 4: Stage panel: theme variant and A3's skin-0 fill — cabinet-proven 2026-09-25
+- [x] Step 5: Stage-panel score sets (RE first) — cabinet-proven 2026-09-26
+- [x] Step 6: Gameplay player name (RE first) — cabinet-proven 2026-09-26
 - [ ] Step 7: Danger on doubles (scoped patch)
 - [ ] Step 8: S-Marvelous on the themes
 - [ ] Step 9: Release integration and the cabinet matrix

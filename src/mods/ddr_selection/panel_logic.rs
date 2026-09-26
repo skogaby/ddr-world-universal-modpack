@@ -14,8 +14,9 @@
 //! holds everything that does not touch the engine. RE record:
 //! `.agents/planning/2026-09-22-ddr-selection/research/stage-panel.md`.
 
-/// The package that carries A3's panel root (requested by FULL name: the bare
-/// `common_choice` resolves `_v0`, the DDR A generation).
+/// The package that carries the eras' panel root (requested by FULL name: the
+/// bare `common_choice` resolves `_v0`, the DDR A generation) — see
+/// [`root_package_cstr`] for the themes'.
 pub const ROOT_PACKAGE: &str = "common_choice_v2";
 /// A3's HD root clip (machine types ≥ 2; World scales it on SD cabinets).
 pub const ROOT_CLIP: &str = "shutter_choice_hd_root";
@@ -55,7 +56,8 @@ pub struct Packages {
 }
 
 /// A3 `FUN_1800328c0`: `common_choice%04d`, `common_shutter%04d`,
-/// `common_choice_cutin%04d` + `common_choice_cutinbg`. `None` outside 1..=5.
+/// `common_choice_cutin%04d` + `common_choice_cutinbg`. `None` outside the
+/// eras (1..=5; a theme's panel loads nothing into its root).
 pub fn packages(skin: u8) -> Option<Packages> {
     if !(1..=5).contains(&skin) {
         return None;
@@ -116,13 +118,82 @@ pub fn stage_texture(skin: u8, c: &StageCtx) -> String {
     format!("scene_choice_stage{:04}_{}", skin, suffix)
 }
 
+/// Which of A3's two panels a skin shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Variant {
+    /// The eras: A3's legacy fill (era `choice_stage` / `choice_background`
+    /// / `choice_jacket` loaded into `common_choice_v2`'s root, the era
+    /// cut-in).
+    Era,
+    /// The themes: A3's own skin-0 fill on the theme generation's root
+    /// (`FUN_180030d10`'s skin-0 branch) — no packages, no cut-in.
+    Theme,
+}
+
+pub fn variant(skin: u8) -> Option<Variant> {
+    if super::policy::is_era(skin) {
+        Some(Variant::Era)
+    } else if super::policy::is_theme(skin) {
+        Some(Variant::Theme)
+    } else {
+        None
+    }
+}
+
+/// The package holding the root clip, NUL-terminated (the row patch hands
+/// the pointer to World's kind-art loader — static): `common_choice_v2` for
+/// the eras (A3's white-cabinet root) and the theme generation's own
+/// `common_choice_vN` for a theme.
+pub fn root_package_cstr(skin: u8) -> Option<&'static str> {
+    match (variant(skin)?, super::policy::theme(skin).map(|t| t.suffix)) {
+        (Variant::Era, _) => Some("common_choice_v2\0"),
+        (Variant::Theme, Some("_v0")) => Some("common_choice_v0\0"),
+        (Variant::Theme, Some("_v1")) => Some("common_choice_v1\0"),
+        (Variant::Theme, Some("_v2")) => Some("common_choice_v2\0"),
+        (Variant::Theme, _) => None,
+    }
+}
+
+/// [`root_package_cstr`] without the NUL.
+pub fn root_package(skin: u8) -> Option<&'static str> {
+    root_package_cstr(skin).map(|s| s.trim_end_matches('\0'))
+}
+
+/// A3's event-only special stages (outside courses and event chains): the
+/// stage the final-stage override names by index, or past the extra stage.
+/// A3 drew event art there (a loader-owned package World does not have);
+/// the theme panel shows EXTRA. Exactly the stages the stage call skips.
+pub fn special_stage(c: &StageCtx) -> bool {
+    !c.course && !event_chain(c) && (c.stage == c.override_stage || c.stage > c.max_stage + 1)
+}
+
+/// A3's skin-0 stage band (`scene_choice_stage_*` of the theme's own
+/// `common_choice_vN`, written into the root's own `choice_stage_usr`):
+/// extra (or special) → `extra`, final → `final`, else stage index 3 / 2 / 1
+/// → `4th` / `3rd` / `2nd`, else `1st`.
+pub fn theme_stage_texture(c: &StageCtx) -> String {
+    let suffix = if special_stage(c) || is_extra_stage(c) {
+        "extra"
+    } else if is_final_stage(c) {
+        "final"
+    } else {
+        match c.stage {
+            3 => "4th",
+            2 => "3rd",
+            1 => "2nd",
+            _ => "1st",
+        }
+    };
+    format!("scene_choice_stage_{}", suffix)
+}
+
 /// A3's stage call (`FUN_18002e210` / `FUN_18002e060`): skin 1 silent;
 /// skins 2–3 `sn2_etc{73 extra, a7 final, a<stage+2> for stages 0..=3}`;
-/// skins 4–5 A3's `vo_stage_{extra, final, NN}`. Nothing when the stage is
-/// the override's own index or past the normal count (outside courses and
-/// event chains).
+/// skins 4–5 and the themes (A3's own skin 0) A3's `vo_stage_{extra, final,
+/// NN}`. Nothing when the stage is the override's own index or past the
+/// normal count (outside courses and event chains).
 pub fn stage_voice(skin: u8, c: &StageCtx) -> Option<String> {
-    if !(2..=5).contains(&skin) {
+    if !(2..=super::policy::SKIN_MAX).contains(&skin) {
         return None;
     }
     let ev = event_chain(c);
@@ -152,7 +223,7 @@ pub fn stage_voice(skin: u8, c: &StageCtx) -> Option<String> {
     }
 }
 
-/// A3's cut-in SE per skin.
+/// A3's cut-in SE per era (the themes have no cut-in).
 pub fn cutin_se(skin: u8) -> Option<&'static str> {
     match skin {
         1 => Some("sele_1st"),
@@ -823,5 +894,98 @@ mod tests {
         done.pending_is_stage = false;
         done.art_ready = false;
         assert_eq!(p.advance(&done), vec![Action::Finished]);
+    }
+
+    #[test]
+    fn themes_call_the_stage_like_a3() {
+        for skin in 6..=8 {
+            assert_eq!(stage_voice(skin, &ctx(0)).as_deref(), Some("vo_stage_01"));
+            assert_eq!(stage_voice(skin, &ctx(1)).as_deref(), Some("vo_stage_02"));
+            assert_eq!(
+                stage_voice(skin, &ctx(2)).as_deref(),
+                Some("vo_stage_final")
+            );
+            assert_eq!(
+                stage_voice(skin, &ctx(3)).as_deref(),
+                Some("vo_stage_extra")
+            );
+            assert_eq!(stage_voice(skin, &ctx(4)), None);
+        }
+        assert_eq!(stage_voice(9, &ctx(0)), None);
+    }
+
+    #[test]
+    fn theme_variant_and_root_package() {
+        for skin in 1..=5 {
+            assert_eq!(variant(skin), Some(Variant::Era));
+            assert_eq!(root_package(skin), Some(ROOT_PACKAGE));
+        }
+        for (skin, pkg) in [
+            (6, "common_choice_v0"),
+            (7, "common_choice_v2"),
+            (8, "common_choice_v1"),
+        ] {
+            assert_eq!(variant(skin), Some(Variant::Theme));
+            assert_eq!(root_package(skin), Some(pkg));
+            assert_eq!(root_package_cstr(skin), Some(format!("{pkg}\0").as_str()));
+            // A3's own UI had no era packages and no cut-in.
+            assert!(packages(skin).is_none());
+            assert_eq!(cutin_se(skin), None);
+        }
+        for skin in [0, 9] {
+            assert_eq!(variant(skin), None);
+            assert_eq!(root_package(skin), None);
+        }
+    }
+
+    #[test]
+    fn theme_band_follows_a3_skin_0() {
+        let five = |stage| StageCtx {
+            max_stage: 4,
+            ..ctx(stage)
+        };
+        let t = |c: &StageCtx| theme_stage_texture(c);
+        assert_eq!(t(&five(0)), "scene_choice_stage_1st");
+        assert_eq!(t(&five(1)), "scene_choice_stage_2nd");
+        assert_eq!(t(&five(2)), "scene_choice_stage_3rd");
+        assert_eq!(t(&five(3)), "scene_choice_stage_4th");
+        assert_eq!(t(&five(4)), "scene_choice_stage_final");
+        assert_eq!(t(&five(5)), "scene_choice_stage_extra");
+        // Three stages: 1st, 2nd, FINAL, EXTRA.
+        assert_eq!(t(&ctx(0)), "scene_choice_stage_1st");
+        assert_eq!(t(&ctx(1)), "scene_choice_stage_2nd");
+        assert_eq!(t(&ctx(2)), "scene_choice_stage_final");
+        assert_eq!(t(&ctx(3)), "scene_choice_stage_extra");
+        // The final-stage override (1-based): stage index 1 is the final.
+        let mut c = ctx(1);
+        c.override_stage = 2;
+        assert_eq!(t(&c), "scene_choice_stage_final");
+        // A3's event-only special stages: the override's own index, or past
+        // the extra stage — shown as EXTRA (A3's event art is not in World).
+        let mut c = ctx(2);
+        c.override_stage = 2;
+        assert!(special_stage(&c));
+        assert_eq!(t(&c), "scene_choice_stage_extra");
+        assert!(special_stage(&ctx(4)));
+        assert_eq!(t(&ctx(4)), "scene_choice_stage_extra");
+        assert!(!special_stage(&ctx(3)), "the extra stage is not special");
+        assert!(!special_stage(&ctx(0)));
+        // Event chains: never final / extra / special.
+        let mut c = ctx(4);
+        c.event_mode = 2;
+        assert!(!special_stage(&c));
+        assert_eq!(t(&c), "scene_choice_stage_1st");
+        // Special stages are exactly where the stage call stays silent.
+        for stage in 0..=6 {
+            for ov in [-1, 1, 2, 3] {
+                let mut c = ctx(stage);
+                c.override_stage = ov;
+                assert_eq!(
+                    special_stage(&c),
+                    stage_voice(7, &c).is_none(),
+                    "stage {stage} override {ov}"
+                );
+            }
+        }
     }
 }

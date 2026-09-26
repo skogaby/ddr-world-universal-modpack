@@ -1,20 +1,26 @@
-//! DDR SELECTION (`ddr-selection`, default ON; inert until a player's row picks an era) — revive DDR A3's
-//! legacy gameplay skins per song: skins 1..=5 = 1st-5th, MAX-EXTREME, SuperNOVA, X, 2013-A.
-//! World kept most of the plumbing and the legacy `…000N` packages; it removed the `%04d`
-//! package-name append and everything that wrote the skin id. This mod puts them back and
-//! re-hosts A3's behaviour on World's own actors.
+//! DDR SELECTION (`ddr-selection`, default ON; inert until a player's row picks a skin) — revive DDR A3's
+//! legacy gameplay skins per song. Skins 1..=5 are the **eras** (1stMIX-5thMIX, MAX-EXTREME,
+//! SuperNOVA 1-2, X-X3 vs 2ndMIX, 2013-2014: A3's legacy `…000N` packages); skins 6..=8 are the
+//! **themes** (DDR A, DDR A3 (White), DDR A3 (Gold): A3's own skin-0 UI generations `_v0` /
+//! `_v2` / `_v1`, registered with the theme skin as the record skin so World's surviving skin-0
+//! branches run on the theme's own packages; `GameWork+0xA8` stays 0 for them —
+//! [`policy::engine_skin`]). World kept most of the plumbing and the legacy packages; it removed
+//! the `%04d` package-name append and everything that wrote the skin id. This mod puts them back
+//! and re-hosts A3's behaviour on World's own actors.
 //!
 //! ## Decision
 //!
-//! The per-player option row ([`options`]: OFF / AUTO / five eras, `PersistMode::Local`,
+//! The per-player option row ([`options`]: OFF / AUTO / five eras / three themes, `PersistMode::Local`,
 //! `versus_mirror`ed, effective next song) feeds the pure [`trigger`]: the entered side's row
 //! governs (P1 in versus; a multiplayer-bot side never governs); AUTO maps the song's raw
-//! musicdb `<series>` to A3's DDR SELECTION folder buckets. A refused mode (course, event
+//! musicdb `<series>` to A3's DDR SELECTION folder buckets, DDR A's songs to the DDR A theme
+//! and A20 / A20 PLUS / A3's to A3's own UI (gold on the gold cabinet —
+//! `services::cabinet`). A refused mode (course, event
 //! chain) stays stock. At the song-select → play edge (25 → 26..=28, before the play
-//! sequence's `LayoutActor` exists) `arm` writes the skin to `GameWork+0xA8`, which World's
-//! own sequence hands to the `LayoutActor` and whose three surviving `CMP [GameWork+0xA8],1`
-//! gates hide the song info and option icons on 1st-5th; the first scene outside {26..=30}
-//! disarms. The pure [`policy`] table then decides, per
+//! sequence's `LayoutActor` exists) `arm` writes the era (0 for a theme) to `GameWork+0xA8`,
+//! which World's own sequence hands to the `LayoutActor` and whose three surviving
+//! `CMP [GameWork+0xA8],1` gates hide the song info and option icons on 1st-5th; the first
+//! scene outside {26..=30} disarms. The pure [`policy`] table then decides, per
 //! World package, whether it turns legacy: only when its World consumer's [`policy::Adapter`]
 //! resolved on this boot (World's HUD actors NULL-deref on a missing export), and a probe
 //! miss falls back to the unsuffixed World base, never `<base>0000`.
@@ -32,7 +38,8 @@
 //! - [`intro`] + [`intro_logic`] — READY! / HERE WE GO!! from `dance_message000N`, World's
 //!   READY? panel dismissed.
 //! - [`markers`] + [`marker_keys`] — A3's element positions via `services::hud_layout_hooks`;
-//!   [`stage_frame`] — the stage frame names.
+//!   [`stage_frame`] — the stage frame names; [`danger`] — the themes' `danger_double` on
+//!   doubles.
 //! - [`gauge`] + [`gauge_math`], [`combo`] + [`combo_math`] (over `services::combo_hooks`),
 //!   [`score`] + [`score_math`], [`song_info`] + [`song_info_logic`] — life gauge, combo,
 //!   score / difficulty, skin 2's band and skins 3–5's A3 panel.
@@ -48,9 +55,11 @@
 //! - **Scoped patches.** Every code / data patch is live only as long as it applies: one call
 //!   (combo / score init, the `SceneManageActor::onInitialize` movie byte), one update
 //!   (ShutterActor kind rows), while the current `LayoutActor`'s record is legacy (stage
-//!   frame, gauge export, song info — applied by the helper before it registers the package,
-//!   which stays stock if a patch fails), or while a `code_se` site's per-song gate holds.
-//!   Longer-lived patches are restored on the next stock request, at disarm and at disable.
+//!   frame, gauge export, song info, a theme's danger doubles — applied by the helper before
+//!   it registers the package, which stays stock if a patch fails; the danger patch is
+//!   cosmetic and never holds its package stock), or while a `code_se` site's per-song gate
+//!   holds. Longer-lived patches are restored on the next stock request, at disarm and at
+//!   disable.
 //! - **Layer before package.** Mod-created layers on a `LayoutActor` package are destroyed
 //!   in the GAMEPLAY-exit scene callback, before the sequence tears the actor down; mod-held
 //!   package tickets are released only after World's layer on them is gone.
@@ -72,7 +81,8 @@
 //! plus the `derive_ddr_selection` sites (`ddr_selection_sites`); without it the mod is
 //! unavailable. Every other derivation is optional and all-or-nothing per surface (intro,
 //! panel, banners, movie, stage frame, gauge, combo, score, song info / panel, option icons,
-//! option forcing, `code_se`, call voice, the AFP sound callback, the AUTO series lookup): a
+//! option forcing, `code_se`, call voice, the AFP sound callback, the AUTO series lookup,
+//! the theme score sets / dancer name / danger doubles): a
 //! missing one leaves that surface World's with one WARN — where the surface is an adapter,
 //! the packages it guards stay stock. A disarmed or stock package always runs World's code.
 //!
@@ -82,7 +92,7 @@
 //! it from an operator's A3 install into `data_mods/ddr_selection_a3/` per
 //! `a3_assets.manifest` (`always` entries such as World's blanked `dance_combo0005_v0.arc`,
 //! `missing` entries only when the World install lacks them). Config section `ddr_selection`
-//! (`era_cutin`, default ON) is written whole by [`settings`]. `DDR_SELECTION_FORCE=<1..5>` with
+//! (`era_cutin`, default ON) is written whole by [`settings`]. `DDR_SELECTION_FORCE=<1..8>` with
 //! `layeredfs.developer_mode` forces that skin on every song, overriding the rows (mode
 //! refusals still apply).
 //!
@@ -95,6 +105,7 @@ mod banner;
 pub mod banner_logic;
 mod combo;
 pub mod combo_math;
+mod danger;
 mod gauge;
 pub mod gauge_math;
 mod intro;
@@ -113,6 +124,10 @@ pub mod panel_logic;
 pub mod policy;
 mod score;
 pub mod score_math;
+mod score_name;
+mod score_name_logic;
+mod score_set;
+mod score_set_logic;
 pub mod sel_movie_logic;
 mod settings;
 mod song_info;
@@ -177,7 +192,8 @@ pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Acquire) && CAPABLE.load(Ordering::Acquire)
 }
 
-/// The skin armed for the current song window (0 = World UI).
+/// The skin armed for the current song window (0 = World UI, 1..=5 era,
+/// 6..=8 theme).
 pub fn armed_skin() -> u8 {
     if ENABLED.load(Ordering::Acquire) {
         ARMED_SKIN.load(Ordering::Acquire)
@@ -353,6 +369,8 @@ fn committed_mcode(side: u8) -> Option<i32> {
 struct Song {
     r: trigger::Resolution,
     mcode: i32,
+    /// AUTO read the cabinet as the gold cabinet (diagnostics).
+    gold_cabinet: bool,
     /// A legacy skin the mode policy refuses (course, event chain, …).
     refusal: Option<&'static str>,
 }
@@ -371,6 +389,13 @@ impl Song {
         match self.r.source {
             trigger::Source::DevKnob => "dev-knob".to_string(),
             trigger::Source::Explicit => "option".to_string(),
+            trigger::Source::Auto(series) if policy::is_theme(self.r.skin) && series >= 18 => {
+                format!(
+                    "AUTO series {} ({} cabinet)",
+                    series,
+                    if self.gold_cabinet { "gold" } else { "white" }
+                )
+            }
             trigger::Source::Auto(series) => format!("AUTO series {}", series),
             trigger::Source::None => "?".to_string(),
         }
@@ -416,16 +441,25 @@ fn resolve_song(at: SongSource) -> Song {
     let row = [options::row_value(0), options::row_value(1)];
     let needs_series = governing.is_some_and(|g| row[g as usize] == trigger::ROW_AUTO);
     let series = if needs_series { series_of(mcode) } else { None };
+    // A3's own test for its gold-cabinet UI (the SMX GOLD force included);
+    // only AUTO's A3-era songs consult it.
+    let gold_cabinet = needs_series && crate::services::cabinet::is_gold_cabinet();
     let inputs = trigger::Inputs {
         entered,
         bot_side,
         row,
         series,
         dev_skin: DEV_SKIN.load(Ordering::Acquire),
+        gold_cabinet,
     };
     let r = trigger::resolve(&inputs);
     let refusal = if r.skin != 0 { mode_refusal() } else { None };
-    Song { r, mcode, refusal }
+    Song {
+        r,
+        mcode,
+        gold_cabinet,
+        refusal,
+    }
 }
 
 /// World is about to load the stage panel during song select (the
@@ -500,7 +534,7 @@ fn arm() {
         }
         return;
     }
-    if !write_skin(r.skin) {
+    if !write_skin(policy::engine_skin(r.skin)) {
         log_warn!("DDR SELECTION: GameWork skin field not writable -- song stays stock");
         if let Some(h) = hosted {
             reconcile_stock(h, "GameWork skin field not writable");
@@ -537,11 +571,13 @@ fn disarm(reason: &str) {
     // (A legacy end banner still on screen is not disarmed: `banner.rs`
     // follows World's ShutterActor until World releases it.)
     panel::disarm();
+    score_name::hide_all();
     // World's stage-frame names back (no-op when nothing is patched) and no
     // pending marker post-pass.
     stage_frame::restore();
     gauge::restore();
     song_info::restore();
+    danger::restore();
     option_icons::release_all("disarm");
     options_force::restore_all("disarm");
     markers::reset();
@@ -570,6 +606,7 @@ fn on_scene_change(prev: i32, next: i32) {
     // the owning LayoutActor still lives.
     intro::on_scene_change(next);
     option_icons::on_scene_change(next);
+    score_name::on_scene_change(prev, next);
     // Register the era bank as soon as it is built — before the first legacy
     // clip can play (the song-select → stage shutter already fires sounds).
     sound::bank::try_register();
@@ -626,8 +663,9 @@ fn configure_dev_knob() {
     let armed = if dev_mode { skin } else { 0 };
     if raw.is_some() && armed == 0 {
         log_warn!(
-            "DDR SELECTION: DDR_SELECTION_FORCE={:?} ignored (needs layeredfs.developer_mode and a value 1..5)",
-            raw.unwrap_or_default()
+            "DDR SELECTION: DDR_SELECTION_FORCE={:?} ignored (needs layeredfs.developer_mode and a value 1..{})",
+            raw.unwrap_or_default(),
+            policy::SKIN_MAX
         );
     }
     DEV_SKIN.store(armed, Ordering::Release);
@@ -706,6 +744,7 @@ impl Mod for DdrSelectionMod {
         intro::init(ctx.signatures);
         markers::init(sites.records_shared_off, sites.records_side_off);
         stage_frame::init(ctx.signatures);
+        danger::init(ctx.signatures);
         gauge::init(ctx.signatures);
         combo::init(ctx.signatures);
         score::init(ctx.signatures);
@@ -714,6 +753,8 @@ impl Mod for DdrSelectionMod {
         // (WARNs itself; 1st-5th songs then keep the player's options.)
         let _ = options_force::init(ctx.signatures);
         panel::init(ctx.signatures);
+        score_set::init(ctx.signatures);
+        score_name::init(ctx.signatures);
         movie_sel::init(
             ctx.signatures,
             ctx.game_module.base as usize,

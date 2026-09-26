@@ -6,7 +6,8 @@
 //! rules ([`rules::step`]) over the fields World's own `onMessage` keeps
 //! filling, instead of World's `onUpdate`: skin 1 `ACT6` / `2nd_BIG2`, skins
 //! 2–3 `sn2_dgm*` + `2nd_KANSEI_B` / `STG_APP03`, skins 4–5 A3's own
-//! `vo_ingame_*` announcer + `STG_APP02`. Every play goes through the game's
+//! `vo_ingame_*` announcer + `STG_APP02`, the themes A3's skin-0 column (the
+//! same announcer; the crowd cheers / boos with a voice). Every play goes through the game's
 //! `se_play` façade into the era bank's slot (the game's mute filter + AVS
 //! lock, the handle registered in the same cue table World's guard reads);
 //! guarded plays use World's own is-playing check. Otherwise (disarmed, bank

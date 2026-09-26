@@ -35,6 +35,11 @@ pub const PLACES: [&str; 7] = [
     "1000000_usr",
 ];
 
+/// The `%04d` of A3's texture names (0 for a theme — A3's skin-0 art).
+fn tex(skin: u8) -> u8 {
+    super::policy::tex_number(skin)
+}
+
 /// The difficulty names by World's difficulty index (A3's table).
 pub const DIFFICULTIES: [&str; 6] = [
     "beginner",
@@ -91,7 +96,7 @@ pub fn difficulty_writes(skin: u8, side: i32, difficulty: i32, level: i32) -> Di
     } else {
         DifficultyWrites {
             level_label: format!("{}{}", d, if level > 9 { 2 } else { 1 }),
-            level_texture: Some(format!("dance_score{:04}_lv{:02}", skin, level)),
+            level_texture: Some(format!("dance_score{:04}_lv{:02}", tex(skin), level)),
             base_label: None,
         }
     }
@@ -133,9 +138,9 @@ pub fn digit_writes(skin: u8, old: i32, new: i32, ex: bool) -> Vec<Write> {
         o /= 10;
         if changed {
             let texture = if lead {
-                format!("dance_score{:04}_score_num_0_gray", skin)
+                format!("dance_score{:04}_score_num_0_gray", tex(skin))
             } else {
-                format!("dance_score{:04}_score_num_{}", skin, v % 10)
+                format!("dance_score{:04}_score_num_{}", tex(skin), v % 10)
             };
             let visible = !ex || !lead;
             out.push(Write {
@@ -148,7 +153,7 @@ pub fn digit_writes(skin: u8, old: i32, new: i32, ex: bool) -> Vec<Write> {
                     path: format!("comma{}_usr", if i == 3 { 2 } else { 1 }),
                     texture: format!(
                         "dance_score{:04}_score_comma{}",
-                        skin,
+                        tex(skin),
                         if lead { "_gray" } else { "" }
                     ),
                     visible,
@@ -251,5 +256,26 @@ mod tests {
         assert_eq!(tex[0], "dance_score0004_score_num_0");
         assert_eq!(tex.last().copied(), Some("dance_score0004_score_comma"));
         assert_eq!(w[w.len() - 2].texture, "dance_score0004_score_num_1");
+    }
+
+    #[test]
+    fn themes_use_a3s_skin_0_textures() {
+        for skin in 6..=8 {
+            assert_eq!(difficulty_priority(skin), PRIORITY);
+            let w = difficulty_writes(skin, 1, 3, 14);
+            assert_eq!(w.level_label, "expert2");
+            assert_eq!(w.level_texture.as_deref(), Some("dance_score0000_lv14"));
+            assert_eq!(w.base_label, None);
+            let w = digit_writes(skin, -1, 1_234, false);
+            assert_eq!(w[0].texture, "dance_score0000_score_num_4");
+            assert_eq!(w[4].path, "comma2_usr");
+            assert_eq!(w[4].texture, "dance_score0000_score_comma");
+            assert!(w
+                .iter()
+                .any(|x| x.texture == "dance_score0000_score_num_0_gray"));
+            assert!(w
+                .iter()
+                .any(|x| x.texture == "dance_score0000_score_comma_gray"));
+        }
     }
 }

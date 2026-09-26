@@ -194,6 +194,8 @@ pub const WORLD_ONLY_KEYS: &[&str] = &["dance_matching", "bpm", "name", "option_
 /// The legacy layout root for a skin (A3 had no `dance_common0001`: skin 1
 /// used A3's own `dance_common0000_v2`, which World ships and which World's
 /// probe reaches only through its bare rung — hence the explicit suffix).
+/// The themes use their own generation's root (`dance_common0000_v0` DDR A,
+/// `_v2` A3 white cabinet, `_v1` A3 gold cabinet).
 pub fn root_name(skin: u8) -> Option<&'static str> {
     match skin {
         1 => Some("dance_common0000_v2"),
@@ -201,6 +203,9 @@ pub fn root_name(skin: u8) -> Option<&'static str> {
         3 => Some("dance_common0003"),
         4 => Some("dance_common0004"),
         5 => Some("dance_common0005"),
+        6 => Some("dance_common0000_v0"),
+        7 => Some("dance_common0000_v2"),
+        8 => Some("dance_common0000_v1"),
         _ => None,
     }
 }
@@ -410,8 +415,11 @@ mod tests {
             assert_eq!(root_name(s).unwrap(), format!("dance_common{:04}", s));
         }
         assert_eq!(root_name(0), None);
-        assert_eq!(root_name(6), None);
-        for s in 1..=5u8 {
+        assert_eq!(root_name(6), Some("dance_common0000_v0"));
+        assert_eq!(root_name(7), Some("dance_common0000_v2"));
+        assert_eq!(root_name(8), Some("dance_common0000_v1"));
+        assert_eq!(root_name(9), None);
+        for s in 1..=8u8 {
             assert!(!root_name(s).unwrap().ends_with("0000"));
         }
     }

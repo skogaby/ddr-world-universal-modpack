@@ -1,7 +1,7 @@
 //! The legacy song intro: A3's READY! / HERE WE GO!! clips from
-//! `dance_message000N`, and the suppression of World's own intro while they
-//! play (its "READY?" panel, its code-played `vo_ingame_ready`, its 5.0 s
-//! READY? dwell).
+//! `dance_message000N` (a theme: its own `dance_message_vN`), and the
+//! suppression of World's own intro while they play (its "READY?" panel, its
+//! code-played `vo_ingame_ready`, its 5.0 s READY? dwell).
 //!
 //! World deleted A3's `ReadyGoActor` (its `dance_message` package has no
 //! World consumer), so this module re-hosts it without a fabricated actor:
@@ -318,7 +318,13 @@ fn on_frame() {
 }
 
 fn create_session(dps: usize, skin: u8) -> Option<Session> {
-    let name = policy::legacy_name("dance_message", skin);
+    let policy::Decision::Legacy {
+        arc_base, naming, ..
+    } = policy::decide("dance_message", skin, super::adapters())
+    else {
+        return None;
+    };
+    let name = policy::package_name(arc_base, skin, naming);
     let package_name = CString::new(name.trim_end_matches('\0')).ok()?;
     let pkg = bm2d_package::lookup_unowned(&package_name)?;
     let first = song_reset::intro_cascade_step().unwrap_or(0);

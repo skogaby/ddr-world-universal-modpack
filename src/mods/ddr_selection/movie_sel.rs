@@ -7,7 +7,8 @@
 //! function that creates the song's MovieActor; its own onInitialize, which
 //! picks the file, runs on a later tree tick):
 //!
-//! * **Pre-original**: when a legacy skin is armed and the `_sel` file exists
+//! * **Pre-original**: when a legacy era (skins 1..=5; never a theme — A3's
+//!   own UI had no `_sel` movies) is armed and the `_sel` file exists
 //!   (LayeredFS mod folders first, then the stock `data/`), and World's gate
 //!   would NOT create a MovieActor (11 of the 18 `_sel` songs have no World
 //!   movie), the music-info entry's decisive movie byte is set to
@@ -151,7 +152,9 @@ unsafe extern "C" fn init_hook(sma: *mut u8) {
     let Some(hook) = (*addr_of!(HOOK)).as_ref() else {
         return;
     };
-    let decision = if super::armed_skin() != 0 {
+    // The eras only: A3's `_sel` movies belonged to its DDR SELECTION folder,
+    // never to its own (skin-0) UI — the themes keep World's movie.
+    let decision = if super::policy::is_era(super::armed_skin()) {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { before(sma) }))
             .ok()
             .flatten()

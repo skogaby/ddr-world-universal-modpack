@@ -7,13 +7,17 @@
 //! applies per song for the whole cabinet (the gameplay packages are shared):
 //! the entered side's row governs; with both sides entered (versus) P1's row
 //! governs. A multiplayer-bot side never governs. AUTO maps the committed
-//! song's raw musicdb `<series>` through [`auto_skin`] — exactly A3's DDR
-//! SELECTION folder buckets; an explicit era applies to every song.
+//! song's raw musicdb `<series>` through [`auto_skin`] — A3's DDR SELECTION
+//! folder buckets for the eras, then DDR A's songs to the DDR A theme and
+//! A20 / A20 PLUS / A3's to A3's own UI (gold on a gold cabinet, as A3 chose
+//! it); an explicit era or theme applies to every song.
 
-/// Row value → meaning (the option row's stored integer, 0..=6).
+/// Row value → meaning (the option row's stored integer, 0..=9): OFF, AUTO,
+/// then one value per skin (value − 1 = the skin: 2..=6 the eras, 7..=9 the
+/// themes — appended, so every saved 0..=6 keeps its meaning).
 pub const ROW_OFF: i32 = 0;
 pub const ROW_AUTO: i32 = 1;
-pub const ROW_MAX: i32 = 6;
+pub const ROW_MAX: i32 = 9;
 
 /// Display text for a row value (≤ 15 bytes — the row's SSO budget).
 pub fn row_label(value: i32) -> Option<&'static str> {
@@ -25,6 +29,9 @@ pub fn row_label(value: i32) -> Option<&'static str> {
         4 => "SuperNOVA 1-2",
         5 => "X-X3 vs 2ndMIX",
         6 => "2013-2014",
+        7 => "DDR A",
+        8 => "DDR A3 (White)",
+        9 => "DDR A3 (Gold)",
         _ => return None,
     })
 }
@@ -38,17 +45,22 @@ pub fn clamp_row(value: i32) -> i32 {
     }
 }
 
-/// A3's DDR SELECTION folder buckets by raw musicdb `<series>`:
-/// 1–5 1st–5thMIX, 6–8 MAX/MAX2/EXTREME, 9–10 SuperNOVA 1–2,
-/// 11–13 X/X2/X3 VS 2ndMIX, 14–17 2013 / 2014 / A (17 = DDR A).
-/// 0, A20 (18) onward and custom series (≥ 22) keep World's UI.
-pub fn auto_skin(series: u8) -> u8 {
+/// AUTO's skin for a raw musicdb `<series>`: A3's DDR SELECTION folder
+/// buckets 1–5 1st–5thMIX, 6–8 MAX/MAX2/EXTREME, 9–10 SuperNOVA 1–2,
+/// 11–13 X/X2/X3 VS 2ndMIX, 14–16 2013 / 2014; then 17 (DDR A) → the DDR A
+/// theme and 18–20 (A20, A20 PLUS, A3) → A3's own UI, **Gold** when the
+/// cabinet is the gold cabinet (machine type 4 — A3's own test), else
+/// **White**. 0, World (21) and custom series (≥ 22) keep World's UI.
+pub fn auto_skin(series: u8, gold_cabinet: bool) -> u8 {
     match series {
         1..=5 => 1,
         6..=8 => 2,
         9..=10 => 3,
         11..=13 => 4,
-        14..=17 => 5,
+        14..=16 => 5,
+        17 => 6,
+        18..=20 if gold_cabinet => 8,
+        18..=20 => 7,
         _ => 0,
     }
 }
@@ -81,7 +93,7 @@ pub enum StockReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resolution {
-    /// 0 = World UI, 1..=5 = legacy skin.
+    /// 0 = World UI, 1..=5 = era, 6..=8 = theme.
     pub skin: u8,
     pub governing: Option<u8>,
     pub source: Source,
@@ -101,6 +113,9 @@ pub struct Inputs {
     pub series: Option<u8>,
     /// Developer-knob skin (0 = unset).
     pub dev_skin: u8,
+    /// The cabinet is the gold cabinet (only consulted for AUTO's A3 songs;
+    /// `false` when unreadable).
+    pub gold_cabinet: bool,
 }
 
 /// The governing side: P1 when entered, else P2 when entered; a bot side and
@@ -111,7 +126,7 @@ pub fn governing_side(entered: [Option<bool>; 2], bot_side: Option<u8>) -> Optio
 
 pub fn resolve(i: &Inputs) -> Resolution {
     let governing = governing_side(i.entered, i.bot_side);
-    if (1..=5).contains(&i.dev_skin) {
+    if (1..=super::policy::SKIN_MAX).contains(&i.dev_skin) {
         return Resolution {
             skin: i.dev_skin,
             governing,
@@ -132,7 +147,7 @@ pub fn resolve(i: &Inputs) -> Resolution {
         ROW_OFF => stock(StockReason::RowOff),
         ROW_AUTO => match i.series {
             None => stock(StockReason::SeriesUnavailable),
-            Some(series) => match auto_skin(series) {
+            Some(series) => match auto_skin(series, i.gold_cabinet) {
                 0 => stock(StockReason::AutoStock),
                 skin => Resolution {
                     skin,
@@ -166,33 +181,55 @@ mod tests {
             row: rows,
             series,
             dev_skin: 0,
+            gold_cabinet: false,
         }
     }
 
     #[test]
-    fn auto_table_matches_a3_folder_buckets() {
+    fn auto_table_matches_a3_folder_buckets_and_the_themes() {
+        // (series, white-cabinet skin, gold-cabinet skin)
         let expect = [
-            (0, 0),
-            (1, 1),
-            (5, 1),
-            (6, 2),
-            (8, 2),
-            (9, 3),
-            (10, 3),
-            (11, 4),
-            (13, 4),
-            (14, 5),
-            (16, 5),
-            (17, 5),
-            (18, 0),
-            (19, 0),
-            (20, 0),
-            (21, 0),
-            (22, 0),
-            (255, 0),
+            (0, 0, 0),
+            (1, 1, 1),
+            (5, 1, 1),
+            (6, 2, 2),
+            (8, 2, 2),
+            (9, 3, 3),
+            (10, 3, 3),
+            (11, 4, 4),
+            (13, 4, 4),
+            (14, 5, 5),
+            (16, 5, 5),
+            // DDR A is its own entry now.
+            (17, 6, 6),
+            // A20, A20 PLUS, A3: A3's own UI, gold on the gold cabinet.
+            (18, 7, 8),
+            (19, 7, 8),
+            (20, 7, 8),
+            // World and custom series keep World's UI.
+            (21, 0, 0),
+            (22, 0, 0),
+            (255, 0, 0),
         ];
-        for (series, skin) in expect {
-            assert_eq!(auto_skin(series), skin, "series {series}");
+        for (series, white, gold) in expect {
+            assert_eq!(auto_skin(series, false), white, "series {series} white");
+            assert_eq!(auto_skin(series, true), gold, "series {series} gold");
+        }
+    }
+
+    #[test]
+    fn auto_follows_the_cabinet_but_explicit_rows_do_not() {
+        let mut i = solo(0, ROW_AUTO, Some(20));
+        assert_eq!(resolve(&i).skin, 7);
+        i.gold_cabinet = true;
+        assert_eq!(resolve(&i).skin, 8);
+        assert_eq!(resolve(&i).source, Source::Auto(20));
+        for (row, skin) in [(8, 7), (9, 8)] {
+            for gold in [false, true] {
+                let mut i = solo(0, row, Some(20));
+                i.gold_cabinet = gold;
+                assert_eq!(resolve(&i).skin, skin, "row {row} gold {gold}");
+            }
         }
     }
 
@@ -237,6 +274,7 @@ mod tests {
             row: [ROW_OFF, 2],
             series: Some(1),
             dev_skin: 0,
+            gold_cabinet: false,
         };
         assert_eq!(resolve(&i).skin, 0);
         assert_eq!(resolve(&i).governing, Some(0));
@@ -256,6 +294,7 @@ mod tests {
             row: [6, 2],
             series: Some(1),
             dev_skin: 0,
+            gold_cabinet: false,
         };
         let r = resolve(&i);
         assert_eq!((r.governing, r.skin), (Some(1), 1));
@@ -276,6 +315,7 @@ mod tests {
             row: [2, 2],
             series: Some(1),
             dev_skin: 0,
+            gold_cabinet: false,
         };
         assert_eq!(resolve(&i).skin, 0);
         let i = Inputs {
@@ -298,7 +338,8 @@ mod tests {
     #[test]
     fn out_of_range_rows_clamp_to_off() {
         assert_eq!(clamp_row(-1), ROW_OFF);
-        assert_eq!(clamp_row(7), ROW_OFF);
+        assert_eq!(clamp_row(9), 9);
+        assert_eq!(clamp_row(10), ROW_OFF);
         assert_eq!(clamp_row(3), 3);
         assert_eq!(resolve(&solo(0, 99, Some(1))).skin, 0);
     }
@@ -309,7 +350,30 @@ mod tests {
             let l = row_label(v).unwrap();
             assert!(!l.is_empty() && l.len() <= 15 && l.is_ascii(), "{l}");
         }
-        assert_eq!(row_label(7), None);
+        assert_eq!(row_label(10), None);
         assert_eq!(row_label(-1), None);
+    }
+
+    #[test]
+    fn theme_rows_are_appended_after_the_eras() {
+        assert_eq!(ROW_MAX, 9);
+        assert_eq!(row_label(6), Some("2013-2014"));
+        assert_eq!(row_label(7), Some("DDR A"));
+        assert_eq!(row_label(8), Some("DDR A3 (White)"));
+        assert_eq!(row_label(9), Some("DDR A3 (Gold)"));
+        for (row, skin) in [(7, 6), (8, 7), (9, 8)] {
+            let r = resolve(&solo(0, row, Some(20)));
+            assert_eq!((r.skin, r.source), (skin, Source::Explicit), "row {row}");
+        }
+    }
+
+    #[test]
+    fn dev_knob_reaches_the_themes() {
+        let mut i = solo(0, ROW_OFF, None);
+        i.dev_skin = 8;
+        assert_eq!(resolve(&i).skin, 8);
+        assert_eq!(resolve(&i).source, Source::DevKnob);
+        i.dev_skin = 6;
+        assert_eq!(resolve(&i).skin, 6);
     }
 }

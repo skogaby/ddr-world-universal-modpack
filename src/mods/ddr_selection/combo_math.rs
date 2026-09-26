@@ -150,7 +150,8 @@ pub fn update_worst(worst: i32, combo: i32, grade: i32) -> i32 {
     }
 }
 
-/// Skins 1–3 use one sheet (`DAT_180265038 = {1, 2, 3}`), 4–5 one per grade.
+/// Skins 1–3 use one sheet (`DAT_180265038 = {1, 2, 3}`), the others (4–5
+/// and A3's own skin 0 — the themes) one per grade.
 pub fn single_sheet(skin: u8) -> bool {
     (1..=3).contains(&skin)
 }
@@ -161,19 +162,21 @@ pub fn single_sheet(skin: u8) -> bool {
 pub const SMARV_SHEET: &str = "smarvelous";
 
 /// The texture-name prefix (`dance_combo%04d` or `dance_combo%04d_<grade>`,
-/// worst grade clamped to `good` — A3 indexed its 4-name table unchecked).
+/// worst grade clamped to `good` — A3 indexed its 4-name table unchecked;
+/// `%04d` = [`super::policy::tex_number`], 0 for a theme).
 /// `all_smarvelous` (S-Marvelous: every step of the combo within its window,
 /// that skin's sheet staged) turns a Marvelous combo on a per-grade skin into
 /// the `smarvelous` sheet; single-sheet skins ignore it, as A3 ignored the
 /// grade there.
 pub fn sheet_prefix(skin: u8, worst: i32, all_smarvelous: bool) -> String {
+    let n = super::policy::tex_number(skin);
     if single_sheet(skin) {
-        format!("dance_combo{:04}", skin)
+        format!("dance_combo{:04}", n)
     } else if all_smarvelous && worst == 0 {
-        format!("dance_combo{:04}_{}", skin, SMARV_SHEET)
+        format!("dance_combo{:04}_{}", n, SMARV_SHEET)
     } else {
         let i = worst.clamp(0, 3) as usize;
-        format!("dance_combo{:04}_{}", skin, GRADE_NAMES[i])
+        format!("dance_combo{:04}_{}", n, GRADE_NAMES[i])
     }
 }
 
@@ -383,5 +386,32 @@ mod tests {
             arc_candidates("dance_combo0005")[1],
             "dance_combo0005_v0.arc"
         );
+    }
+
+    #[test]
+    fn themes_use_a3s_skin_0_sheets() {
+        // Per-grade sheets named with A3's skin-0 number.
+        for skin in 6..=8 {
+            assert!(!single_sheet(skin));
+            for (worst, grade) in GRADE_NAMES.iter().enumerate() {
+                assert_eq!(
+                    sheet_prefix(skin, worst as i32, false),
+                    format!("dance_combo0000_{grade}")
+                );
+            }
+            assert_eq!(
+                sheet_prefix(skin, WORST_NONE, false),
+                "dance_combo0000_good"
+            );
+            assert_eq!(sheet_prefix(skin, 0, true), "dance_combo0000_smarvelous");
+            assert_eq!(
+                word_texture(&sheet_prefix(skin, 2, false)),
+                "dance_combo0000_great_combo"
+            );
+            // Standard growth and full cells (A3's non-skin-1 paths).
+            assert_eq!(growth(100, skin), growth(100, 4));
+            assert_eq!(growth(15, skin), growth(15, 4));
+            assert_eq!(cell_width(40, skin), cell_width(40, 4));
+        }
     }
 }

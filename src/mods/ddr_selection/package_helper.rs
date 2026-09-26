@@ -17,11 +17,13 @@
 //!   branches keep their stock path) even though `GameWork+0xA8` holds the
 //!   armed skin;
 //! * a `Legacy` package ⇒ A3's append, verbatim: probe `<arc_base>000N`
-//!   (or the row's fixed arc — A3's own skin-0 art by its full `_vN` name)
-//!   through the game's own arc probe (LayeredFS-aware, `_v3`/`_v0`/…), then
-//!   insert `records[side][base] = {"<arc_base>000N", N}` and push the name —
-//!   the `LayoutActor` loads it and releases it at finalize like any stock
-//!   package. A probe miss falls back to stock (never to `<base>0000`).
+//!   (or the row's fixed / theme arc — A3's own skin-0 art by its full `_vN`
+//!   name, [`policy::package_name`]) through the game's own arc probe
+//!   (LayeredFS-aware, `_v3`/`_v0`/…), then insert `records[side][base] =
+//!   {name, N}` and push the name — the `LayoutActor` loads it and releases
+//!   it at finalize like any stock package. A probe miss falls back to stock
+//!   (never to `<base>0000`). N is the record skin: an era (1..=5) or a
+//!   theme (6..=8, World's skin-0 branches on the theme's own package).
 //!
 //! Both game callees COPY their inputs (checked on every supported build),
 //! so the record value is a mod-owned `std::string` view on the stack.
@@ -150,8 +152,9 @@ unsafe extern "C" fn helper_hook(
 }
 
 /// A package went through World's own path (`armed` = the armed skin, 0 when
-/// disarmed): World's stage-frame / gauge export names back for a stock
-/// `dance_stage` / `dance_gauge`; on an
+/// disarmed): World's stage-frame / gauge export / song-info names and the
+/// danger actor's doubles rule back for a stock `dance_stage` / `dance_gauge`
+/// / `dance_song_info` / `dance_danger`; on an
 /// armed song, the legacy layout root pushed onto the load list next to
 /// World's `dance_common` (no record — World's builder keeps World's root;
 /// `markers.rs` reads the legacy one after it).
@@ -163,6 +166,7 @@ unsafe fn after_stock(this: *mut u8, base: *const c_char, armed: u8) {
         "dance_stage" => super::stage_frame::restore(),
         "dance_gauge" => super::gauge::restore(),
         "dance_song_info" => super::song_info::restore(),
+        "dance_danger" => super::danger::restore(),
         "dance_common" if armed != 0 && !this.is_null() => {
             let Some(root) = super::markers::on_common_request(this, armed) else {
                 return;
@@ -204,11 +208,12 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     let Ok(base_str) = CStr::from_ptr(base).to_str() else {
         return false;
     };
+    let decision = policy::decide(base_str, skin, super::adapters());
     let Decision::Legacy {
         arc_base,
         skin,
-        fixed_arc,
-    } = policy::decide(base_str, skin, super::adapters())
+        naming,
+    } = decision
     else {
         return false;
     };
@@ -222,7 +227,7 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
         return false;
     }
 
-    let name = policy::package_name(arc_base, skin, fixed_arc);
+    let name = policy::package_name(arc_base, skin, naming);
     // Positions from the legacy layout root (danger 3–5 at `danger_gauge`):
     // never without the root, or the element lands at (0,0).
     if policy::adapter_for(base_str, skin) == Some(policy::Adapter::Markers)
@@ -260,7 +265,8 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     }
     // World's ComboActor asks for A3's one clip only when the package is
     // really there: World ships `dance_combo0005` blanked (A3 import needed).
-    if base_str == "dance_combo" && !super::combo::package_usable(skin) {
+    if base_str == "dance_combo" && !super::combo::package_usable(skin, name.trim_end_matches('\0'))
+    {
         return false;
     }
     // World's SongInfoActor asks for `dance_song_info_single` / `_double`
@@ -268,6 +274,13 @@ unsafe fn register_legacy(this: *mut u8, side: i32, base: *const c_char, skin: u
     // also needs World's SongInfoChild turned into A3's).
     if base_str == "dance_song_info" && !super::song_info::apply(skin) {
         return false;
+    }
+    // World's DanceDangerActor picks `danger_double` on doubles only for
+    // record skin 0: a theme's registration turns that rule on for its own
+    // package, an era's keeps A3's `danger_single`. Cosmetic — a failed
+    // patch never holds the package stock.
+    if base_str == "dance_danger" {
+        super::danger::sync(policy::wants_danger_doubles(base_str, decision));
     }
 
     let bytes = &name.as_bytes()[..name.len() - 1];

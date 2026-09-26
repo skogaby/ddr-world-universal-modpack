@@ -19,7 +19,8 @@
 //! * the export `LEA R8,[rip+"dance_stage"]` (init + 0xC8) → a near-allocated
 //!   `"stage_frame"`;
 //! * the texture `MOV R8D,0xB; LEA RDX,[rip+"dast_stage_"]` → `22` / a
-//!   near-allocated `"stage_frame000N_stage_"`.
+//!   near-allocated `"stage_frame000N_stage_"` (a theme: A3's skin-0
+//!   `"stage_frame0000_stage_"`, [`policy::tex_number`]; one slot per skin).
 //!
 //! Game thread only (the helper runs in `LayoutActor::onInitialize`).
 //! RE: `.agents/planning/2026-09-22-ddr-selection/research/
@@ -32,12 +33,17 @@ use crate::core::memory;
 use crate::core::signatures::SignatureStore;
 use crate::{log_info, log_warn};
 
+use super::policy;
+
 /// A3's export in `dance_stage_frame000N`.
 const EXPORT: &[u8] = b"stage_frame\0";
 /// Stride of the per-skin texture prefixes in the near buffer.
 const PREFIX_STRIDE: usize = 0x20;
 /// `stage_frame000N_stage_` (A3's `stage_frame%04d_stage_%s` minus the suffix).
 const PREFIX_LEN: u32 = 22;
+/// The near buffer holds the export at slot 0 and one prefix per skin.
+const BUFFER_LEN: usize = 0x1000;
+const _: () = assert!(PREFIX_STRIDE * (policy::SKIN_MAX as usize + 1) <= BUFFER_LEN);
 
 struct Sites {
     export_lea: usize,
@@ -55,7 +61,7 @@ static BROKEN: AtomicBool = AtomicBool::new(false);
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn prefix(skin: u8) -> String {
-    format!("stage_frame{:04}_stage_", skin)
+    format!("stage_frame{:04}_stage_", policy::tex_number(skin))
 }
 
 fn rel32(from_next: usize, to: usize) -> Option<i32> {
@@ -69,7 +75,7 @@ pub fn init(signatures: &SignatureStore) -> bool {
         return false;
     };
     let (export_lea, texture_site) = (s.export_lea as usize, s.texture_site as usize);
-    let buffer = unsafe { memory::alloc_near(s.export_lea, 0x1000) } as usize;
+    let buffer = unsafe { memory::alloc_near(s.export_lea, BUFFER_LEN) } as usize;
     if buffer == 0 {
         log_warn!(
             "DDR SELECTION: no near buffer for the stage-frame names -- stage frame stays World's"
@@ -78,7 +84,7 @@ pub fn init(signatures: &SignatureStore) -> bool {
     }
     unsafe {
         std::ptr::copy_nonoverlapping(EXPORT.as_ptr(), buffer as *mut u8, EXPORT.len());
-        for skin in 1..=5u8 {
+        for skin in 1..=policy::SKIN_MAX {
             let p = prefix(skin);
             debug_assert_eq!(p.len() as u32, PREFIX_LEN);
             let dst = (buffer + PREFIX_STRIDE * skin as usize) as *mut u8;
@@ -88,7 +94,10 @@ pub fn init(signatures: &SignatureStore) -> bool {
     }
     let reach = [
         rel32(export_lea + 7, buffer),
-        rel32(texture_site + 13, buffer + PREFIX_STRIDE * 5),
+        rel32(
+            texture_site + 13,
+            buffer + PREFIX_STRIDE * policy::SKIN_MAX as usize,
+        ),
     ];
     if reach.iter().any(|r| r.is_none()) {
         log_warn!("DDR SELECTION: stage-frame name buffer out of rel32 reach -- stage frame stays World's");
@@ -189,9 +198,10 @@ fn switch_to(skin: u8) -> bool {
 }
 
 /// Patch in A3's names for `skin` (package helper, right before it registers
-/// `dance_stage_frame000N`). `false` ⇒ keep `dance_stage` stock.
+/// `dance_stage_frame000N` / a theme's `dance_stage_frame0000_vN`). `false` ⇒
+/// keep `dance_stage` stock.
 pub fn apply(skin: u8) -> bool {
-    (1..=5).contains(&skin) && capable() && switch_to(skin)
+    (1..=policy::SKIN_MAX).contains(&skin) && capable() && switch_to(skin)
 }
 
 /// World's names back (a stock `dance_stage`, disarm, disable). No-op when

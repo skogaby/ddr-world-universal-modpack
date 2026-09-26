@@ -7,7 +7,7 @@
 //! song end (DancePlaySequence step 8; stage kind + 1 / + 2 on every build)
 //! and shows one root clip per kind — nothing reads the clip's children.
 //! A3 showed a root and an overlay from the era package
-//! `common_shutter000N`. Mechanism (the Step 5 stage-panel pattern, on the
+//! `common_shutter000N` (a theme: its own `common_shutter_vN`). Mechanism (the Step 5 stage-panel pattern, on the
 //! same `ShutterActor::onUpdate` detour — `panel.rs` calls in):
 //!
 //! * **Row patch, for one update only**: pre-original of the update whose
@@ -56,14 +56,6 @@ const OVERLAY_GROUP: u16 = 5;
 const PATCHED_FIELDS: usize = 5;
 
 static BM2D_DIR: &CStr = c"bm2d";
-/// Static: the loader keeps the row's POINTERS until its done callback.
-static PACKAGES: [&CStr; 5] = [
-    c"common_shutter0001",
-    c"common_shutter0002",
-    c"common_shutter0003",
-    c"common_shutter0004",
-    c"common_shutter0005",
-];
 static ROOT_CLEAR: &CStr = c"shutter_clear";
 static ROOT_FAILED: &CStr = c"shutter_failed";
 
@@ -186,7 +178,8 @@ fn resolve(outcome: Outcome) -> Option<(u8, Art, &'static CStr)> {
         return None;
     }
     let art = logic::art(skin, outcome, super::armed_mcode())?;
-    let package = *PACKAGES.get(skin as usize - 1)?;
+    // Static (the loader keeps the row's POINTERS until its done callback).
+    let package = CStr::from_bytes_with_nul(logic::package_cstr(skin)?.as_bytes()).ok()?;
     Some((skin, art, package))
 }
 

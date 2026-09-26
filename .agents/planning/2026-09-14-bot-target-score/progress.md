@@ -89,3 +89,11 @@ Resume protocol: `docs/multiplayer_bot_research.md` §12 (RE + mechanism); modul
 ### Deviations & open questions
 - A Target song that falls back to LV10 AFTER a named flip (ghost download failure / length
   mismatch) keeps the name + TARGET BOT label; S-Marv stays excluded for it too.
+
+### Follow-up 2026-09-26 — bot results pane opens on DETAILS
+- Cabinet: the 2026-09-25 presentation changes all confirmed working by the maintainer.
+- New: `results_tab_memory_writeback` AOB + `derive_results_tab_memory` (`results_tab_main_off`
+  0x60 / 0x70 old, sweep `[+]` on all five builds). The flip snapshots the bot PlayerWork's
+  main-window tab kind, writes 1 (DETAILS), restore puts it back (research §12.5). All bot modes.
+- Check: bot pane opens on Details (log `results tab memory at PlayerWork+0x60 -- bot pane opens
+  on DETAILS` at boot); a real 2P session afterwards opens P2 on whatever P2 had before.
