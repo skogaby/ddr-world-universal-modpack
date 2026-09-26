@@ -20,7 +20,7 @@
 - Some harness legs need extra inputs:
   - `$DDR_WORLD_INSTALL` for real game data
   - a sibling `ddr-chart-tools` checkout, for se_bank_synth and song_playback_speed
-  - a sibling `bemaniutils` checkout, for s_marvelous dev legs
+  - a sibling `bemaniutils` checkout, for s_marvelous dev legs (Leg H's art-size check also needs `kbinxml`, which ships with `ifstools`)
 - `updater/` and `tools/bot_sim/` are standalone crates that test natively:
   - `cargo test --manifest-path updater/Cargo.toml`
   - `scripts/validate_multiplayer_bot.sh`
@@ -57,6 +57,7 @@
 - `scripts/bot_sim.sh <ssq-dir>` — offline bot-quality simulation report.
 - `scripts/convert_movies.sh` — VC-1 → H.264 for Wine (idempotent, `--restore`).
 - `scripts/ddr_selection/import_a3_assets.{sh,bat}` — operator-side import of A3-only assets into `data_mods/ddr_selection_a3/`.
+- `scripts/gen_ddr_selection_smarv_art.py` — regenerates the legacy skins' S-Marvelous art in `data_mods/ddr_selection/s_marvelous/` from the installed legacy textures (needs `ifstools`); `--check-world` proves its recipes against `data_mods/s_marvelous/`.
 - Format tools: `arc_tool.py` / `arctool`, `unpack_arc.py`, `unpack_all.py`, `ktmdl_dump.py`, `anm_dump.py`, `split_camanm.py`, `gsp_pack.py`, `kbf_to_font.py`.
 
 ### Planning convention (PDD)

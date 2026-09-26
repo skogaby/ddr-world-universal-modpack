@@ -33,7 +33,8 @@
     "split-ssq-auto-discovery": true,
     "custom-resolution": false,
     "gameplay-timing-fixes": true,
-    "background-dancers": false
+    "background-dancers": false,
+    "ddr-selection": true
   },
   "diagnostics": {
     "profiling": false,

@@ -24,8 +24,8 @@ green plus `shape_diff.py` review for every `match+N` reader.
 - [x] Step 11: A3 announcer and crowd rules (P4) — cabinet-proven 2026-09-25
 - [x] Extra (maintainer request 2026-09-25): A3 in-gameplay option icons — cabinet-proven 2026-09-25 (`research/option-icons.md`)
 - [x] Step 12: 1st-5th option forcing (P5) — cabinet-proven 2026-09-25
-- [ ] Step 13: S-Marvelous legacy art (P6)
-- [ ] Step 14: Release integration
+- [x] Step 13: S-Marvelous legacy art (P6) — cabinet-proven 2026-09-25 (word on all five skins, combo sheet on 4–5; the S-MFC splash and a stock-song S-Marvelous re-check go into Step 14's matrix)
+- [x] Step 14: Release integration — 2026-09-25 (maintainer: complete; `ddr-selection` default ON; a final cabinet run follows — see progress.md)
 
 ---
 
@@ -294,6 +294,17 @@ Step 13: S-Marvelous legacy art (P6)
 - **Tests.** S-Marv host legs extended to the legacy templates.
 - **Integration.** Stock-song S-Marv unchanged.
 - **Demo.** Cabinet: S-Marv word, S-MFC splash and combo treatment per skin.
+- **As built (2026-09-25).** `research/smarv-legacy.md` §4 / §6. Maintainer:
+  no draft phase — the art is generated programmatically (like World's) by
+  `scripts/gen_ddr_selection_smarv_art.py` into
+  `data_mods/ddr_selection/s_marvelous/N/` and committed; two word variants
+  per skin (Judgement Color applies); A3's MARVELOUS keeps its pulse (only
+  the violet copy is muted); all five splash regions per skin; combo sheet on
+  skins 4–5 only. Runtime: `s_marvelous/targets.rs` (pure) + World's staging
+  generalised to per-package targets, patch fns pick World's or the armed
+  skin's entry, per-target applied bits gate the re-drives, `legacy.rs`
+  stages when both mods are enabled; DDR SELECTION's A3 combo write asks
+  `s_marvelous::legacy_combo_smarv`. No signatures / detours / patches.
 
 Step 14: Release integration
 
@@ -303,3 +314,11 @@ Step 14: Release integration
   release archive check (import scripts included).
 - **Tests.** Every validator + sweep green.
 - **Demo.** Stock cabinet install + import script + AUTO on a mixed setlist.
+- **As built (2026-09-25).** Maintainer called the feature complete after
+  Step 13's cabinet run. `ddr-selection` removed from `DEFAULT_OFF_MODS`
+  (it is inert until a player picks an era — the row defaults OFF) and
+  listed `"ddr-selection": true` in the repo `mod-config.json` (the updater's
+  merge adds it to cabinets that lack it; an explicit operator value wins).
+  README (heading, paragraph, mod table) and the mod doc no longer say
+  "in progress / default off". Release archive built and inspected (see
+  progress.md). The final cabinet matrix runs after this pass.

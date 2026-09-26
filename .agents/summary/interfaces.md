@@ -107,7 +107,8 @@ Byte patches have one owner each: `cull_window` (multi-contributor), `song_rate:
 | API | Rule |
 |---|---|
 | `multiplayer_bot::is_bot_side(side)` | During a bot song both sides read as entered. Any cabinet-wide policy that folds both players' option values must exclude the bot side. |
-| `ddr_selection::legacy_package(base)` | Features that restyle a HUD element (s-marvelous) stand down while that element's package is legacy. |
+| `ddr_selection::legacy_package(base)` + `armed_skin()` | A feature that edits a HUD template (s-marvelous) must pick the song's package — World's or legacy skin N's (the legacy exports share World's names and are byte-identical across some skins) — and stand down where it has nothing for that skin. |
+| `s_marvelous::on_ddr_selection_enabled()` / `legacy_combo_smarv(skin, side)` | DDR SELECTION's `enable` triggers S-Marvelous' legacy-skin staging; its A3 combo write asks for the all-S-Marvelous sheet (skins 4–5). |
 | `ddr_selection::leaked_forced_options(side)` | The save trampoline strips forced 1st-5th options from the save tree. |
 | `per_song_judgement_offsets` at `Priority::Early` | It writes `Option+0x24` before assist-tick reads it at `Normal` on the same dispatch. |
 | `s_marvelous::is_enabled()` / `state::is_armed` | Readers of the S-Marv split (PUS widget, bot filler) gate on it. |

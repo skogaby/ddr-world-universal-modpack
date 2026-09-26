@@ -143,6 +143,10 @@ Answers the §6 open questions. Addresses 20260825 / A3 `gamemdx_20240402`.
   (SD: `_v1`). A3's SongInfoActor init `FUN_180056cc0` takes the loader
   slot `+0x830` for record skin 0 — the skins 3–5 fallback — so skins 3–5 all
   showed that panel.
+  **CORRECTION 2026-09-25** (`docs/ddr_selection_a3_themes_research.md` §2, §8):
+  `FUN_180011b40` returns 6 / 7 only for machine type 4 = the **gold cabinet**
+  (the same test picks `ddra3_bg_gold`). So `_v1` is the gold-cabinet set and `_v2`
+  every other cabinet's, not HD vs SD: both are HD with identical image rects.
 - World ships `dance_song_info0000_v0..v3`; `_v0` / `_v1` / `_v2` are
   byte-identical to A3's (md5), `_v3` is early-World art (292-px base).
   World's probe reaches `_v2` only through its bare rung, so the package is

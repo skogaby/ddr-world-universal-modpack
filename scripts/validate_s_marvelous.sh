@@ -73,6 +73,7 @@ for p in "${MODULE_PATHS[@]}"; do
   [[ -r "$REPO_ROOT/$p" ]] || die "module source missing: $p"
 done
 [[ "$HAVE_SMARV_RECORDS" == 1 ]] || die "module source missing: src/mods/s_marvelous/records.rs"
+[[ -r "$REPO_ROOT/src/mods/s_marvelous/targets.rs" ]] || die "module source missing: src/mods/s_marvelous/targets.rs"
 
 TMP=$(mktemp -d)
 trap 'if [[ -z "${KEEP_TMP:-}" ]]; then rm -rf "$TMP"; fi' EXIT
@@ -121,6 +122,10 @@ mkdir -p "$TMP/src"
       echo "    #[path = \"$REPO_ROOT/src/mods/s_marvelous/receptor_color.rs\"]"
       echo "    pub mod receptor_color;"
     fi
+    # s_marvelous/targets (std-only art-target names — World + DDR
+    # SELECTION's legacy skins; also mounted by ap2check for Leg H).
+    echo "    #[path = \"$REPO_ROOT/src/mods/s_marvelous/targets.rs\"]"
+    echo "    pub mod targets;"
     echo "}"
   fi
 } >"$TMP/src/lib.rs"
@@ -137,6 +142,8 @@ mod ap2;
 mod afp;
 #[path = "$REPO_ROOT/src/core/geo.rs"]
 mod geo;
+#[path = "$REPO_ROOT/src/mods/s_marvelous/targets.rs"]
+mod targets;
 
 /// BSI byteswap + string-table cipher removal — the same "fully
 /// descrambled" shape the game's afp_patcher seam sees (docs/afp_system.md
@@ -178,11 +185,20 @@ fn main() {
         std::process::exit(smarv_patch(&args[1], &args[2], &args[3], &args[4]));
     }
     if mode == "smarv-fc" {
-        if args.len() != 4 {
-            eprintln!("usage: ap2check smarv-fc <afp> <bsi> <geo_dir>");
+        if args.len() != 4 && args.len() != 5 {
+            eprintln!("usage: ap2check smarv-fc <afp> <bsi> <geo_dir> [<skin 0..5>]");
             std::process::exit(2);
         }
-        std::process::exit(smarv_fc(&args[1], &args[2], &args[3]));
+        let skin: u8 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        std::process::exit(smarv_fc(&args[1], &args[2], &args[3], skin));
+    }
+    if mode == "smarv-legacy-word" {
+        if args.len() != 6 {
+            eprintln!("usage: ap2check smarv-legacy-word <afp> <bsi> <geo_dir> <skin 1..5> <out_afp>");
+            std::process::exit(2);
+        }
+        let skin: u8 = args[4].parse().unwrap_or(0);
+        std::process::exit(smarv_legacy_word(&args[1], &args[2], &args[3], skin, &args[5]));
     }
     if mode == "smarv-emblem" {
         if args.len() != 5 {
@@ -588,9 +604,172 @@ fn smarv_rows(afp: &str, bsi: &str, rows: &str, expected: &str, out_afp: &str) -
     0
 }
 
-/// Step-6 (Leg E): geo-first art-shape resolution + the multi-shape
-/// recipe on a REAL dance_fullcombo template (the DLL's staging path).
-fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str) -> i32 {
+/// Step-13 (Leg H): the DLL's word recipe for a DDR SELECTION legacy
+/// skin on its REAL `dance_judge000N` template — the shared geo-first
+/// resolver, then the S-Marv-only mute rung (`targets::mute_stock_glow` is
+/// false for every legacy skin: A3's MARVELOUS keeps its additive pulse).
+/// Asserts: the new region follows `targets::word_region`; the cloned
+/// chain's additive copy (when the skin has one) is silent; the STOCK
+/// word's additive copy is untouched; the new label exists in every section
+/// carrying `in_marvelous` with sorted label tables. Writes the patched file
+/// (string table re-scrambled) for the render proof.
+fn smarv_legacy_word(afp: &str, bsi: &str, geo_dir: &str, skin: u8, out_afp: &str) -> i32 {
+    if !(1..=5).contains(&skin) || targets::mute_stock_glow(skin) {
+        println!("FAIL smarv-legacy-word: skin {skin} is not a legacy target");
+        return 1;
+    }
+    let Some(data) = descramble(afp, bsi) else {
+        println!("FAIL smarv-legacy-word: descramble");
+        return 1;
+    };
+    let Some(mut doc) = ap2::Ap2Doc::parse(&data) else {
+        println!("FAIL smarv-legacy-word: parse");
+        return 1;
+    };
+    let Some((word_shape_id, donor_region)) =
+        doc.find_word_shape_by_geo("in_marvelous", "marvelous", |geo_name| {
+            let bytes = std::fs::read(format!("{geo_dir}/{geo_name}")).ok()?;
+            geo::labels(&bytes)
+        })
+    else {
+        println!("FAIL smarv-legacy-word: word chain unresolved (shared resolver)");
+        return 1;
+    };
+    let Some(new_region) = targets::word_region(&donor_region) else {
+        println!("FAIL smarv-legacy-word: donor region {donor_region} has no marvelous suffix");
+        return 1;
+    };
+    if donor_region != format!("dance_judge{skin:04}_marvelous") {
+        println!("FAIL smarv-legacy-word: donor region {donor_region} is not skin {skin}'s");
+        return 1;
+    }
+    println!("word_shape_id={word_shape_id}");
+    println!("donor_region={donor_region}");
+    println!("new_region={new_region}");
+    let Some(ids) = doc.clone_word_segment_with_new_shape_ex(
+        "in_marvelous",
+        "in_smarvelous",
+        word_shape_id,
+        ap2::WordCloneOpts {
+            mute_additive_glow: true,
+            mute_source_additive_glow: targets::mute_stock_glow(skin),
+        },
+    ) else {
+        println!("FAIL smarv-legacy-word: recipe returned None");
+        return 1;
+    };
+    println!("new_shape_id={}", ids.new_shape_id);
+    println!("new_sprite_id={}", ids.new_sprite_id);
+    println!("muted_records={}", ids.muted_records);
+    if ids.muted_source_records != 0 {
+        println!("FAIL smarv-legacy-word: the stock MARVELOUS pulse was muted");
+        return 1;
+    }
+    let Some(mut out) = doc.serialize() else {
+        println!("FAIL smarv-legacy-word: serialize");
+        return 1;
+    };
+    let Some(re) = ap2::Ap2Doc::parse(&out) else {
+        println!("FAIL smarv-legacy-word: re-parse");
+        return 1;
+    };
+    // Additive-copy alphas of a word sprite (records of objects whose
+    // create has blend 8).
+    let additive_alphas = |sec: &ap2::TagSection, sprite_id: u16| -> Vec<i32> {
+        let Some(sp) = sec.tags.iter().find_map(|t| match t {
+            ap2::Tag::DefineSprite(s) if s.id == sprite_id => Some(s),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        let mut keys: Vec<(u16, u16)> = Vec::new();
+        let mut alphas = Vec::new();
+        for t in &sp.section.tags {
+            let ap2::Tag::PlaceObject(po) = t else { continue };
+            let Some(v) = po.view() else { continue };
+            let key = (v.object_id, v.depth);
+            if v.flags & 0x1 == 0 && v.blend == Some(8) {
+                keys.push(key);
+            }
+            if keys.contains(&key) {
+                if let Some(m) = v.mult_color {
+                    alphas.push(m.alpha);
+                }
+            }
+        }
+        alphas
+    };
+    let Some(path) = re.find_sprite_by_label("in_smarvelous") else {
+        println!("FAIL smarv-legacy-word: in_smarvelous missing");
+        return 1;
+    };
+    let Some(sec) = re.section(&path) else {
+        println!("FAIL smarv-legacy-word: section");
+        return 1;
+    };
+    let cloned = additive_alphas(sec, ids.new_sprite_id);
+    let stock = additive_alphas(sec, ids.word_sprite_id);
+    println!("cloned_additive_alphas={cloned:?}");
+    println!("stock_additive_alphas={stock:?}");
+    if cloned.iter().any(|&a| a != 0) {
+        println!("FAIL smarv-legacy-word: the S-Marvelous copy still pulses");
+        return 1;
+    }
+    if cloned.len() != stock.len() {
+        println!("FAIL smarv-legacy-word: cloned / stock additive record counts differ");
+        return 1;
+    }
+    if !stock.is_empty() && !stock.iter().any(|&a| a != 0) {
+        println!("FAIL smarv-legacy-word: the stock MARVELOUS pulse is silent");
+        return 1;
+    }
+    fn check(sec: &ap2::TagSection, path: &str, errs: &mut Vec<String>) {
+        let has_src = sec.labels.iter().any(|l| l.name == "in_marvelous");
+        let has_new = sec.labels.iter().any(|l| l.name == "in_smarvelous");
+        if has_src && !has_new {
+            errs.push(format!("{path}: in_marvelous without in_smarvelous"));
+        }
+        let names: Vec<&str> = sec.labels.iter().map(|l| l.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        if names != sorted {
+            errs.push(format!("{path}: label table unsorted"));
+        }
+        for (i, t) in sec.tags.iter().enumerate() {
+            if let ap2::Tag::DefineSprite(sp) = t {
+                check(&sp.section, &format!("{path}/{i}"), errs);
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    check(&re.root, "root", &mut errs);
+    if !errs.is_empty() {
+        for e in &errs {
+            println!("FAIL smarv-legacy-word: {e}");
+        }
+        return 1;
+    }
+    let label_frame = sec.label_frame("in_smarvelous").unwrap_or(0);
+    println!("label_frame={label_frame}");
+    println!("section_frames={}", sec.frames.len());
+    let st_off = u32::from_le_bytes(out[48..52].try_into().unwrap()) as usize;
+    let st_size = u32::from_le_bytes(out[52..56].try_into().unwrap()) as usize;
+    let scrambled = ap2::encode_string_table(&out[st_off..st_off + st_size]);
+    out[st_off..st_off + st_size].copy_from_slice(&scrambled);
+    if std::fs::write(out_afp, &out).is_err() {
+        println!("FAIL smarv-legacy-word: write {out_afp}");
+        return 1;
+    }
+    println!("smarv-legacy-word OK: skin {skin}, wrote {out_afp} ({} bytes)", out.len());
+    0
+}
+
+/// Step-6 (Leg E) / Step-13 (Leg H): geo-first art-shape resolution + the
+/// multi-shape recipe on a REAL dance_fullcombo template (the DLL's staging
+/// path). `skin` 0 = World's `dance_fullcombo_v3`, 1..=5 = a DDR SELECTION
+/// legacy skin (`targets::fc_expected_shapes` gives the shape count the DLL
+/// requires).
+fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str, skin: u8) -> i32 {
     let Some(data) = descramble(afp, bsi) else {
         println!("FAIL smarv-fc: descramble");
         return 1;
@@ -609,14 +788,13 @@ fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str) -> i32 {
             continue;
         };
         let Some(labels) = geo::labels(&bytes) else { continue };
-        if labels.iter().any(|l| {
-            l.rsplit_once('_').map(|(_, t)| t.starts_with("mar")).unwrap_or(false)
-        }) {
+        if labels.iter().any(|l| targets::fc_region_rename(l).is_some()) {
             shape_ids.push(shape.id);
         }
     }
-    if shape_ids.len() != 4 {
-        println!("FAIL smarv-fc: resolved {} art shapes (want 4)", shape_ids.len());
+    let want = targets::fc_expected_shapes(skin);
+    if shape_ids.len() != want {
+        println!("FAIL smarv-fc: resolved {} art shapes (want {want})", shape_ids.len());
         return 1;
     }
     let Some(ids) =
@@ -1503,4 +1681,172 @@ for sid, smfc, mfc in found:
     print(f"    [G] sprite {sid}: loop_smfc @ {smfc} (stock loop_mfc @ {mfc})")
 PYEOF
 note "Leg G OK"
+
+# ── Leg H: DDR SELECTION legacy skins (Step 13) ─────────────────────
+# Per legacy skin 1..5: the DLL's word recipe on dance_judge000N (the
+# S-Marv-only mute — A3's MARVELOUS keeps its pulse) + a render proof with
+# the shipped legacy art, the multi-shape splash recipe (five Marvelous
+# shapes) on the four dance_fullcombo000N templates, and a size check of
+# every shipped legacy art file against its donor's imgrect (the
+# donor-anchored clone and the per-image serving both place it there).
+LEGACY_ART="$REPO_ROOT/data_mods/ddr_selection/s_marvelous"
+note "Leg H: DDR SELECTION legacy skins (word, S-MFC splash, art sizes)"
+extract_arc_file() { # <arc path> <name> -> echoes the extracted afp/ dir
+  local path="$1" out="$TMP/dev/$2"
+  mkdir -p "$out"
+  (cd "$BEMANIUTILS_DIR" && ./arcutils "$path" -d "$out") >/dev/null 2>&1 || return 1
+  local ifs_file
+  ifs_file=$(find "$out" -name "*.ifs" | head -1)
+  [[ -n "$ifs_file" ]] || return 1
+  (cd "$BEMANIUTILS_DIR" && ./ifsutils "$ifs_file" -d "$out/x") >/dev/null 2>&1 || return 1
+  [[ -d "$out/x/afp" ]] || return 1
+  echo "$out/x/afp"
+}
+for skin in 1 2 3 4 5; do
+  [[ -d "$LEGACY_ART/$skin" ]] || die "Leg H: legacy art missing: data_mods/ddr_selection/s_marvelous/$skin"
+  J="dance_judge000${skin}_v0"
+  F="dance_fullcombo000${skin}_v0"
+  JDIR=$(extract_arc "$J") || die "Leg H: extraction failed for $J"
+  FDIR=$(extract_arc "$F") || die "Leg H: extraction failed for $F"
+  WOUT="$TMP/dev/$J/smarv"
+  mkdir -p "$WOUT"
+  OUT=$("$AP2CHECK" smarv-legacy-word "$JDIR/dance_judge" "$JDIR/bsi/dance_judge" \
+    "$TMP/dev/$J/x/geo" "$skin" "$WOUT/dance_judge")
+  echo "$OUT" | grep -E "OK|FAIL|muted|alphas" | sed "s/^/    [skin $skin] /"
+  echo "$OUT" | grep -q "smarv-legacy-word OK" || die "Leg H: skin $skin word recipe failed"
+  W_SHAPE=$(echo "$OUT" | grep -oE '^word_shape_id=[0-9]+' | cut -d= -f2)
+  W_NEW=$(echo "$OUT" | grep -oE '^new_shape_id=[0-9]+' | cut -d= -f2)
+  W_DONOR=$(echo "$OUT" | grep -oE '^donor_region=.*' | cut -d= -f2)
+  W_REGION=$(echo "$OUT" | grep -oE '^new_region=.*' | cut -d= -f2)
+  W_LABEL=$(echo "$OUT" | grep -oE '^label_frame=[0-9]+' | cut -d= -f2)
+  W_FRAMES=$(echo "$OUT" | grep -oE '^section_frames=[0-9]+' | cut -d= -f2)
+  "$AP2CHECK" geo-rewrite "$TMP/dev/$J/x/geo/dance_judge_shape${W_SHAPE}" \
+    "$W_DONOR" "$W_REGION" "$WOUT/dance_judge_shape${W_NEW}" >/dev/null \
+    || die "Leg H: skin $skin geo rewrite failed"
+  for v in all_purple purple_shadow; do
+    [[ -f "$LEGACY_ART/$skin/dance_judge/smarvelous_$v.png" ]] \
+      || die "Leg H: skin $skin word art missing: smarvelous_$v.png"
+  done
+  python3 - "$BEMANIUTILS_DIR" "$(find "$TMP/dev/$J" -name "*.ifs" | head -1)" "$WOUT/dance_judge" \
+    "$WOUT/dance_judge_shape${W_NEW}" "dance_judge_shape${W_NEW}" "$W_REGION" \
+    "$LEGACY_ART/$skin/dance_judge/smarvelous_purple_shadow.png" "$W_LABEL" "$W_FRAMES" \
+    "$PREVIEW_DIR/legacy_skin${skin}_in_smarvelous.gif" <<'PYEOF' || die "Leg H: skin $skin word render failed"
+import io, os, sys
+(bemaniutils_dir, ifs_path, patched_afp, new_geo_path, new_geo_name,
+ new_region, word_png, label_frame, section_frames, out_gif) = sys.argv[1:11]
+sys.path.insert(0, bemaniutils_dir)
+from PIL import Image
+from bemani.format import IFS
+from bemani.format.afp import SWF, Shape, AFPRenderer
+ifs = IFS(open(ifs_path, "rb").read(), decode_textures=True)
+shapes, textures, swfs = {}, {}, {}
+sep = os.sep
+for fname in ifs.filenames:
+    if fname.startswith(f"geo{sep}"):
+        shape = Shape(fname[4:], ifs.read_file(fname)); shape.parse(); shapes[fname[4:]] = shape
+    elif fname.startswith(f"tex{sep}") and fname.endswith(".png"):
+        textures[fname[4:-4]] = Image.open(io.BytesIO(ifs.read_file(fname)))
+    elif fname.startswith(f"afp{sep}") and not fname.startswith(f"afp{sep}bsi{sep}") and not fname.endswith(".xml"):
+        name = fname[4:]
+        if name == "dance_judge":
+            continue
+        swf = SWF(name, ifs.read_file(fname), ifs.read_file(f"afp{sep}bsi{sep}{name}")); swf.parse(); swfs[name] = swf
+new_shape = Shape(new_geo_name, open(new_geo_path, "rb").read()); new_shape.parse()
+shapes[new_geo_name] = new_shape
+assert new_region in [getattr(d, "region", None) for d in new_shape.draw_params]
+textures[new_region] = Image.open(word_png)
+patched = SWF("dance_judge", open(patched_afp, "rb").read(), b""); patched.parse()
+swfs["dance_judge"] = patched
+assert "in_smarvelous" in patched.labels, patched.labels
+def blank_actions(tags):
+    for t in tags:
+        if hasattr(t, "bytecode") and t.bytecode is not None:
+            t.bytecode.actions = []
+        if hasattr(t, "tags"):
+            blank_actions(t.tags)
+blank_actions(patched.tags)
+renderer = AFPRenderer(shapes=shapes, textures=textures, swfs=swfs, single_threaded=True)
+start, total = int(label_frame), int(section_frames)
+frames = list(renderer.render_path("dance_judge", only_frames=list(range(start + 1, total + 1))))
+assert frames and any(f.getbbox() for f in frames), "patched segment rendered blank"
+frames[0].save(out_gif, save_all=True, append_images=frames[1:], duration=1000 // 60, loop=0)
+print(f"    [render] {len(frames)} frames -> {out_gif}")
+PYEOF
+  for tpl in 01_fullcombo_single_normal 01_fullcombo_single_reverse \
+    02_fullcombo_double_normal 02_fullcombo_double_reverse; do
+    OUT=$("$AP2CHECK" smarv-fc "$FDIR/$tpl" "$FDIR/bsi/$tpl" "$TMP/dev/$F/x/geo" "$skin")
+    echo "$OUT" | sed "s/^/    [skin $skin $tpl] /"
+    echo "$OUT" | grep -q "smarv-fc OK" || die "Leg H: skin $skin $tpl splash recipe failed"
+  done
+done
+# Art sizes vs the donors' imgrects. Skin 5's combo reads the A3 import
+# (World ships a blanked dance_combo0005), else World's data/, else the A3
+# install; skipped with a notice when none is readable.
+for skin in 4 5; do
+  C="dance_combo000${skin}_v0"
+  for cand in "$DDR_WORLD_INSTALL/data_mods/ddr_selection_a3/arc/bm2d/$C.arc" \
+    "$DDR_WORLD_INSTALL/data/arc/bm2d/$C.arc" "${DDR_A3_INSTALL:-/nonexistent}/data/arc/bm2d/$C.arc"; do
+    [[ -f "$cand" ]] || continue
+    rm -rf "$TMP/dev/$C"
+    extract_arc_file "$cand" "$C" >/dev/null && [[ -f "$TMP/dev/$C/x/tex/texturelist.xml" ]] && break
+    rm -rf "$TMP/dev/$C"
+  done
+done
+if ! python3 -c "import kbinxml" 2>/dev/null; then
+  skip "Leg H art sizes: python kbinxml not installed (pip install ifstools)"
+else
+python3 - "$LEGACY_ART" "$TMP/dev" <<'PYEOF' || die "Leg H: legacy art sizes wrong"
+import os, re, sys
+from PIL import Image
+art, dev = sys.argv[1:3]
+def rects(ifs_dir):
+    raw = open(os.path.join(ifs_dir, "x", "tex", "texturelist.xml"), "rb").read()
+    if raw.lstrip().startswith(b"<"):
+        xml = raw.decode("utf-8")
+    else:  # binary kbin (what ifsutils writes) — kbinxml ships with ifstools
+        from kbinxml import KBinXML
+        xml = KBinXML(raw).to_text()
+    out = {}
+    for m in re.finditer(r'<image name="([^"]+)">(.*?)</image>', xml, re.S):
+        r = re.search(r"<imgrect[^>]*>([^<]+)</imgrect>", m.group(2))
+        x0, x1, y0, y1 = (int(v) for v in r.group(1).split())
+        out[m.group(1)] = ((x1 - x0) // 2, (y1 - y0) // 2)
+    return out
+def rename(region):
+    head, sep, tail = region.rpartition("_")
+    return f"{head}_s{tail}" if sep and tail.startswith("mar") else None
+bad = checked = 0
+def check(path, want):
+    global bad, checked
+    if not os.path.isfile(path):
+        print(f"    [H] MISSING {os.path.relpath(path, art)}"); bad += 1; return
+    got = Image.open(path).size
+    checked += 1
+    if got != want:
+        print(f"    [H] SIZE {os.path.relpath(path, art)}: {got} vs donor {want}"); bad += 1
+for skin in range(1, 6):
+    j = rects(os.path.join(dev, f"dance_judge000{skin}_v0"))
+    for v in ("all_purple", "purple_shadow"):
+        check(os.path.join(art, str(skin), "dance_judge", f"smarvelous_{v}.png"), j[f"dance_judge000{skin}_marvelous"])
+    f = rects(os.path.join(dev, f"dance_fullcombo000{skin}_v0"))
+    regions = [(r, rename(r)) for r in f if rename(r)]
+    if len(regions) != 5:
+        print(f"    [H] skin {skin}: {len(regions)} splash regions (want 5)"); bad += 1
+    for donor, new in regions:
+        check(os.path.join(art, str(skin), "dance_fullcombo", f"{new}.png"), f[donor])
+    if skin in (4, 5):
+        cdir = os.path.join(dev, f"dance_combo000{skin}_v0")
+        if not os.path.isfile(os.path.join(cdir, "x", "tex", "texturelist.xml")):
+            print(f"    [H] skin {skin}: no readable dance_combo000{skin} (A3 import?) -- combo sizes skipped")
+            continue
+        c = rects(cdir)
+        for key in [str(d) for d in range(10)] + ["combo"]:
+            check(os.path.join(art, str(skin), "dance_combo", f"smarvelous_{key}.png"), c[f"dance_combo000{skin}_marvelous_{key}"])
+    elif os.path.isdir(os.path.join(art, str(skin), "dance_combo")):
+        print(f"    [H] skin {skin}: has combo art, but A3 drew one sheet on this skin"); bad += 1
+print(f"    [H] {checked} legacy art file(s) match their donors" + ("" if not bad else f", {bad} problem(s)"))
+sys.exit(1 if bad else 0)
+PYEOF
+fi
+note "Leg H OK — legacy previews: ${TMPDIR:-/tmp}/s_marvelous_preview/legacy_skin*_in_smarvelous.gif"
 note "OK"

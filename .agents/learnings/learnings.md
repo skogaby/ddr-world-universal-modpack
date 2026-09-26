@@ -1479,3 +1479,20 @@ vtable (`song_reset::dps_step()` via the RTTI `dance_play_sequence_vtable`);
 a scene id plus a non-null child is not an identity. Corollary for per-node
 "show" flags: clear them per OBJECT after that object's first valid publish,
 never once per window on an edge — objects created after the edge miss it.
+
+## `afp_patcher` byte gates can't tell legacy skins apart; texture tools disagree on image size (2026-09-25)
+
+`afp_patcher` keys patches by exported name, and every DDR SELECTION legacy
+package exports World's names (`dance_judge`, `01_fullcombo_single_normal`
+…). The `dance_fullcombo000N` AFPs are byte-identical between skins 2 / 3 and
+4 / 5, so "the bytes match a staged template" does not identify the IFS that
+is streaming. A patch whose new shapes have no geo / afplist entry in that IFS
+draws nothing. Rule: pick the staged entry by the song
+(`ddr_selection::legacy_package` + `armed_skin()`), then byte-gate against it.
+Separately: `ifstools` extracts textures at their **imgrect** size (the
+padded slot, e.g. 346×63), while bemaniutils' `IFS(decode_textures=True)`
+decodes at the **uvrect** (344×61). The donor-anchored atlas clone and the
+per-image serving both place the PNG at the imgrect origin, so size legacy
+art to the imgrect (World's older art is uvrect-sized, one pixel up-left,
+invisible in practice). bemaniutils' `ifsutils` writes `texturelist.xml` as
+binary kbin; read it with `kbinxml` (an ifstools dependency).

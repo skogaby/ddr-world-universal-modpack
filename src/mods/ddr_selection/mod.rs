@@ -1,4 +1,4 @@
-//! DDR SELECTION (`ddr-selection`, **default OFF** via `DEFAULT_OFF_MODS`) — revive DDR A3's
+//! DDR SELECTION (`ddr-selection`, default ON; inert until a player's row picks an era) — revive DDR A3's
 //! legacy gameplay skins per song: skins 1..=5 = 1st-5th, MAX-EXTREME, SuperNOVA, X, 2013-A.
 //! World kept most of the plumbing and the legacy `…000N` packages; it removed the `%04d`
 //! package-name append and everything that wrote the skin id. This mod puts them back and
@@ -57,8 +57,12 @@
 //! - **Threads.** Everything engine-facing runs on the game thread, except the AFP sound
 //!   route (inside libafp's display pass: lock-, allocation- and log-free), the bank build
 //!   (background thread, owned buffers) and [`leaked_forced_options`] (atomics only).
-//! - **Cross-mod seams.** [`legacy_package`] tells other mods that edit a World template
-//!   (S-Marvelous) to stand down for this song; [`leaked_forced_options`] lets the save
+//! - **Cross-mod seams.** [`legacy_package`] + [`armed_skin`] tell S-Marvelous which package
+//!   (World's or skin N's) a template stream or re-drive belongs to — it dresses the legacy
+//!   skins it has art for and stands down on the rest; `enable` calls
+//!   `s_marvelous::on_ddr_selection_enabled` so it stages that art, and the A3 combo write
+//!   asks `s_marvelous::legacy_combo_smarv` for the skins 4–5 S-Marvelous sheet;
+//!   [`leaked_forced_options`] lets the save
 //!   trampoline (`custom_options_persistence`) rewrite the `/data/option` nodes if a save is
 //!   ever built while 1st-5th's options are forced. No surface taints through `score_guard`.
 //!
@@ -761,6 +765,9 @@ impl Mod for DdrSelectionMod {
         panel::on_scene_change(scene_manager::current_scene());
         banner::on_scene_change(scene_manager::current_scene());
         ENABLED.store(true, Ordering::Release);
+        // S-Marvelous (enabled before this mod at boot) stages its legacy
+        // skins' word / S-MFC splash / combo art now, if it is enabled.
+        crate::mods::s_marvelous::on_ddr_selection_enabled();
         if self.scene_cb.is_none() {
             self.scene_cb = Some(scene_manager::on_scene_change(Box::new(|prev, next| {
                 on_scene_change(prev, next);

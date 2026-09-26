@@ -16,6 +16,12 @@
 //! the staged names always match what the patch fn will allocate at stream
 //! time (allocation is `max_character_id()+1` at call time — deterministic
 //! for fixed input bytes).
+//!
+//! The judgement word, S-MFC splash and combo staging run per [`Target`]:
+//! World's own `_v3` package (skin 0) or one of DDR SELECTION's legacy
+//! skins (1..=5, art under `data_mods/ddr_selection/s_marvelous/N/`; names
+//! in the pure [`super::targets`]). Generated output always lands under
+//! `data_mods/s_marvelous/<ifs>_ifs/`, per IFS.
 
 use crate::core::ap2::Ap2Doc;
 use crate::core::{afp, arc, geo, ifs};
@@ -24,6 +30,85 @@ use crate::services::avs_layeredfs::atlas_cloner::{
 };
 use crate::services::avs_layeredfs::{ifs_textures, mod_paths};
 use crate::{log_info, log_warn};
+
+use super::targets;
+
+// ── Targets ─────────────────────────────────────────────────────────
+
+/// One package S-Marvelous stages art into.
+#[derive(Clone, Debug)]
+pub struct Target {
+    /// 0 = World's own package, 1..=5 = a DDR SELECTION legacy skin.
+    pub skin: u8,
+    /// The arc the game opens for the package.
+    pub arc_path: String,
+    /// The IFS inside it — also the normalized IFS path the game's opens
+    /// resolve to (geo MD5 mappings, afplist extensions).
+    pub ifs_name: String,
+    /// Mod-folder-relative IFS directory (`.ifs → _ifs`).
+    pub ifs_mod_path: String,
+}
+
+impl Target {
+    fn world(arc_path: &str, ifs_name: &str, ifs_mod_path: &str) -> Target {
+        Target {
+            skin: 0,
+            arc_path: arc_path.to_string(),
+            ifs_name: ifs_name.to_string(),
+            ifs_mod_path: ifs_mod_path.to_string(),
+        }
+    }
+
+    /// Log tag: World keeps its historic `dance_judge` / template names.
+    fn tag(&self, name: &str) -> String {
+        if self.skin == 0 {
+            name.to_string()
+        } else {
+            format!("{} (skin {})", self.ifs_name, self.skin)
+        }
+    }
+}
+
+/// The package DDR SELECTION's helper registers for `kind` on `skin`
+/// (`dance_judge` + 1 → `dance_judge0001`), resolved to the arc World's
+/// probe opens: a LayeredFS mod file first (skin 5's combo comes from the A3
+/// import), then `data/`. `None` when no candidate exists.
+pub fn legacy_target(kind: &str, skin: u8) -> Option<Target> {
+    let base = targets::legacy_base(kind, skin);
+    for name in targets::arc_candidates(&base) {
+        let rel = format!("arc/bm2d/{}", name);
+        let path = mod_paths::find_first_modfile(&rel).or_else(|| {
+            let stock = format!("data/{}", rel);
+            std::path::Path::new(&stock).is_file().then_some(stock)
+        });
+        if let Some(arc_path) = path {
+            let ifs_name = targets::ifs_name(&name);
+            let ifs_mod_path = targets::ifs_mod_path(&ifs_name);
+            return Some(Target {
+                skin,
+                arc_path,
+                ifs_name,
+                ifs_mod_path,
+            });
+        }
+    }
+    None
+}
+
+/// Read a target's arc and extract its IFS member. Quiet (`None`) — the
+/// callers word their own WARN / INFO.
+fn read_target_ifs(target: &Target) -> Option<Vec<u8>> {
+    let arc_data = std::fs::read(&target.arc_path).ok()?;
+    let entries = arc::parse(&arc_data)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.path.ends_with(target.ifs_name.as_str()))?;
+    arc::extract(&arc_data, entry)
+}
+
+/// First bytes of every valid IFS (World ships a blanked
+/// `dance_combo0005_v0.arc` whose member decompresses to zeros).
+const IFS_MAGIC: [u8; 4] = [0x6C, 0xAD, 0x8F, 0x89];
 
 // ── Names (§10 derivation — see the module docs and plan.md D4) ─────
 
@@ -36,10 +121,6 @@ use crate::{log_info, log_warn};
 pub const DANCE_JUDGE_ARC: &str = "data/arc/bm2d/dance_judge_v3.arc";
 /// The IFS inside the arc (suffix-matched against the arc's entry paths).
 pub const DANCE_JUDGE_IFS: &str = "dance_judge_v3.ifs";
-/// Normalized IFS path key the game's opens resolve to (arc-contained IFS
-/// paths normalize to the BARE `<name>.ifs/...` form — the
-/// folder_expansion precedent), used for the geo MD5 mapping registration.
-pub const DANCE_JUDGE_IFS_PATH: &str = "dance_judge_v3.ifs";
 /// Mod-folder-relative IFS directory (`.ifs → _ifs`, the ifs_textures rule).
 pub const IFS_MOD_PATH: &str = "dance_judge_v3_ifs";
 /// The mod's data root (a LayeredFS mod folder).
@@ -52,10 +133,15 @@ pub const TEMPLATE_NAME: &str = "dance_judge";
 pub const SRC_LABEL: &str = "in_marvelous";
 pub const NEW_LABEL: &str = "in_smarvelous";
 /// The donor region is detected by this suffix on the word geo's label
-/// (`daju_marvelous` on the live v3 package); the new region substitutes
-/// `smarvelous` for the suffix word (`daju_smarvelous`).
+/// (`daju_marvelous` on the live v3 package, `dance_judge000N_marvelous` on
+/// the legacy skins); the new region substitutes `smarvelous` for it
+/// ([`targets::word_region`]).
 const REGION_SUFFIX_OLD: &str = "marvelous";
-const REGION_SUFFIX_NEW: &str = "smarvelous";
+
+/// World's judgement word target (`dance_judge_v3`).
+pub fn world_judge_target() -> Target {
+    Target::world(DANCE_JUDGE_ARC, DANCE_JUDGE_IFS, IFS_MOD_PATH)
+}
 /// Gameplay flash word art variants (both 260×90 — the v3 donor uvrect
 /// exactly; the donor-anchored atlas clone needs identical rects). Chosen by
 /// the "Judgement Color" overlay row / `s_marvelous.judgement_color`.
@@ -107,19 +193,29 @@ impl JudgementColor {
     pub fn png_path(self) -> String {
         format!("{}/dance_judge/smarvelous_{}.png", MOD_ROOT, self.key())
     }
+
+    /// This variant's word art for a target: World's `png_path`, or the
+    /// legacy skin's own word.
+    pub fn png_path_for(self, skin: u8) -> String {
+        if skin == 0 {
+            self.png_path()
+        } else {
+            targets::legacy_word_png(skin, self.key())
+        }
+    }
 }
 
-/// Resolve the word art to stage for `want`: that variant's PNG, or — when
-/// it is missing on disk — the other variant with one WARN (the two ship
-/// together; a half-installed data drop should not blank the word). `None`
-/// when neither exists.
-fn word_png_for(want: JudgementColor) -> Option<String> {
-    let path = want.png_path();
+/// Resolve the word art to stage for `want` on target `skin`: that variant's
+/// PNG, or — when it is missing on disk — the other variant with one WARN
+/// (the two ship together; a half-installed data drop should not blank the
+/// word). `None` when neither exists.
+fn word_png_for(skin: u8, want: JudgementColor) -> Option<String> {
+    let path = want.png_path_for(skin);
     if std::path::Path::new(&path).exists() {
         return Some(path);
     }
     let other = JudgementColor::ALL.into_iter().find(|c| *c != want)?;
-    let alt = other.png_path();
+    let alt = other.png_path_for(skin);
     if std::path::Path::new(&alt).exists() {
         log_warn!(
             "SMarvelous: word art {} missing — using {} instead",
@@ -154,29 +250,35 @@ pub fn word_clone_opts(mute_stock_glow: bool) -> crate::core::ap2::WordCloneOpts
 /// patch fn execute (identical bytes in ⇒ identical ids/bytes out — the
 /// staged-id equality check in the patch fn relies on that; the mute
 /// options never change the allocated ids). Ladder: S-Marv mute + stock
-/// mute (the shipped shape) → S-Marv mute only → unmuted. Each step down
-/// WARNs once; a mute refusal (an additive object without a mult-colour
-/// field — not a shape the live builds have) never costs the word itself.
-/// Every branch is a pure function of the template bytes, so dry run and
-/// live patch always take the same branch for the same input.
+/// mute (World's shipped shape; only when `mute_stock`) → S-Marv mute only
+/// (a legacy skin's shape: A3's MARVELOUS keeps its pulse,
+/// [`targets::mute_stock_glow`]) → unmuted. Each step down WARNs once; a
+/// mute refusal (an additive object without a mult-colour field — not a
+/// shape the live builds have) never costs the word itself. A template with
+/// no additive copy at all (legacy skin 3) passes the first rung with
+/// nothing muted. Every branch is a pure function of the template bytes, so
+/// dry run and live patch always take the same branch for the same input.
 pub fn run_word_clone(
     doc: &mut Ap2Doc,
     word_shape_id: u16,
+    mute_stock: bool,
 ) -> Option<crate::core::ap2::WordSegmentClone> {
-    let mut both = doc.clone();
-    if let Some(ids) = both.clone_word_segment_with_new_shape_ex(
-        SRC_LABEL,
-        NEW_LABEL,
-        word_shape_id,
-        word_clone_opts(true),
-    ) {
-        *doc = both;
-        return Some(ids);
-    }
-    if !WARN_STOCK_GLOW_UNMUTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        log_warn!(
-            "SMarvelous: stock Marvelous glow could not be muted on this template — the stock Marvelous word keeps its pulse"
-        );
+    if mute_stock {
+        let mut both = doc.clone();
+        if let Some(ids) = both.clone_word_segment_with_new_shape_ex(
+            SRC_LABEL,
+            NEW_LABEL,
+            word_shape_id,
+            word_clone_opts(true),
+        ) {
+            *doc = both;
+            return Some(ids);
+        }
+        if !WARN_STOCK_GLOW_UNMUTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log_warn!(
+                "SMarvelous: stock Marvelous glow could not be muted on this template — the stock Marvelous word keeps its pulse"
+            );
+        }
     }
     let mut muted = doc.clone();
     if let Some(ids) = muted.clone_word_segment_with_new_shape_ex(
@@ -199,8 +301,15 @@ static WARN_GLOW_UNMUTED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 static WARN_STOCK_GLOW_UNMUTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Everything the patch fn needs, staged at enable.
+/// Everything the patch fn needs, staged at enable — one per [`Target`].
 pub struct StagedPatch {
+    /// 0 = World, 1..=5 = the legacy skin this template belongs to.
+    pub skin: u8,
+    /// The target's IFS mod path (word-art restaging).
+    pub ifs_mod_path: String,
+    /// Whether the recipe also mutes the stock Marvelous word's pulse
+    /// ([`targets::mute_stock_glow`]).
+    pub mute_stock: bool,
     /// The stock template, descrambled — the byte-exact input the patch fn
     /// expects at the afp_patcher seam (the v1 skin gate compares against
     /// this).
@@ -211,7 +320,8 @@ pub struct StagedPatch {
     /// Ids the patch WILL allocate (dry-run of the real recipe).
     pub new_shape_id: u16,
     pub new_sprite_id: u16,
-    /// The injected texture region (`dance_judge0000_smarvelous` on 0000).
+    /// The injected texture region (`daju_smarvelous` on World,
+    /// `dance_judge000N_smarvelous` on a legacy skin).
     pub new_region: String,
 }
 
@@ -272,32 +382,37 @@ fn resolve_word_chain(doc: &Ap2Doc, ifs_data: &[u8]) -> Option<WordChain> {
 
 /// The per-image texture path the game's `tex/md5(new_region)` open is
 /// served from (`handle_texture`'s `{ifs_mod_path}/tex/{image_name}.png`).
-fn staged_word_png(new_region: &str) -> String {
-    format!("{}/{}/tex/{}.png", MOD_ROOT, IFS_MOD_PATH, new_region)
+fn staged_word_png(ifs_mod_path: &str, new_region: &str) -> String {
+    format!("{}/{}/tex/{}.png", MOD_ROOT, ifs_mod_path, new_region)
 }
 
-/// Swap the STAGED word art to `color` (the "Judgement Color" row's live
-/// apply): overwrite the per-image PNG and purge LayeredFS's converted
-/// copy + index entry so the next `tex/md5(new_region)` open re-converts
-/// the new bytes. The AFP patch, geo and texturelist are untouched — both
-/// variants share the donor rect. Takes effect when the game next loads
-/// the dance_judge package (the gameplay loader reloads it per song; a
-/// skip-results fast exit can leave it resident one song longer).
-/// Best-effort: failure WARNs and leaves the previous art staged.
-pub fn restage_word_art(color: JudgementColor, new_region: &str) -> bool {
-    let Some(word_png) = word_png_for(color) else {
+/// Swap the STAGED word art of one target to `color` (the "Judgement Color"
+/// row's live apply): overwrite the per-image PNG and purge LayeredFS's
+/// converted copy + index entry so the next `tex/md5(new_region)` open
+/// re-converts the new bytes. The AFP patch, geo and texturelist are
+/// untouched — both variants share the donor rect. Takes effect when the
+/// game next loads the dance_judge package (the gameplay loader reloads it
+/// per song; a skip-results fast exit can leave it resident one song
+/// longer). Best-effort: failure WARNs and leaves the previous art staged.
+pub fn restage_word_art(
+    color: JudgementColor,
+    skin: u8,
+    ifs_mod_path: &str,
+    new_region: &str,
+) -> bool {
+    let Some(word_png) = word_png_for(skin, color) else {
         log_warn!(
             "SMarvelous: word art missing at {} — keeping the staged art",
-            color.png_path()
+            color.png_path_for(skin)
         );
         return false;
     };
-    let image_png = staged_word_png(new_region);
+    let image_png = staged_word_png(ifs_mod_path, new_region);
     if let Err(e) = std::fs::copy(&word_png, &image_png) {
         log_warn!("SMarvelous: can't restage {}: {}", image_png, e);
         return false;
     }
-    ifs_textures::purge_texture_replacement(IFS_MOD_PATH, new_region);
+    ifs_textures::purge_texture_replacement(ifs_mod_path, new_region);
     log_info!(
         "SMarvelous: judgement color {} staged ({} -> {}); applies when dance_judge next loads",
         color.key(),
@@ -307,42 +422,53 @@ pub fn restage_word_art(color: JudgementColor, new_region: &str) -> bool {
     true
 }
 
-/// Stage the full dance_judge asset chain with the `color` word art. Any
-/// failure WARNs with the reason and returns `None` (stock behavior — AC-3).
+/// Stage World's dance_judge asset chain with the `color` word art.
 pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
-    let Some(word_png) = word_png_for(color) else {
+    stage_word(&world_judge_target(), color)
+}
+
+/// Stage one target's full dance_judge asset chain with the `color` word
+/// art. Any failure WARNs with the reason and returns `None` (stock
+/// behavior — AC-3).
+pub fn stage_word(target: &Target, color: JudgementColor) -> Option<StagedPatch> {
+    let tag = target.tag(TEMPLATE_NAME);
+    let Some(word_png) = word_png_for(target.skin, color) else {
         log_warn!(
-            "SMarvelous: word art missing at {} — dance_judge patch not staged",
-            color.png_path()
+            "SMarvelous: word art missing at {} — {} patch not staged",
+            color.png_path_for(target.skin),
+            tag
         );
         return None;
     };
 
     // ── Extract + descramble the stock template ─────────────────────
-    let arc_data = match std::fs::read(DANCE_JUDGE_ARC) {
+    let arc_data = match std::fs::read(&target.arc_path) {
         Ok(d) => d,
         Err(e) => {
-            log_warn!("SMarvelous: can't read {}: {}", DANCE_JUDGE_ARC, e);
+            log_warn!("SMarvelous: can't read {}: {}", target.arc_path, e);
             return None;
         }
     };
     let Some(entries) = arc::parse(&arc_data) else {
-        log_warn!("SMarvelous: failed to parse {}", DANCE_JUDGE_ARC);
+        log_warn!("SMarvelous: failed to parse {}", target.arc_path);
         return None;
     };
-    let ifs_entry = match entries.iter().find(|e| e.path.ends_with(DANCE_JUDGE_IFS)) {
+    let ifs_entry = match entries
+        .iter()
+        .find(|e| e.path.ends_with(target.ifs_name.as_str()))
+    {
         Some(e) => e,
         None => {
             log_warn!(
                 "SMarvelous: {} not found in {}",
-                DANCE_JUDGE_IFS,
-                DANCE_JUDGE_ARC
+                target.ifs_name,
+                target.arc_path
             );
             return None;
         }
     };
     let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
-        log_warn!("SMarvelous: failed to extract {}", DANCE_JUDGE_IFS);
+        log_warn!("SMarvelous: failed to extract {}", target.ifs_name);
         return None;
     };
 
@@ -352,15 +478,15 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     let (Some((_, afp_raw)), Some((_, bsi_raw))) =
         (afp_files.into_iter().next(), bsi_files.into_iter().next())
     else {
-        log_warn!("SMarvelous: dance_judge AFP/BSI not found in the IFS");
+        log_warn!("SMarvelous: {} AFP/BSI not found in the IFS", tag);
         return None;
     };
     let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
-        log_warn!("SMarvelous: dance_judge descramble failed");
+        log_warn!("SMarvelous: {} descramble failed", tag);
         return None;
     };
     let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
-        log_warn!("SMarvelous: stock dance_judge did not parse — patch not staged");
+        log_warn!("SMarvelous: stock {} did not parse — patch not staged", tag);
         return None;
     };
     if doc.exported_name() != TEMPLATE_NAME {
@@ -374,11 +500,12 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     // ── Resolve the word chain (§10) ────────────────────────────────
     let Some(chain) = resolve_word_chain(&doc, &ifs_data) else {
         log_warn!(
-            "SMarvelous: dance_judge word chain unresolved (unknown structure) — patch not staged"
+            "SMarvelous: {} word chain unresolved (unknown structure) — patch not staged",
+            tag
         );
         return None;
     };
-    let Some(stem) = chain.donor_region.strip_suffix(REGION_SUFFIX_OLD) else {
+    let Some(new_region) = targets::word_region(&chain.donor_region) else {
         log_warn!(
             "SMarvelous: donor region '{}' has no '{}' suffix — patch not staged",
             chain.donor_region,
@@ -386,17 +513,23 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
         );
         return None;
     };
-    let new_region = format!("{}{}", stem, REGION_SUFFIX_NEW);
 
     // ── Dry-run the REAL recipe to learn the ids the patch allocates ─
     // (the same ladder the live patch fn runs on these exact bytes).
+    let mute_stock = targets::mute_stock_glow(target.skin);
     let mut scratch = doc.clone();
-    let Some(ids) = run_word_clone(&mut scratch, chain.word_shape_id) else {
-        log_warn!("SMarvelous: dance_judge patch dry-run failed — patch not staged");
+    let Some(ids) = run_word_clone(&mut scratch, chain.word_shape_id, mute_stock) else {
+        log_warn!(
+            "SMarvelous: {} patch dry-run failed — patch not staged",
+            tag
+        );
         return None;
     };
     if scratch.serialize().is_none() {
-        log_warn!("SMarvelous: patched dance_judge does not serialize — patch not staged");
+        log_warn!(
+            "SMarvelous: patched {} does not serialize — patch not staged",
+            tag
+        );
         return None;
     }
 
@@ -412,7 +545,7 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
         return None;
     };
     let geo_name = format!("{}_shape{}", doc.exported_name(), ids.new_shape_id);
-    let geo_dir = format!("{}/{}/geo", MOD_ROOT, IFS_MOD_PATH);
+    let geo_dir = format!("{}/{}/geo", MOD_ROOT, target.ifs_mod_path);
     if let Err(e) = std::fs::create_dir_all(&geo_dir) {
         log_warn!("SMarvelous: mkdir {}: {} — patch not staged", geo_dir, e);
         return None;
@@ -428,8 +561,11 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     }
 
     // ── Donor-anchored atlas clone (cache-guarded) ──────────────────
-    let Some(texlist) = load_stock_texturelist(DANCE_JUDGE_ARC, DANCE_JUDGE_IFS) else {
-        log_warn!("SMarvelous: stock dance_judge texturelist unavailable — patch not staged");
+    let Some(texlist) = load_stock_texturelist(&target.arc_path, &target.ifs_name) else {
+        log_warn!(
+            "SMarvelous: stock {} texturelist unavailable — patch not staged",
+            tag
+        );
         return None;
     };
     let batch = [AtlasSet {
@@ -441,7 +577,13 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
         }],
         fresh: false, // donor-anchored: cloned geo UVs must stay valid
     }];
-    match generate_cloned_atlases_cached(&texlist, IFS_MOD_PATH, CACHE_ROOT, MOD_ROOT, &batch) {
+    match generate_cloned_atlases_cached(
+        &texlist,
+        &target.ifs_mod_path,
+        CACHE_ROOT,
+        MOD_ROOT,
+        &batch,
+    ) {
         BatchResult::Nothing => {
             log_warn!("SMarvelous: word atlas injection produced nothing — patch not staged");
             return None;
@@ -450,14 +592,16 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     }
 
     // ── Serve the new geo by MD5 name ───────────────────────────────
-    ifs_textures::register_afp_geo_mapping(DANCE_JUDGE_IFS_PATH, &geo_name);
+    // (Arc-contained IFS paths normalize to the BARE `<name>.ifs/...` form
+    // — the folder_expansion precedent — so the IFS name is the key.)
+    ifs_textures::register_afp_geo_mapping(&target.ifs_name, &geo_name);
 
     // The AFP runtime loads geos strictly from the afplist `<geo>` id list
     // at IFS mount (deploy #4: `afp-mip: can not find geo id` — no
     // on-demand fallback). Extend the existing dance_judge entry so the
     // stream registers our new shape.
     ifs_textures::register_afplist_geo_extension(
-        DANCE_JUDGE_IFS_PATH,
+        &target.ifs_name,
         TEMPLATE_NAME,
         &[ids.new_shape_id],
     );
@@ -468,12 +612,12 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     // `{ifs_mod_path}/tex/{image_name}.png` (folder_expansion's shipped
     // pattern), converting + padding to the imgrect dims from the merged
     // texturelist. Stage a copy of the word art under the image name.
-    let tex_dir = format!("{}/{}/tex", MOD_ROOT, IFS_MOD_PATH);
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, target.ifs_mod_path);
     if let Err(e) = std::fs::create_dir_all(&tex_dir) {
         log_warn!("SMarvelous: mkdir {}: {} — patch not staged", tex_dir, e);
         return None;
     }
-    let image_png = staged_word_png(&new_region);
+    let image_png = staged_word_png(&target.ifs_mod_path, &new_region);
     if let Err(e) = std::fs::copy(&word_png, &image_png) {
         log_warn!(
             "SMarvelous: can't stage {}: {} — patch not staged",
@@ -487,9 +631,9 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     // enable ran. If the merged texturelist / geo weren't on disk at scan
     // time (first boot after deploy), rescan once so this boot sees them
     // (music_wheel_song_length precedent).
-    let merged_rel = format!("{}/tex/texturelist.merged.xml", IFS_MOD_PATH);
-    let geo_rel = format!("{}/geo/{}", IFS_MOD_PATH, geo_name);
-    let tex_rel = format!("{}/tex/{}.png", IFS_MOD_PATH, new_region);
+    let merged_rel = format!("{}/tex/texturelist.merged.xml", target.ifs_mod_path);
+    let geo_rel = format!("{}/geo/{}", target.ifs_mod_path, geo_name);
+    let tex_rel = format!("{}/tex/{}.png", target.ifs_mod_path, new_region);
     if mod_paths::find_first_modfile(&merged_rel).is_none()
         || mod_paths::find_first_modfile(&geo_rel).is_none()
         || mod_paths::find_first_modfile(&tex_rel).is_none()
@@ -499,16 +643,21 @@ pub fn stage(color: JudgementColor) -> Option<StagedPatch> {
     }
 
     log_info!(
-        "SMarvelous: dance_judge patch staged (word sprite {}, shape {} -> new shape {} / sprite {}, geo '{}', region '{}')",
+        "SMarvelous: {} patch staged (word sprite {}, shape {} -> new shape {} / sprite {}, geo '{}', region '{}'{})",
+        tag,
         ids.word_sprite_id,
         chain.word_shape_id,
         ids.new_shape_id,
         ids.new_sprite_id,
         geo_name,
-        new_region
+        new_region,
+        if mute_stock { "" } else { ", stock MARVELOUS keeps its pulse" }
     );
 
     Some(StagedPatch {
+        skin: target.skin,
+        ifs_mod_path: target.ifs_mod_path.clone(),
+        mute_stock,
         stock_bytes,
         word_shape_id: chain.word_shape_id,
         new_shape_id: ids.new_shape_id,
@@ -804,27 +953,32 @@ pub const FC_NEW_LABEL: &str = "s_marbelous_in";
 const FC_PNG_DIR: &str = "./data_mods/s_marvelous/dance_fullcombo";
 const FC_ATLAS_PREFIX: &str = "smarv_fc";
 
-/// Marvelous-art region → (new region, mod art file). The rename rule:
-/// prefix `s` onto the last underscore token iff it starts with `mar`
-/// (`dafu_eff_mar`→`dafu_eff_smar`, `dafu_light_marvelous`→
-/// `dafu_light_smarvelous`) — the shipped art filenames follow it exactly.
+/// Marvelous-art region rename (the shipped art filenames follow it
+/// exactly): [`targets::fc_region_rename`].
 fn fc_region_rename(region: &str) -> Option<String> {
-    let (head, tail) = region.rsplit_once('_')?;
-    if !tail.starts_with("mar") {
-        return None;
-    }
-    Some(format!("{}_s{}", head, tail))
+    targets::fc_region_rename(region)
 }
 
-/// Mod art path for a NEW region name (`dafu_eff_smar` →
-/// `dance_fullcombo/dafu_eff_smar.png`). Note the shipped files are named
-/// by their historical short names; normalize via a lookup.
-fn fc_art_path(new_region: &str) -> String {
-    format!("{}/{}.png", FC_PNG_DIR, new_region)
+/// Mod art path for a NEW region name on a target (`dafu_eff_smar` →
+/// `dance_fullcombo/dafu_eff_smar.png` under World's or the legacy skin's
+/// art folder).
+fn fc_art_path(skin: u8, new_region: &str) -> String {
+    if skin == 0 {
+        format!("{}/{}.png", FC_PNG_DIR, new_region)
+    } else {
+        targets::legacy_fc_png(skin, new_region)
+    }
+}
+
+/// World's S-MFC splash target (`dance_fullcombo_v3`).
+pub fn world_fullcombo_target() -> Target {
+    Target::world(DANCE_FC_ARC, DANCE_FC_IFS, FC_IFS_MOD_PATH)
 }
 
 /// Everything one splash template's patch needs.
 pub struct StagedFcPatch {
+    /// 0 = World, 1..=5 = the legacy skin this template belongs to.
+    pub skin: u8,
     pub template: &'static str,
     pub stock_bytes: Vec<u8>,
     /// Donor art shape ids in resolution order.
@@ -833,19 +987,25 @@ pub struct StagedFcPatch {
     pub expected: crate::core::ap2::MultiShapeSegmentClone,
 }
 
-/// Stage the S-MFC splash chain: per template — geo-first art-shape
-/// resolution, dry-run of the multi-shape recipe, rewritten geos, geo MD5
-/// mappings + afplist extensions; once per IFS — donor-anchored atlas
-/// clone + per-image PNGs. Returns the staged patches (empty = fully
-/// unstaged, one WARN per failure; per-template failures skip that
-/// template only).
+/// Stage World's S-MFC splash chain.
 pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
-    let arc_data = match std::fs::read(DANCE_FC_ARC) {
+    stage_fullcombo_for(&world_fullcombo_target())
+}
+
+/// Stage one target's S-MFC splash chain: per template — geo-first
+/// art-shape resolution (exactly [`targets::fc_expected_shapes`] shapes),
+/// dry-run of the multi-shape recipe, rewritten geos, geo MD5 mappings +
+/// afplist extensions; once per IFS — donor-anchored atlas clone + per-image
+/// PNGs. Returns the staged patches (empty = fully unstaged, one WARN per
+/// failure; per-template failures skip that template only).
+pub fn stage_fullcombo_for(target: &Target) -> Vec<StagedFcPatch> {
+    let tag = target.tag("dance_fullcombo");
+    let arc_data = match std::fs::read(&target.arc_path) {
         Ok(d) => d,
         Err(e) => {
             log_warn!(
                 "SMarvelous: can't read {}: {} — splash unstaged",
-                DANCE_FC_ARC,
+                target.arc_path,
                 e
             );
             return Vec::new();
@@ -854,34 +1014,38 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
     let Some(entries) = arc::parse(&arc_data) else {
         log_warn!(
             "SMarvelous: failed to parse {} — splash unstaged",
-            DANCE_FC_ARC
+            target.arc_path
         );
         return Vec::new();
     };
-    let Some(ifs_entry) = entries.iter().find(|e| e.path.ends_with(DANCE_FC_IFS)) else {
+    let Some(ifs_entry) = entries
+        .iter()
+        .find(|e| e.path.ends_with(target.ifs_name.as_str()))
+    else {
         log_warn!(
             "SMarvelous: {} not in {} — splash unstaged",
-            DANCE_FC_IFS,
-            DANCE_FC_ARC
+            target.ifs_name,
+            target.arc_path
         );
         return Vec::new();
     };
     let Some(ifs_data) = arc::extract(&arc_data, ifs_entry) else {
         log_warn!(
             "SMarvelous: failed to extract {} — splash unstaged",
-            DANCE_FC_IFS
+            target.ifs_name
         );
         return Vec::new();
     };
 
-    let geo_dir = format!("{}/{}/geo", MOD_ROOT, FC_IFS_MOD_PATH);
+    let geo_dir = format!("{}/{}/geo", MOD_ROOT, target.ifs_mod_path);
     if let Err(e) = std::fs::create_dir_all(&geo_dir) {
         log_warn!("SMarvelous: mkdir {}: {} — splash unstaged", geo_dir, e);
         return Vec::new();
     }
 
-    // Region set across templates (they share the four art regions) for
-    // the one-time texture staging below.
+    let want_shapes = targets::fc_expected_shapes(target.skin);
+    // Region set across templates (they share the art regions) for the
+    // one-time texture staging below.
     let mut regions: Vec<(String, String)> = Vec::new(); // (donor, new)
     let mut staged: Vec<StagedFcPatch> = Vec::new();
 
@@ -892,15 +1056,24 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
         let (Some((_, afp_raw)), Some((_, bsi_raw))) =
             (afp_files.into_iter().next(), bsi_files.into_iter().next())
         else {
-            log_warn!("SMarvelous: {} AFP/BSI missing — skipped", template);
+            log_warn!(
+                "SMarvelous: {} AFP/BSI missing — skipped",
+                target.tag(template)
+            );
             continue;
         };
         let Some(stock_bytes) = descramble(afp_raw, &bsi_raw) else {
-            log_warn!("SMarvelous: {} descramble failed — skipped", template);
+            log_warn!(
+                "SMarvelous: {} descramble failed — skipped",
+                target.tag(template)
+            );
             continue;
         };
         let Some(doc) = Ap2Doc::parse(&stock_bytes) else {
-            log_warn!("SMarvelous: {} did not parse — skipped", template);
+            log_warn!(
+                "SMarvelous: {} did not parse — skipped",
+                target.tag(template)
+            );
             continue;
         };
 
@@ -929,11 +1102,12 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
                 }
             }
         }
-        if shape_ids.len() != 4 {
+        if shape_ids.len() != want_shapes {
             log_warn!(
-                "SMarvelous: {} resolved {} art shapes (want 4) — skipped",
-                template,
-                shape_ids.len()
+                "SMarvelous: {} resolved {} art shapes (want {}) — skipped",
+                target.tag(template),
+                shape_ids.len(),
+                want_shapes
             );
             continue;
         }
@@ -943,13 +1117,16 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
         let Some(expected) =
             scratch.clone_segment_with_new_shapes(FC_SRC_LABEL, FC_NEW_LABEL, &shape_ids)
         else {
-            log_warn!("SMarvelous: {} dry-run failed — skipped", template);
+            log_warn!(
+                "SMarvelous: {} dry-run failed — skipped",
+                target.tag(template)
+            );
             continue;
         };
         if scratch.serialize().is_none() {
             log_warn!(
                 "SMarvelous: {} patched doc does not serialize — skipped",
-                template
+                target.tag(template)
             );
             continue;
         }
@@ -970,7 +1147,7 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
             }) else {
                 log_warn!(
                     "SMarvelous: {} geo rewrite failed ({})",
-                    template,
+                    target.tag(template),
                     donor_region
                 );
                 ok = false;
@@ -991,12 +1168,13 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
             continue;
         }
         for geo_name in &new_geo_names {
-            ifs_textures::register_afp_geo_mapping(DANCE_FC_IFS, geo_name);
+            ifs_textures::register_afp_geo_mapping(&target.ifs_name, geo_name);
         }
         let new_ids: Vec<u16> = expected.shapes.iter().map(|(_, n)| *n).collect();
-        ifs_textures::register_afplist_geo_extension(DANCE_FC_IFS, template, &new_ids);
+        ifs_textures::register_afplist_geo_extension(&target.ifs_name, template, &new_ids);
 
         staged.push(StagedFcPatch {
+            skin: target.skin,
             template,
             stock_bytes,
             shape_ids,
@@ -1009,14 +1187,14 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
     }
 
     // ── One-time texture staging (shared across templates) ──────────
-    let tex_dir = format!("{}/{}/tex", MOD_ROOT, FC_IFS_MOD_PATH);
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, target.ifs_mod_path);
     if let Err(e) = std::fs::create_dir_all(&tex_dir) {
         log_warn!("SMarvelous: mkdir {}: {} — splash unstaged", tex_dir, e);
         return Vec::new();
     }
     let mut specs = Vec::new();
     for (donor, new_region) in &regions {
-        let src = fc_art_path(new_region);
+        let src = fc_art_path(target.skin, new_region);
         if !std::path::Path::new(&src).exists() {
             log_warn!(
                 "SMarvelous: splash art missing at {} — splash unstaged",
@@ -1035,8 +1213,11 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
             png_path: src,
         });
     }
-    let Some(texlist) = load_stock_texturelist(DANCE_FC_ARC, DANCE_FC_IFS) else {
-        log_warn!("SMarvelous: stock dance_fullcombo texturelist unavailable — splash unstaged");
+    let Some(texlist) = load_stock_texturelist(&target.arc_path, &target.ifs_name) else {
+        log_warn!(
+            "SMarvelous: stock {} texturelist unavailable — splash unstaged",
+            tag
+        );
         return Vec::new();
     };
     let batch = [AtlasSet {
@@ -1044,7 +1225,13 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
         specs,
         fresh: false, // donor-anchored: cloned geo UVs must stay valid
     }];
-    match generate_cloned_atlases_cached(&texlist, FC_IFS_MOD_PATH, CACHE_ROOT, MOD_ROOT, &batch) {
+    match generate_cloned_atlases_cached(
+        &texlist,
+        &target.ifs_mod_path,
+        CACHE_ROOT,
+        MOD_ROOT,
+        &batch,
+    ) {
         BatchResult::Nothing => {
             log_warn!("SMarvelous: splash atlas injection produced nothing — splash unstaged");
             return Vec::new();
@@ -1053,11 +1240,12 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
     }
 
     // First-boot mod-path visibility (same rule as the other stagings).
-    let merged_rel = format!("{}/tex/texturelist.merged.xml", FC_IFS_MOD_PATH);
-    let probe_geo = format!(
-        "{}/geo/{}_shape{}",
-        FC_IFS_MOD_PATH, staged[0].template, staged[0].expected.shapes[0].1
-    );
+    let merged_rel = format!("{}/tex/texturelist.merged.xml", target.ifs_mod_path);
+    let probe_geo = staged
+        .first()
+        .and_then(|p| p.expected.shapes.first().map(|s| (p.template, s.1)))
+        .map(|(tpl, id)| format!("{}/geo/{}_shape{}", target.ifs_mod_path, tpl, id))
+        .unwrap_or_default();
     if mod_paths::find_first_modfile(&merged_rel).is_none()
         || mod_paths::find_first_modfile(&probe_geo).is_none()
     {
@@ -1065,12 +1253,123 @@ pub fn stage_fullcombo() -> Vec<StagedFcPatch> {
         mod_paths::init_mod_paths();
     }
 
-    log_info!(
-        "SMarvelous: splash staged ({} template(s), {} region(s))",
-        staged.len(),
-        regions.len()
-    );
+    if target.skin == 0 {
+        log_info!(
+            "SMarvelous: splash staged ({} template(s), {} region(s))",
+            staged.len(),
+            regions.len()
+        );
+    } else {
+        log_info!(
+            "SMarvelous: {} splash staged ({} template(s), {} region(s))",
+            tag,
+            staged.len(),
+            regions.len()
+        );
+    }
     staged
+}
+
+// ── Legacy combo sheet (DDR SELECTION skins 4–5) ────────────────────
+
+/// Stage a legacy skin's all-S-Marvelous combo sheet: the eleven
+/// `dance_combo000N_smarvelous_{0..9,combo}` textures as a FRESH set in the
+/// skin's combo IFS (per-image PNGs + merged texturelist) — DDR SELECTION's
+/// A3 texture write binds them by name (`afp_mc_load_bitmap`), exactly like
+/// World's `daco_combo_smarvelous_%d`. No geo, no AP2 patch. `false` ⇒ the
+/// skin keeps A3's Marvelous sheet (one WARN / INFO names the reason).
+pub fn stage_legacy_combo(target: &Target) -> bool {
+    let skin = target.skin;
+    // World ships a blanked dance_combo0005 (DDR SELECTION WARNs about it
+    // when a skin-5 song plays); without a valid IFS there is nothing to
+    // dress — say so quietly.
+    let usable = read_target_ifs(target).is_some_and(|d| d.starts_with(&IFS_MAGIC));
+    if !usable {
+        log_info!(
+            "SMarvelous: {} is not a readable combo package (skin {} without the A3 import?) -- no S-Marvelous combo sheet",
+            target.arc_path,
+            skin
+        );
+        return false;
+    }
+    let tex_dir = format!("{}/{}/tex", MOD_ROOT, target.ifs_mod_path);
+    if let Err(e) = std::fs::create_dir_all(&tex_dir) {
+        log_warn!(
+            "SMarvelous: mkdir {}: {} — skin {} combo sheet unstaged",
+            tex_dir,
+            e,
+            skin
+        );
+        return false;
+    }
+    let mut specs = Vec::with_capacity(targets::COMBO_KEYS.len());
+    for key in targets::COMBO_KEYS {
+        let src = targets::legacy_combo_png(skin, key);
+        let new_name = targets::legacy_combo_texture(skin, key);
+        let dst = format!("{}/{}.png", tex_dir, new_name);
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            log_warn!(
+                "SMarvelous: can't stage {}: {} — skin {} combo sheet unstaged",
+                dst,
+                e,
+                skin
+            );
+            return false;
+        }
+        specs.push(OwnedTextureSpec {
+            new_name,
+            donor_name: targets::legacy_combo_donor(skin),
+            png_path: src,
+        });
+    }
+    let Some(texlist) = load_stock_texturelist(&target.arc_path, &target.ifs_name) else {
+        log_warn!(
+            "SMarvelous: stock {} texturelist unavailable — skin {} combo sheet unstaged",
+            target.ifs_name,
+            skin
+        );
+        return false;
+    };
+    let batch = [AtlasSet {
+        atlas_prefix: COMBO_ATLAS_PREFIX.to_string(),
+        specs,
+        fresh: true, // net-new sheet — bitmap loads bind by name alone
+    }];
+    match generate_cloned_atlases_cached(
+        &texlist,
+        &target.ifs_mod_path,
+        CACHE_ROOT,
+        MOD_ROOT,
+        &batch,
+    ) {
+        BatchResult::Nothing => {
+            log_warn!(
+                "SMarvelous: skin {} combo sheet atlas injection produced nothing — unstaged",
+                skin
+            );
+            false
+        }
+        BatchResult::Cached | BatchResult::Rebuilt => {
+            let merged_rel = format!("{}/tex/texturelist.merged.xml", target.ifs_mod_path);
+            let probe_rel = format!(
+                "{}/tex/{}.png",
+                target.ifs_mod_path,
+                targets::legacy_combo_texture(skin, "0")
+            );
+            if mod_paths::find_first_modfile(&merged_rel).is_none()
+                || mod_paths::find_first_modfile(&probe_rel).is_none()
+            {
+                log_info!("SMarvelous: combo assets not in mod-path cache — rescanning");
+                mod_paths::init_mod_paths();
+            }
+            log_info!(
+                "SMarvelous: {} S-Marvelous combo sheet staged ({} images, fresh atlas)",
+                target.tag("dance_combo"),
+                targets::COMBO_KEYS.len()
+            );
+            true
+        }
+    }
 }
 
 // ── FC emblems (Step 9) ──────────────────────────────────────────────

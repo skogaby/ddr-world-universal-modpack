@@ -22,8 +22,8 @@ pub fn row_label(value: i32) -> Option<&'static str> {
         1 => "AUTO",
         2 => "1st-5th",
         3 => "MAX-EXTREME",
-        4 => "SuperNOVA",
-        5 => "X",
+        4 => "SuperNOVA 1-2",
+        5 => "X-X3 vs 2ndMIX",
         6 => "2013-A",
         _ => return None,
     })

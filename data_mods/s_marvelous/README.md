@@ -1,5 +1,10 @@
 # S-Marvelous — mod assets
 
+(World's own packages. The S-Marvelous art for DDR SELECTION's legacy skins
+lives in `data_mods/ddr_selection/s_marvelous/`, generated with the same
+recipes by `scripts/gen_ddr_selection_smarv_art.py`, whose `--check-world`
+mode regenerates the World files below and compares them.)
+
 **STATUS: PLACEHOLDER ART** — programmatic deep-violet colorizes (hue fixed
 ~280°, saturation floor 150 so white cores take the tint, value ×0.82) of the
 stock Marvelous donors, generated 2026-08-29. Replace each file with the real

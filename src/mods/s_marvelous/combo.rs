@@ -7,7 +7,9 @@
 //! detour (`services::combo_hooks`, promoted from this file; the refresh is
 //! event-driven — init and combo-changed messages with combo ≥ 4, never
 //! per-frame). A DDR SELECTION legacy combo never reaches World's refresh,
-//! so this never runs for it.
+//! so this never runs for it — the legacy skins 4–5 get an S-Marvelous sheet
+//! of their own instead ([`add_legacy`], read by DDR SELECTION's A3 texture
+//! write through `super::legacy_combo_smarv`).
 //! Post-original, when the stock worst-judgement index says Marvelous tier
 //! (`this+0x6C == 0`) AND the side's all-S-Marv bit holds:
 //!
@@ -30,7 +32,7 @@
 //! once in its own log) — gated behind `assets_ready` so that can't happen
 //! in practice.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::core::signatures::SignatureStore;
 use crate::services::{bm2d_api, combo_hooks};
@@ -66,6 +68,51 @@ const PLACES: [u32; 3] = [10, 100, 1000];
 
 pub fn set_assets_ready(ready: bool) {
     ASSETS_READY.store(ready, Ordering::Release);
+}
+
+// ── DDR SELECTION legacy combo (skins 4–5) ──────────────────────────
+//
+// A legacy combo never reaches World's refresh (DDR SELECTION's A3 texture
+// write replaces it), so the repaint below cannot dress it. Instead the
+// legacy write asks [`super::legacy_combo_smarv`] and, when the combo is all
+// S-Marvelous, loads the skin's `dance_combo000N_smarvelous_*` sheet in place
+// of `…_marvelous_*` — A3's own per-grade sheet switch with one more grade.
+
+/// Bit per legacy skin ([`super::targets::skin_bit`]) whose S-Marvelous
+/// combo sheet is staged. Never cleared (the staged textures stay served);
+/// the query also requires the mod enabled.
+static LEGACY_SHEETS: AtomicU8 = AtomicU8::new(0);
+
+/// Stage a legacy skin's S-Marvelous combo sheet (skins with per-grade
+/// sheets only — A3's skins 1–3 have one sheet whatever the grade).
+/// Idempotent per skin.
+pub fn add_legacy(skin: u8) -> bool {
+    use super::targets;
+    if !targets::legacy_combo_has_grade_sheets(skin) {
+        return false;
+    }
+    let bit = targets::skin_bit(skin);
+    if LEGACY_SHEETS.load(Ordering::Acquire) & bit != 0 {
+        return true;
+    }
+    let Some(target) = super::assets::legacy_target("dance_combo", skin) else {
+        log_info!(
+            "SMarvelous: no dance_combo{:04} package on this install -- no S-Marvelous combo sheet for skin {}",
+            skin,
+            skin
+        );
+        return false;
+    };
+    if !super::assets::stage_legacy_combo(&target) {
+        return false;
+    }
+    LEGACY_SHEETS.fetch_or(bit, Ordering::AcqRel);
+    true
+}
+
+/// Whether the skin's S-Marvelous combo sheet is staged.
+pub fn legacy_sheet_staged(skin: u8) -> bool {
+    LEGACY_SHEETS.load(Ordering::Acquire) & super::targets::skin_bit(skin) != 0
 }
 
 /// Subscribe the repaint to the shared combo-refresh detour

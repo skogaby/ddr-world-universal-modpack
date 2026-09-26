@@ -481,6 +481,9 @@ original work. The runtime generalises S-Marv's word-clone / splash recipes
 (`core/ap2` editing) to the legacy templates, keyed on
 `dance_judge000N_v0.ifs` / `dance_fullcombo000N_v0.ifs`; the bridge then
 enables S-Marv presentation on legacy songs whose art exists.
+*As built 2026-09-25:* no draft phase (maintainer) — the art is generated
+programmatically like World's (`scripts/gen_ddr_selection_smarv_art.py`) and
+committed; see `research/smarv-legacy.md`.
 
 ### 4.10 Diagnostics
 

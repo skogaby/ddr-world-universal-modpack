@@ -4,6 +4,12 @@
 //! — to the mod-synthesized `in_smarvelous` label, one event later in the
 //! same frame (before anything renders). Design §4.4.
 //!
+//! On a DDR SELECTION legacy song the NoteResultActor is still World's; its
+//! `+0xA0` clip is the legacy skin's `dance_judge000N` template, which
+//! carries `in_smarvelous` only when S-Marvelous staged that skin's art —
+//! the re-drive checks that THIS song's template (World's or the armed
+//! skin's) was patched, never the session-wide World latch alone.
+//!
 //! Also the post-original fan-out point for the OTHER judge-event display
 //! surfaces (`on_judge_event`): the FAST/SLOW re-hide and the violet
 //! receptor burst (`receptor`).
@@ -17,7 +23,7 @@
 //! satisfies by construction. Panic-free, lock-free (the one mutex is
 //! `bm2d_api`'s uncontended API cell, the house pattern for libafp calls).
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 
 use crate::mods::overlay_element_styling;
 use crate::services::bm2d_api;
@@ -40,6 +46,8 @@ static WARNED_OP_FAILED: AtomicBool = AtomicBool::new(false);
 /// One-shot INFO on the first successful re-drive of the session — the
 /// cabinet-log confirmation that the whole chain is live.
 static FIRST_REDRIVE_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Per DDR SELECTION skin: the first legacy re-drive of the session.
+static LEGACY_REDRIVE_LOGGED: AtomicU8 = AtomicU8::new(0);
 
 /// Clear the one-shot latches (called at GAMEPLAY entry so a transient
 /// failure class can re-report on a later song during diagnosis).
@@ -132,15 +140,17 @@ fn on_smarvelous(side: usize, nra: Option<*mut u8>) {
 
     // Without the patched template the label does not exist — a goto would
     // be a benign no-op, but skipping keeps the fail-open contract exact
-    // (stock word shows, one WARN came from the patch layer already).
-    if !afp_patches::patch_applied() {
+    // (stock word shows, one WARN came from the patch layer already). The
+    // template is this song's: World's, or the DDR SELECTION legacy skin's
+    // (a skin whose template was never patched — no art, or a variant —
+    // shows A3's MARVELOUS; the World latch alone says nothing about it).
+    let Some(skin) = super::targets::target_skin(
+        crate::mods::ddr_selection::legacy_package("dance_judge"),
+        crate::mods::ddr_selection::armed_skin(),
+    ) else {
         return;
-    }
-    // A DDR SELECTION legacy judgement package is loaded for this song: the
-    // patch-applied latch above is session-wide (an earlier stock song), but
-    // THIS song's clip is the unpatched legacy template — its own MARVELOUS
-    // word shows.
-    if crate::mods::ddr_selection::legacy_package("dance_judge") {
+    };
+    if !afp_patches::patch_applied_for(skin) {
         return;
     }
     // Preferred target: the actor's OWN stored wrapper — the exact object
@@ -197,12 +207,24 @@ fn on_smarvelous(side: usize, nra: Option<*mut u8>) {
         );
     }
     if bm2d_api::mc_op_str(mc_id, 0xF09, LABEL) {
-        if !FIRST_REDRIVE_LOGGED.swap(true, Ordering::Relaxed) {
-            log_info!(
-                "SMarvelous: flash live — first in_smarvelous re-drive (side {}, via_actor {})",
-                side,
-                via_actor
-            );
+        if skin == 0 {
+            if !FIRST_REDRIVE_LOGGED.swap(true, Ordering::Relaxed) {
+                log_info!(
+                    "SMarvelous: flash live — first in_smarvelous re-drive (side {}, via_actor {})",
+                    side,
+                    via_actor
+                );
+            }
+        } else {
+            let bit = super::targets::skin_bit(skin);
+            if LEGACY_REDRIVE_LOGGED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                log_info!(
+                    "SMarvelous: flash live on DDR SELECTION skin {} — first in_smarvelous re-drive (side {}, via_actor {})",
+                    skin,
+                    side,
+                    via_actor
+                );
+            }
         }
     } else if !WARNED_OP_FAILED.swap(true, Ordering::Relaxed) {
         log_warn!("SMarvelous: flash — mc_op(0xF09) refused; stock word shows");

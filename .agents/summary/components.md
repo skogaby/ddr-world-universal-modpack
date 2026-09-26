@@ -132,10 +132,10 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `decorative-option-headers` | `decorative_option_headers.rs` | Heading rows in the options MODS tab | `custom_options` | `option_header_rows_research.md` |
 | `music-wheel-song-length` | `music_wheel_song_length.rs` | LENGTH M:SS in the song-select header | – | – |
 | `per-song-judgement-offsets` | `per_song_judgement_offsets/` | Per-song per-player offsets (CSV + profile) | `judgement_offsets` | `per_song_judgement_offsets.md` |
-| `s-marvelous` | `s_marvelous/` | Display-layer judgement above Marvelous (+ server upload, lamps) | `s_marvelous` | `s_marvelous_judgement_research.md` |
+| `s-marvelous` | `s_marvelous/` | Display-layer judgement above Marvelous (+ server upload, lamps; per-era art on DDR SELECTION's legacy skins) | `s_marvelous` | `s_marvelous_judgement_research.md` |
 | `two-player-bpl-mode` | `two_player_bpl_mode/` | In-shop battle HUD in local versus | `two_player_bpl` | `in_shop_battle_local_versus_research.md` |
 | `background-dancers` (OFF) | `background_dancers/` | A3 3D stage + dancers, custom models, previews | `background_dancers` | `background_dancers_research.md`, `3d_model_format_research.md` |
-| `ddr-selection` (OFF) | `ddr_selection/` | A3-era legacy gameplay skins per song | `ddr_selection` | `ddr_selection_research.md` |
+| `ddr-selection` | `ddr_selection/` | A3-era legacy gameplay skins per song (inert until a player's row picks an era) | `ddr_selection` | `ddr_selection_research.md` |
 | `smx-hardware` (OFF) | `smx_hardware/` | StepManiaX pads, lights, touch overlay | – | `smx_hardware_research.md` |
 | `mod-menu` (always) | `mod_menu/` | The overlay menu | `mod_menu`, `overlay_draw` | `overlay_draw_research.md` |
 
@@ -157,4 +157,4 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `tools/bot_sim/` | Offline bot simulator mounting the DLL's pure bot files; HTML report |
 | `tools/fxc/` | Pinned fxc 9.29 + D3DCompiler_43 (run under CrossOver) |
 | `shaders/src/` | Lane shaders (`gs_screencommand_*`), model style shaders (`mdl_*`), menu themes (`themes/`) |
-| `data_mods/` | Shipped runtime assets: option label sets, series/folder textures, shader blobs, clap PCM, custom models, dancer cameras/badges, SMX atlas, training icons |
+| `data_mods/` | Shipped runtime assets: option label sets, series/folder textures, shader blobs, clap PCM, custom models, dancer cameras/badges, SMX atlas, training icons, S-Marvelous art (World's in `s_marvelous/`, the legacy skins' in `ddr_selection/s_marvelous/`) |

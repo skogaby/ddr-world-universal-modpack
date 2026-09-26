@@ -48,11 +48,15 @@
 //!
 //! ## Cross-mod seams
 //!
-//! On a DDR SELECTION legacy song the mod stands down wherever a legacy package replaces
-//! World's: the flash, the splash re-drive and both AFP patch closures check
-//! `ddr_selection::legacy_package("dance_judge" / "dance_fullcombo")`, and a legacy combo
-//! never reaches World's refresh. `is_enabled()` lets Power User Statistics show its
-//! S-Marv tally.
+//! DDR SELECTION legacy skins ([`legacy`], pure names in [`targets`]): with both mods enabled,
+//! every skin whose art exists under `data_mods/ddr_selection/s_marvelous/N/` is staged like
+//! World — its `dance_judge000N` word and `dance_fullcombo000N` S-MFC splash, and on skins
+//! 4–5 an all-S-Marvelous combo sheet. The patch fns pick the target by the song
+//! (`ddr_selection::legacy_package` + `armed_skin`); the flash and splash re-drives fire only
+//! when THIS song's template was patched; DDR SELECTION's A3 combo write asks
+//! [`legacy_combo_smarv`] (a legacy combo never reaches World's refresh). A skin without art
+//! keeps A3's presentation. DDR SELECTION's `enable` calls [`on_ddr_selection_enabled`].
+//! `is_enabled()` lets Power User Statistics show its S-Marv tally.
 //!
 //! ## Degradation, assets, config
 //!
@@ -79,6 +83,7 @@ pub mod flash;
 pub mod lamp;
 pub mod lamp_badge;
 pub mod lamp_codec;
+pub mod legacy;
 pub mod receptor;
 pub mod receptor_color;
 pub mod records;
@@ -87,6 +92,7 @@ pub mod results_graph;
 pub mod results_score;
 pub mod splash;
 pub mod state;
+pub mod targets;
 pub mod upload;
 pub mod upload_hook;
 
@@ -111,6 +117,25 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// this cabinet right now" flag.
 pub(crate) fn is_enabled() -> bool {
     ACTIVE.load(Ordering::Acquire)
+}
+
+/// DDR SELECTION just enabled (its `enable`, after S-Marvelous' at boot):
+/// stage the legacy skins' S-Marvelous art if this mod is enabled too.
+pub fn on_ddr_selection_enabled() {
+    legacy::stage_if_ready(live_color());
+}
+
+/// DDR SELECTION's A3 combo write, per combo step on a legacy combo actor
+/// (game thread): whether side `side`'s combo should use skin `skin`'s
+/// S-Marvelous sheet — the mod enabled, that sheet staged, and the side's
+/// combo all S-Marvelous so far (`state::combo_is_all_smarv`, which also
+/// requires the side armed). The caller still requires worst grade
+/// Marvelous. Atomics only.
+pub fn legacy_combo_smarv(skin: u8, side: i32) -> bool {
+    is_enabled()
+        && combo::legacy_sheet_staged(skin)
+        && (0..=1).contains(&side)
+        && state::combo_is_all_smarv(side as usize)
 }
 
 /// The LIVE S-Marvelous window (ms). Seeded from `s_marvelous.window_ms` at
@@ -559,6 +584,12 @@ impl Mod for SMarvelousMod {
         if self.splash_installed {
             splash::activate();
         }
+
+        // DDR SELECTION legacy skins: stage their word / splash / combo art
+        // too when DDR SELECTION is already enabled (a live enable after it;
+        // at boot DDR SELECTION enables later and calls
+        // `on_ddr_selection_enabled`).
+        legacy::stage_if_ready(color);
 
         // Results score tab (Step 7): stage the 7-row label sheets +
         // register the row-repositioning patch. Best-effort — failure

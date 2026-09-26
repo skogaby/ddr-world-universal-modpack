@@ -58,7 +58,8 @@ its consumer is adapted (a) or re-hosted (b).
 `_lite` (pcType-gated), bare. A3's fallback appends `"0000"`; in World
 `<base>0000` resolves to the **early-World `*0000_v3`** arcs (A3-structured
 names) or A3's **oldest `_v0`** — never World's `<base>_v3` and never A3's
-gold-cab `_v2`. `*0000_v3` exist for bpm, combo, common, filter, gauge, judge,
+gold-cab `_v2` (**CORRECTION 2026-09-25:** A3's gold-cabinet set is `_v1`; `_v2` is
+every other cabinet's — `docs/ddr_selection_a3_themes_research.md` §2). `*0000_v3` exist for bpm, combo, common, filter, gauge, judge,
 option, score, song_info, stage_frame, and several export the wrong names for
 World's actors: `dance_bpm0000_v3` → `dance_filter` (!), `dance_gauge0000_v3` →
 `00_dance_gauge`, `dance_combo0000_v3` → `dance_combo`, `dance_score0000_v3` →

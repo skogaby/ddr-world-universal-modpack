@@ -155,11 +155,22 @@ pub fn single_sheet(skin: u8) -> bool {
     (1..=3).contains(&skin)
 }
 
+/// The S-Marvelous sheet name on a per-grade skin — the S-Marvelous
+/// Judgement mod's legacy combo art (`dance_combo%04d_smarvelous_*`, staged
+/// by `s_marvelous::assets::stage_legacy_combo` under the same names).
+pub const SMARV_SHEET: &str = "smarvelous";
+
 /// The texture-name prefix (`dance_combo%04d` or `dance_combo%04d_<grade>`,
 /// worst grade clamped to `good` — A3 indexed its 4-name table unchecked).
-pub fn sheet_prefix(skin: u8, worst: i32) -> String {
+/// `all_smarvelous` (S-Marvelous: every step of the combo within its window,
+/// that skin's sheet staged) turns a Marvelous combo on a per-grade skin into
+/// the `smarvelous` sheet; single-sheet skins ignore it, as A3 ignored the
+/// grade there.
+pub fn sheet_prefix(skin: u8, worst: i32, all_smarvelous: bool) -> String {
     if single_sheet(skin) {
         format!("dance_combo{:04}", skin)
+    } else if all_smarvelous && worst == 0 {
+        format!("dance_combo{:04}_{}", skin, SMARV_SHEET)
     } else {
         let i = worst.clamp(0, 3) as usize;
         format!("dance_combo{:04}_{}", skin, GRADE_NAMES[i])
@@ -312,11 +323,11 @@ mod tests {
 
     #[test]
     fn texture_names() {
-        assert_eq!(sheet_prefix(1, 2), "dance_combo0001");
-        assert_eq!(sheet_prefix(3, 0), "dance_combo0003");
-        assert_eq!(sheet_prefix(4, 0), "dance_combo0004_marvelous");
-        assert_eq!(sheet_prefix(5, 2), "dance_combo0005_great");
-        assert_eq!(sheet_prefix(5, WORST_NONE), "dance_combo0005_good");
+        assert_eq!(sheet_prefix(1, 2, false), "dance_combo0001");
+        assert_eq!(sheet_prefix(3, 0, false), "dance_combo0003");
+        assert_eq!(sheet_prefix(4, 0, false), "dance_combo0004_marvelous");
+        assert_eq!(sheet_prefix(5, 2, false), "dance_combo0005_great");
+        assert_eq!(sheet_prefix(5, WORST_NONE, false), "dance_combo0005_good");
         assert_eq!(word_texture("dance_combo0002"), "dance_combo0002_combo");
         let p = places("dance_combo0001", 305);
         assert_eq!(p[0].texture, "dance_combo0001_5");
@@ -334,6 +345,28 @@ mod tests {
         );
         let p = places("x", 1000);
         assert!(p.iter().all(|x| x.visible));
+    }
+
+    #[test]
+    fn smarvelous_sheet() {
+        // Per-grade skins: an all-S-Marvelous Marvelous combo takes the
+        // S-Marvelous sheet (the names S-Marvelous stages).
+        assert_eq!(sheet_prefix(4, 0, true), "dance_combo0004_smarvelous");
+        assert_eq!(sheet_prefix(5, 0, true), "dance_combo0005_smarvelous");
+        assert_eq!(
+            places(&sheet_prefix(4, 0, true), 12)[0].texture,
+            "dance_combo0004_smarvelous_2"
+        );
+        assert_eq!(
+            word_texture(&sheet_prefix(5, 0, true)),
+            "dance_combo0005_smarvelous_combo"
+        );
+        // A worse grade in the combo wins over the flag.
+        assert_eq!(sheet_prefix(4, 1, true), "dance_combo0004_perfect");
+        assert_eq!(sheet_prefix(5, WORST_NONE, true), "dance_combo0005_good");
+        // Single-sheet skins ignore it (A3 ignored the grade there).
+        assert_eq!(sheet_prefix(1, 0, true), "dance_combo0001");
+        assert_eq!(sheet_prefix(3, 0, true), "dance_combo0003");
     }
 
     #[test]

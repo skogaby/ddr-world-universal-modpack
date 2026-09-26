@@ -104,6 +104,7 @@ static BROKEN: AtomicBool = AtomicBool::new(false);
 static PATCH_LOCK: Mutex<()> = Mutex::new(());
 static LOGGED_CREATE: AtomicBool = AtomicBool::new(false);
 static LOGGED_SHOW: AtomicBool = AtomicBool::new(false);
+static LOGGED_SMARV: AtomicBool = AtomicBool::new(false);
 static WARNED_CLIP: AtomicBool = AtomicBool::new(false);
 /// Per skin 1..=5: 0 unchecked, 1 usable, 2 damaged.
 static PACKAGE_STATE: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
@@ -251,6 +252,7 @@ pub fn capable() -> bool {
 pub fn reset_logs() {
     LOGGED_CREATE.store(false, Ordering::Relaxed);
     LOGGED_SHOW.store(false, Ordering::Relaxed);
+    LOGGED_SMARV.store(false, Ordering::Relaxed);
 }
 
 // ── Patches ─────────────────────────────────────────────────────────
@@ -470,10 +472,25 @@ fn send_center(actor: *mut u8, center: &mut i32, st: &State) {
     }
 }
 
-/// A3 `FUN_1800470e0`: word + digit textures, growth, layout.
+/// A3 `FUN_1800470e0`: word + digit textures, growth, layout. With
+/// S-Marvelous on, an all-S-Marvelous combo on a per-grade skin takes that
+/// skin's `smarvelous` sheet (staged by S-Marvelous; re-decided every write,
+/// so the first loose Marvelous falls back to A3's `marvelous` sheet).
 fn texture_write(actor: *mut u8, e: &mut Legacy, st: &State) {
     let (combo, worst) = counters(actor, st);
-    let prefix = cm::sheet_prefix(e.skin, worst);
+    let smarv = !cm::single_sheet(e.skin)
+        && worst == 0
+        && crate::mods::s_marvelous::legacy_combo_smarv(e.skin, e.side);
+    let prefix = cm::sheet_prefix(e.skin, worst, smarv);
+    if smarv && !LOGGED_SMARV.swap(true, Ordering::Relaxed) {
+        log_info!(
+            "DDR SELECTION: legacy combo S-Marvelous sheet (skin {}, {}P, combo {}, {})",
+            e.skin,
+            e.side + 1,
+            combo,
+            prefix
+        );
+    }
     let word = cm::word_texture(&prefix);
     for_siblings(e.layer, "combo_usr", |id| {
         bm2d_api::mc_load_bitmap(id, &word);
