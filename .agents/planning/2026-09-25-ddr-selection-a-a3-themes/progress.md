@@ -1,11 +1,11 @@
 # Progress — DDR SELECTION: DDR A / DDR A3 (White) / DDR A3 (Gold)
 
 Updated: 2026-09-25
-Status: PDD Step 7 of 8 — design approved 2026-09-25; plan drafted, awaiting maintainer approval (no implementation yet)
-NEXT ACTION: maintainer reviews `implementation/plan.md`; on approval set its `Status: Approved <date>`, write `summary.md` (PDD Step 8), then implementation starts at plan Step 1 (code-task-generator → code-assist).
+Status: Planning complete (PDD Steps 1–8 done); implementation Step 1 of 9 — not started
+NEXT ACTION: run code-task-generator on `implementation/plan.md` for plan Step 1 (theme identity + cross-generation texture spike), then code-assist on its tasks.
 
-Resume protocol: read `idea-honing.md` (D1–D26, Readiness Confirmed), then
-`design/detailed-design.md`; research lives in `research/` (`orientation.md`,
+Resume protocol: read `implementation/plan.md` (checklist + current step), then
+`design/detailed-design.md` (approved); decisions in `idea-honing.md` (D1–D26); research lives in `research/` (`orientation.md`,
 `name-and-score-sets.md` incl. the §5 design-pass addendum).
 
 ## Done
@@ -17,9 +17,10 @@ Resume protocol: read `idea-honing.md` (D1–D26, Readiness Confirmed), then
   open RE items (World best-record rank `+4` / clear kind `+8`, both 1:1 with A3's tables; A3's
   name colour, scale and placeholder binding) — recorded in `research/name-and-score-sets.md` §5.
 
-## In flight
+- Step 7: `implementation/plan.md` approved 2026-09-25 (9 steps; Step 1 = identity + cross-generation texture spike).
+- Step 8: `summary.md` written.
 
-- Step 7: `implementation/plan.md` drafted (9 steps; Step 1 = identity + cross-generation texture spike).
+## In flight
 
 - Nothing uncommitted beyond the planning docs (the maintainer commits manually).
 

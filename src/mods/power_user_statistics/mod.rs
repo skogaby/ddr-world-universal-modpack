@@ -13,7 +13,7 @@
 //!   and kept through the post-song loader and the stage results (0-idx 29 → 30); any other
 //!   destination hides it. Content is DETAILED (EX loss, current / max / abs-mean / mean ms
 //!   error, live calories) or STREAMLINED (Δ, Max Δ, EX loss, then per-grade counts), in a
-//!   SIDE COLUMN or BOTTOM LINE layout.
+//!   SIDE COLUMN, BOTTOM LINE or TOP LINE layout.
 //! - **Pacemaker → MS Error** (`pacemaker_to_mserror` + child `pacemaker_threshold`): an
 //!   11-byte JMP patch in the `NoteResultActor` pacemaker render case (msg 0x1036) replaces
 //!   the score delta with the side's latest ms error, forces the readout visible even with no
@@ -73,7 +73,7 @@
 //! - **`bottom_text`:** in the BOTTOM LINE layout the widgets sit where the stock CREDIT /
 //!   PASELI / ONLINE text draws, so during the widget phase this mod hides it under its own
 //!   `HideReason::PowerUserStatistics` bit (independent of the operator's `hide-bottom-text`
-//!   mod); released at disable.
+//!   mod); released at disable. The TOP LINE layout never hides it.
 //! - **`s_marvelous`:** the STREAMLINED content shows an S-Marv count only while that mod is
 //!   enabled (`s_marvelous::is_enabled()`), and Marv is then exclusive of S-Marv.
 //!
@@ -93,9 +93,9 @@
 //! parent is ON) and `step_data_export`; labels come from `scripts/option_strings.py`.
 //! Cabinet-wide widget geometry lives in the DLL-owned `power_user_statistics` section of
 //! mod-config.json (`widget_scale_percent`, `widget_layout`, `widget_content`,
-//! `widget_offset_x` / `_y`, `widget_alignment`, `horizontal_offset_x` / `_y`), seeded at
-//! enable and edited from the GLOBAL SETTINGS `pus_widget_*` rows, which rewrite the whole
-//! section on every edit.
+//! `widget_offset_x` / `_y`, `widget_alignment`, `horizontal_offset_x` / `_y`,
+//! `top_line_offset_x` / `_y`), seeded at enable and edited from the GLOBAL SETTINGS
+//! `pus_widget_*` rows, which rewrite the whole section on every edit.
 //!
 //! RE notes: `docs/pacemaker_display_research.md`, `docs/calorie_weight_profile_research.md`.
 //! Host tests: `scripts/validate_power_user_statistics.sh` (mounts `readout.rs`).

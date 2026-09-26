@@ -1,11 +1,11 @@
 //! Timing Stats Widget — per-player text widget during gameplay showing
 //! either the DETAILED set (EX loss, Current, Max, Abs Mean, Mean ms-error
 //! and live calories) or the STREAMLINED set (Δ, Max Δ, EX loss and the
-//! per-grade tallies), in one of two LAYOUTS: the original side column (one
-//! field per line beside each playfield) or a single line along the bottom
-//! edge of the screen. The blocks stay on screen through the stage results
-//! (0-idx 29 → 30) so the breakdown can be read without gameplay pressure;
-//! they hide on any other scene.
+//! per-grade tallies), in one of three LAYOUTS: the original side column
+//! (one field per line beside each playfield) or a single line along the
+//! bottom or the top edge of the screen. The blocks stay on screen through
+//! the stage results (0-idx 29 → 30) so the breakdown can be read without
+//! gameplay pressure; they hide on any other scene.
 //!
 //! Sign convention for the signed readouts (Current, Δ, Max Δ, μ): POSITIVE
 //! = FAST (early), NEGATIVE = SLOW (late) — the game's own results-graph
@@ -20,11 +20,11 @@
 //! offset rows always edit the ACTIVE layout's (they are re-registered in
 //! place with the new layout's values and labels whenever the layout row
 //! changes; `register_*_row` replaces by key, so their menu position never
-//! moves). Alignment is the SIDE COLUMN's alone: the BOTTOM LINE bakes in
-//! OUTER EDGE (a single line has nothing to align about — the anchor already
-//! is its edge), so its row is removed while that layout is active and
-//! re-added (still the group's last row) on the way back. Edits re-lay out
-//! any already-created widgets immediately (render thread).
+//! moves). Alignment is the SIDE COLUMN's alone: the BOTTOM LINE and TOP
+//! LINE bake in OUTER EDGE (a single line has nothing to align about — the
+//! anchor already is its edge), so its row is removed while either is
+//! active and re-added (still the group's last row) on the way back. Edits
+//! re-lay out any already-created widgets immediately (render thread).
 //!
 //! The BOTTOM LINE layout occupies the band the stock CREDIT / PASELI /
 //! ONLINE readouts draw in, so while its widgets are on screen (GAMEPLAY
@@ -33,7 +33,8 @@
 //! operator's `hide-bottom-text` toggle is independent. The hide follows the
 //! widget PHASE, not per-side visibility (a calibration song, whose widget
 //! never shows, still hides the stock line — harmless), and is re-evaluated
-//! on every scene change and layout edit.
+//! on every scene change and layout edit. The TOP LINE shares no band with
+//! the stock text, so it never hides it (`Layout::hides_bottom_text`).
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -86,12 +87,15 @@ static LIVE_LAYOUT: AtomicI32 = AtomicI32::new(Layout::DEFAULT as i32);
 /// `Content` index (see `Content::from_index`).
 static LIVE_CONTENT: AtomicI32 = AtomicI32::new(Content::DEFAULT as i32);
 /// Per-LAYOUT offsets, indexed by `Layout::index()`.
-static LIVE_OFFSET_X: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
-static LIVE_OFFSET_Y: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+static LIVE_OFFSET_X: [AtomicI32; Layout::ALL.len()] =
+    [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
+static LIVE_OFFSET_Y: [AtomicI32; Layout::ALL.len()] =
+    [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
 /// The operator's `BlockAlignment` index (see `BlockAlignment::from_index`).
-/// Only the SIDE COLUMN's alignment is configurable — the BOTTOM LINE's is
-/// fixed by its `AlignmentRule` — so one slot suffices; every read goes
-/// through `readout::resolve_alignment`, which ignores it for fixed layouts.
+/// Only the SIDE COLUMN's alignment is configurable — the BOTTOM / TOP
+/// LINE's is fixed by its `AlignmentRule` — so one slot suffices; every read
+/// goes through `readout::resolve_alignment`, which ignores it for fixed
+/// layouts.
 static LIVE_ALIGNMENT: AtomicI32 = AtomicI32::new(BlockAlignment::Center as i32);
 
 fn live_layout() -> Layout {
@@ -312,6 +316,8 @@ fn persist_section() {
             "widget_alignment": configured_alignment().key(),
             "horizontal_offset_x": live_offset_x(Layout::Horizontal),
             "horizontal_offset_y": live_offset_y(Layout::Horizontal),
+            "top_line_offset_x": live_offset_x(Layout::TopLine),
+            "top_line_offset_y": live_offset_y(Layout::TopLine),
         }),
     );
 }
@@ -325,15 +331,16 @@ fn on_layout_row_change(slot: &'static AtomicI32, min: i32, max: i32, what: &str
     log_info!("timing_stats_widget: {} set to {}", what, clamped);
 }
 
-/// Ask `bottom_text` to hide the stock bottom readouts iff the BOTTOM LINE
-/// layout's widgets are in their on-screen phase. Idempotent; silent when
-/// the service is unavailable (the mod then simply draws over the stock
-/// text — one WARN at enable covers it).
+/// Ask `bottom_text` to hide the stock bottom readouts iff the live layout
+/// sits in their band (the BOTTOM LINE) and its widgets are in their
+/// on-screen phase. Idempotent; silent when the service is unavailable (the
+/// mod then simply draws over the stock text — one WARN at enable covers
+/// it).
 fn sync_bottom_text_hide(widgets_shown: bool) {
     if !bottom_text::is_available() {
         return;
     }
-    let want = widgets_shown && live_layout() == Layout::Horizontal;
+    let want = widgets_shown && live_layout().hides_bottom_text();
     if bottom_text::is_hidden_by(HideReason::PowerUserStatistics) != want {
         bottom_text::set_hidden(HideReason::PowerUserStatistics, want);
     }
@@ -477,7 +484,7 @@ fn register_overlay_rows() {
     mod_menu::register_enum_row(EnumRowSpec {
         key: LAYOUT_ROW_KEY.to_string(),
         label: "Stats Widget Layout".to_string(),
-        hint: "SIDE COLUMN: one field per line beside each playfield. BOTTOM LINE: every field on one line along the bottom edge, P1 from the left / P2 to the right (hides the stock CREDIT/PASELI text while shown)."
+        hint: "SIDE COLUMN: one field per line beside each playfield. BOTTOM LINE: every field on one line along the bottom edge, P1 from the left / P2 to the right (hides the stock CREDIT/PASELI text while shown). TOP LINE: the same line along the top edge."
             .to_string(),
         parent_row_key: Some(OWNING_MOD_ID.to_string()),
         values: Layout::ALL.iter().map(|l| l.index() as i32).collect(),
@@ -586,6 +593,13 @@ pub fn enable() {
         "horizontal_offset_y",
         |c| c.horizontal_offset_y,
     );
+    seed_layout_offsets(
+        Layout::TopLine,
+        "top_line_offset_x",
+        |c| c.top_line_offset_x,
+        "top_line_offset_y",
+        |c| c.top_line_offset_y,
+    );
     seed_alignment();
     register_overlay_rows();
     if !bottom_text::is_available() {
@@ -693,7 +707,8 @@ pub fn on_scene_change(prev: i32, next: i32) {
             }
         }
         // The BOTTOM LINE layout owns the stock bottom-text band for exactly
-        // the widget phase (gameplay + results carry-over).
+        // the widget phase (gameplay + results carry-over); other layouts
+        // leave it alone.
         sync_bottom_text_hide(s.visible);
     });
 }

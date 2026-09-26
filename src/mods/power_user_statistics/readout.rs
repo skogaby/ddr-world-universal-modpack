@@ -1,5 +1,5 @@
-//! Pure readout model for the realtime gameplay-statistics widget: the two
-//! LAYOUTS (side column / bottom line), the two CONTENT sets (detailed /
+//! Pure readout model for the realtime gameplay-statistics widget: the three
+//! LAYOUTS (side column / bottom line / top line), the two CONTENT sets (detailed /
 //! streamlined), per-layout screen geometry, the block alignment, the
 //! max-error tracker and the text composition itself.
 //!
@@ -95,15 +95,21 @@ pub enum Layout {
     /// hidden through `services::bottom_text` while this layout's widgets
     /// are on screen).
     Horizontal = 1,
+    /// The bottom line moved to the TOP edge: the same single line, the
+    /// same baked-in OUTER EDGE alignment and mirrored corner anchors, only
+    /// anchored under the top edge instead of on the stock bottom-text row.
+    /// It shares no band with the stock bottom text, so that text stays up.
+    TopLine = 2,
 }
 
 impl Layout {
-    pub const ALL: [Layout; 2] = [Layout::Vertical, Layout::Horizontal];
+    pub const ALL: [Layout; 3] = [Layout::Vertical, Layout::Horizontal, Layout::TopLine];
     pub const DEFAULT: Layout = Layout::Vertical;
 
     pub fn from_index(i: i32) -> Self {
         match i {
             1 => Self::Horizontal,
+            2 => Self::TopLine,
             _ => Self::Vertical,
         }
     }
@@ -113,6 +119,7 @@ impl Layout {
         match key {
             "vertical" => Some(Self::Vertical),
             "horizontal" => Some(Self::Horizontal),
+            "top_line" => Some(Self::TopLine),
             _ => None,
         }
     }
@@ -121,6 +128,7 @@ impl Layout {
         match self {
             Self::Vertical => "vertical",
             Self::Horizontal => "horizontal",
+            Self::TopLine => "top_line",
         }
     }
 
@@ -133,6 +141,7 @@ impl Layout {
         match self {
             Self::Vertical => "SIDE COLUMN",
             Self::Horizontal => "BOTTOM LINE",
+            Self::TopLine => "TOP LINE",
         }
     }
 
@@ -141,6 +150,7 @@ impl Layout {
         match self {
             Self::Vertical => "Side Column",
             Self::Horizontal => "Bottom Line",
+            Self::TopLine => "Top Line",
         }
     }
 
@@ -148,7 +158,7 @@ impl Layout {
     pub fn separator(self) -> &'static str {
         match self {
             Self::Vertical => "\n",
-            Self::Horizontal => "  ",
+            Self::Horizontal | Self::TopLine => "  ",
         }
     }
 
@@ -156,7 +166,15 @@ impl Layout {
         match self {
             Self::Vertical => &VERTICAL_GEOMETRY,
             Self::Horizontal => &HORIZONTAL_GEOMETRY,
+            Self::TopLine => &TOP_LINE_GEOMETRY,
         }
+    }
+
+    /// Whether this layout's widgets sit in the stock CREDIT / PASELI /
+    /// ONLINE band, so the stock text must be hidden while they are shown.
+    /// Only the bottom line does — the top line is the same line elsewhere.
+    pub fn hides_bottom_text(self) -> bool {
+        matches!(self, Self::Horizontal)
     }
 }
 
@@ -232,6 +250,21 @@ pub const HORIZONTAL_GEOMETRY: Geometry = Geometry {
     alignment: AlignmentRule::Fixed(BlockAlignment::Outer),
 };
 
+/// Top line: the bottom line's corner anchors (P1 `x = 10` left-aligned, P2
+/// `x = screen_w − 10` right-aligned, OUTER EDGE baked in) moved to the top
+/// edge — the line's top sits 10 px under it, the same inset the corner
+/// anchors keep from the side edges. Only the vertical range differs from
+/// the bottom line's (it must still reach the whole canvas from `y = 10`).
+pub const TOP_LINE_GEOMETRY: Geometry = Geometry {
+    p1_anchor_x: HORIZONTAL_GEOMETRY.p1_anchor_x,
+    base_y: 10.0,
+    offset_x_min: HORIZONTAL_GEOMETRY.offset_x_min,
+    offset_x_max: HORIZONTAL_GEOMETRY.offset_x_max,
+    offset_y_min: -10,
+    offset_y_max: 710,
+    alignment: HORIZONTAL_GEOMETRY.alignment,
+};
+
 /// Resolved anchor `(x, y)` for `side` (0 = P1, inward = +x; 1 = P2,
 /// inward = −x) from the layout's geometry and the layout's live offsets.
 pub fn anchor(layout: Layout, side: usize, dx: i32, dy: i32) -> (f32, f32) {
@@ -251,7 +284,7 @@ pub fn anchor(layout: Layout, side: usize, dx: i32, dy: i32) -> (f32, f32) {
 /// toward the edge / the centre, and the H-offset row repositions the anchor
 /// if wanted. Mirrored per side so the two blocks always read as the same
 /// layout. Per-LAYOUT: see [`AlignmentRule`] — the side column's is the
-/// operator's choice, the bottom line's is baked in.
+/// operator's choice, the bottom and top lines' is baked in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockAlignment {
     /// Every line centred about the anchor (both sides).
@@ -551,6 +584,37 @@ mod tests {
     }
 
     #[test]
+    fn top_line_is_the_bottom_line_under_the_top_edge() {
+        let top = Layout::TopLine.geometry();
+        let bottom = Layout::Horizontal.geometry();
+        assert_eq!(anchor(Layout::TopLine, 0, 0, 0), (10.0, 10.0));
+        assert_eq!(anchor(Layout::TopLine, 1, 0, 0), (1270.0, 10.0));
+        // Same corner anchors, horizontal range, alignment and separator —
+        // only the row it sits on differs.
+        assert_eq!(top.p1_anchor_x, bottom.p1_anchor_x);
+        assert_eq!(
+            (top.offset_x_min, top.offset_x_max),
+            (bottom.offset_x_min, bottom.offset_x_max)
+        );
+        assert_eq!(top.alignment, bottom.alignment);
+        assert_eq!(Layout::TopLine.separator(), Layout::Horizontal.separator());
+        let s = sample();
+        for c in [Content::Detailed, Content::Streamlined] {
+            assert_eq!(
+                compose(c, Layout::TopLine, &s),
+                compose(c, Layout::Horizontal, &s)
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_bottom_line_hides_the_stock_bottom_text() {
+        assert!(!Layout::Vertical.hides_bottom_text());
+        assert!(Layout::Horizontal.hides_bottom_text());
+        assert!(!Layout::TopLine.hides_bottom_text());
+    }
+
+    #[test]
     fn alignment_resolution_honours_the_rule() {
         for configured in [
             BlockAlignment::Center,
@@ -559,12 +623,11 @@ mod tests {
         ] {
             // The side column is the operator's choice …
             assert_eq!(resolve_alignment(Layout::Vertical, configured), configured);
-            // … the bottom line ignores any configured value: OUTER EDGE
-            // is baked in (P1 grows from the left, P2 ends at the right).
-            assert_eq!(
-                resolve_alignment(Layout::Horizontal, configured),
-                BlockAlignment::Outer
-            );
+            // … the bottom and top lines ignore any configured value: OUTER
+            // EDGE is baked in (P1 grows from the left, P2 ends at the right).
+            for l in [Layout::Horizontal, Layout::TopLine] {
+                assert_eq!(resolve_alignment(l, configured), BlockAlignment::Outer);
+            }
         }
     }
 
@@ -580,10 +643,12 @@ mod tests {
             assert_eq!(y_hi, CANVAS_H, "{:?} bottom limit", l);
             assert!(g.offset_x_min < 0 && g.offset_x_max > 0);
         }
-        // The bottom line's anchor can be dragged to the canvas centre (and
-        // past it) by a solo player.
-        let (x, _) = anchor(Layout::Horizontal, 0, 630, 0);
-        assert_eq!(x, CANVAS_W / 2.0);
+        // The bottom and top lines' anchors can be dragged to the canvas
+        // centre (and past it) by a solo player.
+        for l in [Layout::Horizontal, Layout::TopLine] {
+            let (x, _) = anchor(l, 0, 630, 0);
+            assert_eq!(x, CANVAS_W / 2.0, "{:?}", l);
+        }
     }
 
     fn sample() -> Snapshot {

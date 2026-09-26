@@ -639,24 +639,27 @@ pub struct SMarvelousConfig {
 /// P1 and P2 (the horizontal offset is signed relative to each side's own
 /// screen edge, so one value moves both blocks symmetrically).
 ///
-/// Two LAYOUTS, each with its OWN offsets so repositioning one never
-/// disturbs the other: `widget_offset_x` / `widget_offset_y` /
+/// Three LAYOUTS, each with its OWN offsets so repositioning one never
+/// disturbs another: `widget_offset_x` / `widget_offset_y` /
 /// `widget_alignment` belong to the `"vertical"` side column (the original
 /// keys, kept for existing configs); `horizontal_offset_x` /
-/// `horizontal_offset_y` belong to the `"horizontal"` bottom line, whose
-/// alignment is baked in (OUTER EDGE — a single line has nothing to align
-/// about). `widget_layout` picks which is active and `widget_content` which
-/// fields show.
+/// `horizontal_offset_y` belong to the `"horizontal"` bottom line and
+/// `top_line_offset_x` / `top_line_offset_y` to the `"top_line"` top line,
+/// both with their alignment baked in (OUTER EDGE — a single line has
+/// nothing to align about). `widget_layout` picks which is active and
+/// `widget_content` which fields show.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct PowerUserStatisticsConfig {
-    /// Widget scale in percent of the stock size (both layouts). Default
+    /// Widget scale in percent of the stock size (all layouts). Default
     /// 100; clamped 50..=150.
     #[serde(default)]
     pub widget_scale_percent: Option<i32>,
     /// `"vertical"` (default — one field per line, a column beside each
-    /// playfield) or `"horizontal"` (every field on one line along the
+    /// playfield), `"horizontal"` (every field on one line along the
     /// bottom edge; the stock CREDIT / PASELI / ONLINE text is hidden while
-    /// the line is on screen). Unknown values warn once and use the default.
+    /// the line is on screen) or `"top_line"` (the same line along the top
+    /// edge; the stock text stays). Unknown values warn once and use the
+    /// default.
     #[serde(default)]
     pub widget_layout: Option<String>,
     /// `"detailed"` (default — EX loss, current/max/abs-mean/mean ms error,
@@ -690,6 +693,15 @@ pub struct PowerUserStatisticsConfig {
     /// (y = 700), POSITIVE = down. Default 0; clamped -700..=20.
     #[serde(default)]
     pub horizontal_offset_y: Option<i32>,
+    /// TOP LINE horizontal offset in px from the corner anchor (P1 x = 10,
+    /// P2 x = 1270 — the bottom line's), POSITIVE = inward. Default 0;
+    /// clamped -10..=1000 (+630 centres P1's line on screen).
+    #[serde(default)]
+    pub top_line_offset_x: Option<i32>,
+    /// TOP LINE vertical offset in px from its row under the top edge
+    /// (y = 10), POSITIVE = down. Default 0; clamped -10..=710.
+    #[serde(default)]
+    pub top_line_offset_y: Option<i32>,
 }
 
 /// Config for the `smx-hardware` mod (`smx_hardware` section). Operator-

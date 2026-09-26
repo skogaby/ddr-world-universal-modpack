@@ -1,6 +1,6 @@
 # DDR SELECTION — DDR A / DDR A3 (White) / DDR A3 (Gold) — Implementation Plan
 
-Status: Draft — awaiting approval.
+Status: Approved 2026-09-25
 
 Design: `.agents/planning/2026-09-25-ddr-selection-a-a3-themes/design/detailed-design.md`
 (approved 2026-09-25). Section references (§) point there; this plan does not restate them.
