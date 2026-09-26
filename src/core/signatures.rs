@@ -101,6 +101,33 @@ pub struct DdrSelectionSites {
     pub gamework_skin_off: usize,
 }
 
+/// The Multiplayer Bot's Target Score name-plate sites
+/// (`derive_target_name_sites`): the game's own TARGET-option lookup plus
+/// the rival/ranking-set getters, and the build-dependent `PlayerWork`
+/// fields the lookup reads.
+#[derive(Clone, Copy, Debug)]
+pub struct TargetNameSites {
+    /// `i64 ghost_id(int side)` — 0 = no pacemaker, < 0 = same-credit local
+    /// slot, > 0 = network ghost id.
+    pub ghost_id_lookup: *const u8,
+    /// `const ScoreEntry* score_entry(RivalSet*, u32 mcode, int style, int
+    /// diff)` — null when the chart is absent; entry `+0x10` = ghost id.
+    pub score_entry: *const u8,
+    /// `const char* dancer_name(RivalSet*, u32 mcode, int style, int diff)`.
+    pub dancer_name: *const u8,
+    /// Global G: `*G` → owner, `**G` → the set container {begin +0, end +8,
+    /// default set +0x20}; set kind dword +0 (3 = rival), rival code +0x50.
+    pub rival_sets_global: *const u8,
+    /// `PlayerWork` offsets (0x50/0x54/0x5C on 20260324+, 0x60/0x64/0x6C on
+    /// 20250805 / 20260224).
+    pub pw_style_off: usize,
+    pub pw_mcode_off: usize,
+    pub pw_diff_off: usize,
+    /// `PlayerWork` TARGET option (−1 OFF, 0 own PB, 1..3 rival, 4..6
+    /// ranking sets); the three rival codes follow at `+4`.
+    pub pw_target_off: usize,
+}
+
 /// ddr_selection's legacy stage-panel sites (`derive_ddr_sel_panel`).
 #[derive(Clone, Copy, Debug)]
 pub struct DdrSelPanelSites {
@@ -1033,6 +1060,55 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "gpa_ghost_actor_probe",
         pattern: "48 8B 8F ?? ?? 00 00 48 85 C9 74 ?? E8 ?? ?? ?? ?? 84 C0 0F 84",
         description: "GamePlayActor::onUpdate state-2 GhostActor wait — disp32 at +3 = the GhostActor field (published as gpa_ghost_actor_off), CALL at +12 = GhostActor::isReady (identity gate).",
+    },
+    // ── Multiplayer Bot "Target Score" — whose ghost it is (the name plate) ──
+    // The ghost-id lookup `ghost_actor_init` calls (20260825 `FUN_18001dc90`,
+    // 20250805 `FUN_18001d6c0`, 20260721 `0x18001dc00`, 20260915
+    // `0x18001de70`): `i64 ghost_id(int side)` — the game's own verdict on the
+    // player's TARGET option. Byte-identical apart from the displacements:
+    //
+    //   +0    48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20   prologue
+    //   +15   4C 8D 05 d32            LEA  R8,[image base]
+    //   +28   49 8B 84 C0 d32         MOV  RAX,[R8+RAX*8+player_work_table]
+    //   +39   83 7A s8 01             CMP  [PW+style],1   (0x50 / 0x60 old)
+    //   +43   8B 72 m8                MOV  ESI,[PW+mcode] (0x54 / 0x64 old)
+    //   +48   83 7A d8 01 / +52 48 8D 42 d8 / +77 8B 5A d8   PW+difficulty (0x5C / 0x6C)
+    //   +80   48 8B 05 d32            MOV  RAX,[rip+game_work_global]
+    //   +90   8B 87 D0 00 00 00 ...   GameWork+0xD0 in {1,2} (battle modes) ⇒ 0
+    //   +114  4C 63 92 t32 00 00      MOVSXD R10,[PW+target] (0x1328 / 0x1308 old)
+    //   +121  41 83 FA 06 0F 87       switch 0..=6
+    //   +144  case 0: own PB — `LEA RCX,[PW+score_db]; CALL`
+    //   +170  case 1..3: rival code `[PW+target+4+(n-1)*4]` (t32+4 at +189);
+    //   +198  48 8B 05 d32            MOV RAX,[rip+rival_sets] (G → P → container)
+    //         the container {begin +0, end +8, default set +0x20}, set kind
+    //         dword +0 == 3 (rival), rival code dword +0x50
+    //   +0x1C0 44 8B 47 04 44 8B CB 8B D6 E8   CALL score_entry(set, mcode,
+    //         GameWork+4 style, difficulty) — cases 1..6; entry +0x10 = ghost id
+    //
+    // Consumers: multiplayer_bot::target_name (the lookup + set getters,
+    // called once per Target Score flip; nothing is detoured) and
+    // multiplayer_bot::impersonation (the decoded PlayerWork chart-identity
+    // offsets, which differ on 20250805 / 20260224). `derive_target_name_sites`
+    // decodes and cross-checks every field. Unique on 20250805 / 20260721 /
+    // 20260825 / 20260915 (Ghidra); 20260224 via the sweep.
+    SignatureDefinition {
+        name: "ghost_id_lookup",
+        pattern: "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 4C 8D 05 ?? ?? ?? ?? 48 63 C1 45 33 DB 49 8B 84 C0 ?? ?? ?? ?? 48 8B 10 83 7A ?? 01 8B 72 ?? 75 ?? 83 7A ?? 01 48 8D 42 ?? 48 8D 4C 24 30 48 0F 4F C8 C7 44 24 30 01 00 00 00 8B 19 EB ?? 8B 5A ?? 48 8B 05 ?? ?? ?? ?? 48 8B 38 8B 87 D0 00 00 00 83 F8 01 0F 84 ?? ?? ?? ?? 83 F8 02 0F 84 ?? ?? ?? ?? 4C 63 92 ?? ?? 00 00 41 83 FA 06 0F 87 ?? ?? ?? ?? 43 8B 8C 90 ?? ?? ?? ?? 49 03 C8 FF E1 44 8B 47 04 48 8D 8A ?? ?? 00 00 44 8B CB 8B D6 E8 ?? ?? ?? ?? E9 ?? ?? ?? ?? 41 8D 42 FF 85 C0 78 ?? 83 F8 03 73 ?? 48 98 44 8B 84 82 ?? ?? 00 00 45 85 C0 74 ?? 48 8B 05 ?? ?? ?? ?? 4C 8B 08 49 8B 09 49 8B 41 08 48 3B C8 74 ?? 0F 1F 40 00 48 8B 11 83 3A 03 75 ?? 44 39 42 50 74 ?? 48 83 C1 08 48 3B C8 75 ?? 49 8B 49 20",
+        description: "i64 ghost_id(int side) — the TARGET-option switch (own PB / rival 1-3 / ranking sets) ghost_actor_init calls. Entry of the function; derive_target_name_sites decodes the PlayerWork offsets, the rival-set global and the score-entry callee from it.",
+    },
+    // `const char* dancer_name(RivalSet*, u32 mcode, int style, int diff)`
+    // (20260825 `FUN_1801ee8c0`; 20250805 `0x1801d63f0`): the name the song
+    // select's TARGET list shows for a set — a rival set (kind 3) returns
+    // its own name (`set+0x58`, 8 chars + NUL), a ranking set looks the
+    // chart up in its holder map (`set+0x38` head, `_Isnil` +0xE5, value
+    // +0x1C, 10 × 0x14 entries {ddr code, area, name[12]} indexed style*5 +
+    // diff) and returns the record holder's name, `""` when absent. The
+    // pattern covers the rival return and the whole tree descent, so it
+    // pins that layout. Unique on 20250805 / 20260721 / 20260825 / 20260915.
+    SignatureDefinition {
+        name: "rival_set_dancer_name",
+        pattern: "48 83 EC 18 83 39 03 4C 8B D1 75 09 48 8D 41 58 48 83 C4 18 C3 48 8B 49 38 48 8B 41 08 80 B8 E5 00 00 00 00 75 1A 39 50 18 73 06 48 8B 40 10 EB 06 48 8B C8 48 8B 00 80 B8 E5 00 00 00 00 74 E6 49 8B 42 38",
+        description: "Rival/ranking set dancer-name getter (set, mcode, style, diff) -> const char* — rival set: its +0x58 name; ranking set: the chart's record-holder name from the +0x38 holder map. Consumer: multiplayer_bot::target_name.",
     },
     // The song-end result commit — GamePlayActor vtable +0x28 (20260721
     // `FUN_18005d970`, 20260526 `FUN_18005d180`). Copies the actor's live
@@ -3411,6 +3487,9 @@ impl SignatureStore {
         self.derive_smarvelous_burst();
         self.derive_bottom_text();
         self.derive_ghost_actor_probe();
+        // Cross-checks its table disp against `player_work_table` (derived
+        // above); consumes `rival_set_dancer_name` (a plain AOB).
+        self.derive_target_name_sites();
         // Consumes `cmovieclip_create` (identity gate of the bg_root site) —
         // must stay after derive_cmovieclip_create.
         self.derive_scene3d();
@@ -8526,6 +8605,164 @@ impl SignatureStore {
     /// `derive_ghost_actor_probe`), or `None`.
     pub fn gpa_ghost_actor_off(&self) -> Option<usize> {
         self.published_value("gpa_ghost_actor_off")
+    }
+
+    /// Decode the Target Score name-plate sites from `ghost_id_lookup` (byte
+    /// map on the signature). Two stages, each all-or-nothing; every field
+    /// is decoded from the instruction that uses it and cross-checked.
+    ///
+    /// Stage 1 — the `PlayerWork` chart identity (published as
+    /// `pw_chart_{style,mcode,diff}_off`, consumed by the Multiplayer Bot's
+    /// impersonation mirror as well):
+    /// * the `LEA R8` at +15 is the image base and the table disp32 at +32
+    ///   lands on the independently derived `player_work_table`;
+    /// * the three difficulty disp8s (+50, +55, +79) agree, and style <
+    ///   mcode < difficulty < 0x80, all 4-aligned.
+    ///
+    /// Stage 2 — the name lookup (`pw_target_select_off`, addresses
+    /// `rival_sets_global` / `rival_set_score_entry`):
+    /// * the TARGET disp32 (+117) is plausible and the rival-code load
+    ///   (+189) reads exactly `target + 4`;
+    /// * the rival-set global (+201) is inside the module;
+    /// * the CALL at +0x1C9 follows its exact argument setup and lands on a
+    ///   body whose prologue walks a set's +0x18 score map (`_Isnil` +0x201);
+    /// * `rival_set_dancer_name` resolved.
+    ///
+    /// A stage-2 miss leaves the bot's Target Score plate reading `TARGET`
+    /// (one WARN); a stage-1 miss also leaves the impersonation on its
+    /// 20260324+ constants.
+    fn derive_target_name_sites(&mut self) {
+        const TAG: &str = "target_name_sites";
+        const CALL_SITE: usize = 0x1C0;
+        const CALL_ARGS: [u8; 10] = [0x44, 0x8B, 0x47, 0x04, 0x44, 0x8B, 0xCB, 0x8B, 0xD6, 0xE8];
+        const ENTRY_PROLOGUE: [u8; 19] = [
+            0x48, 0x83, 0xEC, 0x18, 0x4C, 0x8B, 0x51, 0x18, 0x49, 0x8B, 0x42, 0x08, 0x80, 0xB8,
+            0x01, 0x02, 0x00, 0x00, 0x00,
+        ];
+        let (Some(m), Some(pwt)) = (
+            self.get_address("ghost_id_lookup"),
+            self.get_address("player_work_table"),
+        ) else {
+            log_warn!(
+                "  [-] {} -- ghost_id_lookup / player_work_table unresolved",
+                TAG
+            );
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: usize, len: usize| {
+            p.wrapping_sub(base) < size && p.wrapping_sub(base).saturating_add(len) <= size
+        };
+        if !inside(m as usize, CALL_SITE + CALL_ARGS.len() + 4) {
+            log_warn!("  [-] {} -- lookup body outside module", TAG);
+            return;
+        }
+        unsafe {
+            let rd32 = |p: *const u8| std::ptr::read_unaligned(p as *const u32) as usize;
+            // ── Stage 1: PlayerWork chart identity ──
+            if decode_rip_relative(m.add(18)) as usize != base {
+                log_warn!("  [-] {} -- LEA at +15 is not the image base", TAG);
+                return;
+            }
+            if base.wrapping_add(rd32(m.add(32))) != pwt as usize {
+                log_warn!(
+                    "  [-] {} -- table disp disagrees with player_work_table",
+                    TAG
+                );
+                return;
+            }
+            let style = *m.add(41) as usize;
+            let mcode = *m.add(45) as usize;
+            let diff = *m.add(50) as usize;
+            if *m.add(55) as usize != diff || *m.add(79) as usize != diff {
+                log_warn!("  [-] {} -- difficulty disps disagree", TAG);
+                return;
+            }
+            if !(style < mcode && mcode < diff && diff < 0x80) || (style | mcode | diff) % 4 != 0 {
+                log_warn!(
+                    "  [-] {} -- implausible PlayerWork offsets (style 0x{:X}, mcode 0x{:X}, diff 0x{:X})",
+                    TAG,
+                    style,
+                    mcode,
+                    diff
+                );
+                return;
+            }
+            self.publish_value("pw_chart_style_off", style);
+            self.publish_value("pw_chart_mcode_off", mcode);
+            self.publish_value("pw_chart_diff_off", diff);
+
+            // ── Stage 2: the name lookup ──
+            if self.get_address("rival_set_dancer_name").is_none() {
+                log_warn!("  [-] {} -- rival_set_dancer_name unresolved", TAG);
+                return;
+            }
+            let target = rd32(m.add(117));
+            if !(0x100..0x4000).contains(&target) || target % 4 != 0 {
+                log_warn!("  [-] {} -- implausible TARGET offset 0x{:X}", TAG, target);
+                return;
+            }
+            if rd32(m.add(189)) != target + 4 {
+                log_warn!("  [-] {} -- rival-code load is not TARGET + 4", TAG);
+                return;
+            }
+            let sets = decode_rip_relative(m.add(201));
+            if !inside(sets as usize, 8) {
+                log_warn!("  [-] {} -- rival-set global outside module", TAG);
+                return;
+            }
+            let call_args = std::slice::from_raw_parts(m.add(CALL_SITE), CALL_ARGS.len());
+            if call_args != CALL_ARGS {
+                log_warn!("  [-] {} -- score-entry call site shape differs", TAG);
+                return;
+            }
+            let entry_fn = decode_call_rel32(m.add(CALL_SITE + CALL_ARGS.len() - 1));
+            if !inside(entry_fn as usize, ENTRY_PROLOGUE.len())
+                || std::slice::from_raw_parts(entry_fn, ENTRY_PROLOGUE.len()) != ENTRY_PROLOGUE
+            {
+                log_warn!("  [-] {} -- score-entry callee prologue differs", TAG);
+                return;
+            }
+            self.resolved.insert("rival_sets_global".into(), sets);
+            log_info!(
+                "  [+] rival_sets_global (derived) @ +0x{:X}",
+                sets as usize - base
+            );
+            self.resolved
+                .insert("rival_set_score_entry".into(), entry_fn);
+            log_info!(
+                "  [+] rival_set_score_entry (derived) @ +0x{:X}",
+                entry_fn as usize - base
+            );
+            self.publish_value("pw_target_select_off", target);
+        }
+    }
+
+    /// `PlayerWork` chart-identity offsets `(style, committed mcode, selected
+    /// difficulty)` — `(0x50, 0x54, 0x5C)` on 20260324+, `(0x60, 0x64, 0x6C)`
+    /// on 20250805 / 20260224 (stage 1 of `derive_target_name_sites`).
+    pub fn player_work_chart_offsets(&self) -> Option<(usize, usize, usize)> {
+        Some((
+            self.published_value("pw_chart_style_off")?,
+            self.published_value("pw_chart_mcode_off")?,
+            self.published_value("pw_chart_diff_off")?,
+        ))
+    }
+
+    /// The Target Score name-plate sites (see `derive_target_name_sites`),
+    /// or `None`.
+    pub fn target_name_sites(&self) -> Option<TargetNameSites> {
+        Some(TargetNameSites {
+            ghost_id_lookup: self.get_address("ghost_id_lookup")?,
+            score_entry: self.get_address("rival_set_score_entry")?,
+            dancer_name: self.get_address("rival_set_dancer_name")?,
+            rival_sets_global: self.get_address("rival_sets_global")?,
+            pw_style_off: self.published_value("pw_chart_style_off")?,
+            pw_mcode_off: self.published_value("pw_chart_mcode_off")?,
+            pw_diff_off: self.published_value("pw_chart_diff_off")?,
+            pw_target_off: self.published_value("pw_target_select_off")?,
+        })
     }
 
     fn derive_song_rate_runtime_sites(&mut self) {

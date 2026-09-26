@@ -24,8 +24,12 @@
 //! 2. S-Marvelous re-hide: the gate cannot know about S-Marvelous (a
 //!    display-layer notion), so the flash re-drive — which already runs
 //!    post-original on every S-Marv event with the NoteResultActor in hand
-//!    — clears the clip's visibility bit again ([`hide_for_smarvelous`]),
-//!    one event later in the same frame, before anything renders.
+//!    — clears the clip's visibility bit again ([`hide_for_top_tier`]),
+//!    one event later in the same frame, before anything renders. The same
+//!    re-hide runs for every Marvelous of a side EXCLUDED from
+//!    classification (`state::set_excluded` — the Multiplayer Bot's Target
+//!    Score replay): with no S-Marvelous tier on that side, Marvelous is
+//!    its exempt top tier again, exactly as stock.
 //!
 //! Cabinet-wide (the handler is shared by both sides' actors) and respects
 //! the per-player FAST/SLOW option: the clip at this+0xA8 is only created
@@ -119,13 +123,14 @@ pub fn deactivate() {
 /// §3.2; null when the player's FAST/SLOW option is off).
 const NOTE_RESULT_FAST_SLOW_WRAPPER_OFFSET: usize = 0xA8;
 
-/// Post-original, on an S-MARVELOUS event: re-hide the indicator the
-/// patched gate just showed. The stock hide branch is `play` +
-/// `set_attribute(visible, 0)`; the play already ran in the show branch,
-/// so only the visibility write is needed. `note_result_actor` = the side's
-/// NoteResultActor (resolved by the flash re-drive). Silent no-op when the
-/// patch is inactive, the actor is unknown, or the clip is absent.
-pub fn hide_for_smarvelous(note_result_actor: Option<*mut u8>) {
+/// Post-original, on a TOP-TIER event — an S-Marvelous, or a Marvelous of
+/// an excluded side: re-hide the indicator the patched gate just showed.
+/// The stock hide branch is `play` + `set_attribute(visible, 0)`; the play
+/// already ran in the show branch, so only the visibility write is needed.
+/// `note_result_actor` = the side's NoteResultActor (resolved by the flash
+/// fan-out). Silent no-op when the patch is inactive, the actor is
+/// unknown, or the clip is absent.
+pub fn hide_for_top_tier(note_result_actor: Option<*mut u8>) {
     if !is_active() {
         return;
     }

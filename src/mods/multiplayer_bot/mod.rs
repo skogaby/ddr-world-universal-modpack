@@ -30,8 +30,9 @@
 //!   level also comes from the human's side). `apply` then probes every pointer, refuses unless
 //!   the commit prepared both stage records for the same song, mirrors the chart identity onto
 //!   the bot side, copies the human's lane `Option` fields with the gauge forced NORMAL, writes
-//!   the name plate (`BOT LV<n>` / `TARGET`), sets `PlayerWork+0x4 = 1` and the `GameWork`
-//!   versus word, pans SEs by side (cosmetic), arms the controller and taints the bot side. The
+//!   the name plate (`BOT LV<n>`; for Target Score the target's own name — see below — or
+//!   `TARGET`), sets `PlayerWork+0x4 = 1` and the `GameWork` versus word, pans SEs by side
+//!   (cosmetic), arms the controller and taints the bot side. The
 //!   game builds the second `GamePlayActor` natively. The first scene outside the play window
 //!   {26..=30} restores the snapshot; GAMEPLAY re-entry and an in-place `song_reset` re-seed
 //!   the bot. A 20 s render-thread watchdog WARNs if no scene change follows the flip.
@@ -49,6 +50,17 @@
 //!   the bytes `ghost_source.rs` reads from the human's `GhostActor`. With no usable ghost the
 //!   song plays at [`GHOST_FALLBACK_LEVEL`] with one WARN and a toast. The filler also counts
 //!   planner-vs-judge grade mismatches for the restore tally.
+//! - **Target Score presentation**: `target_name.rs` asks the game's own TARGET-option lookup
+//!   (`ghost_id_lookup`, then the rival/ranking set's `score_entry` + `dancer_name` getters — the
+//!   set must carry the SAME ghost id) whose ghost the human's pacemaker will load, at the flip
+//!   and before any write; the plate becomes that name (own best ⇒ the human's name; nothing
+//!   usable ⇒ `TARGET`). The plate is an inline 8-char buffer, so `plate_label.rs` draws a
+//!   smaller `TARGET BOT` row of the plate's own glyphs just above it in gameplay and on the
+//!   stage results (two process-lifetime `SpriteLayer`s on an `input_manager` frame driver; the
+//!   glyph sets have no parentheses). A Target session also holds
+//!   `s_marvelous::state::set_excluded` on the bot side: the ghost alphabet predates the tier,
+//!   so that side reads as a stock player (no S-Marvelous, Marvelous exempt from FAST/SLOW,
+//!   "-" in the results pane's S-MARV slot) — even when the song fell back to LV10.
 //! - **Extra-stage guard** (`extra_stage_guard.rs`): one detour on `extra_stage_grant` clears
 //!   the bot's entered byte around the original, so the grant's "every entered side AAA'd"
 //!   rule ignores the bot. The bot can never add a grant.
@@ -82,7 +94,9 @@
 //! offset), `scene_manager` and `score_guard` are all available. A missing gate input
 //! refuses every song with one WARN. A missing `extra_stage_grant` leaves the stock grant
 //! rule (one WARN). A missing ghost source makes every Target Score song fall back to
-//! [`GHOST_FALLBACK_LEVEL`]. Without `custom_options` there are no rows, so the bot stays off.
+//! [`GHOST_FALLBACK_LEVEL`]. A missing target-name lookup leaves Target plates reading `TARGET`
+//! (no label); missing SpriteLayer / ScoreActor sites drop the label (per surface), one WARN
+//! each. Without `custom_options` there are no rows, so the bot stays off.
 //!
 //! ## Config and option rows
 //!
@@ -105,9 +119,11 @@ pub mod ghost;
 pub mod ghost_source;
 pub mod impersonation;
 pub mod planner;
+pub mod plate_label;
 pub mod self_test;
 pub mod session;
 pub mod skill;
+pub mod target_name;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -115,7 +131,9 @@ use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::custom_options::{
     self, PersistMode, RegisterError, RegisterSpec, ScalarFormat, ShowWhen,
 };
-use crate::services::{foot_panel_swap, scene_manager, score_guard, song_reset, stage_records};
+use crate::services::{
+    foot_panel_swap, input_manager, scene_manager, score_guard, song_reset, stage_records,
+};
 use crate::{log_info, log_warn};
 
 pub use eligibility::BotMode;
@@ -318,6 +336,10 @@ fn register_level_row() {
 pub struct MultiplayerBotMod {
     scene_cb: Option<usize>,
     reset_cb: Option<usize>,
+    /// The `TARGET BOT` label's frame driver — registered once, kept across
+    /// disable (the disable only disarms; the driver blanks on the next
+    /// game-thread frame).
+    frame_cb: Option<usize>,
 }
 
 impl MultiplayerBotMod {
@@ -325,6 +347,7 @@ impl MultiplayerBotMod {
         Self {
             scene_cb: None,
             reset_cb: None,
+            frame_cb: None,
         }
     }
 }
@@ -375,11 +398,18 @@ impl Mod for MultiplayerBotMod {
             log_warn!("MultiplayerBot: score guard unavailable -- mod inactive (fail-closed)");
             ok = false;
         }
+        // The PlayerWork chart fields the flip mirrors (build-dependent;
+        // an underived build keeps the 20260324+ layout with one WARN).
+        impersonation::init(ctx.signatures);
         // Optional: the extra-stage guard's signature (fail-open, its own WARN).
         extra_stage_guard::init(ctx.signatures);
         // Optional: the Target Score ghost source (fail-open — a miss means
         // every Target song falls back to LV10 with a WARN + toast).
         ghost_source::init(ctx.signatures);
+        // Optional: the Target Score name plate + its TARGET BOT label
+        // (fail-open — a miss leaves the plate reading TARGET / no label).
+        target_name::init(ctx.signatures);
+        plate_label::init(ctx.signatures);
         CAPABLE.store(ok, Ordering::Release);
         ok
     }
@@ -405,6 +435,11 @@ impl Mod for MultiplayerBotMod {
                 impersonation::on_song_reset(t_ms);
                 self_test::on_song_reset(t_ms);
             }));
+        }
+        if self.frame_cb.is_none() && plate_label::is_available() {
+            self.frame_cb = Some(input_manager::on_frame(std::sync::Arc::new(
+                plate_label::on_frame,
+            )));
         }
         log_info!(
             "MultiplayerBot: enabled (bot rows + impersonation ready; extra-stage guard {}; self-test {})",

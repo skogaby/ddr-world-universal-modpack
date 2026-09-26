@@ -3,11 +3,16 @@
 //!
 //! At the song-select → stage edge (0-idx 25 → 26/27/28), when the
 //! `eligibility` gate passes, the bot side's `PlayerWork` is dressed as an
-//! entered player — chart identity mirrored from the human (`+0x50/+0x54/
-//! +0x5C` and the stage record's `+0x04/+0x08`), the human's lane
+//! entered player — chart identity mirrored from the human (the PlayerWork
+//! style / mcode / difficulty fields, `+0x50/+0x54/+0x5C` on 20260324+ and
+//! `+0x60/+0x64/+0x6C` on the two old builds — derived, see [`init`] — and
+//! the stage record's `+0x04/+0x08`), the human's lane
 //! `ddr::player::Option` copied with the gauge forced NORMAL, the name plate
-//! `BOT LV<n>` (`TARGET` for the Target Score replay), then `PlayerWork+0x4
-//! = 1` and `GameWork+0x0 = 1`. The game
+//! `BOT LV<n>` (for the Target Score replay: the target's own name when
+//! `target_name` can tell whose ghost the human's pacemaker will load, with
+//! the `plate_label` TARGET BOT label armed above it — else `TARGET`), then
+//! `PlayerWork+0x4 = 1` and `GameWork+0x0 = 1`. A Target session also
+//! holds `s_marvelous::state::set_excluded` on the bot side. The game
 //! does the rest natively: the GAMEPLAY loader copies `+0x4` into the
 //! `DancePlaySequence` ctor struct and creates a `GamePlayActor` per entered
 //! side; every play-window reader of `GameWork+0x0` is a display selector
@@ -25,13 +30,15 @@
 //! here runs per frame.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::eligibility::{self, BotMode, Inputs, Refusal};
 use super::session::{self, Edge, NAME_LEN};
-use super::{filler, self_test, skill};
+use super::{filler, plate_label, self_test, skill, target_name};
 use crate::core::memory;
+use crate::core::signatures::SignatureStore;
+use crate::mods::s_marvelous;
 use crate::services::foot_panel_swap::{self, Controller};
 use crate::services::{game_audio, score_guard, stage_records, widget_renderer};
 use crate::types::scenes::scene;
@@ -48,14 +55,65 @@ const _: () = assert!(
         && session::PLAY_WINDOW[4] == scene::RESULTS_DETAIL
 );
 
-// ── PlayerWork header (build-invariant, design §2.3 / §5.1) ──────────────
+// ── PlayerWork header (design §2.3 / §5.1) ──────────────────────────────
 const PW_ENTERED: usize = 0x4;
 const PW_NAME: usize = 0xC;
-const PW_STYLE: usize = 0x50;
-const PW_MCODE: usize = 0x54;
-const PW_DIFFICULTY: usize = 0x5C;
-/// Bytes probed on each PlayerWork (header through `+0x5C`).
-const PW_PROBE_LEN: usize = 0x60;
+
+/// The PlayerWork chart-identity fields the flip mirrors: style, committed
+/// mcode, selected difficulty. BUILD-DEPENDENT — `+0x50/+0x54/+0x5C` on
+/// 20260324+, `+0x60/+0x64/+0x6C` on 20250805 / 20260224 (the DPS loader's
+/// difficulty getter reads the latter there) — so they come from
+/// `SignatureStore::player_work_chart_offsets` (decoded from the game's
+/// TARGET lookup); an underived build keeps the 20260324+ values (one WARN).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChartOffsets {
+    style: usize,
+    mcode: usize,
+    difficulty: usize,
+}
+
+impl ChartOffsets {
+    /// Bytes probed on each PlayerWork: the header through the name and the
+    /// last chart field.
+    fn probe_len(self) -> usize {
+        (self.style.max(self.mcode).max(self.difficulty) + 4).max(PW_NAME + NAME_LEN)
+    }
+}
+
+const CHART_20260324: ChartOffsets = ChartOffsets {
+    style: 0x50,
+    mcode: 0x54,
+    difficulty: 0x5C,
+};
+
+static CHART: OnceLock<ChartOffsets> = OnceLock::new();
+
+fn chart() -> ChartOffsets {
+    CHART.get().copied().unwrap_or(CHART_20260324)
+}
+
+/// Capture the derived chart offsets (mod init).
+pub fn init(signatures: &SignatureStore) {
+    match signatures.player_work_chart_offsets() {
+        Some((style, mcode, difficulty)) => {
+            let c = ChartOffsets {
+                style,
+                mcode,
+                difficulty,
+            };
+            let _ = CHART.set(c);
+            log_info!(
+                "MultiplayerBot: PlayerWork chart fields style +0x{:X} mcode +0x{:X} difficulty +0x{:X}",
+                c.style,
+                c.mcode,
+                c.difficulty
+            );
+        }
+        None => log_warn!(
+            "MultiplayerBot: PlayerWork chart offsets underived -- using the 20260324+ layout (+0x50/+0x54/+0x5C)"
+        ),
+    }
+}
 
 // ── GameWork ────────────────────────────────────────────────────────────
 const GW_VERSUS: usize = 0x0;
@@ -214,8 +272,10 @@ fn gather_inputs() -> Inputs {
     }
 }
 
-/// Every game pointer the flip touches, all probed.
+/// Every game pointer the flip touches, all probed (plus the chart-field
+/// offsets they were probed for — `apply` and `undo` use exactly these).
 struct Ptrs {
+    chart: ChartOffsets,
     pw_h: *mut u8,
     pw_b: *mut u8,
     rec_h: *mut u8,
@@ -273,9 +333,10 @@ fn resolve_ptrs(plan: &eligibility::Plan) -> Option<Ptrs> {
     };
     let opt_h = unsafe { pw_h.add(opt_off) };
     let opt_b = unsafe { pw_b.add(opt_off) };
+    let chart = chart();
     let probes: [(*const u8, usize, &str); 7] = [
-        (pw_h, PW_PROBE_LEN, "human PlayerWork"),
-        (pw_b, PW_PROBE_LEN, "bot PlayerWork"),
+        (pw_h, chart.probe_len(), "human PlayerWork"),
+        (pw_b, chart.probe_len(), "bot PlayerWork"),
         (rec_h, REC_PROBE_LEN, "human stage record"),
         (rec_b, REC_PROBE_LEN, "bot stage record"),
         (opt_h, OPT_PROBE_LEN, "human Option"),
@@ -293,6 +354,7 @@ fn resolve_ptrs(plan: &eligibility::Plan) -> Option<Ptrs> {
         }
     }
     Some(Ptrs {
+        chart,
         pw_h,
         pw_b,
         rec_h,
@@ -342,9 +404,9 @@ fn apply(plan: eligibility::Plan) {
                 versus_word: memory::read_i32(p.gw.add(GW_VERSUS)),
                 pan_byte: game_audio::versus_pan(),
             },
-            pw_style: memory::read_i32(p.pw_b.add(PW_STYLE)),
-            pw_mcode: memory::read_i32(p.pw_b.add(PW_MCODE)),
-            pw_difficulty: memory::read_i32(p.pw_b.add(PW_DIFFICULTY)),
+            pw_style: memory::read_i32(p.pw_b.add(p.chart.style)),
+            pw_mcode: memory::read_i32(p.pw_b.add(p.chart.mcode)),
+            pw_difficulty: memory::read_i32(p.pw_b.add(p.chart.difficulty)),
             rec_difficulty: memory::read_i32(p.rec_b.add(REC_DIFFICULTY)),
             rec_style: memory::read_i32(p.rec_b.add(REC_STYLE)),
             option,
@@ -352,15 +414,34 @@ fn apply(plan: eligibility::Plan) {
     };
     let (song_mcode, song_difficulty) = unsafe {
         (
-            memory::read_i32(p.pw_h.add(PW_MCODE)),
-            memory::read_i32(p.pw_h.add(PW_DIFFICULTY)),
+            memory::read_i32(p.pw_h.add(p.chart.mcode)),
+            memory::read_i32(p.pw_h.add(p.chart.difficulty)),
         )
     };
+    // 3b. The plate (read-only work, before the first write): a Target
+    // Score replay is named after whoever's ghost the human's pacemaker
+    // will load — `TARGET` when that can't be told.
+    let target = match mode {
+        BotMode::Target => match target_name::resolve(human) {
+            Ok(r) => Some(r),
+            Err(why) => {
+                log_info!("MultiplayerBot: Target Score plate stays TARGET -- {}", why);
+                None
+            }
+        },
+        BotMode::Level(_) => None,
+    };
+    let plate = target
+        .map(|r| r.name)
+        .unwrap_or_else(|| session::format_bot_name(mode));
     unsafe {
         // 4. Mirror the chart identity.
-        memory::write_i32(p.pw_b.add(PW_STYLE), memory::read_i32(p.pw_h.add(PW_STYLE)));
-        memory::write_i32(p.pw_b.add(PW_MCODE), song_mcode);
-        memory::write_i32(p.pw_b.add(PW_DIFFICULTY), song_difficulty);
+        memory::write_i32(
+            p.pw_b.add(p.chart.style),
+            memory::read_i32(p.pw_h.add(p.chart.style)),
+        );
+        memory::write_i32(p.pw_b.add(p.chart.mcode), song_mcode);
+        memory::write_i32(p.pw_b.add(p.chart.difficulty), song_difficulty);
         memory::write_i32(
             p.rec_b.add(REC_DIFFICULTY),
             memory::read_i32(p.rec_h.add(REC_DIFFICULTY)),
@@ -377,8 +458,7 @@ fn apply(plan: eligibility::Plan) {
         );
         memory::write_i32(p.opt_b.add(OPT_GAUGE), 0);
         // 6. Name plate.
-        let name = session::format_bot_name(mode);
-        std::ptr::copy_nonoverlapping(name.as_ptr(), p.pw_b.add(PW_NAME), NAME_LEN);
+        std::ptr::copy_nonoverlapping(plate.as_ptr(), p.pw_b.add(PW_NAME), NAME_LEN);
         // 7. The two load-bearing words.
         memory::write_u8(p.pw_b.add(PW_ENTERED), 1);
         memory::write_i32(p.gw.add(GW_VERSUS), 1);
@@ -407,6 +487,15 @@ fn apply(plan: eligibility::Plan) {
         return;
     }
     score_guard::set_autoplay_taint(bot, true);
+    if mode == BotMode::Target {
+        // The ghost alphabet predates S-Marvelous, so a replay can never
+        // earn the tier: that side reads as a stock, S-Marv-less player for
+        // the whole session (gameplay, FAST/SLOW, results).
+        s_marvelous::state::set_excluded(bot, true);
+    }
+    if target.is_some() {
+        plate_label::arm(bot);
+    }
 
     *lock_state() = State::Active(Active {
         bot,
@@ -430,14 +519,44 @@ fn apply(plan: eligibility::Plan) {
             seed
         ),
         BotMode::Target => log_info!(
-            "MultiplayerBot: side {} impersonated as \"TARGET\" for P{}'s song mcode={} diff={} (replays P{}'s pacemaker ghost; seed={:#x})",
+            "MultiplayerBot: side {} impersonated as \"{}\" for P{}'s song mcode={} diff={} (replays P{}'s pacemaker ghost{}; seed={:#x})",
             bot,
+            plate_str(&plate),
             human + 1,
             song_mcode,
             song_difficulty,
             human + 1,
+            describe_target(target.as_ref()),
             seed
         ),
+    }
+}
+
+/// The plate buffer as text for the log (up to its NUL).
+fn plate_str(plate: &[u8; NAME_LEN]) -> String {
+    let end = plate.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
+    String::from_utf8_lossy(&plate[..end]).into_owned()
+}
+
+/// The flip line's target provenance (empty when unnamed).
+fn describe_target(target: Option<&target_name::Resolved>) -> String {
+    use target_name::Source;
+    match target {
+        None => String::new(),
+        Some(r) => {
+            let source = match r.source {
+                Source::OwnBest => "own best".to_string(),
+                Source::Rival(n) => format!("rival {n}"),
+                Source::Ranking(0) => "world ranking".to_string(),
+                Source::Ranking(1) => "area ranking".to_string(),
+                Source::Ranking(2) => "machine ranking".to_string(),
+                Source::Ranking(k) => format!("ranking kind {k}"),
+            };
+            format!(
+                " -- {source}, ghost id {}, TARGET BOT label armed",
+                r.ghost_id
+            )
+        }
     }
 }
 
@@ -454,9 +573,9 @@ fn undo(p: &Ptrs, w: &Written) {
         std::ptr::copy_nonoverlapping(w.option.as_ptr(), p.opt_b.add(OPT_COPY_START), OPT_COPY_LEN);
         memory::write_i32(p.rec_b.add(REC_STYLE), w.rec_style);
         memory::write_i32(p.rec_b.add(REC_DIFFICULTY), w.rec_difficulty);
-        memory::write_i32(p.pw_b.add(PW_DIFFICULTY), w.pw_difficulty);
-        memory::write_i32(p.pw_b.add(PW_MCODE), w.pw_mcode);
-        memory::write_i32(p.pw_b.add(PW_STYLE), w.pw_style);
+        memory::write_i32(p.pw_b.add(p.chart.difficulty), w.pw_difficulty);
+        memory::write_i32(p.pw_b.add(p.chart.mcode), w.pw_mcode);
+        memory::write_i32(p.pw_b.add(p.chart.style), w.pw_style);
     }
 }
 
@@ -472,7 +591,7 @@ fn restore() {
     };
 
     match stage_records::player_work(a.bot) {
-        Some(pw_b) if memory::is_readable(pw_b, PW_PROBE_LEN) => unsafe {
+        Some(pw_b) if memory::is_readable(pw_b, chart().probe_len()) => unsafe {
             memory::write_u8(pw_b.add(PW_ENTERED), a.snap.entered_byte);
             std::ptr::copy_nonoverlapping(a.snap.name.as_ptr(), pw_b.add(PW_NAME), NAME_LEN);
         },
@@ -494,6 +613,12 @@ fn restore() {
     }
 
     foot_panel_swap::disarm_bot(a.bot);
+    // The TARGET BOT label blanks on the next frame; the S-Marvelous
+    // exclusion is ours (set only for a Target session) — drop it.
+    plate_label::disarm();
+    if a.mode == BotMode::Target {
+        s_marvelous::state::set_excluded(a.bot, false);
+    }
     // The taint mirrors autoplay's own state once the bot is gone: a cached
     // `autoplay = ON` on that side keeps its taint, anything else clears.
     score_guard::set_autoplay_taint(
@@ -556,11 +681,12 @@ fn describe_ghost(s: &filler::SongSummary) -> String {
 
 /// Fresh seed for the same song (GAMEPLAY entry / quick restart / song reset).
 fn reseed(a: &Active, reason: &str) {
+    let chart = chart();
     let (mcode, difficulty) = match stage_records::player_work(a.human) {
-        Some(pw_h) if memory::is_readable(pw_h, PW_PROBE_LEN) => unsafe {
+        Some(pw_h) if memory::is_readable(pw_h, chart.probe_len()) => unsafe {
             (
-                memory::read_i32(pw_h.add(PW_MCODE)),
-                memory::read_i32(pw_h.add(PW_DIFFICULTY)),
+                memory::read_i32(pw_h.add(chart.mcode)),
+                memory::read_i32(pw_h.add(chart.difficulty)),
             )
         },
         _ => (0, 0),

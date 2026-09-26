@@ -172,10 +172,12 @@ fn apply_layout(w: &TextWidget, side: usize) {
 }
 
 /// S-Marv tally for the composer: `Some` only while the S-Marvelous mod is
-/// enabled (the field is omitted otherwise and Marv counts every grade-0
-/// step).
+/// enabled and the side is classified (the field is omitted otherwise and
+/// Marv counts every grade-0 step — also for a side the S-Marvelous mod
+/// excludes, the Multiplayer Bot's Target Score replay).
 fn smarv_for(side: usize) -> Option<u32> {
-    if crate::mods::s_marvelous::is_enabled() {
+    if crate::mods::s_marvelous::is_enabled() && !crate::mods::s_marvelous::state::is_excluded(side)
+    {
         Some(crate::mods::s_marvelous::state::smarv_count(side))
     } else {
         None

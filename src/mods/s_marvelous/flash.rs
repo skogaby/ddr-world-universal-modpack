@@ -12,7 +12,8 @@
 //!
 //! Also the post-original fan-out point for the OTHER judge-event display
 //! surfaces (`on_judge_event`): the FAST/SLOW re-hide and the violet
-//! receptor burst (`receptor`).
+//! receptor burst (`receptor`) — plus the FAST/SLOW re-hide for an
+//! excluded side's Marvelous (`on_excluded_marvelous`).
 //!
 //! No play/visibility calls: the stock handler already set them for this
 //! judgement. Calibration hide and per-player judgement styling apply
@@ -127,6 +128,21 @@ pub fn on_judge_event(side: usize, judge_actor: *mut u8, info: *const u8, smarv:
     on_smarvelous(side, nra);
 }
 
+/// Post-original entry for a MARVELOUS of a side excluded from
+/// classification (`state::set_excluded` — the Multiplayer Bot's Target
+/// Score replay). That side has no S-Marvelous tier, so Marvelous is its
+/// exempt top tier: re-hide the FAST/SLOW indicator the cabinet-wide gate
+/// patch just showed, exactly like stock. Nothing else on that side is
+/// touched (stock word, stock receptor). Called from the judge tap, game
+/// thread; the actor walk only runs while the gate patch is live.
+pub fn on_excluded_marvelous(judge_actor: *mut u8) {
+    if !super::fast_slow::is_active() {
+        return;
+    }
+    let nra = unsafe { find_note_result_actor(judge_actor, 0) };
+    super::fast_slow::hide_for_top_tier(nra);
+}
+
 /// Re-drive the side's judgement clip to `in_smarvelous`. Called when an
 /// event classified S-Marvelous (armed sides only — the caller's
 /// classification return gates this). `nra` = the side's NoteResultActor
@@ -136,7 +152,7 @@ fn on_smarvelous(side: usize, nra: Option<*mut u8>) {
     // indicator the patched gate just showed for this grade-0 event.
     // Independent of the word re-drive below (which needs the patched
     // template) — the hide is correct even when the word shows stock.
-    super::fast_slow::hide_for_smarvelous(nra);
+    super::fast_slow::hide_for_top_tier(nra);
 
     // Without the patched template the label does not exist — a goto would
     // be a benign no-op, but skipping keeps the fail-open contract exact

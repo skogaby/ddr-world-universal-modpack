@@ -20,11 +20,11 @@ pub fn row_label(value: i32) -> Option<&'static str> {
     Some(match value {
         0 => "OFF",
         1 => "AUTO",
-        2 => "1st-5th",
+        2 => "1stMIX-5thMIX",
         3 => "MAX-EXTREME",
         4 => "SuperNOVA 1-2",
         5 => "X-X3 vs 2ndMIX",
-        6 => "2013-A",
+        6 => "2013-2014",
         _ => return None,
     })
 }

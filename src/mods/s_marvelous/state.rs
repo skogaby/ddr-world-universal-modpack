@@ -1,6 +1,8 @@
 //! Per-side live state for the S-Marvelous judgement feature: S-Marv
-//! counters and the "current combo contains no Marvelous looser than the
-//! window" tracking bit.
+//! counters, the "current combo contains no Marvelous looser than the
+//! window" tracking bit, and the per-side classification exclusion a
+//! client mod can hold (the Multiplayer Bot's Target Score replay side —
+//! see [`set_excluded`]).
 //!
 //! Design: `.agents/planning/2026-08-29-s-marvelous-judgement/design/
 //! detailed-design.md` §4.3 / §5.1. Fed from the `judge_submit` detour tap
@@ -107,14 +109,59 @@ pub fn is_armed(side: usize) -> bool {
 }
 
 /// The side's ARMED window (ms), `0` when the side is not armed. Read by the
-/// Multiplayer Bot's Target Score replay so its ghost Marvelous samples land
-/// strictly OUTSIDE the S-Marvelous tier (`|d| > window`).
+/// Multiplayer Bot's Target Score replay as its ghost Marvelous floor
+/// (`|d| > window`) — a belt-and-braces guard: that side is normally
+/// [`set_excluded`], so this reads 0 and the replay uses the full band.
 pub fn armed_window(side: usize) -> i32 {
     WINDOW_MS[side & 1].load(Ordering::Relaxed)
 }
 
+/// Per-side classification EXCLUSION, owned by a client mod — today the
+/// Multiplayer Bot's Target Score replay: its ghost stream predates the
+/// tier, so that side must read exactly like a stock, S-Marvelous-less
+/// player (no S-Marv events, no violet surfaces, stock results pane, and
+/// Marvelous back to the exempt top tier for FAST/SLOW).
+///
+/// While set, [`arm`] leaves the side disarmed AND clears its sticky
+/// window + song-armed latch, so gameplay never classifies it, every
+/// results surface falls back to stock for it (`last_armed_window == 0`)
+/// and the upload producer skips it. Setting it also clears the side
+/// immediately, so its order against the play-scene arm on the same scene
+/// edge does not matter. The client clears it when its session ends.
+static EXCLUDED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+/// Set / clear a side's exclusion (see [`EXCLUDED`]).
+pub fn set_excluded(side: usize, excluded: bool) {
+    EXCLUDED[side & 1].store(excluded, Ordering::Relaxed);
+    if excluded {
+        clear_side(side);
+    }
+}
+
+/// Whether the side is excluded from classification this song.
+pub fn is_excluded(side: usize) -> bool {
+    EXCLUDED[side & 1].load(Ordering::Relaxed)
+}
+
+/// Drop everything the side carries: armed + sticky window, song-armed
+/// latch and per-song counters.
+fn clear_side(side: usize) {
+    let s = side & 1;
+    WINDOW_MS[s].store(0, Ordering::Relaxed);
+    LAST_WINDOW_MS[s].store(0, Ordering::Relaxed);
+    ARMED_THIS_SONG[s].store(false, Ordering::Relaxed);
+    SMARV_COUNT[s].store(0, Ordering::Relaxed);
+    MARV_TOTAL[s].store(0, Ordering::Relaxed);
+    COMBO_HAS_LOOSE_MARV[s].store(false, Ordering::Relaxed);
+}
+
 /// Arm a side with the given (already clamped) window at GAMEPLAY entry.
+/// An excluded side is cleared instead (see [`set_excluded`]).
 pub fn arm(side: usize, window_ms: i32) {
+    if is_excluded(side) {
+        clear_side(side);
+        return;
+    }
     let clamped = clamp_window(window_ms);
     WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
     LAST_WINDOW_MS[side & 1].store(clamped, Ordering::Relaxed);
@@ -371,6 +418,46 @@ mod tests {
         assert!(!on_judge_event(0, 0, Some(1), 2)); // disarmed again
         assert_eq!(smarv_count(0), 1);
         assert!(!combo_is_all_smarv(0)); // disarm alone drops the predicate
+        reset_song_state();
+
+        // Exclusion (the Multiplayer Bot's Target Score replay side).
+        clear_song_armed();
+        arm(0, 12);
+        arm(1, 12);
+        assert!(on_judge_event(1, 0, Some(3), 1));
+        assert_eq!(last_armed_window(1), 12);
+        assert!(armed_this_song(1));
+        // Excluding an ARMED side (the arm ran first on this edge) clears it
+        // at once: window, sticky window, song latch, counters.
+        set_excluded(1, true);
+        assert!(is_excluded(1));
+        assert!(!is_excluded(0));
+        assert!(!is_armed(1));
+        assert_eq!(armed_window(1), 0);
+        assert_eq!(last_armed_window(1), 0);
+        assert!(!armed_this_song(1));
+        assert_eq!(smarv_count(1), 0);
+        assert_eq!(marv_total(1), 0);
+        assert!(!combo_is_all_smarv(1));
+        assert!(!on_judge_event(1, 0, Some(1), 2)); // never classifies
+                                                    // A later arm (quick-restart GAMEPLAY re-entry) keeps it cleared,
+                                                    // and never touches the other side.
+        arm(1, 12);
+        assert!(!is_armed(1));
+        assert_eq!(last_armed_window(1), 0);
+        assert!(!armed_this_song(1));
+        assert!(is_armed(0));
+        assert_eq!(last_armed_window(0), 12);
+        // Cleared by the client: the next arm is ordinary again.
+        set_excluded(1, false);
+        assert!(!is_excluded(1));
+        assert!(!is_armed(1)); // clearing alone does not arm
+        arm(1, 12);
+        assert!(is_armed(1));
+        assert_eq!(last_armed_window(1), 12);
+        assert!(armed_this_song(1));
+        disarm_all();
+        clear_song_armed();
         reset_song_state();
     }
 }

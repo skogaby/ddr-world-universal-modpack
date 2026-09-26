@@ -12,11 +12,16 @@
 //! side comes from the skill model's sticky per-song side chain so a replay
 //! looks like a person and not a metronome.
 //!
-//! S-Marvelous exclusion (maintainer directive, 2026-09-14): with the
-//! S-Marvelous mod armed at window `W`, a ghost Marvelous samples
-//! `|d| ∈ [W+1, 17]` — exclusive Marvelous only — so a replay never produces
-//! an S-Marvelous the target's play could not have had (the ghost alphabet
-//! predates the tier). `W = 16` leaves exactly `|d| = 17`.
+//! S-Marvelous (maintainer directives 2026-09-14 / 2026-09-25): the ghost
+//! alphabet predates the tier, so a replay can never earn it — the
+//! impersonation holds `s_marvelous::state::set_excluded` on the bot side,
+//! which keeps that side unclassified (stock Marvelous word, Marvelous exempt
+//! from FAST/SLOW, stock results pane with "-" in the S-MARV slot). The
+//! armed window therefore reads 0 and a ghost Marvelous samples the full
+//! stock band. The `smarv_floor` parameter stays as a guard: were the side
+//! ever armed at window `W`, a Marvelous samples `|d| ∈ [W+1, 17]` so the
+//! replay still never lands inside the tier (`W = 16` leaves exactly
+//! `|d| = 17`).
 //!
 //! World's judge has no Boo (the ±160 row is matched but rejected), so a `4`
 //! is unreproducible and lands on Miss like a `5`; a `7` on a tap likewise. A

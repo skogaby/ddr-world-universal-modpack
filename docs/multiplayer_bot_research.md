@@ -30,7 +30,9 @@ per-step research notes, `progress.md`).
    `getPressAge` returns `current_mc − planned_event` places every graded event exactly where a
    skill model decided — on every build (§5).
 
-## 2. `PlayerWork` / `GameWork` header (build-invariant)
+## 2. `PlayerWork` / `GameWork` header
+
+Build-invariant except where marked (the chart-identity triple moved: see §12.1).
 
 | Object | Offset | Type | Meaning / use |
 |---|---|---|---|
@@ -44,9 +46,9 @@ per-step research notes, `progress.md`).
 | `PlayerWork[side]` (`*table[side]`) | `+0x4` | u8 | entered — WRITTEN 1 at the flip, restored |
 | | `+0x5` | u8 | registered (carded) player — gates the network rival/event calls |
 | | `+0x8` | i32 | payment (−1 never entered) — the EAM-exit settle-up requires `>= 0` |
-| | `+0xC..+0x14` | char[8+1] | name — WRITTEN `BOT LV<n>`, restored |
+| | `+0xC..+0x14` | char[8+1] | name — WRITTEN (`BOT LV<n>` / the Target Score target's name / `TARGET`), restored |
 | | `+0x1C` | i32 | "saves" flag the per-stage `SavePlayerDataActor` waits on |
-| | `+0x50/+0x54/+0x5C` | i32 | style / committed mcode / selected difficulty — MIRRORED from the human |
+| | `+0x50/+0x54/+0x5C` (20260324+) · `+0x60/+0x64/+0x6C` (20250805, 20260224) | i32 | style / committed mcode / selected difficulty — MIRRORED from the human; **build-dependent**, derived (`pw_chart_*_off`, §12.1) |
 | | `+player_option_offset()` (0xE0 new / 0xF0 old) | `ddr::player::Option` | `+0x08..=0x6C` COPIED from the human, `+0x18` gauge forced 0 |
 | `record[stage]` (`stage_record(side, stage)`; base 0x590 new / 0x570 old, stride 0x2B8) | `+0x00/+0x04/+0x08` | i32 | mcode / difficulty / style — `+0x04/+0x08` MIRRORED |
 | | `+0x50` | i32 | rank (extra-stage AAA test `>= 0xF`) |
@@ -257,8 +259,10 @@ ghost unless the saving play had none.
 - Tap byte 0–3 ⇒ uniform |offset| inside that grade's inclusive window (Marvelous `[0,17]`,
   Perfect `[18,34]`, Great `[35,84]`, Good `[85,124]`), side from the skill model's sticky
   Markov chain; 5 ⇒ Miss; 4 and 7 ⇒ Miss (unreproducible); 6 on a tap ⇒ Marvelous.
-- S-Marvelous exclusion: with the S-Marv mod armed at window `W` on the bot side, Marvelous
-  samples `[W+1, 17]` (`W=16` ⇒ exactly 17). Levels 1–10 untouched.
+- S-Marvelous floor: were the S-Marv mod armed at window `W` on the bot side, Marvelous
+  samples `[W+1, 17]` (`W=16` ⇒ exactly 17). Since 2026-09-25 the side is excluded from
+  classification instead (§12.4), so `W` reads 0 and the floor is only a guard. Levels 1–10
+  untouched.
 - Freeze N.G. (byte 7 at the tail): the planner drops the body hold on the head AND tail
   entries (both emit it) — the freeze judge (§2 of the gauge/judge RE) resolves N.G. as soon as
   any body panel was released. Head↔tail link: first later kind-2 entry at
@@ -272,8 +276,100 @@ ghost unless the saving play had none.
 
 No usable ghost at the first fill (empty / id 0 / failed download / `len ≠ results` / derivation
 missing) ⇒ the song plays at Level 10, one WARN with the reason, 3 s toast `NO TARGET GHOST -
-BOT LV10`; the plate stays `TARGET`. The impersonation is applied at song select — before the
+BOT LV10`; the plate keeps whatever the flip wrote (the target's name + TARGET BOT label, or
+`TARGET` — §12). The impersonation is applied at song select — before the
 GhostActor exists — so the flip cannot refuse ahead of time. Both bot rows are
 `PersistMode::Local` (JSON cache in both directions, never on the wire; the load gate is split by
 `LoadSource`), and the level row renders text via `ScalarFormat::Labeled` (`Level 1`…`Level 10`,
 `Target Score`) on the scalar donor — no chip textures.
+
+## 12. Addendum 2026-09-25 — Target Score presentation (target name, TARGET BOT label, S-Marvelous)
+
+Research pass on gamemdx 20260825 (Ghidra) with per-build checks on 20250805 / 20260721 /
+20260915; the signature sweep covers all five builds (20260224 included).
+
+### 12.1 The game's TARGET-option lookup — and the PlayerWork chart fields
+
+`i64 ghost_id(int side)` (`FUN_18001dc90` @20260825, `0x18001d6c0` @20250805, `0x18001dc00`
+@20260721, `0x18001de70` @20260915) is what `ghost_actor_init` calls (see
+`docs/premium_free_stale_record_bug.md`, 2026-09-16 addendum, for the switch). Byte-identical on
+every build apart from its displacements, which make it the attested source of three
+`PlayerWork` fields that turned out to be BUILD-DEPENDENT:
+
+| field | 20260324+ | 20250805 / 20260224 | also read by |
+|---|---|---|---|
+| style (`CMP [PW+s],1` → doubles clamp difficulty ≥ 1) | `+0x50` | `+0x60` | the DPS loader's per-side difficulty getter (`FUN_1801d02f0` @20250805 reads `+0x60`/`+0x6C`) |
+| committed mcode | `+0x54` | `+0x64` | |
+| selected difficulty | `+0x5C` | `+0x6C` | createNextSequence case `0x1d` (the DPS ctor struct) |
+| TARGET option | `+0x1328` | `+0x1308` | |
+| rival codes 1..3 | TARGET `+4 .. +0xC` | same | |
+
+Signature `ghost_id_lookup` (the function entry, 251 bytes through the rival scan);
+`derive_target_name_sites` stage 1 cross-checks the image-base `LEA` and the table disp against
+`player_work_table` and publishes `pw_chart_{style,mcode,diff}_off` — the impersonation's
+chart-identity mirror now uses them (it hardcoded the 20260324+ triple, so on the two old builds
+it wrote the human's chart into three unrelated bot fields that the restore never puts back, and
+the bot's DPS read a stale difficulty). Stage 2 publishes `pw_target_select_off`, the rival-set
+global and the score-entry callee (`CALL` at `+0x1C9` behind its exact argument setup, prologue
+attested).
+
+### 12.2 Rival / ranking sets
+
+`G` (`rival_sets_global`, `DAT_1806f1500` @20260825) → owner → container `{vector<Set*> begin +0,
+end +8, …, default set +0x20}` (built at boot, destroyed by `FUN_1801ef320`). A set:
+
+| offset | meaning |
+|---|---|
+| `+0x0` | kind: 0 / 1 / 2 = the three ranking loads (`rivaldata_load` loadkind 1 / 2 / 3 — WORLD / AREA / MACHINE in bemani-buddy's naming), 3 = rival |
+| `+0x8` | load timestamp |
+| `+0x10/+0x18` | `map<mcode, ScoreRow>` (`_Isnil` +0x201); value +0x20: 10 × 0x30 entries indexed `style*5 + diff`: `+0` score, `+4` rank, `+8` clear kind, **`+0x10` ghost id** |
+| `+0x30/+0x38` | ranking sets: `map<mcode, HolderRow>` (`_Isnil` +0xE5); value +0x1C: 10 × 0x14 `{ddr code, area, name[12]}` — the best score's holder (written only when the score improves) |
+| `+0x50` | rival set: DDR code |
+| `+0x54` | rival set: area |
+| `+0x58..+0x60` | rival set: name (8 chars + NUL, `FUN_1801ee860`) |
+
+The parser (`FUN_18001cce0` rankings, `FUN_18001d5d0` rivals) copies at most 8 name chars.
+Getters (all pure readers): `score_entry(set, mcode, style, diff)` (`FUN_1801ee220`) and
+`dancer_name(set, mcode, style, diff)` (`FUN_1801ee8c0`, signature `rival_set_dancer_name` —
+kind 3 ⇒ `set+0x58`, else the holder row's name, `""` when absent; the song select's
+`target=%d, label=%s, …, dancername=%s` lambdas use exactly this pair).
+
+`target_name::resolve` (at the flip, before any write): read TARGET; own best ⇒ the human's name;
+rival n ⇒ the kind-3 set whose code matches; 4..6 ⇒ the set of kind `n−4` — found by the SAME
+first-match search the lookup does, over a fully probed container (the lookup walks it unchecked
+and falls back to the default set / reads past the end when absent). Then `ghost_id(human)`
+(0 ⇒ no pacemaker ⇒ `TARGET`), then `score_entry` must carry that same ghost id before
+`dancer_name` is trusted.
+
+### 12.3 Where the plate is drawn, and why a second label
+
+The name buffer is `char[9]` at `PlayerWork+0xC` (`PlayerWork::reset` zeroes `+0xC..+0x14`;
+`+0x18` is the next field), read inline by ~10 routines plus one `getName` (`FUN_1801e88a0`), so
+it cannot grow. Every reader builds a `sequence::SpriteLayer` of per-character bitmaps through
+`FUN_1801d3240(text, "<prefix>%s")` / `FUN_1801d2b50` (letters lower-cased; `& , $ . ! - ? % + /
+~` spelled out; anything else `blank`). `common_texture_v3` ships only A–Z, 0–9, `ampersand
+blank dollar exclamation hyphen period question` for both sets — no parentheses, no brackets.
+
+| surface | owner | clip / anchor | glyphs | stock SpriteLayer setup |
+|---|---|---|---|---|
+| gameplay | `sequence::dance::ScoreActor` init (vslot 4, `FUN_1800775d0`) | `dance_name` clip at `+0x88`, anchor `name_usr`; SpriteLayer shared_ptr `+0x90` | `cote_edge_*` | priority 1, align (0,0), fit-to-anchor |
+| stage results | `ResultSequence` setup (`FUN_1800b9030`) | main clip `RS+0x108`, anchor `player_Np_info_usr/profile_usr/player_name_usr`; SpriteLayer `RS+0x400+side*0x10` | `cote_shadow_*` | priority 0, align (1,1), fit |
+
+(`FUN_1800f9a00`'s `cote_shadow` rows are the results ranking tab, not the plate.)
+`plate_label.rs` adds one process-lifetime SpriteLayer per surface on the same parent + anchor
+(ScoreActor found by a bounded DPS-tree walk, side `**(+0x58)`; the results clip by content),
+fixed scale `0.55 ×` the anchor's `0x1016` height × `0x100D` y-scale (the layout's own fit
+input, re-measured per frame), top-aligned 2 px above the box. SpriteLayer layout math
+(`FUN_1801d38e0`): `x = (W − w)·align_x/2 + pos_x + off_x − W/2`, same for y; alpha from the
+anchor's `0x100A`.
+
+### 12.4 S-Marvelous on the replay side
+
+`s_marvelous::state::set_excluded(bot, true)` for the whole Target session (both orders against
+the play-scene arm on a direct 25 → 28 edge are handled: the arm clears an excluded side, and the
+exclusion clears an armed one). The side is never classified; `last_armed_window` / the song
+latch read 0, so the results tab, graph, emblems and upload producer are stock for it; the
+data-feed tap re-hides the cabinet-wide FAST/SLOW gate patch on its Marvelous
+(`flash::on_excluded_marvelous`); its results pane shows `scre_tab_num_minus` in the shared
+7-row sheet's S-MARV slot (the label word is baked into ONE sheet texture both panes share). The
+ghost's Marvelous floor then reads 0 — the full stock band.

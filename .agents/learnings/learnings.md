@@ -1496,3 +1496,28 @@ per-image serving both place the PNG at the imgrect origin, so size legacy
 art to the imgrect (World's older art is uvrect-sized, one pixel up-left,
 invisible in practice). bemaniutils' `ifsutils` writes `texturelist.xml` as
 binary kbin; read it with `kbinxml` (an ifstools dependency).
+
+## `PlayerWork` +0x50..+0x6C is NOT build-invariant — the chart triple moved (2026-09-25)
+
+The Multiplayer Bot's research table called `PlayerWork+0x50/+0x54/+0x5C` (style /
+committed mcode / selected difficulty) "build-invariant" and the impersonation
+hardcoded them. On 20250805 / 20260224 they are `+0x60/+0x64/+0x6C` (the game's
+own TARGET lookup and the DPS loader's difficulty getter read those there), while
+`+0x4` entered and `+0xC` name did NOT move — so a spot-check of the entered byte
+and the name on an old build proves nothing about the fields further down. The
+flip wrote three unrelated bot fields the restore never puts back. Rule: every
+`PlayerWork` field past `+0x15` needs a derivation (`player_work_chart_offsets`,
+decoded from `ghost_id_lookup`, is the one for the chart triple); cross-check a
+"same on every build" claim with a function on the OLDEST build that reads the
+field, not with a neighbouring field.
+
+## The name plate is `char[9]` read inline everywhere; name glyph fonts have no parentheses (2026-09-25)
+
+`PlayerWork+0xC` is 8 chars + NUL (`+0x18` is the next field) and ~10 routines
+read it inline (plus one `getName`), so nothing longer can go there. Every name
+display is a `sequence::SpriteLayer` of per-character bitmaps
+(`cote_edge_*` in gameplay, `cote_shadow_*` on results, both in
+`common_texture_v3`); the char→name map spells out `& , $ . ! - ? % + / ~` but
+the atlas only ships A–Z, 0–9, `& $ ! - . ?` and `blank` — `(`, `)`, `[`, `]`
+render as blanks. Extra text next to a plate = a second SpriteLayer on the same
+parent clip + anchor (`multiplayer_bot::plate_label`).

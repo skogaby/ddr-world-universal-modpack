@@ -285,7 +285,7 @@ unsafe extern "C" fn judge_submit_hook(
     use crate::services::audio_sync_diag::{self as diag, spans::Scope};
     let submit = diag::span(Scope::Submit, 0);
     diag::record_hit(actor, result, judge_code, scratch, submit.event());
-    let armed_event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let fanout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _pre = diag::span(Scope::SubmitPre, 0);
         // Only process grade opcodes (0x1028..0x102E for M/P/G/Gd/Boo/Miss/OK).
         // Skip shock codes (0x1030, 0x1031) and cancel (0x1046).
@@ -300,6 +300,9 @@ unsafe extern "C" fn judge_submit_hook(
         // `(side, classified_smarv)` — the receptor-flash tint must also see
         // the non-S-Marv events to re-assert the stock colour.
         let mut armed_event: Option<(usize, bool)> = None;
+        // The side of an EXCLUDED side's Marvelous (below) — its FAST/SLOW
+        // re-hide is also a post-original fan-out.
+        let mut excluded_marvelous: Option<usize> = None;
 
         if is_grade_opcode {
             let player_side = *(actor.add(ACTOR_PLAY_SIDE_OFFSET) as *const i32) as usize;
@@ -327,6 +330,13 @@ unsafe extern "C" fn judge_submit_hook(
                         combo,
                     );
                     armed_event = Some((player_side, is_smarv));
+                } else if grade_index == 0
+                    && crate::mods::s_marvelous::state::is_excluded(player_side)
+                {
+                    // A side excluded from classification (the Multiplayer
+                    // Bot's Target Score replay) has no S-Marvelous tier, so
+                    // its Marvelous is the exempt top tier again.
+                    excluded_marvelous = Some(player_side);
                 }
 
                 let ex_earned = ex_value_for_opcode(judge_code);
@@ -399,9 +409,9 @@ unsafe extern "C" fn judge_submit_hook(
             }
         }
 
-        armed_event
+        (armed_event, excluded_marvelous)
     }))
-    .unwrap_or(None);
+    .unwrap_or((None, None));
 
     // Original is outside diagnostic/panic containment and is never retried.
     {
@@ -417,9 +427,13 @@ unsafe extern "C" fn judge_submit_hook(
     // whose clips the stock handler drives lives in its subtree) and the
     // info struct (lane bitset at +0x08 — which panels flashed).
     let _post = diag::span(Scope::SubmitPost, 0);
+    let (armed_event, excluded_marvelous) = fanout;
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Some((side, is_smarv)) = armed_event {
             crate::mods::s_marvelous::flash::on_judge_event(side, actor, scratch, is_smarv);
+        }
+        if excluded_marvelous.is_some() {
+            crate::mods::s_marvelous::flash::on_excluded_marvelous(actor);
         }
     }));
 }

@@ -43,6 +43,11 @@
 //!    from FAST/SLOW — stock Marvelous, now S-Marvelous — matching the
 //!    gameplay indicator (`fast_slow.rs`). The record's own counters — and
 //!    therefore the score save — are untouched.
+//! 6. **Excluded side** — a side `state::set_excluded` holds (the
+//!    Multiplayer Bot's Target Score replay) keeps every stock number
+//!    (inclusive MARVELOUS, FAST/SLOW without Marvelous); the shared 7-row
+//!    sheet still carries the S-MARVELOUS word, so our row shows the stock
+//!    `scre_tab_num_minus` glyph ("-", not applicable) instead of a count.
 //!
 //! Counts are recomputed from the stage record's per-note grade/ms streams
 //! ([`super::records`]) with the window the side was last armed with —
@@ -168,6 +173,7 @@ static WARN_FAST_SLOW_WIDGET: AtomicBool = AtomicBool::new(false);
 static WARN_VARIANT: AtomicBool = AtomicBool::new(false);
 static WARN_TRANSFORM: AtomicBool = AtomicBool::new(false);
 static FIRST_ROW_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_NA_ROW_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn warn_once(latch: &AtomicBool, msg: &str) {
     if !latch.swap(true, Ordering::Relaxed) {
@@ -334,6 +340,19 @@ fn populate_smarv_row(tab: *mut u8) {
             return;
         }
         let side = side as usize;
+
+        // A side EXCLUDED from classification (`state::set_excluded` — the
+        // Multiplayer Bot's Target Score replay, whose ghost stream predates
+        // the tier): its stock rows are already right for it (inclusive
+        // MARVELOUS; FAST/SLOW without Marvelous, its exempt top tier). The
+        // 7-row label sheet is shared by both panes, so only the S-MARV
+        // slot needs a value: "-", not applicable.
+        if state::is_excluded(side) {
+            if stage_records::side_entered(side) != Some(false) {
+                show_not_applicable_row(tab);
+            }
+            return;
+        }
 
         // The window the side played with (sticky across the GAMEPLAY-exit
         // disarm). 0 = the mod wasn't armed for this song — stock counts.
@@ -576,22 +595,56 @@ unsafe fn rewrite_named_widget(tab: *mut u8, anchor: &[u8], count: u32) -> bool 
 /// Apply a digit string to a SpriteLayer as `scre_tab_num_<d>` glyph names
 /// via the game's set-names (copy-assign; backing storage stays ours).
 unsafe fn set_widget_names_digits(widget: *mut u8, digits: &str) {
+    const MAX_GLYPHS: usize = 8;
+    let mut names: [&'static str; MAX_GLYPHS] = [""; MAX_GLYPHS];
+    let mut count = 0usize;
+    for ch in digits.chars().take(MAX_GLYPHS) {
+        let Some(d) = ch.to_digit(10) else {
+            continue;
+        };
+        names[count] = DIGIT_GLYPHS[d as usize];
+        count += 1;
+    }
+    set_widget_names(widget, &names[..count]);
+}
+
+/// The stock `scre_tab_num_<d>` digit glyph names.
+const DIGIT_GLYPHS: [&str; 10] = [
+    "scre_tab_num_0",
+    "scre_tab_num_1",
+    "scre_tab_num_2",
+    "scre_tab_num_3",
+    "scre_tab_num_4",
+    "scre_tab_num_5",
+    "scre_tab_num_6",
+    "scre_tab_num_7",
+    "scre_tab_num_8",
+    "scre_tab_num_9",
+];
+
+/// The stock minus glyph (the `difference_num_usr` row's sign) — the S-MARV
+/// slot's "not applicable" mark for an excluded side. 18 bytes, so it rides
+/// the names vector in heap form.
+const NOT_APPLICABLE_GLYPH: &str = "scre_tab_num_minus";
+
+/// Apply an explicit glyph-name list to a SpriteLayer via the game's
+/// set-names (copy-assign — the source strings stay ours and are only read
+/// during the call). Names ≤ 15 bytes ride in SSO form, longer ones as a
+/// heap-form view of the `'static` bytes.
+unsafe fn set_widget_names(widget: *mut u8, glyphs: &[&'static str]) {
     let set_names = SET_NAMES.load(Ordering::Acquire);
     if set_names == 0 || widget.is_null() {
         return;
     }
     const MAX_GLYPHS: usize = 8;
     let mut names: [MsvcString; MAX_GLYPHS] = std::array::from_fn(|_| MsvcString::sso(""));
-    let mut count = 0usize;
-    for ch in digits.chars().take(MAX_GLYPHS) {
-        if !ch.is_ascii_digit() {
-            continue;
+    let count = glyphs.len().min(MAX_GLYPHS);
+    for (slot, name) in names.iter_mut().zip(glyphs.iter().take(count)) {
+        if name.len() <= 15 {
+            slot.set(name);
+        } else {
+            *slot = MsvcString::heap_ref(name.as_bytes());
         }
-        let mut name = String::with_capacity(15);
-        name.push_str("scre_tab_num_");
-        name.push(ch);
-        names[count] = MsvcString::sso(&name);
-        count += 1;
     }
     let vec = MsvcVec::<MsvcString> {
         begin: names.as_ptr(),
@@ -600,6 +653,28 @@ unsafe fn set_widget_names_digits(widget: *mut u8, digits: &str) {
     };
     let f: SetNamesFn = std::mem::transmute(set_names);
     f(widget, &vec);
+}
+
+/// An excluded side's pane: our S-MARV row showing "-" (created through the
+/// game's helper exactly like the counted row, then re-glyphed). The stock
+/// rows are left untouched.
+unsafe fn show_not_applicable_row(tab: *mut u8) {
+    let widget = match find_our_row(tab) {
+        Some(w) => Some(w),
+        None => {
+            if !create_smarv_row(tab, "0") {
+                return;
+            }
+            find_our_row(tab)
+        }
+    };
+    let Some(widget) = widget else {
+        return;
+    };
+    set_widget_names(widget, &[NOT_APPLICABLE_GLYPH]);
+    if !FIRST_NA_ROW_LOGGED.swap(true, Ordering::Relaxed) {
+        log_info!("SMarvelous: results row shows \"-\" for a side excluded from classification");
+    }
 }
 
 /// Create our S-MARV row through the game's row-write helper (the widget

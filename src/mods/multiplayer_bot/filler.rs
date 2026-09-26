@@ -357,7 +357,9 @@ fn build_song_state(ctx: &mut SongCtx, side: usize, count: usize) -> SongState {
         (Some(g), None) => {
             // The S-Marv arm happens at play-scene entry, before the first
             // judge frame; read it at bind time (per-song latch, like the
-            // mod's own consumers).
+            // mod's own consumers). A Target session excludes the bot side
+            // from classification, so this normally reads 0 (full band) —
+            // the floor is the guard for a side that somehow got armed.
             ctx.smarv_floor = if s_marvelous::is_enabled() {
                 s_marvelous::state::armed_window(side)
             } else {

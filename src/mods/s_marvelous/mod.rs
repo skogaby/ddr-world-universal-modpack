@@ -58,6 +58,13 @@
 //! keeps A3's presentation. DDR SELECTION's `enable` calls [`on_ddr_selection_enabled`].
 //! `is_enabled()` lets Power User Statistics show its S-Marv tally.
 //!
+//! Per-side exclusion: `state::set_excluded(side, true)` (held by the Multiplayer Bot for a
+//! Target Score replay — its ghost stream predates the tier) keeps that side unclassified for
+//! the session: never armed, sticky window + song latch cleared, so every surface is stock for
+//! it — except that the cabinet-wide FAST/SLOW gate patch is re-hidden for its Marvelous
+//! (`flash::on_excluded_marvelous`) and its results pane shows "-" in the shared sheet's S-MARV
+//! slot. The client owns the flag; this mod never clears it.
+//!
 //! ## Degradation, assets, config
 //!
 //! Only `judge_submit` is required; without the tap the mod is inert. Every surface's
