@@ -1,6 +1,12 @@
 # DDR SELECTION — A20 / A20 PLUS / A3 Gameplay Themes — Research & Plan (2026-09-25)
 
-Status: **RESEARCH ONLY.** Nothing here is implemented or cabinet-tested.
+Status: **Implemented and cabinet-tested (2026-09-26)** as DDR SELECTION's `DDR A`, `DDR A3 (White)` and
+`DDR A3 (Gold)` choices (skins 6 / 7 / 8, packages `_v0` / `_v2` / `_v1`). Planning, deviations and the
+deploy log are in `.agents/planning/2026-09-25-ddr-selection-a-a3-themes/`; the mechanisms are in the
+`src/mods/ddr_selection/` module docs, and the theme stage panel's score-set RE is in
+`docs/ddr_selection_theme_score_sets.md`. Only site A of the §5 danger patch was needed (site B's
+second clip is never read). Where this research-time note and the code differ, the code and the
+planning notes are right.
 
 **Question.** World's install still carries the UI data of the last few A-series releases. Can DDR
 SELECTION offer those themes (A20, A20 PLUS, A3) wholesale during gameplay, next to its five

@@ -30,7 +30,7 @@
 //! fns — everything in [`patch_dance_judge`] is Option-chained, no
 //! unwrap/index.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, Once};
 
 use once_cell::sync::Lazy;
@@ -51,7 +51,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// disable: a template already patched in game memory STAYS patched —
 /// task-03 must gate re-drives on `patch_applied*() && mod active`, not on
 /// this flag alone.
-static APPLIED: AtomicU8 = AtomicU8::new(0);
+static APPLIED: AtomicU16 = AtomicU16::new(0);
 
 /// One staged patch per target (World's first when it staged).
 static STAGED: Lazy<Mutex<Vec<StagedPatch>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -63,7 +63,7 @@ static REGISTER_ONCE: Once = Once::new();
 static WARN_VARIANT: AtomicBool = AtomicBool::new(false);
 static WARN_TRANSFORM: AtomicBool = AtomicBool::new(false);
 /// Per legacy skin: its template differed from the staged one.
-static WARN_LEGACY_VARIANT: AtomicU8 = AtomicU8::new(0);
+static WARN_LEGACY_VARIANT: AtomicU16 = AtomicU16::new(0);
 
 fn warn_once(latch: &AtomicBool, msg: &str) {
     if !latch.swap(true, Ordering::Relaxed) {
@@ -82,7 +82,7 @@ pub fn patch_applied() -> bool {
     patch_applied_for(0)
 }
 
-/// [`patch_applied`] for any target: 0 = World, 1..=5 = a legacy skin.
+/// [`patch_applied`] for any target: 0 = World, 1..=8 = a legacy skin.
 pub fn patch_applied_for(skin: u8) -> bool {
     APPLIED.load(Ordering::Acquire) & targets::skin_bit(skin) != 0
 }
@@ -114,8 +114,8 @@ pub fn activate(color: assets::JudgementColor) {
     ENABLED.store(true, Ordering::Release);
 }
 
-/// Stage a DDR SELECTION legacy skin's word (its `dance_judge000N`
-/// package) with the `color` art. Idempotent per skin (a second call only
+/// Stage a DDR SELECTION legacy skin's word (its `dance_judge000N` /
+/// theme `dance_judge0000_vN` package) with the `color` art. Idempotent per skin (a second call only
 /// restages the art). `false` when the mod is not active or staging failed
 /// (WARNed) — that skin's songs keep A3's MARVELOUS only.
 pub fn add_legacy(skin: u8, color: assets::JudgementColor) -> bool {
@@ -131,8 +131,8 @@ pub fn add_legacy(skin: u8, color: assets::JudgementColor) -> bool {
     }
     let Some(target) = assets::legacy_target(TEMPLATE_NAME, skin) else {
         log_warn!(
-            "SMarvelous: no dance_judge{:04} package on this install -- skin {} keeps A3's word",
-            skin,
+            "SMarvelous: no {} package on this install -- skin {} keeps A3's word",
+            assets::package_label(TEMPLATE_NAME, skin),
             skin
         );
         return false;
@@ -209,8 +209,8 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
             == 0
         {
             log_warn!(
-                "SMarvelous: dance_judge{:04} (skin {}) differs from the template staged at enable — A3's word shows",
-                skin,
+                "SMarvelous: {} (skin {}) differs from the template staged at enable — A3's word shows",
+                assets::package_label(TEMPLATE_NAME, skin),
                 skin
             );
         }
@@ -249,8 +249,8 @@ fn patch_dance_judge(afp: &[u8], _bsi: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
                 );
             } else {
                 log_info!(
-                    "SMarvelous: dance_judge{:04} (skin {}) patched ({} -> {} bytes, {} segment, shape {}, additive glow records muted: {} (S-Marv) / {} (A3's MARVELOUS keeps its pulse))",
-                    skin,
+                    "SMarvelous: {} (skin {}) patched ({} -> {} bytes, {} segment, shape {}, additive glow records muted: {} (S-Marv) / {} (A3's MARVELOUS keeps its pulse))",
+                    assets::package_label(TEMPLATE_NAME, skin),
                     skin,
                     afp.len(),
                     out.len(),

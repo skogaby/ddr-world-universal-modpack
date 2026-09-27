@@ -521,6 +521,23 @@ pub fn package_name(arc_base: &str, skin: u8, naming: Naming) -> String {
     }
 }
 
+/// The package a theme's row registers for `base` (without the NUL), whatever
+/// the adapter availability — for mods that stage art into it (S-Marvelous).
+/// `None` off a theme or for a base no theme row covers.
+pub fn theme_package(base: &str, skin: u8) -> Option<String> {
+    if !is_theme(skin) {
+        return None;
+    }
+    TABLE
+        .iter()
+        .find(|e| e.base == base && e.skins & (1 << skin) != 0)
+        .map(|e| {
+            package_name(e.arc_base, skin, e.naming)
+                .trim_end_matches('\0')
+                .to_string()
+        })
+}
+
 /// Whether a `base` request decided as `decision` wants World's danger actor
 /// to pick `danger_double` on doubles (`danger.rs`): exactly a theme's
 /// `dance_danger` — World's skin-0 rule on the theme's own package. The eras
@@ -1051,6 +1068,32 @@ mod tests {
         for skin in 1..=ERA_MAX {
             let name = legacy_name_of("dance_judge", skin, all).unwrap();
             assert_eq!(name, format!("dance_judge{:04}", skin));
+        }
+    }
+
+    #[test]
+    fn theme_packages_for_other_mods() {
+        for (skin, v) in THEMES {
+            for base in ["dance_judge", "dance_fullcombo", "dance_combo"] {
+                assert_eq!(
+                    theme_package(base, skin),
+                    Some(format!("{base}0000{v}")),
+                    "{base} {skin}"
+                );
+            }
+            assert_eq!(
+                theme_package("dance_danger", skin).as_deref(),
+                Some("dance_danger0000_v0")
+            );
+            // Whatever adapter the row needs — the name alone.
+            assert_eq!(
+                theme_package("dance_combo", skin),
+                legacy_name_of("dance_combo", skin, every_adapter())
+            );
+            assert_eq!(theme_package("dance_common", skin), None);
+        }
+        for skin in [0, 1, 5, 9] {
+            assert_eq!(theme_package("dance_judge", skin), None, "skin {skin}");
         }
     }
 

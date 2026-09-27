@@ -32,8 +32,8 @@ meet World's unadapted actor, which NULL-derefs.
 - [x] Step 4: Stage panel: theme variant and A3's skin-0 fill — cabinet-proven 2026-09-25
 - [x] Step 5: Stage-panel score sets (RE first) — cabinet-proven 2026-09-26
 - [x] Step 6: Gameplay player name (RE first) — cabinet-proven 2026-09-26
-- [ ] Step 7: Danger on doubles (scoped patch)
-- [ ] Step 8: S-Marvelous on the themes
+- [x] Step 7: Danger on doubles (scoped patch) — cabinet-proven 2026-09-26
+- [x] Step 8: S-Marvelous on the themes — cabinet-proven 2026-09-26 (incl. the task-02 combo-sheet Judgement Color extension)
 - [ ] Step 9: Release integration and the cabinet matrix
 
 ---

@@ -49,9 +49,10 @@
 //! ## Cross-mod seams
 //!
 //! DDR SELECTION legacy skins ([`legacy`], pure names in [`targets`]): with both mods enabled,
-//! every skin whose art exists under `data_mods/ddr_selection/s_marvelous/N/` is staged like
-//! World — its `dance_judge000N` word and `dance_fullcombo000N` S-MFC splash, and on skins
-//! 4–5 an all-S-Marvelous combo sheet. The patch fns pick the target by the song
+//! every skin whose art exists under `data_mods/ddr_selection/s_marvelous/<art set>/` is staged
+//! like World — the eras' `…000N` and the themes' `…0000_vN` word and S-MFC splash, and on the
+//! per-grade combo skins (4..=8) an all-S-Marvelous combo sheet (A3 White and Gold share art
+//! set 7); the sheet's art follows the Judgement Color like the word. The patch fns pick the target by the song
 //! (`ddr_selection::legacy_package` + `armed_skin`); the flash and splash re-drives fire only
 //! when THIS song's template was patched; DDR SELECTION's A3 combo write asks
 //! [`legacy_combo_smarv`] (a legacy combo never reaches World's refresh). A skin without art
@@ -329,7 +330,8 @@ fn register_overlay_row(initial: i32) {
 
 /// The "Judgement Color" enum row (ALL PURPLE / PURPLE SHADOW), directly
 /// under the window row. Edits update the live choice, persist the section
-/// and re-stage the word art immediately — the additive `marvelous_ef`
+/// and re-stage the word art (and the DDR SELECTION legacy combo sheets,
+/// `combo::set_legacy_color`) immediately — the additive `marvelous_ef`
 /// glow is muted on BOTH the S-Marv copy and the stock Marvelous word
 /// regardless of the choice (`assets::word_clone_opts`), so every word
 /// renders static.
@@ -339,7 +341,7 @@ fn register_color_row(initial: assets::JudgementColor) {
     mod_menu::register_enum_row(EnumRowSpec {
         key: COLOR_ROW_KEY.to_string(),
         label: "Judgement Color".to_string(),
-        hint: "S-Marvelous flash art: all-violet word, or white letters with a violet shadow. Applies next song."
+        hint: "S-Marvelous word (and a DDR SELECTION skin's combo): all violet, or stock letters with a violet shadow. Applies next song."
             .to_string(),
         parent_row_key: Some("s-marvelous".to_string()),
         values: JudgementColor::ALL.iter().map(|c| c.index()).collect(),
@@ -351,7 +353,9 @@ fn register_color_row(initial: assets::JudgementColor) {
             };
             LIVE_COLOR_IDX.store(color.index(), Ordering::Relaxed);
             persist_section();
-            if !afp_patches::set_judgement_color(color) {
+            // The DDR SELECTION legacy combo sheets follow the word.
+            let combo = combo::set_legacy_color(color);
+            if !afp_patches::set_judgement_color(color) && !combo {
                 log_info!(
                     "SMarvelous: judgement color {} saved (word art not staged this session -- applies next launch)",
                     color.key()

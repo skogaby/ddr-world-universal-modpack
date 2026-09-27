@@ -85,7 +85,7 @@ pub fn register() -> bool {
     .persist_transform(identity_transform, clamp_load)
     .display_name("DDR SELECTION")
     .description(
-        "Play with the gameplay screen of a classic DDR era; AUTO picks each song's own era",
+        "Play with the gameplay screen of an earlier DDR, 1stMIX to DDR A3; AUTO picks each song's own",
     )
     .on_change(on_change);
     let ok = match custom_options::register_option(spec) {

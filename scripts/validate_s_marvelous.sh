@@ -614,7 +614,7 @@ fn smarv_rows(afp: &str, bsi: &str, rows: &str, expected: &str, out_afp: &str) -
 /// carrying `in_marvelous` with sorted label tables. Writes the patched file
 /// (string table re-scrambled) for the render proof.
 fn smarv_legacy_word(afp: &str, bsi: &str, geo_dir: &str, skin: u8, out_afp: &str) -> i32 {
-    if !(1..=5).contains(&skin) || targets::mute_stock_glow(skin) {
+    if !targets::LEGACY_SKINS.contains(&skin) || targets::mute_stock_glow(skin) {
         println!("FAIL smarv-legacy-word: skin {skin} is not a legacy target");
         return 1;
     }
@@ -639,7 +639,8 @@ fn smarv_legacy_word(afp: &str, bsi: &str, geo_dir: &str, skin: u8, out_afp: &st
         println!("FAIL smarv-legacy-word: donor region {donor_region} has no marvelous suffix");
         return 1;
     };
-    if donor_region != format!("dance_judge{skin:04}_marvelous") {
+    // A theme's word is A3's skin-0 `dance_judge0000_marvelous`.
+    if donor_region != format!("dance_judge{:04}_marvelous", targets::tex_number(skin)) {
         println!("FAIL smarv-legacy-word: donor region {donor_region} is not skin {skin}'s");
         return 1;
     }
@@ -766,7 +767,7 @@ fn smarv_legacy_word(afp: &str, bsi: &str, geo_dir: &str, skin: u8, out_afp: &st
 
 /// Step-6 (Leg E) / Step-13 (Leg H): geo-first art-shape resolution + the
 /// multi-shape recipe on a REAL dance_fullcombo template (the DLL's staging
-/// path). `skin` 0 = World's `dance_fullcombo_v3`, 1..=5 = a DDR SELECTION
+/// path). `skin` 0 = World's `dance_fullcombo_v3`, 1..=8 = a DDR SELECTION
 /// legacy skin (`targets::fc_expected_shapes` gives the shape count the DLL
 /// requires).
 fn smarv_fc(afp: &str, bsi: &str, geo_dir: &str, skin: u8) -> i32 {
@@ -1683,13 +1684,19 @@ PYEOF
 note "Leg G OK"
 
 # ── Leg H: DDR SELECTION legacy skins (Step 13) ─────────────────────
-# Per legacy skin 1..5: the DLL's word recipe on dance_judge000N (the
-# S-Marv-only mute — A3's MARVELOUS keeps its pulse) + a render proof with
-# the shipped legacy art, the multi-shape splash recipe (five Marvelous
-# shapes) on the four dance_fullcombo000N templates, and a size check of
-# every shipped legacy art file against its donor's imgrect (the
-# donor-anchored clone and the per-image serving both place it there).
+# Per legacy skin 1..8 (the eras' dance_*000N_v0, the themes' A3 skin-0
+# dance_*0000_v0 / _v2 / _v1): the DLL's word recipe on the skin's
+# dance_judge (the S-Marv-only mute — A3's MARVELOUS keeps its pulse) + a
+# render proof with the shipped art of its set, the multi-shape splash recipe
+# (five Marvelous shapes) on the four dance_fullcombo templates, and a size
+# check of every shipped art file against its donor's imgrect (the
+# donor-anchored clone and the per-image serving both place it there; set 7
+# is checked against both _v2 and _v1).
 LEGACY_ART="$REPO_ROOT/data_mods/ddr_selection/s_marvelous"
+# DDR SELECTION skin -> its packages' tail (era: 000N_v0; theme: 0000_vN)
+# and its art set (targets::art_set).
+legacy_tail() { case "$1" in 6) echo 0000_v0 ;; 7) echo 0000_v2 ;; 8) echo 0000_v1 ;; *) echo "000${1}_v0" ;; esac; }
+legacy_set() { [[ "$1" == 8 ]] && echo 7 || echo "$1"; }
 note "Leg H: DDR SELECTION legacy skins (word, S-MFC splash, art sizes)"
 extract_arc_file() { # <arc path> <name> -> echoes the extracted afp/ dir
   local path="$1" out="$TMP/dev/$2"
@@ -1702,10 +1709,11 @@ extract_arc_file() { # <arc path> <name> -> echoes the extracted afp/ dir
   [[ -d "$out/x/afp" ]] || return 1
   echo "$out/x/afp"
 }
-for skin in 1 2 3 4 5; do
-  [[ -d "$LEGACY_ART/$skin" ]] || die "Leg H: legacy art missing: data_mods/ddr_selection/s_marvelous/$skin"
-  J="dance_judge000${skin}_v0"
-  F="dance_fullcombo000${skin}_v0"
+for skin in 1 2 3 4 5 6 7 8; do
+  SET=$(legacy_set "$skin")
+  [[ -d "$LEGACY_ART/$SET" ]] || die "Leg H: legacy art missing: data_mods/ddr_selection/s_marvelous/$SET"
+  J="dance_judge$(legacy_tail "$skin")"
+  F="dance_fullcombo$(legacy_tail "$skin")"
   JDIR=$(extract_arc "$J") || die "Leg H: extraction failed for $J"
   FDIR=$(extract_arc "$F") || die "Leg H: extraction failed for $F"
   WOUT="$TMP/dev/$J/smarv"
@@ -1724,12 +1732,12 @@ for skin in 1 2 3 4 5; do
     "$W_DONOR" "$W_REGION" "$WOUT/dance_judge_shape${W_NEW}" >/dev/null \
     || die "Leg H: skin $skin geo rewrite failed"
   for v in all_purple purple_shadow; do
-    [[ -f "$LEGACY_ART/$skin/dance_judge/smarvelous_$v.png" ]] \
-      || die "Leg H: skin $skin word art missing: smarvelous_$v.png"
+    [[ -f "$LEGACY_ART/$SET/dance_judge/smarvelous_$v.png" ]] \
+      || die "Leg H: skin $skin word art missing: $SET/smarvelous_$v.png"
   done
   python3 - "$BEMANIUTILS_DIR" "$(find "$TMP/dev/$J" -name "*.ifs" | head -1)" "$WOUT/dance_judge" \
     "$WOUT/dance_judge_shape${W_NEW}" "dance_judge_shape${W_NEW}" "$W_REGION" \
-    "$LEGACY_ART/$skin/dance_judge/smarvelous_purple_shadow.png" "$W_LABEL" "$W_FRAMES" \
+    "$LEGACY_ART/$SET/dance_judge/smarvelous_purple_shadow.png" "$W_LABEL" "$W_FRAMES" \
     "$PREVIEW_DIR/legacy_skin${skin}_in_smarvelous.gif" <<'PYEOF' || die "Leg H: skin $skin word render failed"
 import io, os, sys
 (bemaniutils_dir, ifs_path, patched_afp, new_geo_path, new_geo_name,
@@ -1782,8 +1790,8 @@ done
 # Art sizes vs the donors' imgrects. Skin 5's combo reads the A3 import
 # (World ships a blanked dance_combo0005), else World's data/, else the A3
 # install; skipped with a notice when none is readable.
-for skin in 4 5; do
-  C="dance_combo000${skin}_v0"
+for skin in 4 5 6 7 8; do
+  C="dance_combo$(legacy_tail "$skin")"
   for cand in "$DDR_WORLD_INSTALL/data_mods/ddr_selection_a3/arc/bm2d/$C.arc" \
     "$DDR_WORLD_INSTALL/data/arc/bm2d/$C.arc" "${DDR_A3_INSTALL:-/nonexistent}/data/arc/bm2d/$C.arc"; do
     [[ -f "$cand" ]] || continue
@@ -1815,6 +1823,13 @@ def rects(ifs_dir):
 def rename(region):
     head, sep, tail = region.rpartition("_")
     return f"{head}_s{tail}" if sep and tail.startswith("mar") else None
+TAIL = {6: "0000_v0", 7: "0000_v2", 8: "0000_v1"}
+def tail(skin):
+    return TAIL.get(skin, f"000{skin}_v0")
+def art_set(skin):
+    return 7 if skin == 8 else skin
+def tex(skin):
+    return "0000" if skin in TAIL else f"000{skin}"
 bad = checked = 0
 def check(path, want):
     global bad, checked
@@ -1824,25 +1839,28 @@ def check(path, want):
     checked += 1
     if got != want:
         print(f"    [H] SIZE {os.path.relpath(path, art)}: {got} vs donor {want}"); bad += 1
-for skin in range(1, 6):
-    j = rects(os.path.join(dev, f"dance_judge000{skin}_v0"))
+for skin in range(1, 9):
+    aset = str(art_set(skin))
+    j = rects(os.path.join(dev, f"dance_judge{tail(skin)}"))
     for v in ("all_purple", "purple_shadow"):
-        check(os.path.join(art, str(skin), "dance_judge", f"smarvelous_{v}.png"), j[f"dance_judge000{skin}_marvelous"])
-    f = rects(os.path.join(dev, f"dance_fullcombo000{skin}_v0"))
+        check(os.path.join(art, aset, "dance_judge", f"smarvelous_{v}.png"), j[f"dance_judge{tex(skin)}_marvelous"])
+    f = rects(os.path.join(dev, f"dance_fullcombo{tail(skin)}"))
     regions = [(r, rename(r)) for r in f if rename(r)]
     if len(regions) != 5:
         print(f"    [H] skin {skin}: {len(regions)} splash regions (want 5)"); bad += 1
     for donor, new in regions:
-        check(os.path.join(art, str(skin), "dance_fullcombo", f"{new}.png"), f[donor])
-    if skin in (4, 5):
-        cdir = os.path.join(dev, f"dance_combo000{skin}_v0")
+        check(os.path.join(art, aset, "dance_fullcombo", f"{new}.png"), f[donor])
+    if skin >= 4:
+        cdir = os.path.join(dev, f"dance_combo{tail(skin)}")
         if not os.path.isfile(os.path.join(cdir, "x", "tex", "texturelist.xml")):
-            print(f"    [H] skin {skin}: no readable dance_combo000{skin} (A3 import?) -- combo sizes skipped")
+            print(f"    [H] skin {skin}: no readable dance_combo{tail(skin)} (A3 import?) -- combo sizes skipped")
             continue
         c = rects(cdir)
+        # Both Judgement Color variants of the sheet keep the donors' sizes.
         for key in [str(d) for d in range(10)] + ["combo"]:
-            check(os.path.join(art, str(skin), "dance_combo", f"smarvelous_{key}.png"), c[f"dance_combo000{skin}_marvelous_{key}"])
-    elif os.path.isdir(os.path.join(art, str(skin), "dance_combo")):
+            for color in ("all_purple", "purple_shadow"):
+                check(os.path.join(art, aset, "dance_combo", f"smarvelous_{color}_{key}.png"), c[f"dance_combo{tex(skin)}_marvelous_{key}"])
+    elif os.path.isdir(os.path.join(art, aset, "dance_combo")):
         print(f"    [H] skin {skin}: has combo art, but A3 drew one sheet on this skin"); bad += 1
 print(f"    [H] {checked} legacy art file(s) match their donors" + ("" if not bad else f", {bad} problem(s)"))
 sys.exit(1 if bad else 0)

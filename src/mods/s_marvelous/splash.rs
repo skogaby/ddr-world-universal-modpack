@@ -30,7 +30,7 @@
 //! Actor layout (display-side RE §5): `+0x88` side-info ptr (first dword =
 //! side), `+0x98` splash clip wrapper.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
@@ -55,9 +55,9 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static WORLD_READY: AtomicBool = AtomicBool::new(false);
 /// Bit per legacy skin ([`targets::skin_bit`]): one of its templates was
 /// patched this session — the legacy re-drive's gate.
-static LEGACY_APPLIED: AtomicU8 = AtomicU8::new(0);
+static LEGACY_APPLIED: AtomicU16 = AtomicU16::new(0);
 /// Per legacy skin: its template differed from the staged one (one WARN).
-static WARN_LEGACY_VARIANT: AtomicU8 = AtomicU8::new(0);
+static WARN_LEGACY_VARIANT: AtomicU16 = AtomicU16::new(0);
 static FIRST_REDRIVE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// One-time patch registration latch (afp_patcher registrations persist).
 static PATCHES_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -122,7 +122,7 @@ pub fn activate() {
 }
 
 /// Stage a DDR SELECTION legacy skin's S-MFC splash (its
-/// `dance_fullcombo000N` package). Idempotent per skin. `false` when the
+/// `dance_fullcombo000N` / theme `dance_fullcombo0000_vN` package). Idempotent per skin. `false` when the
 /// splash surface is not active or staging failed (WARNed) — that skin's
 /// full combos keep A3's MARVELOUS splash.
 pub fn add_legacy(skin: u8) -> bool {
@@ -138,8 +138,8 @@ pub fn add_legacy(skin: u8) -> bool {
     }
     let Some(target) = assets::legacy_target("dance_fullcombo", skin) else {
         log_warn!(
-            "SMarvelous: no dance_fullcombo{:04} package on this install -- skin {} keeps A3's splash",
-            skin,
+            "SMarvelous: no {} package on this install -- skin {} keeps A3's splash",
+            assets::package_label("dance_fullcombo", skin),
             skin
         );
         return false;
@@ -186,8 +186,8 @@ fn patch_template(template: &'static str, afp: &[u8]) -> Option<(Vec<u8>, Vec<u8
             == 0
         {
             log_warn!(
-                "SMarvelous: dance_fullcombo{:04} {} (skin {}) differs from the template staged at enable — A3's splash shows",
-                skin,
+                "SMarvelous: {} {} (skin {}) differs from the template staged at enable — A3's splash shows",
+                assets::package_label("dance_fullcombo", skin),
                 template,
                 skin
             );
@@ -219,8 +219,8 @@ fn patch_template(template: &'static str, afp: &[u8]) -> Option<(Vec<u8>, Vec<u8
     } else {
         LEGACY_APPLIED.fetch_or(targets::skin_bit(skin), Ordering::AcqRel);
         log_info!(
-            "SMarvelous: dance_fullcombo{:04} {} (skin {}) patched ({} -> {} bytes, {})",
-            skin,
+            "SMarvelous: {} {} (skin {}) patched ({} -> {} bytes, {})",
+            assets::package_label("dance_fullcombo", skin),
             template,
             skin,
             afp.len(),

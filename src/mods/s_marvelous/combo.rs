@@ -7,7 +7,7 @@
 //! detour (`services::combo_hooks`, promoted from this file; the refresh is
 //! event-driven — init and combo-changed messages with combo ≥ 4, never
 //! per-frame). A DDR SELECTION legacy combo never reaches World's refresh,
-//! so this never runs for it — the legacy skins 4–5 get an S-Marvelous sheet
+//! so this never runs for it — the per-grade legacy skins 4..=8 get an S-Marvelous sheet
 //! of their own instead ([`add_legacy`], read by DDR SELECTION's A3 texture
 //! write through `super::legacy_combo_smarv`).
 //! Post-original, when the stock worst-judgement index says Marvelous tier
@@ -32,7 +32,8 @@
 //! once in its own log) — gated behind `assets_ready` so that can't happen
 //! in practice.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::Mutex;
 
 use crate::core::signatures::SignatureStore;
 use crate::services::{bm2d_api, combo_hooks};
@@ -70,44 +71,85 @@ pub fn set_assets_ready(ready: bool) {
     ASSETS_READY.store(ready, Ordering::Release);
 }
 
-// ── DDR SELECTION legacy combo (skins 4–5) ──────────────────────────
+// ── DDR SELECTION legacy combo (skins 4..=8) ────────────────────────
 //
 // A legacy combo never reaches World's refresh (DDR SELECTION's A3 texture
 // write replaces it), so the repaint below cannot dress it. Instead the
 // legacy write asks [`super::legacy_combo_smarv`] and, when the combo is all
 // S-Marvelous, loads the skin's `dance_combo000N_smarvelous_*` sheet in place
 // of `…_marvelous_*` — A3's own per-grade sheet switch with one more grade.
+// The sheet's art follows the "Judgement Color" setting like the word: ALL
+// PURPLE violet digits, or PURPLE SHADOW — the skin's own digits with the
+// word's violet outline / glow (these skins colour the combo by its worst
+// grade, so a violet fill alone would read as one more grade colour).
 
 /// Bit per legacy skin ([`super::targets::skin_bit`]) whose S-Marvelous
 /// combo sheet is staged. Never cleared (the staged textures stay served);
 /// the query also requires the mod enabled.
-static LEGACY_SHEETS: AtomicU8 = AtomicU8::new(0);
+static LEGACY_SHEETS: AtomicU16 = AtomicU16::new(0);
+/// The staged sheets' `(skin, ifs_mod_path)`, for the live colour swap.
+static LEGACY_STAGED: Mutex<Vec<(u8, String)>> = Mutex::new(Vec::new());
 
-/// Stage a legacy skin's S-Marvelous combo sheet (skins with per-grade
-/// sheets only — A3's skins 1–3 have one sheet whatever the grade).
-/// Idempotent per skin.
-pub fn add_legacy(skin: u8) -> bool {
+/// Stage a legacy skin's S-Marvelous combo sheet in `color`'s art (skins
+/// with per-grade sheets only — A3's skins 1–3 have one sheet whatever the
+/// grade). Idempotent per skin.
+pub fn add_legacy(skin: u8, color: super::assets::JudgementColor) -> bool {
     use super::targets;
     if !targets::legacy_combo_has_grade_sheets(skin) {
         return false;
     }
     let bit = targets::skin_bit(skin);
     if LEGACY_SHEETS.load(Ordering::Acquire) & bit != 0 {
-        return true;
+        return true; // (a later colour goes through `set_legacy_color`)
+    }
+    // The seam: DDR SELECTION's A3 combo write loads this exact name (its
+    // `%04d` is the tex number — 0 on a theme), so a drift would stage a
+    // sheet nothing ever binds.
+    let wanted = format!(
+        "{}_0",
+        crate::mods::ddr_selection::combo_math::sheet_prefix(skin, 0, true)
+    );
+    if wanted != targets::legacy_combo_texture(skin, "0") {
+        log_warn!(
+            "SMarvelous: skin {} combo sheet name {} != DDR SELECTION's {} -- no S-Marvelous combo sheet",
+            skin,
+            targets::legacy_combo_texture(skin, "0"),
+            wanted
+        );
+        return false;
     }
     let Some(target) = super::assets::legacy_target("dance_combo", skin) else {
         log_info!(
-            "SMarvelous: no dance_combo{:04} package on this install -- no S-Marvelous combo sheet for skin {}",
-            skin,
+            "SMarvelous: no {} package on this install -- no S-Marvelous combo sheet for skin {}",
+            super::assets::package_label("dance_combo", skin),
             skin
         );
         return false;
     };
-    if !super::assets::stage_legacy_combo(&target) {
+    if !super::assets::stage_legacy_combo(&target, color) {
         return false;
+    }
+    if let Ok(mut g) = LEGACY_STAGED.lock() {
+        g.push((skin, target.ifs_mod_path.clone()));
     }
     LEGACY_SHEETS.fetch_or(bit, Ordering::AcqRel);
     true
+}
+
+/// Live "Judgement Color" apply (the overlay row, an enable): swap every
+/// staged legacy combo sheet to `color`'s art. `false` when none is
+/// staged. Applies when each skin's `dance_combo` next loads.
+pub fn set_legacy_color(color: super::assets::JudgementColor) -> bool {
+    // Copy the targets out: the file IO below must not hold the lock.
+    let staged: Vec<(u8, String)> = match LEGACY_STAGED.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return false,
+    };
+    let mut any = false;
+    for (skin, ifs_mod_path) in &staged {
+        any |= super::assets::restage_legacy_combo(color, *skin, ifs_mod_path);
+    }
+    any
 }
 
 /// Whether the skin's S-Marvelous combo sheet is staged.

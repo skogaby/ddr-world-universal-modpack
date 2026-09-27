@@ -13,6 +13,7 @@ Import this from a per-character config script running inside Blender:
     P.conform(fa, s, targets, next_of, terminal_len)
     P.bake_meshes(meshes, fa)                # world-space bake incl. evaluated normals, drops the rig
     P.retarget_weights(meshes, arm, J, order, classify)
+    ... rigidly skinned rip? weld_graph + relax_displacement / blend_weights_across (GTA example) ...
     ... materials ...
     P.export_and_check(env, arm)
     P.preview_renders(env, arm, clips=[...])
@@ -377,6 +378,100 @@ def white_color_attribute(o):
     me.color_attributes.active_color = col
     me.color_attributes.active = col
     return col
+
+
+# ---------------------------------------------------------------------------------------------
+# rigidly skinned sources (older game rips: every vertex 1.00 on a single bone)
+# ---------------------------------------------------------------------------------------------
+def weld_graph(o, key_co=None, ndigits=3):
+    """The mesh's edge graph with split duplicates (UV / normal seams) welded into one node, so
+    a seam never reads as a boundary. `key_co`: per-vertex positions to weld on (default: the
+    current coordinates) — pass the source rest positions after a bake. Returns
+    (node_of_vertex, neighbours per node, member vertices per node)."""
+    co = key_co if key_co is not None else [v.co for v in o.data.vertices]
+    key_of, node = {}, []
+    for p in co:
+        node.append(key_of.setdefault((round(p.x, ndigits), round(p.y, ndigits), round(p.z, ndigits)), len(key_of)))
+    nbr = [set() for _ in range(len(key_of))]
+    for e in o.data.edges:
+        a, b = node[e.vertices[0]], node[e.vertices[1]]
+        if a != b:
+            nbr[a].add(b)
+            nbr[b].add(a)
+    members = [[] for _ in nbr]
+    for i, n in enumerate(node):
+        members[n].append(i)
+    return node, nbr, members
+
+
+def dominant_group(o, v):
+    """Name of the vertex group with the largest weight on vertex `v` ('' if none)."""
+    g = max(v.groups, key=lambda g: g.weight, default=None)
+    return o.vertex_groups[g.group].name if g else ''
+
+
+def relax_displacement(o, graph, ref, free, iters=600):
+    """Harmonic re-bake of a region. With rigid skinning, wherever two neighbouring bones got
+    different conform transforms the bake tears along the weight border. D = co - ref(i) is held
+    on every node NOT in `free` and relaxed over the `free` nodes (Gauss-Seidel on the uniform
+    graph Laplacian), so it blends smoothly between the held neighbours; each free vertex becomes
+    ref(i) + D. `ref(i)` -> Vector is a smooth map of vertex i's source position (e.g. a linear
+    trunk map). Positions only; weights are untouched. Returns the largest vertex move (m)."""
+    node, nbr, members = graph
+    vs = o.data.vertices
+    D = [vs[ms[0]].co - ref(ms[0]) for ms in members]
+    for _ in range(iters):
+        for n in free:
+            acc = Vector()
+            for m in nbr[n]:
+                acc += D[m]
+            D[n] = acc / len(nbr[n])
+    moved = 0.0
+    for n in free:
+        for i in members[n]:
+            p = ref(i) + D[n]
+            moved = max(moved, (p - vs[i].co).length)
+            vs[i].co = p
+    o.data.update()
+    return moved
+
+
+def blend_weights_across(o, graph, is_border, rings=2, iters=3, lam=0.5, max_influences=4):
+    """Soften hard weight borders AFTER retarget_weights: every welded node on an edge whose two
+    ends have different dominant groups with is_border(dom_a, dom_b) true, plus `rings - 1` rings
+    around them, is Laplacian-smoothed (`iters` Jacobi passes of strength `lam`), then capped at
+    `max_influences` and renormalised. UV-split duplicates get identical weights. A rigid Collar |
+    Arm border otherwise stretches 3-5x when the arm lifts (a pointy flap at the shoulder).
+    Returns the number of welded nodes changed."""
+    node, nbr, members = graph
+    vs = o.data.vertices
+    gname = {vg.index: vg.name for vg in o.vertex_groups}
+    W = [{gname[g.group]: g.weight for g in vs[ms[0]].groups if g.weight > 0.0} if ms else {} for ms in members]
+    dom = [max(w, key=lambda k, w=w: w[k]) if w else '' for w in W]
+    free = {n for n in range(len(nbr)) for m in nbr[n] if dom[m] != dom[n] and is_border(dom[n], dom[m])}
+    ring = set(free)
+    for _ in range(rings - 1):
+        ring = {m for n in ring for m in nbr[n]} - free
+        free |= ring
+    for _ in range(iters):                            # Jacobi: every node reads the previous pass
+        new = {}
+        for n in free:
+            acc = {}
+            for m in nbr[n]:
+                for k, w in W[m].items():
+                    acc[k] = acc.get(k, 0.0) + w / len(nbr[n])
+            new[n] = {k: (1.0 - lam) * W[n].get(k, 0.0) + lam * acc.get(k, 0.0) for k in set(W[n]) | set(acc)}
+        W = [new.get(n, w) for n, w in enumerate(W)]
+    groups = {vg.name: vg for vg in o.vertex_groups}
+    for n in free:
+        top = sorted(((k, w) for k, w in W[n].items() if w > 1e-3), key=lambda kv: -kv[1])[:max_influences]
+        tot = sum(w for _, w in top)
+        for i in members[n]:
+            for g in list(vs[i].groups):
+                groups[gname[g.group]].remove([i])
+            for k, w in top:
+                groups[k].add([i], w / tot, 'REPLACE')
+    return len(free)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -13,6 +13,6 @@
       all covered by alternates, as before); `ddr_sel_danger_double_jnz` resolves on all five
       builds at the design's file offsets + 0xC00 + 0x18; `shape_diff.py` identical through 0x40
       (`75 07 45 84 ED 4D 0F 45 C7` at the JNZ on every build)
-- [ ] Cabinet demo (maintainer)
+- [x] Cabinet demo (maintainer) — passed 2026-09-26
 
-Status: Complete (uncommitted — maintainer commits manually); cabinet demo pending
+Status: Complete (uncommitted — maintainer commits manually)

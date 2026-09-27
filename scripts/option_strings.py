@@ -635,17 +635,17 @@ PREVIEWS = [
         WIDE,
         {
             "en": [
-                'Plays songs with the gameplay screen of a classic DDR era.',
+                'Plays songs with the gameplay screen of an earlier DDR, from 1stMIX to DDR A3.',
                 'AUTO: each song uses the look of the DDR version it first appeared in. '
-                'Picking an era applies that look to every song.',
+                'Picking a version applies that look to every song.',
             ],
             "ja": [
-                'ゲーム画面を過去のDDRシリーズの見た目でプレイします。',
+                'ゲーム画面を1stMIXからDDR A3までの過去のDDRの見た目でプレイします。',
                 'AUTO: 曲ごとに初収録バージョンの見た目になります。'
                 'バージョンを選ぶと全曲に適用されます。',
             ],
             "ko": [
-                '게임 화면을 예전 DDR 시리즈의 모습으로 플레이합니다.',
+                '게임 화면을 1stMIX부터 DDR A3까지 예전 DDR의 모습으로 플레이합니다.',
                 'AUTO: 곡마다 처음 수록된 버전의 모습이 됩니다. '
                 '버전을 선택하면 모든 곡에 적용됩니다.',
             ],

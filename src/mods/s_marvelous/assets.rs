@@ -19,9 +19,11 @@
 //!
 //! The judgement word, S-MFC splash and combo staging run per [`Target`]:
 //! World's own `_v3` package (skin 0) or one of DDR SELECTION's legacy
-//! skins (1..=5, art under `data_mods/ddr_selection/s_marvelous/N/`; names
-//! in the pure [`super::targets`]). Generated output always lands under
-//! `data_mods/s_marvelous/<ifs>_ifs/`, per IFS.
+//! skins (1..=5 the eras, 6..=8 the themes; art under
+//! `data_mods/ddr_selection/s_marvelous/<art set>/`; names in the pure
+//! [`super::targets`], a theme's package from DDR SELECTION's policy).
+//! Generated output always lands under `data_mods/s_marvelous/<ifs>_ifs/`,
+//! per IFS.
 
 use crate::core::ap2::Ap2Doc;
 use crate::core::{afp, arc, geo, ifs};
@@ -38,7 +40,7 @@ use super::targets;
 /// One package S-Marvelous stages art into.
 #[derive(Clone, Debug)]
 pub struct Target {
-    /// 0 = World's own package, 1..=5 = a DDR SELECTION legacy skin.
+    /// 0 = World's own package, 1..=8 = a DDR SELECTION legacy skin.
     pub skin: u8,
     /// The arc the game opens for the package.
     pub arc_path: String,
@@ -69,13 +71,28 @@ impl Target {
     }
 }
 
-/// The package DDR SELECTION's helper registers for `kind` on `skin`
-/// (`dance_judge` + 1 → `dance_judge0001`), resolved to the arc World's
-/// probe opens: a LayeredFS mod file first (skin 5's combo comes from the A3
-/// import), then `data/`. `None` when no candidate exists.
+/// The package DDR SELECTION's helper registers for `kind` on `skin` (logs):
+/// an era's `dance_judge0001`, a theme's `dance_judge0000_v2`.
+pub fn package_label(kind: &str, skin: u8) -> String {
+    crate::mods::ddr_selection::policy::theme_package(kind, skin)
+        .unwrap_or_else(|| targets::legacy_base(kind, skin))
+}
+
+/// The package DDR SELECTION's helper registers for `kind` on `skin`,
+/// resolved to the arc World's probe opens: a LayeredFS mod file first
+/// (skin 5's combo comes from the A3 import), then `data/`. An era's
+/// `dance_judge000N` goes through the probe's `_v3` / `_v0` / bare rungs; a
+/// theme's full `…0000_vN` name (DDR SELECTION's policy, the one naming
+/// source) is reached by the bare rung alone. `None` when no candidate
+/// exists.
 pub fn legacy_target(kind: &str, skin: u8) -> Option<Target> {
-    let base = targets::legacy_base(kind, skin);
-    for name in targets::arc_candidates(&base) {
+    let candidates: Vec<String> =
+        match crate::mods::ddr_selection::policy::theme_package(kind, skin) {
+            Some(name) => vec![format!("{}.arc", name)],
+            None if targets::is_theme(skin) => return None,
+            None => targets::arc_candidates(&targets::legacy_base(kind, skin)).to_vec(),
+        };
+    for name in candidates {
         let rel = format!("arc/bm2d/{}", name);
         let path = mod_paths::find_first_modfile(&rel).or_else(|| {
             let stock = format!("data/{}", rel);
@@ -203,6 +220,95 @@ impl JudgementColor {
             targets::legacy_word_png(skin, self.key())
         }
     }
+
+    /// This variant's combo-sheet art for a legacy skin's `key` (World's
+    /// combo has one variant: its digits are violet either way).
+    pub fn legacy_combo_png(self, skin: u8, key: &str) -> String {
+        targets::legacy_combo_png(skin, self.key(), key)
+    }
+}
+
+/// Serve `src` as the per-image texture `name` of `ifs_mod_path` (this IFS
+/// family stores texture data one file per image, served from
+/// `{ifs_mod_path}/tex/{name}.png`): rewrite the staged PNG when its bytes
+/// differ and purge LayeredFS's converted copy — whose freshness test is by
+/// mtime, which a copy of an older file would not advance. `Ok(true)` = the
+/// served art changed.
+fn serve_image(src: &str, ifs_mod_path: &str, name: &str) -> std::io::Result<bool> {
+    let dst = format!("{}/{}/tex/{}.png", MOD_ROOT, ifs_mod_path, name);
+    let bytes = std::fs::read(src)?;
+    if std::fs::read(&dst).is_ok_and(|old| old == bytes) {
+        return Ok(false);
+    }
+    std::fs::write(&dst, &bytes)?;
+    ifs_textures::purge_texture_replacement(ifs_mod_path, name);
+    Ok(true)
+}
+
+/// The combo sheet to stage for `want` on a legacy `skin`: that variant's
+/// eleven PNGs, or — when one is missing — the other variant's with one
+/// WARN (a half-installed data drop keeps a violet combo). `None` when
+/// neither variant is complete.
+fn combo_pngs_for(skin: u8, want: JudgementColor) -> Option<(JudgementColor, Vec<String>)> {
+    let complete = |c: JudgementColor| -> Option<Vec<String>> {
+        let pngs: Vec<String> = targets::COMBO_KEYS
+            .iter()
+            .map(|k| c.legacy_combo_png(skin, k))
+            .collect();
+        pngs.iter()
+            .all(|p| std::path::Path::new(p).is_file())
+            .then_some(pngs)
+    };
+    if let Some(pngs) = complete(want) {
+        return Some((want, pngs));
+    }
+    let other = JudgementColor::ALL.into_iter().find(|c| *c != want)?;
+    let pngs = complete(other)?;
+    log_warn!(
+        "SMarvelous: skin {} {} combo art incomplete under {} — using {} instead",
+        skin,
+        want.key(),
+        targets::legacy_art_dir(skin),
+        other.key()
+    );
+    Some((other, pngs))
+}
+
+/// Swap a legacy skin's STAGED combo sheet to `color` (the "Judgement
+/// Color" row's live apply, and every enable): re-serve the eleven
+/// per-image PNGs ([`serve_image`] — a no-op for images already in that
+/// variant). The texturelist and fresh atlas are untouched: both variants
+/// keep the donors' sizes. Takes effect when the game next loads the
+/// skin's `dance_combo` package (every song). Best-effort: failure WARNs
+/// and leaves the previous art staged.
+pub fn restage_legacy_combo(color: JudgementColor, skin: u8, ifs_mod_path: &str) -> bool {
+    let Some((got, pngs)) = combo_pngs_for(skin, color) else {
+        log_warn!(
+            "SMarvelous: skin {} combo art missing under {} — keeping the staged sheet",
+            skin,
+            targets::legacy_art_dir(skin)
+        );
+        return false;
+    };
+    let mut changed = 0;
+    for (key, src) in targets::COMBO_KEYS.iter().zip(&pngs) {
+        match serve_image(src, ifs_mod_path, &targets::legacy_combo_texture(skin, key)) {
+            Ok(c) => changed += usize::from(c),
+            Err(e) => {
+                log_warn!("SMarvelous: can't restage {}: {}", src, e);
+                return false;
+            }
+        }
+    }
+    if changed > 0 {
+        log_info!(
+            "SMarvelous: skin {} combo sheet {} staged ({} image(s) changed); applies when dance_combo next loads",
+            skin,
+            got.key(),
+            changed
+        );
+    }
+    true
 }
 
 /// Resolve the word art to stage for `want` on target `skin`: that variant's
@@ -303,7 +409,7 @@ static WARN_STOCK_GLOW_UNMUTED: std::sync::atomic::AtomicBool =
 
 /// Everything the patch fn needs, staged at enable — one per [`Target`].
 pub struct StagedPatch {
-    /// 0 = World, 1..=5 = the legacy skin this template belongs to.
+    /// 0 = World, 1..=8 = the legacy skin this template belongs to.
     pub skin: u8,
     /// The target's IFS mod path (word-art restaging).
     pub ifs_mod_path: String,
@@ -617,11 +723,11 @@ pub fn stage_word(target: &Target, color: JudgementColor) -> Option<StagedPatch>
         log_warn!("SMarvelous: mkdir {}: {} — patch not staged", tex_dir, e);
         return None;
     }
-    let image_png = staged_word_png(&target.ifs_mod_path, &new_region);
-    if let Err(e) = std::fs::copy(&word_png, &image_png) {
+    // (`serve_image`: a colour changed since the last boot re-converts.)
+    if let Err(e) = serve_image(&word_png, &target.ifs_mod_path, &new_region) {
         log_warn!(
             "SMarvelous: can't stage {}: {} — patch not staged",
-            image_png,
+            staged_word_png(&target.ifs_mod_path, &new_region),
             e
         );
         return None;
@@ -977,7 +1083,7 @@ pub fn world_fullcombo_target() -> Target {
 
 /// Everything one splash template's patch needs.
 pub struct StagedFcPatch {
-    /// 0 = World, 1..=5 = the legacy skin this template belongs to.
+    /// 0 = World, 1..=8 = the legacy skin this template belongs to.
     pub skin: u8,
     pub template: &'static str,
     pub stock_bytes: Vec<u8>,
@@ -1270,15 +1376,18 @@ pub fn stage_fullcombo_for(target: &Target) -> Vec<StagedFcPatch> {
     staged
 }
 
-// ── Legacy combo sheet (DDR SELECTION skins 4–5) ────────────────────
+// ── Legacy combo sheet (DDR SELECTION skins 4..=8) ──────────────────
 
 /// Stage a legacy skin's all-S-Marvelous combo sheet: the eleven
-/// `dance_combo000N_smarvelous_{0..9,combo}` textures as a FRESH set in the
-/// skin's combo IFS (per-image PNGs + merged texturelist) — DDR SELECTION's
+/// `dance_combo%04d_smarvelous_{0..9,combo}` textures (`%04d` = the tex
+/// number: `0000` on a theme) as a FRESH set in the skin's combo IFS
+/// (per-image PNGs + merged texturelist) — DDR SELECTION's
 /// A3 texture write binds them by name (`afp_mc_load_bitmap`), exactly like
-/// World's `daco_combo_smarvelous_%d`. No geo, no AP2 patch. `false` ⇒ the
+/// World's `daco_combo_smarvelous_%d`. The images are `color`'s variant
+/// (the "Judgement Color" setting; the other one when that is incomplete),
+/// swapped live by [`restage_legacy_combo`]. No geo, no AP2 patch. `false` ⇒ the
 /// skin keeps A3's Marvelous sheet (one WARN / INFO names the reason).
-pub fn stage_legacy_combo(target: &Target) -> bool {
+pub fn stage_legacy_combo(target: &Target, color: JudgementColor) -> bool {
     let skin = target.skin;
     // World ships a blanked dance_combo0005 (DDR SELECTION WARNs about it
     // when a skin-5 song plays); without a valid IFS there is nothing to
@@ -1302,15 +1411,22 @@ pub fn stage_legacy_combo(target: &Target) -> bool {
         );
         return false;
     }
+    let Some((color, pngs)) = combo_pngs_for(skin, color) else {
+        log_warn!(
+            "SMarvelous: skin {} combo art missing under {} — combo sheet unstaged",
+            skin,
+            targets::legacy_art_dir(skin)
+        );
+        return false;
+    };
     let mut specs = Vec::with_capacity(targets::COMBO_KEYS.len());
-    for key in targets::COMBO_KEYS {
-        let src = targets::legacy_combo_png(skin, key);
+    for (key, src) in targets::COMBO_KEYS.iter().zip(pngs) {
         let new_name = targets::legacy_combo_texture(skin, key);
-        let dst = format!("{}/{}.png", tex_dir, new_name);
-        if let Err(e) = std::fs::copy(&src, &dst) {
+        if let Err(e) = serve_image(&src, &target.ifs_mod_path, &new_name) {
             log_warn!(
-                "SMarvelous: can't stage {}: {} — skin {} combo sheet unstaged",
-                dst,
+                "SMarvelous: can't stage {} as {}: {} — skin {} combo sheet unstaged",
+                src,
+                new_name,
                 e,
                 skin
             );
@@ -1363,9 +1479,10 @@ pub fn stage_legacy_combo(target: &Target) -> bool {
                 mod_paths::init_mod_paths();
             }
             log_info!(
-                "SMarvelous: {} S-Marvelous combo sheet staged ({} images, fresh atlas)",
+                "SMarvelous: {} S-Marvelous combo sheet staged ({} images, {}, fresh atlas)",
                 target.tag("dance_combo"),
-                targets::COMBO_KEYS.len()
+                targets::COMBO_KEYS.len(),
+                color.key()
             );
             true
         }

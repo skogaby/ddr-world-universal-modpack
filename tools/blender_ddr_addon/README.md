@@ -217,6 +217,45 @@ dance loops + bind offsets). Run either with `SRC`, `OUT_DIR`, `DDR_3D_DATA`, `D
   pre-cabinet check; a `_face`/`_hand`/`_feet` close-up pass caught nothing on these two but is
   where a wrong UV layer or a dropped texture shows first.
 
+### A rigidly skinned game rip in ASCII FBX 6.1 (`examples/port_character_gta_fbx6.py`)
+
+GTA San Andreas' Carl Johnson (2026-09-26, ships as `data_mods/custom_models/dancers/Carl Johnson/`,
+sidecar `cj00, pl, M, A, 1.0, 0.8, 0.0` — a MALE on the `pl_rage00` donor). Same `port_lib` flow;
+what was different:
+
+* **ASCII FBX 6.1** (3ds Max / FBX SDK 2011): Blender refuses it. `examples/fbx6_ascii.py` is a pure-
+  Python reader (node tree, mesh, UVs, per-polygon materials, skin clusters, bind pose) and
+  `examples/fbx6_gta_source.py` builds the armature from the clusters' `TransformLink` matrices (FBX
+  global Y-up → +90° about X) plus the skinned mesh. Coordinates are Max Z-up inches facing −Y, like
+  Blender. Its `MAIN_CHILD` table names the GTA/XNALara-style bones; adapt it for another skeleton.
+  The rar needed `bsdtar` (p7zip 17 reported "Unsupported Method").
+* **Floor-root weights:** 30 heel vertices were skinned to `root ground`; they are moved to the nearer
+  ankle before the conform, or the shoe heels stay on the floor.
+* **Waist:** the DDR hip joints sit ~2 cm/side wider than CJ's, so dragging the thighs out to them
+  made the jeans flare over the tank top at the belt. The thigh targets keep the source socket width
+  (the trunk's linear map of the source joint), and the belt band is re-baked with the trunk map,
+  ramped back to the limb bake over 3 in below the hip joints. `waist_report` prints baked ÷ source
+  width per height slice, and that ratio should read 1.00.
+* **Short neck:** stretched only `NECK_K` = 1.15× toward the DDR Head joint. The rigid head then rides
+  2 cm below the joint, which is invisible, instead of sitting on a long thin neck.
+* **Rigid skinning** (every vertex 1.00 on one bone): wherever two neighbouring bones get different
+  conform transforms, the bake tears along the weight border. Here the DDR Collar sits 2 cm outboard
+  and 2.5 cm higher than the source clavicle, and the clavicle's rigid region runs down the shirt
+  sides, which gave 4–6 cm tears under the arms and steps at the strap tops. Two `port_lib` helpers
+  repair this, both on `weld_graph` (the edge graph with UV-split duplicates welded, keyed on the
+  source rest positions):
+  * `relax_displacement` re-bakes a region harmonically. D = bake − a smooth reference (the trunk
+    map) is held everywhere else and relaxed over the free nodes (the clavicle vertices). Positions
+    only.
+  * `blend_weights_across` softens hard DDR weight borders after `retarget_weights`. Every edge
+    whose ends have different dominant groups involving a Collar gets 2 rings of Laplacian
+    smoothing. Otherwise the Collar 1.0 | Arm 1.0 edge at the shoulder pivot stretches 3–5× when an
+    arm lifts, which shows as a pointy flap.
+
+  `seam_report` in the config lists the largest displacement jumps across an edge, which is where
+  a rigid bake tears.
+* **Small textures are fine:** 256², 128², 128×256 and 64² load at native size (no upscaling).
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

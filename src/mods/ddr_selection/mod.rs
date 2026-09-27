@@ -28,22 +28,27 @@
 //! ## Surfaces
 //!
 //! - [`package_helper`] — full replacement of World's `LayoutActor` per-package helper:
-//!   stock packages get the original with skin 0, legacy ones A3's `<arc_base>000N` append.
+//!   stock packages get the original with skin 0, legacy ones A3's `<arc_base>000N` append
+//!   (a theme: its `…0000_vN` / `_v0` / `dance_message_vN` package, [`policy::package_name`]).
 //!   The whole-package swaps (judge, FAST/SLOW, full combo, game over, danger 1–2,
 //!   pacemaker) need nothing else.
-//! - [`panel`] + [`panel_logic`] — A3's stage panel with era cut-in and stage call, hosted
-//!   in World's ShutterActor stage kind from the song-select confirm (resolved there from the
-//!   wheel highlight); [`banner`] + [`banner_logic`] — CLEARED / FAILED / PRAY FOR ALL in the
-//!   banner kinds, on the same `ShutterActor::onUpdate` detour.
-//! - [`intro`] + [`intro_logic`] — READY! / HERE WE GO!! from `dance_message000N`, World's
-//!   READY? panel dismissed.
+//! - [`panel`] + [`panel_logic`] — A3's stage panel, hosted in World's ShutterActor stage kind
+//!   from the song-select confirm (resolved there from the wheel highlight): an era's panel
+//!   with its cut-in and stage call, or a theme's own `common_choice_vN` root filled the
+//!   skin-0 way (stage band, jacket, stage call, no cut-in) with both players' high-score /
+//!   target sets ([`score_set`] + [`score_set_logic`]); [`banner`] + [`banner_logic`] —
+//!   CLEARED / FAILED / PRAY FOR ALL in the banner kinds, on the same `ShutterActor::onUpdate`
+//!   detour.
+//! - [`intro`] + [`intro_logic`] — READY! / HERE WE GO!! from `dance_message000N` (a theme's
+//!   `dance_message_vN`), World's READY? panel dismissed.
 //! - [`markers`] + [`marker_keys`] — A3's element positions via `services::hud_layout_hooks`;
 //!   [`stage_frame`] — the stage frame names; [`danger`] — the themes' `danger_double` on
 //!   doubles.
 //! - [`gauge`] + [`gauge_math`], [`combo`] + [`combo_math`] (over `services::combo_hooks`),
 //!   [`score`] + [`score_math`], [`song_info`] + [`song_info_logic`] — life gauge, combo,
-//!   score / difficulty, skin 2's band and skins 3–5's A3 panel.
-//! - [`option_icons`] + [`option_icons_logic`] — A3's option-icon sprites (skins 2–5);
+//!   score / difficulty, skin 2's band and the A3 song-info panel (skins 3–5 and the themes);
+//!   [`score_name`] + [`score_name_logic`] — the themes' dancer name in the difficulty frame.
+//! - [`option_icons`] + [`option_icons_logic`] — A3's option-icon sprites (skins 2–8);
 //!   [`options_force`] + [`options_force_logic`] — 1st-5th's forced classic options.
 //! - [`movie_sel`] + [`sel_movie_logic`] — A3's `_sel` background movies.
 //! - [`sound`] — the mod-owned `dsel` era bank, the AFP-clip sound route, `code_se` flips
@@ -70,7 +75,7 @@
 //!   (World's or skin N's) a template stream or re-drive belongs to — it dresses the legacy
 //!   skins it has art for and stands down on the rest; `enable` calls
 //!   `s_marvelous::on_ddr_selection_enabled` so it stages that art, and the A3 combo write
-//!   asks `s_marvelous::legacy_combo_smarv` for the skins 4–5 S-Marvelous sheet;
+//!   asks `s_marvelous::legacy_combo_smarv` for the S-Marvelous sheet (skins 4..=8);
 //!   [`leaked_forced_options`] lets the save
 //!   trampoline (`custom_options_persistence`) rewrite the `/data/option` nodes if a save is
 //!   ever built while 1st-5th's options are forced. No surface taints through `score_guard`.
@@ -698,7 +703,7 @@ impl Mod for DdrSelectionMod {
     }
 
     fn description(&self) -> &str {
-        "Play songs with the gameplay UI of the DDR era they came from (A3's DDR SELECTION)"
+        "Play songs with the gameplay UI of an earlier DDR, from 1stMIX to DDR A3 (A3's DDR SELECTION, extended)"
     }
 
     fn required_signatures(&self) -> &[&str] {

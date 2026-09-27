@@ -24,7 +24,7 @@
 //! satisfies by construction. Panic-free, lock-free (the one mutex is
 //! `bm2d_api`'s uncontended API cell, the house pattern for libafp calls).
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
 
 use crate::mods::overlay_element_styling;
 use crate::services::bm2d_api;
@@ -48,7 +48,7 @@ static WARNED_OP_FAILED: AtomicBool = AtomicBool::new(false);
 /// cabinet-log confirmation that the whole chain is live.
 static FIRST_REDRIVE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// Per DDR SELECTION skin: the first legacy re-drive of the session.
-static LEGACY_REDRIVE_LOGGED: AtomicU8 = AtomicU8::new(0);
+static LEGACY_REDRIVE_LOGGED: AtomicU16 = AtomicU16::new(0);
 
 /// Clear the one-shot latches (called at GAMEPLAY entry so a transient
 /// failure class can re-report on a later song during diagnosis).

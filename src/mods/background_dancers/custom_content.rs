@@ -1445,4 +1445,54 @@ mod tests {
         assert_eq!(p.mounts.len(), 2);
         assert!(p.notes.iter().all(|n| n.contains("(sidecar row)")));
     }
+
+    /// The male dancer shipped 2026-09-26 (`data_mods/custom_models/dancers/Carl
+    /// Johnson/`, ported onto the `pl_rage00` rig): the flat export folder + its
+    /// one-row sidecar, exactly as on disk — MALE, full-size model, labelled from
+    /// the folder name.
+    #[test]
+    fn shipped_carl_johnson_folder() {
+        let body = ArcRole::Body { key: "cj00".into() };
+        let files = [
+            "pl_cj00.model",
+            "pl_cj00.b2it",
+            "pl_cj00.grp2it",
+            "cj_body.dds",
+            "cj_head.dds",
+            "cj_legs.dds",
+            "cj_shoes.dds",
+        ];
+        let members: Vec<String> = files
+            .iter()
+            .map(|f| folder_member_path(&body, "pl_cj00", f))
+            .collect();
+        assert!(body_model_present("cj00", &members));
+        let d = PackDir {
+            dir: "./data_mods/custom_models/dancers/Carl Johnson".into(),
+            folder: Some("Carl Johnson".into()),
+            arcs: vec![ArcFile {
+                name: "pl_cj00.arc".into(),
+                path: "./data_mods/_cache/custom_models/pl_cj00-deadbeef.arc".into(),
+                source: "./data_mods/custom_models/dancers/Carl Johnson/pl_cj00".into(),
+                members: Some(members),
+            }],
+            chara_rows: parse_text_rlist("cj00, pl, M, A, 1.0, 0.8, 0.0"),
+            ..Default::default()
+        };
+        let p = plan(&[d], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.dancers.len(), 1);
+        assert_eq!(p.dancers[0].key, "cj00");
+        assert_eq!(p.dancers[0].sex, Sex::Male);
+        assert_eq!(
+            (p.dancers[0].model_scale, p.dancers[0].shadow_scale),
+            (1.0, 0.8)
+        );
+        assert_eq!(
+            p.labels,
+            vec![("cj00".to_string(), "CARL JOHNSON".to_string())]
+        );
+        assert_eq!(p.mounts.len(), 1);
+        assert!(p.notes.iter().all(|n| n.contains("(sidecar row)")));
+    }
 }
