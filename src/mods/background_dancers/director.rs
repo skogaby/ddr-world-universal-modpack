@@ -7,7 +7,10 @@
 //! segment, A3 placement), each dancer's rigid accessory PARTS
 //! (`part_world(mirror, bones[attach], body)`) and its `pl_shadow00` quad
 //! (the A3 shadow rule over the ground bones, low-passed per frame). The
-//! camanm camera (Step 9) plugs into the same loop.
+//! camanm camera (Step 9) plugs into the same loop. BIG HEAD (`style.rs`,
+//! live) scales each dancer's `Head` subtree ×3 about the Head joint between
+//! the evaluation and the body publish, so every derived instance inherits it
+//! (`docs/big_head_mode_feasibility.md`).
 //!
 //! No per-frame allocation: the session's scratch buffers are sized once;
 //! the ground-point buffer is a fixed array.
@@ -17,8 +20,8 @@ use crate::core::anm::pose::evaluate_into;
 use crate::services::scene3d::{frame_board, scene_graph};
 
 use super::director_math::{
-    clip_frame, part_world, shadow_step, shadow_target, shadow_world, transform_point, BLACK,
-    IDENTITY, WHITE,
+    clip_frame, part_world, scale_subtree_about_root, shadow_step, shadow_target, shadow_world,
+    transform_point, BLACK, IDENTITY, WHITE,
 };
 use super::movie_mode::SceneMask;
 use super::schedule::ClipSel;
@@ -40,6 +43,9 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
     let shadow_hidden = hidden || !mask.shadows;
     let dancer_hidden = hidden || !mask.dancers;
     let n_dancers = sess.parsed.dancers.len();
+    // BIG HEAD is live: read every frame (gameplay and previews share this
+    // path), so a mod-menu toggle shows on the next frame.
+    let head_scale = super::style::head_scale();
 
     // Stage parts.
     for idx in 0..sess.instances.len() {
@@ -143,6 +149,16 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
                 scratch,
                 bones,
             );
+            // Big Head: scale the Head subtree about the Head joint in the
+            // freshly evaluated bones, BEFORE the body publish — the body,
+            // its head parts (`part_world` reads `bones[attach]`) and every
+            // hull twin (they read those slots) all inherit it; the shadow
+            // reads translations only and the Head joint's does not move.
+            // `evaluate_into` rewrites every bone each call, so this never
+            // accumulates across frames or dancers.
+            if head_scale != 1.0 {
+                scale_subtree_about_root(bones, &d.head_subtree, head_scale);
+            }
         }
         if body_built {
             let n = body_bone_count.min(sess.bones.len());

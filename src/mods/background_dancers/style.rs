@@ -5,7 +5,8 @@
 //! switches. Owns the live values the session builder reads
 //! (`effective()`, `hull_plan()`, `outline_widths()`, `tempo_options()`,
 //! and `movie_mode()` — the Background Movies choice the song window
-//! latches at entry, `movie_mode.rs`), the overlay rows under the
+//! latches at entry, `movie_mode.rs`) plus the one the director reads every
+//! frame (`head_scale()` — BIG HEAD), the overlay rows under the
 //! Background Dancers header (the outline style + width rows are CHILDREN of
 //! SCENE OUTLINES — hidden while it is OFF, `mod_menu::set_row_show_when`),
 //! and the WHOLE-section persistence of `background_dancers`
@@ -17,7 +18,11 @@
 //! synthesized `<name>_lit` / `<name>_cel` variant containers
 //! (`render_item::restyle_materials`, RE §4.7), and the outline twins are
 //! created per session. Nothing here depends on a relaunch — every variant
-//! container is synthesized at boot whenever the two mods are on.
+//! container is synthesized at boot whenever the two mods are on. The
+//! exceptions: CUSTOM DANCERS & STAGES (next launch — the catalog is built
+//! once) and BIG HEAD, the section's last row, which is LIVE — `head_scale()`
+//! is read by `director::produce` every frame (gameplay and previews), so a
+//! toggle shows on the next frame (`docs/big_head_mode_feasibility.md`).
 //!
 //! The three style values are the shape the maintainer intends to expose to
 //! players later (stock / enhanced lighting / enhanced lighting + cel);
@@ -31,6 +36,7 @@ use crate::services::avs_layeredfs::shader_layout::SceneStyle;
 use crate::services::avs_layeredfs::shader_synthesis;
 use crate::{log_info, log_warn};
 
+use super::director_math::BIG_HEAD_SCALE;
 use super::movie_mode::MovieMode;
 use super::outline::{self, HullPlan, OutlineStyle};
 
@@ -44,6 +50,7 @@ const ROW_KEY_BPM_SYNC: &str = "background-dancers-bpm-sync";
 const ROW_KEY_STOP_SLOW: &str = "background-dancers-stop-slow";
 const ROW_KEY_CUSTOM_CONTENT: &str = "background-dancers-custom-content";
 const ROW_KEY_MOVIE_MODE: &str = "background-dancers-movie-mode";
+const ROW_KEY_BIG_HEAD: &str = "background-dancers-big-head";
 /// Rows shown only while SCENE OUTLINES is ON (`set_row_show_when`).
 const OUTLINE_CHILD_ROWS: [&str; 3] = [ROW_KEY_OUTLINE_STYLE, ROW_KEY_PX_DANCER, ROW_KEY_PX_STAGE];
 
@@ -66,6 +73,8 @@ static LIVE_CUSTOM_CONTENT: AtomicBool = AtomicBool::new(true);
 /// BACKGROUND MOVIES (`MovieMode::row_value`) — read by the song window at
 /// its entry (next-song knob).
 static LIVE_MOVIE_MODE: AtomicU8 = AtomicU8::new(3); // MovieMode::DEFAULT (StageScreens)
+/// BIG HEAD — the one LIVE row: `director::produce` reads it every frame.
+static LIVE_BIG_HEAD: AtomicBool = AtomicBool::new(false);
 /// Outline rim widths (f32 bits): dancers / stage props.
 static LIVE_PX_DANCER: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0
 static LIVE_PX_STAGE: AtomicU32 = AtomicU32::new(0x3FC0_0000); // 1.5
@@ -102,6 +111,17 @@ pub fn tempo_options() -> super::tempo::TempoOptions {
 /// window at its entry).
 pub fn movie_mode() -> MovieMode {
     MovieMode::from_row_value(LIVE_MOVIE_MODE.load(Ordering::Relaxed) as i32)
+}
+
+/// The factor the director applies to every dancer's `Head` subtree THIS
+/// frame: [`BIG_HEAD_SCALE`] while BIG HEAD is on, else `1.0` (no-op). Live —
+/// one relaxed atomic load, safe on the game thread's per-frame path.
+pub fn head_scale() -> f32 {
+    if LIVE_BIG_HEAD.load(Ordering::Relaxed) {
+        BIG_HEAD_SCALE
+    } else {
+        1.0
+    }
 }
 
 /// Nearest row value (hundredths of a px on the 0.25 grid) for a width.
@@ -258,6 +278,7 @@ pub fn init_from_config() {
         }),
     };
     LIVE_MOVIE_MODE.store(movie_mode.row_value() as u8, Ordering::Relaxed);
+    LIVE_BIG_HEAD.store(bd.big_head, Ordering::Relaxed);
     let px_d = config::clamp_outline_px(bd.outline_px.unwrap_or(DEFAULT_OUTLINE_PX_DANCER));
     let px_s = config::clamp_outline_px(bd.outline_px_stage.unwrap_or(DEFAULT_OUTLINE_PX_STAGE));
     LIVE_PX_DANCER.store(px_d.to_bits(), Ordering::Relaxed);
@@ -282,6 +303,11 @@ pub fn init_from_config() {
     log_info!(
         "BackgroundDancers: background movies -- {} (applies per song)",
         movie_mode.key()
+    );
+    log_info!(
+        "BackgroundDancers: big head -- {} (x{}, live)",
+        if bd.big_head { "on" } else { "off" },
+        BIG_HEAD_SCALE
     );
     log_info!(
         "BackgroundDancers: scene style -- {} outlines={} style={} (rim px dancers={} stage={}; layered palette={}; variants {}, outline programs {}; applies per song)",
@@ -316,6 +342,7 @@ pub fn init_from_config() {
             bd.stop_slow,
             bd.custom_content,
             movie_mode,
+            bd.big_head,
         );
     }
 }
@@ -333,6 +360,7 @@ fn persist_section() {
         "outline_px_stage": f32::from_bits(LIVE_PX_STAGE.load(Ordering::Relaxed)),
         "custom_content": LIVE_CUSTOM_CONTENT.load(Ordering::Relaxed),
         "movie_mode": movie_mode().key(),
+        "big_head": LIVE_BIG_HEAD.load(Ordering::Relaxed),
     });
     // Optional key: absent means "default", so it is emitted only when set
     // (the palette is operator-authored and must survive every row edit).
@@ -434,6 +462,16 @@ fn set_movie_mode(value: i32) {
     );
 }
 
+fn set_big_head(value: i32) {
+    let on = value != 0;
+    LIVE_BIG_HEAD.store(on, Ordering::Relaxed);
+    persist_section();
+    log_info!(
+        "BackgroundDancers: BIG HEAD set to {} (live)",
+        if on { "ON" } else { "OFF" }
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn register_rows(
     style: SceneStyle,
@@ -445,6 +483,7 @@ fn register_rows(
     stop_slow: bool,
     custom_content: bool,
     movie_mode: MovieMode,
+    big_head: bool,
 ) {
     use crate::mods::mod_menu::{register_enum_row, set_row_show_when, EnumRowSpec};
     let on_off = || (vec![0, 1], vec!["OFF".to_string(), "ON".to_string()]);
@@ -546,6 +585,19 @@ fn register_rows(
         labels: l,
         initial_value: i32::from(custom_content),
         on_change: Arc::new(set_custom_content),
+    });
+    // BIG HEAD — the LAST row of the section (rows render in registration
+    // order), and the only live one.
+    let (v, l) = on_off();
+    register_enum_row(EnumRowSpec {
+        key: ROW_KEY_BIG_HEAD.to_string(),
+        label: "Big Head".to_string(),
+        hint: "Every dancer's head at 3x size, hair and head accessories included (previews too). Applies immediately.".to_string(),
+        parent_row_key: Some(MOD_ID.to_string()),
+        values: v,
+        labels: l,
+        initial_value: i32::from(big_head),
+        on_change: Arc::new(set_big_head),
     });
     // The three outline detail rows are CHILDREN of SCENE OUTLINES: hidden
     // while it is OFF (their values persist unchanged underneath).

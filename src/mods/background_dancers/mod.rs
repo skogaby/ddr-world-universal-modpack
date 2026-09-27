@@ -44,6 +44,13 @@
 //! outlines, one WARN. The shadow, `_bg` skydome parts, blended materials
 //! and screen materials always stay stock.
 //!
+//! **Big Head** (live, cosmetic): every dancer's `Head` subtree — resolved by
+//! name through the body's `.b2it` at parse — is scaled ×3 about the Head
+//! joint in the director's evaluated bones before the body publish, so the
+//! skinned head and hair, the `head00` / `face01` parts, their hull twins and
+//! the previews all follow; the engine's cull tests the published bones, so
+//! nothing pops (`docs/big_head_mode_feasibility.md`).
+//!
 //! **Choice, previews, custom content:** two in-game `custom_options` rows
 //! (`PersistMode::Local`) — BACKGROUND DANCER (per player) and BACKGROUND
 //! STAGE (cabinet-wide, `versus_mirror`ed) — with a live 3D preview in the
@@ -69,10 +76,11 @@
 //! **Config** `background_dancers` (DLL-written, rewritten whole by
 //! `style.rs` on every GLOBAL SETTINGS edit): `style`, `outlines`,
 //! `outline_style`, `outline_px`, `outline_px_stage`, `bpm_sync`,
-//! `stop_slow`, `movie_mode`, `custom_content`, plus the operator-set
-//! `outline_layer_colors` (re-emitted when present). All apply next song
-//! except `custom_content` (next launch). Legacy `shader_fixes.dancer_*` /
-//! `lit_models` seed `style` / `outlines` when absent.
+//! `stop_slow`, `movie_mode`, `custom_content`, `big_head`, plus the
+//! operator-set `outline_layer_colors` (re-emitted when present). All apply
+//! next song except `custom_content` (next launch) and `big_head` (live).
+//! Legacy `shader_fixes.dancer_*` / `lit_models` seed `style` / `outlines`
+//! when absent.
 //!
 //! **Degradation:** `required_signatures` = the all-or-nothing `scene3d`
 //! group anchor + FileManager (a miss skips the mod). Without the
@@ -97,7 +105,8 @@
 //!   [`tempo`]† + [`tempo_source`], [`background_hide`].
 //! - Movies: [`movie_mode`]†, [`movie_size`], [`movie_backdrop`],
 //!   [`movie_camera`]†, [`screen_route`], [`song_movie`].
-//! - Look: [`style`] (rows, live values, config), [`outline`]†.
+//! - Look: [`style`] (rows, live values, config — incl. BIG HEAD),
+//!   [`outline`]†.
 //! - [`preview`] (`layout`†, `state`†, camera, scene, badge);
 //!   [`viewport_smoke`] (dev compositor smoke).
 

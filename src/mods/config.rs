@@ -520,6 +520,14 @@ pub struct BackgroundDancersConfig {
     /// song.
     #[serde(default)]
     pub movie_mode: Option<String>,
+    /// BIG HEAD (2026-09-27): every dancer's head (the `Head` bone's subtree —
+    /// the skinned head and hair, the `head00` / `face01` parts, their
+    /// outlines) drawn at 3× about the Head joint, in gameplay and in the
+    /// song-select previews. Purely cosmetic. Default `false`. Mod menu
+    /// (GLOBAL SETTINGS, Background Dancers — the last row), LIVE: applies on
+    /// the next frame. `docs/big_head_mode_feasibility.md`.
+    #[serde(default)]
+    pub big_head: bool,
 }
 
 /// Clamp an outline width to the range the hull VS was tuned for.
@@ -544,6 +552,7 @@ impl Default for BackgroundDancersConfig {
             outline_layer_colors: None,
             custom_content: true,
             movie_mode: None,
+            big_head: false,
         }
     }
 }

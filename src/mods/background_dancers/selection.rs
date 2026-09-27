@@ -226,6 +226,9 @@ pub const MIRROR_ATTACH_BONE: &str = "RightForeArmRoll";
 pub const GROUND_BONES: [&str; 5] = ["Hips", "Spine2", "Head", "LeftToeBase", "RightToeBase"];
 /// The bone whose height delta vs bind scales the shadow.
 pub const HIPS_BONE: &str = "Hips";
+/// The bone whose subtree Big Head scales (index 16 on every known rig — but
+/// always resolved by name through the body's `.b2it`).
+pub const HEAD_BONE: &str = "Head";
 
 /// The shared floor-shadow quad (one instance per dancer).
 pub const SHADOW_ARC: &str = "pl_shadow00.arc";

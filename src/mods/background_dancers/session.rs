@@ -35,8 +35,8 @@ use crate::services::scene3d::{
 use crate::{log_info, log_warn};
 
 use super::director_math::{
-    body_world, part_world, shadow_target, shadow_world, transform_point, BLACK, SHADOW_FLOOR_Y,
-    WHITE,
+    body_world, part_world, shadow_target, shadow_world, subtree_of, transform_point, BLACK,
+    SHADOW_FLOOR_Y, WHITE,
 };
 use super::instance_plan::{
     plan_instances, DancerSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
@@ -44,8 +44,8 @@ use super::instance_plan::{
 use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
 use super::selection::{
-    camanm_member_path, clip_member_path, part_attach_bone, Sex, GROUND_BONES, HIPS_BONE,
-    MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
+    camanm_member_path, clip_member_path, part_attach_bone, Sex, GROUND_BONES, HEAD_BONE,
+    HIPS_BONE, MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
 };
 use super::tempo::{TempoOptions, BEAT_TAU};
 
@@ -121,6 +121,10 @@ pub struct ParsedDancer {
     pub ground: Vec<usize>,
     /// `Hips` bone index (shadow height rule).
     pub hips: Option<usize>,
+    /// The `Head` bone and its descendants (root first) — what Big Head
+    /// scales (`director_math::scale_subtree_about_root`); empty without a
+    /// `.b2it` / a `Head` entry, which leaves the dancer at normal size.
+    pub head_subtree: Vec<usize>,
 }
 
 /// The stage's camera sets that parsed (in the pick's shuffled order).
@@ -303,19 +307,22 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         }
         let seed = seed_local_trs(&skeleton);
 
-        // Parts + shadow bones need the body's `.b2it` (bone name → index).
-        // Missing/unparseable ⇒ the body dances alone (one warning).
+        // Parts, shadow bones and the Big Head subtree need the body's `.b2it`
+        // (bone name → index). Missing/unparseable ⇒ the body dances alone,
+        // at normal size (one warning).
         let names = match body.get(&format!("data/chara/{model_name}/{model_name}.b2it")) {
             Some(bytes) => match b2it::parse(&bytes) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    warnings.push(format!("{model_name}.b2it: {e} -- no parts/shadow"));
+                    warnings.push(format!(
+                        "{model_name}.b2it: {e} -- no parts/shadow/big head"
+                    ));
                     None
                 }
             },
             None => {
                 warnings.push(format!(
-                    "{model_name}.b2it: member missing -- no parts/shadow"
+                    "{model_name}.b2it: member missing -- no parts/shadow/big head"
                 ));
                 None
             }
@@ -375,6 +382,14 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         }
         let ground: Vec<usize> = GROUND_BONES.iter().filter_map(|n| bone_index(n)).collect();
         let hips = bone_index(HIPS_BONE);
+        let head_subtree = bone_index(HEAD_BONE)
+            .map(|h| subtree_of(&skeleton.parents, h))
+            .unwrap_or_default();
+        if names.is_some() && head_subtree.is_empty() {
+            warnings.push(format!(
+                "{model_name}.b2it has no {HEAD_BONE} -- big head skipped for this dancer"
+            ));
+        }
 
         dancers.push(ParsedDancer {
             key: d.key.clone(),
@@ -388,6 +403,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             parts,
             ground,
             hips,
+            head_subtree,
         });
     }
 

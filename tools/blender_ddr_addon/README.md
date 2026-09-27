@@ -158,6 +158,14 @@ diffuse maps). Every step below exists because of a rule of the game's format:
    `pelvis → Hips` and `head`+face → `Head` outright. Log the groups you did not map (the
    Fortnite rig had belt/groin/lat helpers) and add them to a class rather than dropping
    them. Keep ≤ 4 influences, renormalise.
+   **Keep the head rigid:** like the stock rigs, weight everything from the jaw up 1.00 to
+   `Head` and confine the `Head`/`Neck` blend to a band under the chin and at the nape
+   (stock ~1.39–1.45 m). Auto/heat weights on an unrigged rip spread the blend over the whole
+   lower face, while inner features (eyes, teeth, glasses) stay at 1.00. That is invisible at
+   rest, but any Head-vs-Neck difference then shears the skin off those features. The
+   modpack's Big Head mode (Head ×3) pushed Big Smoke's eye whites and teeth through his
+   face. A strong nod does the same, more subtly. Check: no vertex above the lips should
+   carry a partial `Head` weight.
 4. **Textures:** use the flat diffuse maps (the `_DShaded` bakes look muddy unlit, the
    `_DF` masks are not ink lines), downscale to ≤ 1024 (1024², 1024×512 and 512² all
    load), name the images `xx_stem` (stems must be unique after lower-casing and dropping
