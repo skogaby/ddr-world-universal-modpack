@@ -1,5 +1,28 @@
 {
   "custom_series_enhanced": {
+    "num_group_columns": 4,
+    "groups": [
+      {
+        "texture": "group_gold",
+        "series_start": 18,
+        "series_end": 21
+      },
+      {
+        "texture": "group_white",
+        "series_start": 14,
+        "series_end": 17
+      },
+      {
+        "texture": "group_classic",
+        "series_start": 1,
+        "series_end": 13
+      },
+      {
+        "texture": "no_flare",
+        "series_start": 22,
+        "series_end": 255
+      }
+    ],
     "num_columns": 3,
     "filters": [
       {

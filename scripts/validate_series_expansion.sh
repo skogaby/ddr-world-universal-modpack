@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Offline validation for series_expansion's pure enhanced-layout model
-# (src/mods/series_expansion/enhanced/model.rs): config validation, cell cap,
-# 16->15 normalisation, group membership, table rows, label names and the
-# thumbnail-bound policy.
+# (src/mods/series_expansion/enhanced/model.rs): config validation, row
+# breaks, GROUP tabs, the flow-layout simulation and caps, 16->15
+# normalisation, group membership, table rows, label names and the
+# thumbnail-bound policy -- plus series_filter_scroll's pure row/viewport math
+# (src/services/series_filter_scroll/math.rs).
 #
 # Usage:
 #   ./scripts/validate_series_expansion.sh
@@ -24,7 +26,10 @@ die() { echo "error: $*" >&2; exit 1; }
 note() { echo "[*] $*"; }
 
 MODEL="src/mods/series_expansion/enhanced/model.rs"
-[[ -r "$REPO_ROOT/$MODEL" ]] || die "module source missing: $MODEL"
+SCROLL_MATH="src/services/series_filter_scroll/math.rs"
+for f in "$MODEL" "$SCROLL_MATH"; do
+  [[ -r "$REPO_ROOT/$f" ]] || die "module source missing: $f"
+done
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -52,8 +57,10 @@ mkdir -p "$TMP/src"
   echo "#![allow(dead_code)]"
   echo "#[path = \"$REPO_ROOT/$MODEL\"]"
   echo "pub mod model;"
+  echo "#[path = \"$REPO_ROOT/$SCROLL_MATH\"]"
+  echo "pub mod scroll_math;"
 } >"$TMP/src/lib.rs"
 
-note "running pure model tests (model)"
+note "running pure model tests (model, scroll_math)"
 (cd "$TMP" && cargo test --quiet -- --nocapture 2>&1 | grep -vE "^$")
 note "OK"

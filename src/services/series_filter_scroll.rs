@@ -18,14 +18,23 @@
 //!   it is missing, only the scene-change callback (leaving SONG_SELECT) and the
 //!   per-frame liveness check clear them.
 //!
+//! ## Rows and the viewport
+//!
+//! Every tracked entry has a row (0 = the first scrollable line) and a top in
+//! px relative to row 0's top; rows need not be evenly spaced (the enhanced
+//! layout's row breaks add height). Scrolled to row `s`, the offset is
+//! `top(s) − top(0)` and an entry is shown while `row >= s` and its bottom
+//! (`top − top(s) + row_height`) stays within `viewport` px. Legacy tracking
+//! uses evenly spaced rows (`top = row × row_height`, viewport 9 rows).
+//!
 //! ## Contract with series_expansion
 //!
 //! [`init`] (run from `lib.rs` only when BM2D is available) installs the detours
 //! and returns false if a required one fails. The service does nothing until the
-//! consumer calls [`configure`] with the panel layout (columns, row height,
-//! visible rows, total stock + custom entries); series_expansion does so from its
-//! `enable` when [`is_available`]. Without a configuration the builder detour
-//! passes through.
+//! consumer calls [`configure`] with the panel layout (row height, viewport, and
+//! for legacy tracking the columns and total stock + custom entries);
+//! series_expansion does so from its `enable` when [`is_available`]. Without a
+//! configuration the builder detour passes through.
 //!
 //! See `docs/filter_scroll_research.md`.
 
@@ -40,10 +49,17 @@ use crate::core::signatures::SignatureStore;
 use crate::services::{bm2d_api, scene_manager, widget_renderer};
 use crate::{log_info, log_warn};
 
+/// Row / viewport math (pure; host-tested by `validate_series_expansion.sh`).
+mod math;
+
 pub struct ScrollConfig {
+    /// Height of one entry row (px).
     pub row_height: f64,
-    pub visible_rows: usize,
+    /// Px below row 0's top in which rows are shown (see the module docs).
+    pub viewport: f64,
+    /// Template2 only: entries per build pass (activation count).
     pub total_entries: usize,
+    /// Template2 only: entries per row (row = creation index / columns).
     pub columns: usize,
     pub tracking: Tracking,
 }
@@ -62,6 +78,8 @@ struct FilterEntry {
     this_ptr: *mut u8,
     layer_id: u32,
     row: usize,
+    /// Px relative to row 0's top.
+    top: f64,
 }
 
 unsafe impl Send for FilterEntry {}
@@ -69,6 +87,8 @@ unsafe impl Send for FilterEntry {}
 struct ScrollState {
     config: Option<ScrollConfig>,
     entries: Vec<FilterEntry>,
+    /// Top of every row (index = row), fixed at activation.
+    row_tops: Vec<f64>,
     scroll_row: usize,
     active: bool,
     pump: PendingPump,
@@ -81,6 +101,7 @@ static STATE: Lazy<Mutex<ScrollState>> = Lazy::new(|| {
     Mutex::new(ScrollState {
         config: None,
         entries: Vec::new(),
+        row_tops: Vec::new(),
         scroll_row: 0,
         active: false,
         pump: PendingPump::new(),
@@ -155,11 +176,15 @@ unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
         SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
         tracked.clear();
         state.entries.clear();
+        state.row_tops.clear();
         state.scroll_row = 0;
         state.active = false;
     }
 
-    let columns = state.config.as_ref().unwrap().columns;
+    let (columns, row_height) = {
+        let c = state.config.as_ref().unwrap();
+        (c.columns.max(1), c.row_height)
+    };
     let row = state.entries.len() / columns;
 
     tracked.insert(layer_id);
@@ -168,6 +193,7 @@ unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
         this_ptr: this,
         layer_id,
         row,
+        top: row as f64 * row_height,
     });
 
     let entry_count = state.entries.len();
@@ -213,9 +239,9 @@ unsafe fn on_registered_visual(this: *mut u8) {
     }
     if state.active {
         // Re-apply this entry's mask for the current window.
-        let visible_rows = state.config.as_ref().map(|c| c.visible_rows).unwrap_or(0);
+        let window = Window::of(&state);
         let entry = &state.entries[pos];
-        apply_visibility(std::slice::from_ref(entry), state.scroll_row, visible_rows);
+        apply_visibility(std::slice::from_ref(entry), window);
         return;
     }
     if state.entries.iter().all(|e| e.layer_id != 0) {
@@ -279,9 +305,10 @@ unsafe extern "C" fn set_position_hook(this: *mut u8, pos: *mut [i32; 2]) {
 pub fn configure(config: ScrollConfig) {
     let mut state = STATE.lock().unwrap();
     log_info!(
-        "SeriesFilterScroll: configured — {} entries, {} visible rows",
-        config.total_entries,
-        config.visible_rows
+        "SeriesFilterScroll: configured — {:?} tracking, {} px viewport, {} px rows",
+        config.tracking,
+        config.viewport,
+        config.row_height
     );
     state.config = Some(config);
 }
@@ -292,9 +319,10 @@ pub fn begin_build() {
     deactivate_scroll();
 }
 
-/// Registered tracking: `button` is the VERSION entry on grid row `row`
-/// (rows counted below the GROUP tabs). Call from the builder, in order.
-pub fn register_entry(button: *mut u8, row: usize) {
+/// Registered tracking: `button` is a VERSION cell on scroll row `row`
+/// (0 = the first cell line below the GROUP tabs) whose top lies `top` px
+/// below row 0's. Call from the builder, in order.
+pub fn register_entry(button: *mut u8, row: usize, top: f64) {
     let Ok(mut state) = STATE.lock() else { return };
     if !matches!(
         state.config.as_ref().map(|c| c.tracking),
@@ -306,6 +334,7 @@ pub fn register_entry(button: *mut u8, row: usize) {
         this_ptr: button,
         layer_id: 0,
         row,
+        top,
     });
 }
 
@@ -419,6 +448,76 @@ pub fn is_available() -> bool {
 
 // ── Internal ────────────────────────────────────────────────────────
 
+/// The current scroll window (valid while active).
+#[derive(Clone, Copy)]
+struct Window<'a> {
+    row_tops: &'a [f64],
+    scroll_row: usize,
+    viewport: f64,
+    row_height: f64,
+}
+
+impl<'a> Window<'a> {
+    fn of(state: &'a ScrollState) -> Window<'a> {
+        let (viewport, row_height) = state
+            .config
+            .as_ref()
+            .map(|c| (c.viewport, c.row_height))
+            .unwrap_or((0.0, 0.0));
+        Window {
+            row_tops: &state.row_tops,
+            scroll_row: state.scroll_row,
+            viewport,
+            row_height,
+        }
+    }
+
+    fn shows(&self, row: usize) -> bool {
+        math::is_visible(
+            row,
+            self.scroll_row,
+            self.row_tops,
+            self.viewport,
+            self.row_height,
+        )
+    }
+}
+
+/// Registered tracking, once per boot: compare the builder's registered tops
+/// with the live layout (`Component+0x90`, grid-relative Y) — the model's
+/// flow simulation must match the game's for scrolling to line up.
+static LAYOUT_CHECKED: AtomicBool = AtomicBool::new(false);
+
+fn check_layout_once(entries: &[FilterEntry]) {
+    if LAYOUT_CHECKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let live_y = |e: &FilterEntry| unsafe {
+        let p = e.this_ptr.add(0x90);
+        crate::core::memory::is_readable(p, 8).then(|| *(p as *const f64))
+    };
+    let Some(origin) = entries.first().and_then(live_y) else {
+        return;
+    };
+    let base = entries.first().map(|e| e.top).unwrap_or(0.0);
+    let mismatch = entries.iter().find_map(|e| {
+        let live = live_y(e)? - origin;
+        ((live - (e.top - base)).abs() > 0.5).then_some((e.row, e.top, live))
+    });
+    match mismatch {
+        None => log_info!(
+            "SeriesFilterScroll: layout check — {} registered tops match the live layout",
+            entries.len()
+        ),
+        Some((row, top, live)) => log_warn!(
+            "SeriesFilterScroll: layout check — row {} registered at {} px, live at {} px (scrolling may misalign)",
+            row,
+            top,
+            live
+        ),
+    }
+}
+
 fn activate_scroll(generation: u64) {
     let Ok(mut state) = STATE.lock() else { return };
     if !state.pump.begin(generation)
@@ -429,33 +528,41 @@ fn activate_scroll(generation: u64) {
         return;
     }
 
-    let visible_rows = state.config.as_ref().unwrap().visible_rows;
-    let columns = state.config.as_ref().unwrap().columns;
-    let total_rows = state.entries.len().div_ceil(columns);
+    let (viewport, row_height, tracking) = {
+        let c = state.config.as_ref().unwrap();
+        (c.viewport, c.row_height, c.tracking)
+    };
+    if tracking == Tracking::Registered {
+        check_layout_once(&state.entries);
+    }
+    let tops = math::row_tops(state.entries.iter().map(|e| (e.row, e.top)), row_height);
+    let fits = math::fits(&tops, viewport, row_height);
 
     log_info!(
-        "SeriesFilterScroll: ACTIVATED — {} entries, {} rows, {} visible",
+        "SeriesFilterScroll: ACTIVATED — {} entries, {} rows, {} px viewport{}",
         state.entries.len(),
-        total_rows,
-        visible_rows
+        tops.len(),
+        viewport,
+        if fits { " (all visible)" } else { "" }
     );
 
+    state.row_tops = tops;
     state.scroll_row = 0;
     state.active = true;
 
-    if total_rows <= visible_rows {
+    if fits {
         return;
     }
 
-    apply_visibility(&state.entries, 0, visible_rows);
+    apply_visibility(&state.entries, Window::of(&state));
     SCROLL_Y_OFFSET.store(0u64, Ordering::Release);
     drop(state);
     schedule_update(generation);
 }
 
-fn apply_visibility(entries: &[FilterEntry], scroll_row: usize, visible_rows: usize) {
+fn apply_visibility(entries: &[FilterEntry], window: Window<'_>) {
     for entry in entries {
-        if entry.row >= scroll_row && entry.row < scroll_row + visible_rows {
+        if window.shows(entry.row) {
             bm2d_api::set_mask(entry.layer_id, -1000, -1000, 3000, 3000);
         } else {
             bm2d_api::set_mask(entry.layer_id, 0, 0, 0, 0);
@@ -478,6 +585,7 @@ fn deactivate_scroll() {
     }
     state.active = false;
     state.entries.clear();
+    state.row_tops.clear();
     state.scroll_row = 0;
 }
 
@@ -519,13 +627,14 @@ fn scroll_update_frame(generation: u64) -> bool {
         TRACKED_LAYERS.lock().unwrap().clear();
         state.active = false;
         state.entries.clear();
+        state.row_tops.clear();
         state.scroll_row = 0;
         log_info!("SeriesFilterScroll: entries gone — deactivating");
         return false;
     }
 
-    let (visible_rows, row_height) = match state.config.as_ref() {
-        Some(c) => (c.visible_rows, c.row_height),
+    let (viewport, row_height) = match state.config.as_ref() {
+        Some(c) => (c.viewport, c.row_height),
         None => return false,
     };
 
@@ -545,13 +654,13 @@ fn scroll_update_frame(generation: u64) -> bool {
     };
 
     let old_scroll = state.scroll_row;
-    let mut new_scroll = old_scroll;
-
-    if cursor_row < new_scroll {
-        new_scroll = cursor_row;
-    } else if cursor_row >= new_scroll + visible_rows {
-        new_scroll = cursor_row - visible_rows + 1;
-    }
+    let new_scroll = math::follow(
+        &state.row_tops,
+        old_scroll,
+        cursor_row,
+        viewport,
+        row_height,
+    );
 
     if new_scroll != old_scroll {
         log_info!(
@@ -561,9 +670,9 @@ fn scroll_update_frame(generation: u64) -> bool {
             new_scroll
         );
         state.scroll_row = new_scroll;
-        let y_offset = new_scroll as f64 * row_height;
+        let y_offset = math::offset(&state.row_tops, new_scroll);
         SCROLL_Y_OFFSET.store(y_offset.to_bits(), Ordering::Release);
-        apply_visibility(&state.entries, new_scroll, visible_rows);
+        apply_visibility(&state.entries, Window::of(&state));
     }
 
     true

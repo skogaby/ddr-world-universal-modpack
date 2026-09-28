@@ -464,6 +464,15 @@ pub struct SeriesEnhancedSites {
     /// The VERSION predicate loop head (`version_predicate_range` match):
     /// table LEA at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34.
     pub predicate_range: *const u8,
+    /// `void* operator new(usize)` (the game CRT's; grid children are freed
+    /// through their deleting destructor → the CRT `free`).
+    pub operator_new: *const u8,
+    /// `sequence::Component* Component::Component(Component*)` — installs
+    /// the base vtables; a bare Component is the row-break spacer.
+    pub component_ctor: *const u8,
+    /// `void vector<Component*>::grow_by_one(vector*)` (the push_back
+    /// reallocation path).
+    pub vector_grow: *const u8,
 }
 
 /// improved_song_title_sorting's MUSIC TITLE menu (`derive_title_filter`).
@@ -9076,9 +9085,14 @@ impl SignatureStore {
     ///   (CALL tab factory), +0x65 / +0x27F (CALL SetTemplate — both equal,
     ///   and equal to `filter_button_panel_config` when resolved), +0x8B
     ///   (CALL string assign — equal to `string_assign` when resolved),
-    ///   +0x1D0 `MOV RAX,[R15+0x40]`, +0x260 `MOV RCX,[R14+0x18]`,
-    ///   +0x278 `MOV EDX,[R15+0x48]`; `ui_entry_loop` (when resolved) sits
-    ///   at +0x249.
+    ///   +0x1D0 `MOV RAX,[R15+0x40]; MOV R13,[RAX+0x228]` (capture → item
+    ///   grid), +0x260 `MOV RCX,[R14+0x18]`, +0x278 `MOV EDX,[R15+0x48]`;
+    ///   `ui_entry_loop` (when resolved) sits at +0x249.
+    /// * row break (the stock FilterHeader block, builder +0x16D — equal to
+    ///   `filter_header_alloc` when resolved): `MOV ECX,0xF8` then +0x05 CALL
+    ///   operator new, +0x19 CALL Component ctor, +0x45 the first derived
+    ///   field store at `+0xC0` (sizeof Component), both vector grow CALLs
+    ///   (+0x9D, +0xC2) agree, +0xD8 `MOV [RBX+0x60],R13` (parent = grid).
     /// * tab factory: entry prologue; +0x9F `LEA R13,[group table]`, +0xAD
     ///   `MOV ECX,0x30`, +0xC3 `LEA RAX,[lambda60 vtable]` whose slot 1 is
     ///   `ADD RCX,8; JMP` to the `version_group_press` match.
@@ -9150,8 +9164,13 @@ impl SignatureStore {
             };
 
             // ── builder ──
-            if !at(builder, 0x1D0, &[0x49, 0x8B, 0x47, 0x40])
-                || !at(builder, 0x260, &[0x49, 0x8B, 0x4E, 0x18])
+            if !at(
+                builder,
+                0x1D0,
+                &[
+                    0x49, 0x8B, 0x47, 0x40, 0x4C, 0x8B, 0xA8, 0x28, 0x02, 0x00, 0x00,
+                ],
+            ) || !at(builder, 0x260, &[0x49, 0x8B, 0x4E, 0x18])
                 || !at(builder, 0x278, &[0x41, 0x8B, 0x57, 0x48])
             {
                 return fail(self, "builder capture/factory loads differ");
@@ -9180,6 +9199,35 @@ impl SignatureStore {
             if let Some(loop_site) = self.get_address("ui_entry_loop") {
                 if loop_site != builder.add(0x249) {
                     return fail(self, "ui_entry_loop is not builder+0x249");
+                }
+            }
+
+            // ── row break (stock FilterHeader construction) ──
+            const HEADER: usize = 0x16D;
+            if !at(builder, HEADER, &[0xB9, 0xF8, 0x00, 0x00, 0x00])
+                || !at(
+                    builder,
+                    HEADER + 0x45,
+                    &[0xC6, 0x83, 0xC0, 0x00, 0x00, 0x00, 0x00],
+                )
+                || !at(builder, HEADER + 0xD8, &[0x4C, 0x89, 0x6B, 0x60])
+            {
+                return fail(self, "builder row-break block differs");
+            }
+            let (Some(op_new), Some(component_ctor), Some(grow), Some(grow_b)) = (
+                branch(builder, HEADER + 0x05, 0xE8),
+                branch(builder, HEADER + 0x19, 0xE8),
+                branch(builder, HEADER + 0x9D, 0xE8),
+                branch(builder, HEADER + 0xC2, 0xE8),
+            ) else {
+                return fail(self, "builder row-break call sites differ");
+            };
+            if grow != grow_b {
+                return fail(self, "builder row-break vector grow calls disagree");
+            }
+            if let Some(known) = self.get_address("filter_header_alloc") {
+                if known != builder.add(HEADER) {
+                    return fail(self, "filter_header_alloc is not builder+0x16D");
                 }
             }
 
@@ -9243,6 +9291,9 @@ impl SignatureStore {
                 ("series_enh_clear_category", clear),
                 ("series_enh_set_one", set_one),
                 ("series_enh_notify", notify),
+                ("series_enh_operator_new", op_new),
+                ("series_enh_component_ctor", component_ctor),
+                ("series_enh_vector_grow", grow),
             ] {
                 self.resolved.insert(name.into(), addr);
                 log_info!("  [+] {} (derived) @ +0x{:X}", name, addr as usize - base);
@@ -9262,6 +9313,9 @@ impl SignatureStore {
             set_one: self.get_address("series_enh_set_one")?,
             notify: self.get_address("series_enh_notify")?,
             predicate_range: self.get_address("version_predicate_range")?,
+            operator_new: self.get_address("series_enh_operator_new")?,
+            component_ctor: self.get_address("series_enh_component_ctor")?,
+            vector_grow: self.get_address("series_enh_vector_grow")?,
         })
     }
 

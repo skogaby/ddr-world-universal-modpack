@@ -2,24 +2,30 @@
 """Generate VERSION-filter cell labels for series_expansion's enhanced layout.
 
 The enhanced VERSION menu (`series_expansion.custom_series_enhanced` in
-mod-config.json) lays its cells out `num_columns` (1-5) per row, and each
-column count uses a different label canvas. Every label is therefore rendered
-at all five widths and named `sefi_version_<texture>_<N>col.png`, so switching
-layouts needs no new art. The DLL picks the variant matching the configured
-`num_columns` at boot.
+mod-config.json) lays its cells out `num_columns` (1-5) per row and its GROUP
+tabs `num_group_columns` per row, and each column count uses a different label
+canvas. Every label is therefore rendered at all five widths and named
+`sefi_version_<texture>_<N>col.png`, so switching layouts needs no new art. The
+DLL picks the variant matching the configured column count at boot.
 
-Outputs (default run): every canonical series (1stMIX ... WORLD) at all five
-widths into data_mods/custom_series/series_labels/. Generated files — edit the
-CANONICAL table or the metrics here and regenerate; never hand-edit the PNGs.
+Outputs (default run): every canonical series (1stMIX ... WORLD) and every
+canonical GROUP tab (GROUP GOLD / WHITE / CLASSIC, NO FLARE) at all five widths
+into data_mods/custom_series/series_labels/. Generated files — edit the
+CANONICAL / CANONICAL_GROUPS tables or the metrics here and regenerate; never
+hand-edit the PNGs.
 
 Modes:
   (default)            render the canonical labels
   --from-config PATH   render every distinct `texture` of a config's
-                       custom_series_enhanced.filters from its `label`
+                       custom_series_enhanced.filters (from its `label`) and
+                       .groups (from an optional `label`, else the canonical
+                       text for that texture)
   --emit-config        print the canonical custom_series_enhanced block
                        (paste it into series_expansion in a cabinet config)
-  --preview [PATH]     write a contact sheet of all five layouts instead of
-                       label files (default target/series_labels_preview.png)
+  --preview [PATH]     write a contact sheet of all five cell layouts instead
+                       of label files (default target/series_labels_preview.png);
+                       with --from-config it previews that config's groups,
+                       breaks and cells
 
 Look: FOT-TsukuGo Pro B, tuned against the stock sefi_version_* labels —
 12-px caps on a baseline at y=16, a 0.90 base horizontal scale, fill #00B68C,
@@ -120,6 +126,16 @@ CANONICAL = [
     Entry("3rdmix", "3rdMIX", 3, 3),
     Entry("2ndmix", "2ndMIX", 2, 2),
     Entry("1stmix", "1stMIX", 1, 1),
+]
+
+# GROUP tabs (`groups[]`): a tab selects every cell whose series_start lies in
+# its range. GOLD / WHITE / CLASSIC are the stock tabs' spans; NO FLARE covers
+# the custom series the mod excludes from flare skill (22+).
+CANONICAL_GROUPS = [
+    Entry("group_gold", "GROUP GOLD", 18, 21),
+    Entry("group_white", "GROUP WHITE", 14, 17),
+    Entry("group_classic", "GROUP CLASSIC", 1, 13),
+    Entry("no_flare", "NO FLARE", 22, 255),
 ]
 
 TEXTURE_KEY_RE = re.compile(r"^[a-z0-9_]+$")
@@ -277,8 +293,19 @@ def write_labels(entries, out_dir: Path) -> list:
 
 # ── Config interplay ──────────────────────────────────────────────────────
 def canonical_config() -> dict:
-    """The canonical custom_series_enhanced block: one cell per series."""
+    """The canonical custom_series_enhanced block: every CANONICAL_GROUPS tab
+    (with the generated art; omit `groups` for the stock tab art), then one
+    cell per series."""
     return {
+        "num_group_columns": 4,
+        "groups": [
+            {
+                "texture": e.key,
+                "series_start": e.start,
+                "series_end": e.end,
+            }
+            for e in CANONICAL_GROUPS
+        ],
         "num_columns": 3,
         "filters": [
             {
@@ -292,42 +319,168 @@ def canonical_config() -> dict:
     }
 
 
+def is_break(item) -> bool:
+    """A row break: `{"type": "BREAK", "thickness": N}` (`type` in any case;
+    optional when `thickness` is present)."""
+    if not isinstance(item, dict):
+        return False
+    kind = item.get("type")
+    if kind is None:
+        return "thickness" in item
+    return isinstance(kind, str) and kind.lower() == "break"
+
+
+def break_thickness(item: dict) -> Optional[int]:
+    """A break's thickness in px (0-255), or None when invalid."""
+    t = item.get("thickness", 0)
+    if isinstance(t, bool) or not isinstance(t, int) or not 0 <= t <= 255:
+        return None
+    return t
+
+
+KNOWN_TEXT = {e.key: e.text for e in CANONICAL + CANONICAL_GROUPS}
+
+
+class Block(NamedTuple):
+    """A parsed custom_series_enhanced block (lenient; the DLL validates)."""
+
+    group_columns: int
+    # None = the stock tabs; else [("tab", Entry) | ("break", px)]
+    groups: Optional[list]
+    columns: int
+    # [("cell", Entry) | ("break", px)]
+    filters: list
+
+
+def _columns(value, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5 else default
+
+
+def _items(block: dict, name: str, warnings: list, need_label: bool) -> Optional[list]:
+    raw = block.get(name)
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for i, item in enumerate(raw):
+        where = f"{name}[{i}]"
+        if not isinstance(item, dict):
+            warnings.append(f"{where}: not an object")
+            continue
+        if item.get("type") is not None and not is_break(item):
+            warnings.append(f"{where}: unknown type {item.get('type')!r}")
+            continue
+        if is_break(item):
+            t = break_thickness(item)
+            if t is None:
+                warnings.append(f"{where}: break thickness must be an integer 0-255")
+            else:
+                out.append(("break", t))
+            continue
+        key = item.get("texture")
+        if not isinstance(key, str) or not TEXTURE_KEY_RE.match(key):
+            warnings.append(f"{where}: texture {key!r} must match [a-z0-9_]+")
+            continue
+        label = item.get("label")
+        if not isinstance(label, str) or not label.strip():
+            if need_label or key not in KNOWN_TEXT:
+                warnings.append(f"{where}: missing label" + ("" if need_label else f" (no canonical text for {key!r})"))
+                continue
+            label = KNOWN_TEXT[key]
+        start = item.get("series_start", 0)
+        end = item.get("series_end", start)
+        out.append(("tab" if name == "groups" else "cell", Entry(key, label, start, end)))
+    return out
+
+
+def parse_block(block: dict) -> tuple:
+    """(Block, warnings) for a custom_series_enhanced dict."""
+    warnings = []
+    groups = _items(block, "groups", warnings, need_label=False)
+    if "groups" in block and groups is None:
+        warnings.append("groups is not a list — stock GROUP tabs")
+    filters = _items(block, "filters", warnings, need_label=True)
+    if filters is None:
+        warnings.append("filters is missing or not a list")
+        filters = []
+    parsed = Block(
+        _columns(block.get("num_group_columns"), 3),
+        groups,
+        _columns(block.get("num_columns"), 2),
+        filters,
+    )
+    return parsed, warnings
+
+
 def cells_from_config(config: dict) -> tuple:
     """Entries for every distinct, valid `texture` in a mod-config's
-    series_expansion.custom_series_enhanced.filters. Returns
+    series_expansion.custom_series_enhanced groups and filters. Returns
     (entries, warnings)."""
     block = (config.get("series_expansion") or {}).get("custom_series_enhanced")
     if not isinstance(block, dict) or not isinstance(block.get("filters"), list):
         return [], ["no series_expansion.custom_series_enhanced.filters list in config"]
-    entries, warnings, seen = [], [], set()
-    for i, cell in enumerate(block["filters"]):
-        if not isinstance(cell, dict):
-            warnings.append(f"filters[{i}]: not an object")
+    parsed, warnings = parse_block(block)
+    entries, seen = [], set()
+    for kind, item in (parsed.groups or []) + parsed.filters:
+        if kind == "break" or item.key in seen:
             continue
-        key, label = cell.get("texture"), cell.get("label")
-        if not isinstance(key, str) or not TEXTURE_KEY_RE.match(key):
-            warnings.append(f"filters[{i}]: texture {key!r} must match [a-z0-9_]+")
-            continue
-        if not isinstance(label, str) or not label.strip():
-            warnings.append(f"filters[{i}]: missing label")
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        start = cell.get("series_start", 0)
-        end = cell.get("series_end", start)
-        entries.append(Entry(key, label, start, end))
+        seen.add(item.key)
+        entries.append(item)
     return entries, warnings
 
 
 # ── Preview contact sheet ─────────────────────────────────────────────────
 CELL_W = {1: 220, 2: 108, 3: 72, 4: 54, 5: 42}  # filter_switch_base0N
 CELL_H = 26
-PANEL_W, PANEL_H = 216, 266  # the filter item area; 9 cell rows below the tabs
+PANEL_W, PANEL_H = 216, 266  # the filter item area (GridPanel)
 LABEL_X, LABEL_Y = 10, 3  # label canvas offset right of the check mark
 PANEL_BG = (244, 246, 245, 255)
 MARK_COLOR = (0, 72, 52, 255)
 GROUPS = ("gold", "white", "classic")  # stock tab order
+
+
+class Flow:
+    """The item GridPanel's flow layout (mirrors the DLL's model::Flow): a
+    child that would overflow the line starts the next one, below the
+    tallest child of the previous line; breaks are full-width spacers."""
+
+    def __init__(self):
+        self.cursor = 0
+        self.line_h = 0
+        self.top = 0
+
+    def place(self, w: int, h: int) -> tuple:
+        if self.cursor + w > PANEL_W:
+            self.top += self.line_h
+            self.cursor = 0
+            self.line_h = 0
+        pos = (self.cursor, self.top)
+        self.cursor += w
+        self.line_h = max(self.line_h, h)
+        return pos
+
+    def joins_line(self, w: int) -> bool:
+        return self.cursor > 0 and self.cursor + w <= PANEL_W
+
+
+def layout(block: Block) -> list:
+    """[(kind, payload, x, y)] in build order: tabs ("stock" name or Entry),
+    the implicit separator, cells; breaks as ("break", px)."""
+    flow, out = Flow(), []
+    tab_w = CELL_W[block.group_columns]
+    tabs: list = [("stock", g) for g in GROUPS] if block.groups is None else block.groups
+    for kind, item in tabs:
+        if kind == "break":
+            out.append((kind, item, *flow.place(PANEL_W, item)))
+        else:
+            out.append((kind, item, *flow.place(tab_w, CELL_H)))
+    if any(k != "break" for k, _ in tabs) and flow.joins_line(CELL_W[block.columns]):
+        out.append(("break", 0, *flow.place(PANEL_W, 0)))
+    for kind, item in block.filters:
+        if kind == "break":
+            out.append((kind, item, *flow.place(PANEL_W, item)))
+        else:
+            out.append((kind, item, *flow.place(CELL_W[block.columns], CELL_H)))
+    return out
 
 
 def _stock_image(stock_dir: Optional[Path], name: str) -> Optional[Image.Image]:
@@ -347,35 +500,47 @@ def _cell(label: Image.Image, cell_w: int, mark: Optional[Image.Image]) -> Image
     return cell
 
 
-def _panel(entries, cols: int, stock_dir: Optional[Path]) -> Image.Image:
+def _panel(block: Block, stock_dir: Optional[Path]) -> Image.Image:
     mark = _stock_image(stock_dir, "switch_mark_off")
-    rows = -(-len(entries) // cols)
-    height = max(CELL_H * (rows + 1), PANEL_H) + 20
+    placed = layout(block)
+    bottom = max((y + (item if kind == "break" else CELL_H) for kind, item, _, y in placed), default=0)
+    height = max(bottom, PANEL_H) + 20
     panel = Image.new("RGBA", (PANEL_W + 20, height), PANEL_BG)
-    for g, group in enumerate(GROUPS):
-        tab = _stock_image(stock_dir, f"version_{group}")
-        if tab is None:
-            tab = render_label(f"GROUP\n{group.upper()}", 3)[0]
-        panel.alpha_composite(_cell(tab, 72, mark), (4 + g * 72, 4))
-    for i, entry in enumerate(entries):
-        label = render_label(text_for(entry, cols), cols)[0]
-        x = 4 + (i % cols) * CELL_W[cols]
-        y = 4 + CELL_H * (1 + i // cols)
-        panel.alpha_composite(_cell(label, CELL_W[cols], mark), (x, y))
+    first_cell_y = next((y for kind, _, _, y in placed if kind == "cell"), None)
+    for kind, item, x, y in placed:
+        if kind == "break":
+            continue
+        if kind == "stock":
+            label = _stock_image(stock_dir, f"version_{item}")
+            if label is None:
+                label = render_label(f"GROUP\n{item.upper()}", block.group_columns)[0]
+            cell_w = CELL_W[block.group_columns]
+        elif kind == "tab":
+            label = render_label(item.text, block.group_columns)[0]
+            cell_w = CELL_W[block.group_columns]
+        else:
+            label = render_label(text_for(item, block.columns), block.columns)[0]
+            cell_w = CELL_W[block.columns]
+        panel.alpha_composite(_cell(label, cell_w, mark), (4 + x, 4 + y))
     draw = ImageDraw.Draw(panel)
     draw.rectangle([3, 3, 4 + PANEL_W, 4 + PANEL_H], outline=(0, 200, 160, 255))
-    if CELL_H * (rows + 1) > PANEL_H:
+    if first_cell_y is not None:
+        # Tabs stay fixed above this line; cells scroll below it.
+        draw.line([(0, 4 + first_cell_y), (2, 4 + first_cell_y)], fill=(40, 120, 220, 255))
+    if bottom > PANEL_H:
         draw.line([(3, 4 + PANEL_H), (4 + PANEL_W, 4 + PANEL_H)], fill=(220, 40, 40, 255))
     return panel
 
 
-def build_preview(entries, stock_dir: Optional[Path] = STOCK_TEX_DIR, scale: int = 3) -> Image.Image:
-    """Contact sheet: the filter item area for every num_columns, tabs on the
-    first line, `entries` in order below; a red line marks where scrolling
-    starts. Approximate (label offset, cell chrome), for layout review."""
+def build_preview(block: dict, stock_dir: Optional[Path] = STOCK_TEX_DIR, scale: int = 3) -> Image.Image:
+    """Contact sheet: the filter item area of `block` (a
+    custom_series_enhanced dict) for every num_columns — tabs first, cells
+    and breaks below; a red line marks where scrolling starts. Approximate
+    (label offset, cell chrome), for layout review."""
     if stock_dir is not None and not Path(stock_dir).is_dir():
         stock_dir = None
-    panels = [_panel(entries, cols, stock_dir) for cols in COLUMNS]
+    parsed, _ = parse_block(block)
+    panels = [_panel(parsed._replace(columns=cols), stock_dir) for cols in COLUMNS]
     head = 18
     sheet_w = sum(p.width + 8 for p in panels)
     sheet_h = max(p.height for p in panels) + head
@@ -395,7 +560,7 @@ def main(argv=None) -> None:
         description="Generate VERSION-filter labels for series_expansion's enhanced layout."
     )
     parser.add_argument("--from-config", metavar="PATH", type=Path,
-                        help="render the textures named by a config's custom_series_enhanced.filters")
+                        help="render the textures named by a config's custom_series_enhanced groups and filters")
     parser.add_argument("--emit-config", action="store_true",
                         help="print the canonical custom_series_enhanced block and exit")
     parser.add_argument("--preview", metavar="PATH", type=Path, nargs="?", const=DEFAULT_PREVIEW,
@@ -409,7 +574,8 @@ def main(argv=None) -> None:
         print(f'"custom_series_enhanced": {body}')
         return
 
-    entries = CANONICAL
+    entries = CANONICAL + CANONICAL_GROUPS
+    block = canonical_config()
     if args.from_config is not None:
         try:
             config = json.loads(Path(args.from_config).read_text(encoding="utf-8"))
@@ -418,11 +584,12 @@ def main(argv=None) -> None:
         entries, warnings = cells_from_config(config)
         for warning in warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
+        block = (config.get("series_expansion") or {}).get("custom_series_enhanced") or {}
 
     if args.preview is not None:
         args.preview.parent.mkdir(parents=True, exist_ok=True)
-        build_preview(entries).save(args.preview)
-        print(f"wrote {rel(args.preview)} ({len(entries)} cell(s), 5 layouts)")
+        build_preview(block).save(args.preview)
+        print(f"wrote {rel(args.preview)} ({len(entries)} label(s), 5 layouts)")
         return
 
     written = write_labels(entries, args.out_dir)

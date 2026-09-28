@@ -1,7 +1,8 @@
 //! Label art for the enhanced VERSION layout.
 //!
-//! Cells use texture `sefi_version_<texture>_<N>col` (N = `num_columns`).
-//! `select_music_option_v3.ifs` serves its textures per image name, so a new
+//! Cells use texture `sefi_version_<texture>_<N>col` (N = `num_columns`) and
+//! config GROUP tabs the same at N = `num_group_columns` (stock tabs keep the
+//! stock art). `select_music_option_v3.ifs` serves its textures per image name, so a new
 //! name needs two things: a texturelist `<image>` entry declaring it (merged
 //! texturelist, via the cached atlas-clone batch in fresh mode) and the
 //! per-image blob LayeredFS serves for it (`_cache/<ifs>/md5(name)`, written
@@ -9,10 +10,10 @@
 //! `data_mods/custom_series/series_labels/` — outside every `_ifs` folder, so
 //! LayeredFS never auto-injects the unused widths.
 //!
-//! Resolution per texture: `sefi_version_<texture>_<N>col.png`, then
-//! `sefi_version_<texture>.png`; a source that isn't exactly the width's
+//! Resolution per texture and width: `sefi_version_<texture>_<N>col.png`,
+//! then `sefi_version_<texture>.png`; a source that isn't exactly the width's
 //! canvas × 20 is cropped/padded (top-left) into
-//! `data_mods/_cache/custom_series_labels/`. Only the active width is
+//! `data_mods/_cache/custom_series_labels/`. Only the active widths are
 //! declared. The batch never latches the boot "reboot" warning: the options
 //! IFS mounts at the CAUTION preload, after `enable()`, so a rebuild is live
 //! the same boot.
@@ -125,28 +126,21 @@ fn merged_declares(stems: &[String]) -> bool {
     }
 }
 
-/// Resolve, convert and declare the active width's labels. Call from
+/// Resolve, convert and declare the active widths' labels. Call from
 /// `enable()`, before the options IFS mounts.
 pub fn prepare(plan: &EnhancedPlan) {
-    let columns = plan.columns;
-    let width = canvas_width(columns);
-    let donor = label_donor(columns);
-
     let mut specs = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
-    for cell in &plan.cells {
-        if seen.contains(&cell.texture.as_str()) {
-            continue;
-        }
-        seen.push(&cell.texture);
-        let stem = texture_name(&cell.texture, columns);
-        let Some(source) = find_source(&cell.texture, columns) else {
+    let mut widths: Vec<u32> = Vec::new();
+    for (texture, columns) in plan.label_textures() {
+        let width = canvas_width(columns);
+        let stem = texture_name(&texture, columns);
+        let Some(source) = find_source(&texture, columns) else {
             log_warn!(
-                "SeriesExpansion[enhanced]: no label art for '{}' in {} ({} or sefi_version_{}.png) — cell has no label",
-                cell.texture,
+                "SeriesExpansion[enhanced]: no label art for '{}' in {} ({} or sefi_version_{}.png) — button has no label",
+                texture,
                 SOURCE_DIR,
                 format_args!("{}.png", stem),
-                cell.texture
+                texture
             );
             continue;
         };
@@ -156,17 +150,25 @@ pub fn prepare(plan: &EnhancedPlan) {
         let png = png.to_string_lossy().into_owned();
         if !ifs_textures::prebuild_texture(OPTION_IFS_MOD_PATH, &stem, &png, width, CANVAS_H) {
             log_warn!(
-                "SeriesExpansion[enhanced]: could not convert {} — cell has no label",
+                "SeriesExpansion[enhanced]: could not convert {} — button has no label",
                 png
             );
             continue;
         }
+        if !widths.contains(&width) {
+            widths.push(width);
+        }
         specs.push(OwnedTextureSpec {
             new_name: stem,
-            donor_name: donor.to_string(),
+            donor_name: label_donor(columns).to_string(),
             png_path: png,
         });
     }
+    let widths = widths
+        .iter()
+        .map(|w| format!("{}x{}", w, CANVAS_H))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     if specs.is_empty() {
         // Replace any previous declarations (legacy or another width).
@@ -221,17 +223,15 @@ pub fn prepare(plan: &EnhancedPlan) {
         BatchResult::Rebuilt => {
             mod_paths::init_mod_paths();
             log_info!(
-                "SeriesExpansion[enhanced]: declared {} label(s) at {}x{} (rebuilt)",
+                "SeriesExpansion[enhanced]: declared {} label(s) at {} (rebuilt)",
                 stems.len(),
-                width,
-                CANVAS_H
+                widths
             );
         }
         BatchResult::Cached => log_info!(
-            "SeriesExpansion[enhanced]: {} label(s) at {}x{} unchanged",
+            "SeriesExpansion[enhanced]: {} label(s) at {} unchanged",
             stems.len(),
-            width,
-            CANVAS_H
+            widths
         ),
         BatchResult::Nothing => {
             log_warn!("SeriesExpansion[enhanced]: label texturelist generation produced nothing")
