@@ -55,6 +55,10 @@ fn minutes_seconds() {
     assert_eq!(fmt(90, ScalarFormat::MinutesSeconds), b"1:30");
     assert_eq!(fmt(200, ScalarFormat::MinutesSeconds), b"3:20");
     assert_eq!(fmt(600, ScalarFormat::MinutesSeconds), b"10:00");
+    // Marathon lengths (Training Mode's 5000 s bound-row cap): minutes
+    // keep counting past 60 — no hours field.
+    assert_eq!(fmt(3_600, ScalarFormat::MinutesSeconds), b"60:00");
+    assert_eq!(fmt(5_000, ScalarFormat::MinutesSeconds), b"83:20");
     // Defensive clamp — no shipped row can go negative.
     assert_eq!(fmt(-1, ScalarFormat::MinutesSeconds), b"0:00");
 }

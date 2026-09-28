@@ -116,9 +116,11 @@ const OPT_END_TIME: &str = "training_end_time";
 /// song switches within a session and takes no part in the highlight
 /// seeder or the digest stamp; card-in resets it to OFF.
 const OPT_LOOP_SONG: &str = "training_loop_song";
-/// Bound-row range/stepping (design §4.1 as amended): 0–200 s absolute
-/// timestamps, fine 5, coarse 30. START defaults 0 (natural start); END
-/// defaults to the cap (= natural end for every real chart).
+/// Bound-row range/stepping (design §4.1 as amended): 0 s up to the
+/// abstract [`section_math::BOUND_ROW_MAX_S`] cap (re-bounded per song to
+/// its own length by [`seed_rows_for_highlight`]), absolute timestamps,
+/// fine 5, coarse 30. START defaults 0 (natural start); END defaults to
+/// the cap (= natural end for every real chart).
 const BOUND_ROW_MIN_S: i32 = 0;
 const BOUND_ROW_MAX_S: i32 = section_math::BOUND_ROW_MAX_S;
 /// The stepper's nudge distance only — the highlight seeder's END seed
