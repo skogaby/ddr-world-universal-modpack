@@ -23,6 +23,20 @@ pub struct CustomResolutionAnchors {
     pub screen_h_global: Option<*const u8>,
 }
 
+/// Addresses FPS Unlock's sub-60 frame limiter needs — see
+/// [`SignatureStore::frame_limiter_anchors`]. Like
+/// [`CustomResolutionAnchors`] these come from linear hits only, so the mod
+/// can resolve them inside `early_apply`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameLimiterAnchors {
+    /// The per-frame "submit last frame + reset" function the app tick calls
+    /// first (the limiter's detour target).
+    pub frame_begin: Option<*const u8>,
+    /// The f32 per-frame delta-time clamp global (`2.0 / 59.94` s, set in
+    /// onBoot, read by the dt function every frame).
+    pub frame_dt_clamp: Option<*const u8>,
+}
+
 pub struct SignatureDefinition {
     pub name: &'static str,
     pub pattern: &'static str,
@@ -1246,7 +1260,22 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "fps_target_imm32",
         pattern: "C7 44 24 ?? 3C 00 00 00 75 08 C7 44 24 ?? 4B 00 00 00",
-        description: "Fullscreen display-refresh ('FPS') target in Application::onBoot — MOV dword [RSP+d],0x3C (default 60); JNZ +8; MOV dword [RSP+d],0x4B (75 if MachineType==1). The patchable imm32 is at match+4 (the 0x3C). FPS-unlock mod overwrites it (u32) before onBoot consumes it. Value is latched into the D3D device once at boot (never re-read). Unique single match, byte-identical on builds 20250805/20260324/20260526.",
+        description: "Fullscreen display-refresh ('FPS') target in Application::onBoot — MOV dword [RSP+d],0x3C (default 60); JNZ +8; MOV dword [RSP+d],0x4B (75 if MachineType==1). The patchable imm32 is at match+4 (the 0x3C). FPS-unlock mod overwrites it (u32) before onBoot consumes it — for targets ABOVE 60 only (sub-60 targets use the frame limiter, see app_tick_frame_begin_site). Value is latched into the D3D device once at boot (never re-read); it becomes D3DPRESENT_PARAMETERS.FullScreen_RefreshRateInHz, which is forced to 0 in windowed mode. Unique single match, byte-identical on builds 20250805/20260324/20260526.",
+    },
+    // The top of the per-frame application tick (FUN_180003070 on 20260915):
+    // `CMP byte [first_frame_done],0; JZ +6; CALL frame_begin; NOP; CALL
+    // frame_dt; NOP; INC dword [frame_counter]; MOV RCX,[rip+d]; CALL`.
+    // frame_begin (FUN_1801f2a80 on 20260915 = the "submit+reset" of
+    // overlay_draw_research.md) drains the GPU executor and submits the
+    // previous frame's command stream; frame_dt (FUN_180210b80) measures the
+    // frame's delta-time and clamps it to a boot-computed global. Consumed
+    // ONLY by FPS Unlock's sub-60 frame limiter via
+    // `SignatureStore::frame_limiter_anchors` (shape-gated). RE:
+    // docs/fps_frame_limiter.md.
+    SignatureDefinition {
+        name: "app_tick_frame_begin_site",
+        pattern: "80 3D ?? ?? ?? ?? 00 74 06 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 90 FF 05 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? E8",
+        description: "Per-frame application tick head: `CMP byte [rip+d],0; JZ +6; CALL frame_begin (match+9); NOP; CALL frame_dt (match+15); NOP; INC dword [rip+d]; MOV RCX,[rip+d]; CALL`. frame_begin = the once-per-frame GPU-drain + previous-stream submit (single caller: this tick; a second, first-frame-only call site later in the same tick); frame_dt = the delta-time measure + clamp whose `MOVSS XMM1,[rip+clamp]` disp32 sits at frame_dt+0x44. FPS Unlock's sub-60 frame limiter detours frame_begin (post-original wait) and raises the clamp. Unique on 20250805/20260721/20260825/20260915.",
     },
     // Landmark in the timing-init publisher: the four consecutive
     // `MOV EDX,[RBP+d]; LEA RCX,[rip+key]; CALL set_int` pairs that publish
@@ -3628,6 +3657,7 @@ impl SignatureStore {
         self.derive_frame_tick_global();
         self.derive_input_tick_function();
         self.derive_custom_resolution();
+        self.derive_frame_limiter();
         self.find_gauge_vtables();
         self.derive_judge_rebuild_trio();
         self.derive_song_rate_runtime_sites();
@@ -12362,6 +12392,90 @@ impl SignatureStore {
                     );
                 }
                 None => log_warn!("  [-] {} -- shape not found (from {})", name, from),
+            }
+        }
+    }
+
+    /// FPS Unlock frame-limiter anchors, computed from the LINEAR
+    /// `app_tick_frame_begin_site` hit only so the mod can call this inside
+    /// `early_apply` (it does so ONLY for a sub-60 target);
+    /// [`Self::derive_frame_limiter`] publishes the same values for the boot
+    /// log / sweep. Both callees are shape-gated — an anchor hit proves
+    /// nothing about the bytes it points at:
+    /// - `frame_begin` = CALL target at match+9; its prologue must read
+    ///   `PUSH RBX; SUB RSP,0x20; CALL; CALL; CMP byte [rip+d],0; JNZ +5; CALL`.
+    /// - `frame_dt_clamp` = the RIP global loaded by `MOVSS XMM1,[rip+d]`
+    ///   (disp32 at frame_dt+0x44) in the CALL target at match+15, whose body
+    ///   must be the dt measure + `COMISS XMM0,XMM1; MOVSS [raw],XMM0; JBE;
+    ///   MOVSS [dt],XMM1` clamp — i.e. the loaded global IS the value stored
+    ///   as the frame dt when the measured one exceeds it.
+    pub fn frame_limiter_anchors(&self) -> FrameLimiterAnchors {
+        const FRAME_BEGIN_SHAPE: &str =
+            "40 53 48 83 EC 20 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 80 3D ?? ?? ?? ?? 00 75 05 E8";
+        const FRAME_DT_SHAPE: &str = "48 83 EC 28 48 8B 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 2B 05 ?? ?? ?? ?? 66 0F EF C0 F3 48 0F 2A C0 79 08 F3 0F 58 05 ?? ?? ?? ?? F3 0F 59 05 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ?? 0F 2F C1 F3 0F 11 05 ?? ?? ?? ?? 76 ?? F3 0F 11 0D";
+        const FRAME_BEGIN_CALL: usize = 9;
+        const FRAME_DT_CALL: usize = 15;
+        const CLAMP_DISP: usize = 0x44;
+
+        let mut a = FrameLimiterAnchors::default();
+        let Some(site) = self.get_address("app_tick_frame_begin_site") else {
+            return a;
+        };
+        let base = self.base as usize;
+        let end = base + self.size;
+        let in_module = |p: *const u8, len: usize| -> bool {
+            let p = p as usize;
+            p >= base && p.checked_add(len).is_some_and(|e| e <= end)
+        };
+        // Pattern at exactly `p` (a window the size of the pattern admits
+        // only offset 0).
+        let shape_at = |p: *const u8, pattern: &str| -> bool {
+            let len = pattern.split_whitespace().count();
+            in_module(p, len) && scan_pattern(p, len, pattern).is_some()
+        };
+        unsafe {
+            let frame_begin = decode_call_rel32(site.add(FRAME_BEGIN_CALL));
+            if shape_at(frame_begin, FRAME_BEGIN_SHAPE) {
+                a.frame_begin = Some(frame_begin);
+            }
+            let frame_dt = decode_call_rel32(site.add(FRAME_DT_CALL));
+            if shape_at(frame_dt, FRAME_DT_SHAPE) {
+                let clamp = decode_rip_relative(frame_dt.add(CLAMP_DISP));
+                if in_module(clamp, 4) {
+                    a.frame_dt_clamp = Some(clamp);
+                }
+            }
+        }
+        a
+    }
+
+    /// Publish [`Self::frame_limiter_anchors`] (boot log + sweep visibility;
+    /// read-only — nothing is hooked or written here).
+    fn derive_frame_limiter(&mut self) {
+        if self.get_address("app_tick_frame_begin_site").is_none() {
+            log_warn!(
+                "  [-] frame_begin / frame_dt_clamp -- app_tick_frame_begin_site not resolved"
+            );
+            return;
+        }
+        let a = self.frame_limiter_anchors();
+        for (name, v) in [
+            ("frame_begin", a.frame_begin),
+            ("frame_dt_clamp", a.frame_dt_clamp),
+        ] {
+            match v {
+                Some(p) => {
+                    self.resolved.insert(name.into(), p);
+                    log_info!(
+                        "  [+] {} (derived from app_tick_frame_begin_site) @ +0x{:X}",
+                        name,
+                        (p as usize).wrapping_sub(self.base as usize)
+                    );
+                }
+                None => log_warn!(
+                    "  [-] {} -- shape not found (from app_tick_frame_begin_site)",
+                    name
+                ),
             }
         }
     }

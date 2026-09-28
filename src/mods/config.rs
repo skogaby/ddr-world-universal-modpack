@@ -154,7 +154,10 @@ fn default_render_offset() -> i32 {
 /// Config for the `fps-unlock` mod. `presets` are the selectable FPS values
 /// shown in the overlay enum row (operator-editable — add oddball refresh rates
 /// here); `selected` is the active value, stored as a raw FPS number (not an
-/// index). Both have sensible defaults so an absent/partial section still works.
+/// index). Values above 60 are fullscreen refresh requests; values below 60
+/// (floor 10) are frame-limiter caps at the stock refresh
+/// (`mods::fps_unlock::pacing::mode_for`). Both have sensible defaults so an
+/// absent/partial section still works.
 /// Normalization (dedupe / sort / range-clamp / auto-add `selected`) is applied
 /// in-memory by the mod, NOT written back — only `selected` is persisted on
 /// change (via `save_json_key`), preserving the operator's `presets` array.

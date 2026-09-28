@@ -1558,3 +1558,15 @@ resource pool is exhausted and then writes at negative indices — the real caus
 of the old "bound 255 crashed AVS" report. Clamp any imm8 bound patched into a
 `CMP r64` to 127 (series_expansion does, in both modes).
 
+
+## The FPS target is a fullscreen refresh REQUEST, not a frame cap — windowed ignores it, sub-60 bricks fullscreen (2026-09-27)
+
+`fps_target_imm32` ends up as `D3DPRESENT_PARAMETERS.FullScreen_RefreshRateInHz`
+with `PresentationInterval = ONE`: the game renders at whatever vsync paces it at.
+In windowed mode (spice2x `-w`, the CrossOver dev loop) both the game's gd layer and
+spice2x force the rate to 0, so EVERY preset renders at the desktop refresh (120 on
+a ProMotion Mac) — testing fps-unlock windowed proves nothing. In fullscreen a rate
+the monitor doesn't enumerate (any 20/30) fails all three `CreateDevice` attempts →
+no renderer, and the persisted selection can't be undone from the menu. Sub-60
+targets therefore never touch the imm; `fps_unlock/limiter.rs` paces the loop and
+raises the game's 2/59.94 s per-frame dt clamp (`docs/fps_frame_limiter.md`).

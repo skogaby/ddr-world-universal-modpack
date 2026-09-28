@@ -185,7 +185,7 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **Overlay Element Styling** | Combo/judgement/pacemaker scale and opacity, per player. |
 | **Center Arrows (1P)** | Centers the playfield during solo play. |
 | **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses), plus the lit / cel-shaded / outline shader variants Background Dancers' LIGHTING STYLE picks from. |
-| **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
+| **FPS Unlock** | Raise the display target from 60 up to 360 FPS, or cap the frame rate below 60 (e.g. 20/30) with a frame limiter (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
 | **Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the files World still ships but never opens — with optional smooth or cel-shaded lighting and ink outlines over the whole scene, a BACKGROUND MOVIES choice for movie songs (off / thumbnail / on the stage's video screens — the default / DDR 5th Mix-style fullscreen movie behind the dancers / movie only, no 3D), a BIG HEAD toggle (every dancer's head at 3×), and BACKGROUND DANCER / BACKGROUND STAGE rows in the options menu with live 3D previews. Off by default; see above. |
@@ -233,7 +233,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `series_expansion` / `folder_expansion` | Custom series/folder definitions for custom song packs |
 | `custom_options` | Option persistence gates, preview tuning, menu ordering/placement |
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
-| `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
+| `fps_unlock` | FPS preset list + selection (also editable in the mod menu). Values above 60 request that fullscreen refresh rate (the monitor must offer it; ignored in windowed mode); values below 60 (10–59, e.g. `20`, `30`) keep the stock 60 Hz and cap the frame rate instead |
 | `gameplay_timing_fixes` | Gameplay Timing Fixes: `audio_clock.mode` (`fit` default — averages the coarse DirectSound cursor and lets it drive the in-song clock; `anchor` — reads the cursor once per song to fix the 0–10 ms startup error, then runs the song on the game's own clock (the conservative choice if you'd rather not have the sound card's reported position steer the clock mid-song); `raw` for platforms whose cursor is already smooth), `audio_clock.window_seconds` (2–60, default 10), `audio_clock.latency_bias_ms` (added to the mean-preserving latency constant; normally 0 — auto-calibration absorbs any residual), `assist_tick_alignment` (default `true`) — all boot-only (next launch) |
 | `resolution` | Custom Resolution: `output` (`WxH`; 16:9 = native render at that size, 4:3 sizes = SD-cabinet mode at the stock 1280×720 render), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`, 4:3 only) — editable in the mod menu (RESOLUTION / SD PRESENT MODE); `test_menu_scale` (operator-only multiplier on TEST-menu text size); all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |

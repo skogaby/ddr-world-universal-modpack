@@ -155,14 +155,18 @@ impl CustomResolutionMod {
             .unwrap_or(1.0)
     }
 
-    /// FPS Unlock's selected target when that mod is enabled (feeds the
-    /// display-mode check's refresh-rate match).
+    /// The fullscreen refresh FPS Unlock will request when that mod is
+    /// enabled (feeds the display-mode check's refresh-rate match). A sub-60
+    /// target is a frame cap, not a refresh request — the device still asks
+    /// for the stock 60, so that is what must be matched.
     fn fps_hint() -> Option<u32> {
         let cfg = config::get()?;
         if !cfg.mods.get("fps-unlock").copied().unwrap_or(true) {
             return None;
         }
-        cfg.fps_unlock.as_ref().map(|f| f.selected.max(1) as u32)
+        cfg.fps_unlock
+            .as_ref()
+            .map(|f| crate::mods::fps_unlock::requested_refresh_hz(f.selected))
     }
 
     fn describe(plan: &Plan) -> String {

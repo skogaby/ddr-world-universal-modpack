@@ -1,24 +1,45 @@
-//! FPS Unlock — overrides DDR World's fullscreen display-refresh ("FPS") target.
+//! FPS Unlock — overrides DDR World's frame-rate target.
 //!
 //! The game writes a hardcoded `0x3C` (60) into a stack struct during
 //! `Application::onBoot()`, which is copied into a global and consumed **once**
 //! to configure the Direct3D device — it is never re-read per frame (see
-//! `.agents/planning/20260627-fps-unlock/research/r2`). Because the engine is
-//! delta-time based, raising this target gives smooth high-refresh gameplay.
+//! `.agents/planning/20260627-fps-unlock/research/r2`). It becomes
+//! `D3DPRESENT_PARAMETERS.FullScreen_RefreshRateInHz`: a request for a
+//! fullscreen DISPLAY MODE, not a frame cap (the game vsyncs with
+//! `D3DPRESENT_INTERVAL_ONE`, so it renders at whatever the display refreshes
+//! at). Because the engine is delta-time based, raising this target gives
+//! smooth high-refresh gameplay.
 //!
-//! Apply lever: an AOB-resolved byte-patch of that imm32, written in the
-//! `early_apply` boot phase (before `onBoot` reads it) — the same race-critical
-//! pattern `song_limit_expansion` uses. The stock value is captured first so a
-//! disable reverts to it.
+//! Two paths, chosen once at boot by `pacing::mode_for`:
+//!
+//! - **Target ≥ 60 (the original feature, unchanged):** an AOB-resolved
+//!   byte-patch of that imm32, written in the `early_apply` boot phase (before
+//!   `onBoot` reads it) — the same race-critical pattern `song_limit_expansion`
+//!   uses. The stock value is captured first so a disable reverts to it. 60
+//!   itself patches nothing.
+//! - **Target < 60 (`limiter.rs`):** the imm32 is left at stock — no monitor
+//!   offers a 20/30 Hz mode, D3D9 fails `CreateDevice` for a non-enumerated
+//!   fullscreen rate (a boot the operator could not recover from in the
+//!   menu), and windowed mode ignores the value outright. Instead a
+//!   post-original detour on the app tick's `frame_begin` paces the game loop
+//!   to the target and raises the game's per-frame dt clamp so dt-driven
+//!   animation keeps wall-clock speed. Nothing of this path runs — no detour,
+//!   no global write — for a target ≥ 60. RE: `docs/fps_frame_limiter.md`.
 //!
 //! Cabinet-wide (not per-player), so it is configured via the `fps_unlock`
 //! section of `mod-config.json` and adjusted in the DLL mod-overlay (an `Enum`
 //! row), not the game's per-player Options screen. Changes take effect on the
-//! **next launch** (the value is latched into the D3D device at boot).
+//! **next launch** (the refresh value is latched into the D3D device at boot;
+//! the limiter is armed from the boot selection for the same semantics).
 //!
-//! Two-tier graceful degradation: the patch site is load-bearing (mod
-//! self-disables if the AOB doesn't resolve); the overlay row is optional
-//! (config-file control still works without it).
+//! Graceful degradation: the patch site is load-bearing (mod self-disables if
+//! the AOB doesn't resolve); the limiter needs both of its anchors or it is
+//! not installed (the game then runs at stock pacing — never with a sub-60
+//! refresh request); the overlay row is optional (config-file control still
+//! works without it).
+
+mod limiter;
+pub mod pacing;
 
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +51,8 @@ use crate::mods::mod_menu;
 use crate::mods::mod_trait::{EarlyContext, Mod, ModContext};
 use crate::{log_info, log_warn};
 
+use pacing::{default_presets, mode_for, normalize, Mode};
+
 /// Registry mod id (the master toggle row the enum row nests under).
 const MOD_ID: &str = "fps-unlock";
 /// Enum child-row key.
@@ -39,15 +62,13 @@ const ROW_KEY: &str = "fps-target";
 const IMM_OFFSET: usize = 4;
 /// Expected stock FPS immediate in the binary (always 60 — the cabinet-selected
 /// 75 is a separate runtime branch, not this literal). Validated before patching.
-const STOCK_FPS: u32 = 60;
-/// Sane FPS bounds for preset normalization.
-const FPS_MIN: i32 = 1;
-const FPS_MAX: i32 = 1000;
+const STOCK_FPS: u32 = pacing::STOCK_FPS as u32;
 
-/// Fallback preset list (matches `config::default_fps_presets`), used when the
-/// operator's list normalizes to empty.
-fn default_presets() -> Vec<i32> {
-    vec![60, 120, 144, 165, 240, 360]
+/// The fullscreen refresh the D3D device is asked for with `selected` — the
+/// value a display-mode check must match (custom_resolution's fail-safe).
+/// Identical to `selected` for targets ≥ 60; the stock 60 below that.
+pub fn requested_refresh_hz(selected: i32) -> u32 {
+    pacing::requested_refresh_hz(selected)
 }
 
 /// Resolved patch site: the imm32 address plus the captured stock bytes (for the
@@ -84,30 +105,6 @@ static STATE: Lazy<Mutex<FpsState>> = Lazy::new(|| {
         original_presets: default_presets(),
     })
 });
-
-/// Normalize the operator's preset list: keep only in-range entries, sort
-/// ascending, dedupe; fall back to defaults if that empties the list; clamp
-/// `selected` into range and ensure it's present (auto-add). Returns the
-/// normalized `(values, selected)`.
-fn normalize(presets: &[i32], selected: i32) -> (Vec<i32>, i32) {
-    let mut values: Vec<i32> = presets
-        .iter()
-        .copied()
-        .filter(|v| (FPS_MIN..=FPS_MAX).contains(v))
-        .collect();
-    values.sort_unstable();
-    values.dedup();
-    if values.is_empty() {
-        values = default_presets();
-    }
-    let sel = selected.clamp(FPS_MIN, FPS_MAX);
-    if !values.contains(&sel) {
-        values.push(sel);
-        values.sort_unstable();
-        values.dedup();
-    }
-    (values, sel)
-}
 
 /// Load `fps_unlock` config, normalize it, and seed `STATE`. Idempotent; safe to
 /// call from both `early_apply` and `init`.
@@ -174,6 +171,10 @@ pub struct FpsUnlockMod {
     patch_site: Option<PatchSite>,
     /// True once `early_apply` actually wrote a non-stock value.
     applied: bool,
+    /// True once `early_apply` installed the sub-60 frame limiter.
+    limiter_armed: bool,
+    /// True while a menu toggle has the armed limiter suspended.
+    limiter_suspended: bool,
     /// True once the overlay row is registered (so `disable` removes it).
     row_registered: bool,
 }
@@ -187,6 +188,8 @@ impl FpsUnlockMod {
         Self {
             patch_site: None,
             applied: false,
+            limiter_armed: false,
+            limiter_suspended: false,
             row_registered: false,
         }
     }
@@ -266,14 +269,35 @@ impl Mod for FpsUnlockMod {
             .lock()
             .map(|st| st.selected)
             .unwrap_or(STOCK_FPS as i32);
-        if selected as u32 != STOCK_FPS {
-            self.write_patch(selected);
-            self.applied = true;
-            log_info!(
-                "FpsUnlock: early_apply patched FPS target {STOCK_FPS} -> {selected} (effective this boot)"
-            );
-        } else {
-            log_info!("FpsUnlock: selected == stock ({STOCK_FPS}fps); no patch needed");
+        match mode_for(selected) {
+            // Above stock: the original refresh-request patch, unchanged.
+            Mode::Refresh(_) => {
+                self.write_patch(selected);
+                self.applied = true;
+                log_info!(
+                    "FpsUnlock: early_apply patched FPS target {STOCK_FPS} -> {selected} (effective this boot)"
+                );
+            }
+            Mode::Stock => {
+                log_info!("FpsUnlock: selected == stock ({STOCK_FPS}fps); no patch needed");
+            }
+            // Below stock: the refresh request stays at stock (never a
+            // sub-60 display mode); the frame limiter paces the loop instead.
+            // Installed here, before the frame loop starts.
+            Mode::Limit(fps) => {
+                let anchors = ctx.signatures.frame_limiter_anchors();
+                match limiter::install(&anchors, fps) {
+                    Ok(()) => {
+                        self.limiter_armed = true;
+                        log_info!(
+                            "FpsUnlock: early_apply armed the {fps}fps frame limiter (refresh request stays at stock {STOCK_FPS}Hz)"
+                        );
+                    }
+                    Err(e) => log_warn!(
+                        "FpsUnlock: {fps}fps needs the frame limiter, which is unavailable ({e}) -- running at stock pacing"
+                    ),
+                }
+            }
         }
         true
     }
@@ -312,7 +336,15 @@ impl Mod for FpsUnlockMod {
             .lock()
             .map(|st| st.selected)
             .unwrap_or(STOCK_FPS as i32);
-        if self.applied {
+        if self.limiter_armed {
+            // A menu OFF -> ON within the session resumes the boot-armed
+            // limiter (the first enable after boot finds it already active).
+            if self.limiter_suspended {
+                limiter::set_active(true);
+                self.limiter_suspended = false;
+            }
+            log_info!("FpsUnlock: enabled -- {selected}fps frame limiter active this boot");
+        } else if self.applied {
             log_info!("FpsUnlock: enabled -- target {selected}fps active this boot");
         } else {
             log_info!("FpsUnlock: enabled -- target {selected}fps (applies on next launch)");
@@ -328,6 +360,12 @@ impl Mod for FpsUnlockMod {
         // already latched into the D3D device) but keeps memory clean and
         // symmetric; the config toggle being off means next launch stays stock.
         self.revert_patch();
+        // The limiter, unlike the refresh value, is live: suspend it now
+        // (restores stock pacing and the game's own dt clamp).
+        if self.limiter_armed && !self.limiter_suspended {
+            limiter::set_active(false);
+            self.limiter_suspended = true;
+        }
         log_info!("FpsUnlock: disabled (reverted FPS target to stock)");
     }
 
