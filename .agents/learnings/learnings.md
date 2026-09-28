@@ -1570,3 +1570,15 @@ the monitor doesn't enumerate (any 20/30) fails all three `CreateDevice` attempt
 no renderer, and the persisted selection can't be undone from the menu. Sub-60
 targets therefore never touch the imm; `fps_unlock/limiter.rs` paces the loop and
 raises the game's 2/59.94 s per-frame dt clamp (`docs/fps_frame_limiter.md`).
+
+## A filter cell's layout box is not spacing — its movie is centred in it; force line breaks with a FilterHeader (2026-09-27)
+
+`GridPanel` wraps only on overflow, so a narrow cell followed by a wide-enough gap keeps
+the next item on the same row (MUSIC TITLE: Z 42 + OTHER 108 + ア 54 = 204 ≤ 216).
+Widening a button's `+0xA0` size to eat the rest of the row does NOT work: the per-frame
+update places the movie at `pos + size × 0.5`, so the visual slides to the middle of the
+enlarged box. The real break is the stock `FilterHeader` (grid-wide, 1 px, not focusable).
+Only the VERSION builder builds one, but its construction is a short fixed sequence
+(`filter_header_alloc`: `operator new(0xF8)`, Component ctor, two vtables, field inits,
+`children.push_back`, `+0x60` = grid) that a builder detour can replay —
+`improved_song_title_sorting/hooks.rs::push_row_break`.

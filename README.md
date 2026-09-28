@@ -203,6 +203,7 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **Split SSQ Auto-Discovery** | Finds split chart files (`<song>_N.ssq`) on disk instead of trusting the game's hardcoded per-version list — newer chart data loads correctly on older game builds. |
 | **Note Types Expansion** | New note types for custom charts — ITG-style **mines** are fully supported. |
 | **Series Expansion** | Custom VERSION filter categories for custom song packs (config-driven). |
+| **Improved Song Title Sorting** | The song-select FILTER menu's MUSIC TITLE list gets one entry per letter — A to Z five per row, then OTHER — instead of three-letter groups, ahead of the unchanged kana lines. Pick one letter to see only the songs that start with it. On by default. |
 | **Folder Expansion** | Custom genre folders in the song wheel (config-driven). |
 | **Song Limit Expansion** | Raises the loadable song cap by ~8× for large custom libraries. |
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |

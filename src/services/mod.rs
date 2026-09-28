@@ -130,6 +130,11 @@
 //!   eight persistent text objects instead of recomposing them. Contributors:
 //!   the `hide-bottom-text` mod (operator toggle) and power_user_statistics'
 //!   horizontal readout (needs the stock line gone under its own layout).
+//!
+//! - **filter_entry_count** — The ONE owner of the detour on the filtersort
+//!   per-category entry-count leaf, which bounds each filter category's saved
+//!   `u64` round-trip. Contributors override one category each:
+//!   series_expansion (VERSION) and improved_song_title_sorting (MUSIC TITLE).
 
 pub mod afp_patcher;
 pub mod analyze_hook;
@@ -147,6 +152,7 @@ pub mod combo_hooks;
 pub mod cull_window;
 pub mod custom_options;
 pub mod custom_options_persistence;
+pub mod filter_entry_count;
 pub mod foot_panel_swap;
 pub mod game_audio;
 pub mod hud_layout_hooks;

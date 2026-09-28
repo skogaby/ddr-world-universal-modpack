@@ -2,6 +2,7 @@
   "mods": {
     "fast-bootup": true,
     "series-expansion": false,
+    "improved-song-title-sorting": true,
     "folder-expansion": false,
     "skip-intros": true,
     "song-limit-expansion": true,

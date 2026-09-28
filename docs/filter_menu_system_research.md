@@ -21,8 +21,10 @@ string xref), never hardcode them.
 [afp_system.md](afp_system.md), [folder_system_research.md](folder_system_research.md).
 Existing consumers in the tree: `src/mods/series_expansion/` (legacy table
 extension and the experimental enhanced layout, which follows strategy B of
-[9.2](#92-two-implementation-strategies)), `src/services/series_filter_scroll.rs`.
-Findings added by the enhanced-layout work: [section 15](#15-addenda-2026-09-27).
+[9.2](#92-two-implementation-strategies)), `src/services/series_filter_scroll.rs`,
+`src/mods/improved_song_title_sorting/` (per-letter MUSIC TITLE, strategy B plus a
+recreated row break). Findings added by the enhanced-layout work:
+[section 15](#15-addenda-2026-09-27); by the title work: [section 16](#16-addenda-2026-09-27-per-letter-music-title-improved_song_title_sorting).
 
 ---
 
@@ -43,6 +45,7 @@ Findings added by the enhanced-layout work: [section 15](#15-addenda-2026-09-27)
 13. [Address reference (20260915)](#13-address-reference-20260915)
 14. [Open questions](#14-open-questions)
 15. [Addenda (2026-09-27)](#15-addenda-2026-09-27)
+16. [Addenda (2026-09-27): per-letter MUSIC TITLE](#16-addenda-2026-09-27-per-letter-music-title-improved_song_title_sorting)
 
 ---
 
@@ -1039,3 +1042,45 @@ instruction-identical across them (only rel32/disp32 values differ).
   any bound ≥ 0x80 never terminates (pool exhaustion, then negative-index writes). Only
   `jacket_thumbnails_ja_0..21.arc` ship.
 
+
+---
+
+## 16. Addenda (2026-09-27): per-letter MUSIC TITLE (`improved_song_title_sorting`)
+
+Verified on all five supported builds (20250805, 20260224, 20260721, 20260825, 20260915);
+the builder, predicate, chip summary and the VERSION builder's FilterHeader block are
+instruction-identical across them (only rel32/disp32 and the predicate's FilterManager
+selection offset `+0x378`/`+0x358` differ). Sites: `derive_title_filter` in
+`src/core/signatures.rs`.
+
+* **Builder** (`FUN_180123B90`): the shared filter-builder prologue (identical in the GENRE,
+  BPM, DIFFICULTY, LEVEL and CLEAR TYPE builders), told apart by its loop tail
+  `CMP RSI,0xAA0` (20 × 0x88) at entry+0x168. Capture `+0x00` template, `+0x08` prefix
+  string. Same by-value factory contract as VERSION (impl at +0x18, slot 1 invoke, slot 3
+  delete). The factory pushes the button onto the item grid's `children` (`grid+0x68`,
+  `FUN_180046CC0` push_back) and sets `button+0x60` = grid.
+* **Title table readers** are exactly the builder (keys), the predicate (`LEA R8` at
+  +0x3A: `start(i) <= class < start(i+1)`, stride 0x88, +0x30/+0xB8) and the chip summary
+  (`FUN_180123A60`: one `LEA RCX,[table]` at +0x6F feeding both label lambdas, which read
+  `+0x38` first / `+0x60` last via `FUN_180127770` / `FUN_1801277C0`; `MOV EDX,20` imm32 at
+  +0xD4). The summary is the `filter_label_builder_count` shape with count 20
+  (`title_label_builder_count`). Stock kana summary labels: あ/お か/こ さ/そ た/と な/の
+  は/ほ ま/も や/よ ら/ろ わ/ん (Shift-JIS, first/last).
+* **Count function** (`FUN_1801D55B0`) has exactly two callers: the FilterManager ctor
+  (profile load) and the mask builder `FUN_1801D58A0` (save + the category's active
+  indicator). Its detour now lives in `services::filter_entry_count` (per-category
+  overrides; series_expansion → VERSION, improved_song_title_sorting → MUSIC TITLE).
+* **Row break recreated from outside the VERSION builder.** The only FilterHeader
+  construction (`filter_header_alloc`, VERSION builder +0x16D): `operator new(0xF8)`
+  (`FUN_1802792A4`), `Component::Component` (`FUN_18003D850`), primary / `+0x28` vtables, an
+  empty SSO string at +0xC0, zero qwords at +0xE8 / +0xF0, then an inlined push_back onto
+  `FilterPanel+0x228`'s children (grow-by-one `FUN_1800D3140`) and `+0x60` = grid. Replaying
+  that sequence from a builder detour (grid = the last factory button's `+0x60`) gives any
+  menu a forced line break; the grid's clear frees it through the deleting destructor.
+* **A cell's layout box can't be widened to force a break**: `FUN_1801355C0` positions the
+  button's movie at `pos + size × 0.5` (`DAT_18038FC18` = 0.5), i.e. centred in the box, so a
+  wider box moves the visual.
+* **Template 2 outside VERSION**: the MUSIC TITLE OTHER cell uses template 2, so legacy
+  `series_filter_scroll` (`Tracking::Template2`) records it when the menu opens — as it
+  already does for the nine CLEAR TYPE cells. Benign for the same reason (§9.3): the count
+  never reaches the VERSION total and the FilterButton dtor clears the tracking.

@@ -35,6 +35,7 @@ pub mod folder_expansion;
 pub mod fps_unlock;
 pub mod gameplay_timing_fixes;
 pub mod hide_bottom_text;
+pub mod improved_song_title_sorting;
 pub mod mod_menu;
 pub mod mod_trait;
 pub mod movie_size_customization;

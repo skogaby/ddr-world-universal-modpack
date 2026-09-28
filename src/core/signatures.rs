@@ -466,6 +466,40 @@ pub struct SeriesEnhancedSites {
     pub predicate_range: *const u8,
 }
 
+/// improved_song_title_sorting's MUSIC TITLE menu (`derive_title_filter`).
+/// All-or-nothing: either every site resolved and passed its shape checks,
+/// or none is published.
+#[derive(Clone, Copy, Debug)]
+pub struct TitleFilterSites {
+    /// `void builder(u8* capture, std::function<FilterButton*(int)>* factory)`
+    /// — the same by-value factory contract as the VERSION builder.
+    pub builder: *const u8,
+    /// `void FilterButton::SetTemplate(FilterButton*, i32 template)`.
+    pub set_template: *const u8,
+    /// `std::string* std::string::assign(std::string*, const char*, usize)`.
+    pub string_assign: *const u8,
+    /// The stock 0x88-stride title table (20 rows + sentinel; range start
+    /// at +0x30, summary labels at +0x38 / +0x60).
+    pub table: *const u8,
+    /// The predicate's `LEA R8,[table]` instruction (disp32 at +3).
+    pub predicate_lea: *const u8,
+    /// The chip summary's `LEA RCX,[table]` instruction (disp32 at +3).
+    pub summary_table_lea: *const u8,
+    /// The chip summary's run-builder count (imm32 of `MOV EDX,20`).
+    pub summary_count: *const u8,
+    /// `void* operator new(usize)` (the game CRT's; frees via the object's
+    /// deleting destructor).
+    pub operator_new: *const u8,
+    /// `sequence::Component* Component::Component(Component*)`.
+    pub component_ctor: *const u8,
+    /// `FilterHeader` primary / secondary (`+0x28`) vtables.
+    pub header_vtable: *const u8,
+    pub header_vtable2: *const u8,
+    /// `void vector<Component*>::grow_by_one(vector*)` (the push_back
+    /// reallocation path).
+    pub vector_grow: *const u8,
+}
+
 /// ddr_selection's theme stage-panel score sets (`derive_ddr_sel_score_set`):
 /// World's own-best record lookup and the `PlayerWork` score db it takes.
 #[derive(Clone, Copy, Debug)]
@@ -1578,6 +1612,51 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "version_predicate_range",
         pattern: "48 8B 50 08 48 8B 0A 48 3B CA 74 36 4C 8D 05 ?? ?? ?? ?? 66 66 66 0F 1F 84 00 00 00 00 00 48 63 41 10 48 69 C0 88 00 00 00 42 39 7C 00 30 7F 0A 42 3B BC 00 B8 00 00 00 7C 15",
         description: "VERSION predicate selection loop. LEA R8 table at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34 (0xB8). series_expansion enhanced mode repoints +0x34 to 0x34 (per-row end).",
+    },
+    // ── improved_song_title_sorting (per-letter MUSIC TITLE menu) ───────
+    // All four verified unique on 20250805 / 20260224 / 20260721 / 20260825
+    // / 20260915 with instruction-identical bodies (only rel32/disp32 and the
+    // FilterManager selection offset differ); every offset consumed is
+    // checked in `derive_title_filter`.
+    //
+    // MUSIC TITLE builder (lambda body `builder(capture, factory)`), matched
+    // at its loop tail: `INC R12; ADD RSI,0x88; ADD RBX,0x88; CMP
+    // RSI,0xAA0; JB` — 0xAA0 = 20 stock rows × 0x88 is what tells it apart
+    // from the five sibling builders sharing its prologue. Entry = match −
+    // 0x168.
+    SignatureDefinition {
+        name: "title_builder_loop",
+        pattern: "49 FF C4 48 81 C6 88 00 00 00 48 81 C3 88 00 00 00 48 81 FE A0 0A 00 00 0F 82",
+        description: "MUSIC TITLE filter builder loop tail (20 rows x 0x88). Entry = match - 0x168; +0x6F CALL SetTemplate, +0x95 CALL string assign, +0x45 LEA RBX,[table+8]. improved_song_title_sorting detours the entry.",
+    },
+    // MUSIC TITLE predicate (lambda body) at entry: reads the title class
+    // `ChartMetadata+0x88`, looks the category's selection set up
+    // (`ADD RCX,<FilterManager+0x378>` — 0x358 on 20250805/20260224,
+    // wildcarded), then `LEA R8,[title table]` at +0x3A (disp32 +0x3D).
+    SignatureDefinition {
+        name: "title_predicate",
+        pattern: "40 53 48 83 EC 20 48 8B 02 4C 8B C1 48 8B 09 8B 98 88 00 00 00 41 8B 40 08 48 8D 54 24 30 48 81 C1 ?? ?? 00 00 89 44 24 30 E8 ?? ?? ?? ?? 48 8B 50 08 48 8B 02 48 3B C2 74 ?? 4C 8D 05",
+        description: "MUSIC TITLE filter predicate at entry. LEA R8 title table at +0x3A (disp32 +0x3D); range loop `start(+0x30) <= class < next start(+0xB8)` at +0x50.",
+    },
+    // MUSIC TITLE chip summary (`"TITLE "` + selected runs): the
+    // `filter_label_builder_count` shape with the TITLE count (20). Count
+    // imm32 at +14, `LEA RCX,[title table]` at −0x57, `LEA RDX,["TITLE "]`
+    // at −0x78.
+    SignatureDefinition {
+        name: "title_label_builder_count",
+        pattern: "48 89 44 24 20 4C 8D 4D AF 4C 8D 45 8F BA 14 00 00 00 48 8D 4D",
+        description: "MUSIC TITLE filter chip summary: MOV EDX,20 (imm32 at +14) into the run builder; table LEA RCX at -0x57, seed LEA RDX \"TITLE \" at -0x78.",
+    },
+    // The VERSION builder's invisible full-width row break
+    // (`FilterHeader`, 0xF8 bytes): `MOV ECX,0xF8; CALL operator new`,
+    // `CALL Component ctor`, both vtable stores, the field inits, then an
+    // inlined `children.push_back` (CALL vector grow at +0x9D / +0xC2) and
+    // `MOV [RBX+0x60],R13` (parent) at +0xD8. The only FilterHeader
+    // construction in the module.
+    SignatureDefinition {
+        name: "filter_header_alloc",
+        pattern: "B9 F8 00 00 00 E8 ?? ?? ?? ?? 48 8B D8 48 89 45 87 48 85 C0 74 46 48 8B C8 E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 89 13 48 8D 05 ?? ?? ?? ?? 48 89 43 28 48 C7 83 D8 00 00 00 0F 00 00 00 48 89 BB D0 00 00 00 C6 83 C0 00 00 00 00 48 89 BB E8 00 00 00 48 89 BB F0 00 00 00",
+        description: "FilterHeader (filter-grid row break) construction inside the VERSION builder. +0x05 CALL operator new, +0x19 CALL Component ctor, vtable LEAs at +0x1E / +0x28, +0x9D CALL vector<Component*> grow.",
     },
     // ── Folder Expansion signatures ─────────────────────────────────
     // Only folder_register and folder_has_songs are AOB-scanned.
@@ -3713,6 +3792,9 @@ impl SignatureStore {
         // `ui_entry_loop`, `version_predicate_lea` and `series_mapper_bounds`
         // (plain AOBs / derive_string_assign_via_pair, above).
         self.derive_series_enhanced();
+        // Same cross-checks (`filter_button_panel_config`, `string_assign`);
+        // independent of the enhanced VERSION sites.
+        self.derive_title_filter();
     }
 
     /// Derive the bottom-text service's two data addresses from the
@@ -9180,6 +9262,226 @@ impl SignatureStore {
             set_one: self.get_address("series_enh_set_one")?,
             notify: self.get_address("series_enh_notify")?,
             predicate_range: self.get_address("version_predicate_range")?,
+        })
+    }
+
+    /// improved_song_title_sorting: verify the four MUSIC TITLE AOBs and
+    /// derive what the per-letter menu calls and patches. Offsets are
+    /// identical on every supported build.
+    ///
+    /// * builder (`title_builder_loop` − 0x168): the shared filter-builder
+    ///   prologue; +0x36 `MOV R13,RDX; MOV R15,RCX` (factory, capture);
+    ///   +0x45 `LEA RBX,[table+8]`; +0x50 `MOV RCX,[R13+0x18]` (factory
+    ///   impl); +0x69 `MOV EDX,[R15]` then +0x6F CALL SetTemplate (equal to
+    ///   `filter_button_panel_config` when resolved); +0x84 `MOV R8D,5`,
+    ///   +0x95 CALL string assign (equal to `string_assign` when resolved).
+    /// * predicate (`title_predicate`): its LEA (+0x3A) targets the builder's
+    ///   table, and the range loop at +0x50 is
+    ///   `stride 0x88, start +0x30 <= class < next start +0xB8`.
+    /// * summary (`title_label_builder_count`): count imm32 = 20; `LEA
+    ///   RCX,[table]` at −0x57 targets the same table; `LEA RDX` at −0x78
+    ///   points at `"TITLE "`.
+    /// * row break (`filter_header_alloc`): +0x05 / +0x19 CALLs (operator
+    ///   new, Component ctor), vtable LEAs +0x1E / +0x28, +0x63 `MOV
+    ///   RAX,[R15+0x40]; MOV R13,[RAX+0x228]` (the item grid), both vector
+    ///   grow CALLs (+0x9D, +0xC2) agree, +0xD8 `MOV [RBX+0x60],R13`.
+    ///
+    /// Any failure un-resolves all four AOBs so no consumer can install half
+    /// of the layout.
+    fn derive_title_filter(&mut self) {
+        const TAG: &str = "title_filter";
+        const NAMES: [&str; 4] = [
+            "title_builder_loop",
+            "title_predicate",
+            "title_label_builder_count",
+            "filter_header_alloc",
+        ];
+        const BUILDER_OFF: usize = 0x168;
+        const BUILDER_PROLOGUE: [u8; 24] = [
+            0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
+            0x6C, 0x24, 0xD9, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00,
+        ];
+        const PRED_LOOP: [u8; 28] = [
+            0x48, 0x63, 0x48, 0x10, 0x48, 0x69, 0xC9, 0x88, 0x00, 0x00, 0x00, 0x42, 0x39, 0x5C,
+            0x01, 0x30, 0x7F, 0x0A, 0x42, 0x3B, 0x9C, 0x01, 0xB8, 0x00, 0x00, 0x00, 0x7C, 0x10,
+        ];
+        let (Some(tail), Some(pred), Some(summary), Some(header)) = (
+            self.get_address(NAMES[0]),
+            self.get_address(NAMES[1]),
+            self.get_address(NAMES[2]),
+            self.get_address(NAMES[3]),
+        ) else {
+            if NAMES.iter().any(|n| self.get_address(n).is_some()) {
+                for n in NAMES {
+                    self.resolved.remove(n);
+                }
+                log_warn!(
+                    "  [-] {} -- not every title-filter AOB resolved; un-resolved all",
+                    TAG
+                );
+            }
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8, len: usize| {
+            let off = (p as usize).wrapping_sub(base);
+            off < size && off.saturating_add(len) <= size
+        };
+        let fail = |this: &mut Self, why: &str| {
+            for n in NAMES {
+                this.resolved.remove(n);
+            }
+            log_warn!("  [-] {} -- {}; title-filter sites un-resolved", TAG, why);
+        };
+        let builder = (tail as usize).wrapping_sub(BUILDER_OFF) as *const u8;
+        if !inside(builder, BUILDER_OFF + 0x20)
+            || !inside(pred, 0x6C)
+            || !inside(
+                (summary as usize).wrapping_sub(0x78) as *const u8,
+                0x78 + 0x12,
+            )
+            || !inside(header, 0xDC)
+        {
+            return fail(self, "a title-filter site lies outside the module");
+        }
+        unsafe {
+            let at = |p: *const u8, off: usize, want: &[u8]| {
+                std::slice::from_raw_parts(p.add(off), want.len()) == want
+            };
+            // Decode a CALL (E8) / JMP (E9) rel32 at p+off after checking the opcode.
+            let branch = |p: *const u8, off: usize, op: u8| -> Option<*const u8> {
+                if *p.add(off) != op {
+                    return None;
+                }
+                let target = decode_call_rel32(p.add(off));
+                inside(target, 1).then_some(target)
+            };
+            // `LEA r64,[rip+disp32]` (3-byte opcode `op`) at p+off → target.
+            let lea = |p: *const u8, off: usize, op: [u8; 3]| -> Option<*const u8> {
+                if std::slice::from_raw_parts(p.add(off), 3) != op {
+                    return None;
+                }
+                let target = decode_rip_relative(p.add(off + 3));
+                inside(target, 1).then_some(target)
+            };
+
+            // ── builder ──
+            if !at(builder, 0, &BUILDER_PROLOGUE)
+                || !at(builder, 0x36, &[0x4C, 0x8B, 0xEA, 0x4C, 0x8B, 0xF9])
+                || !at(builder, 0x50, &[0x49, 0x8B, 0x4D, 0x18])
+                || !at(builder, 0x69, &[0x41, 0x8B, 0x17])
+                || !at(builder, 0x84, &[0x41, 0xB8, 0x05, 0x00, 0x00, 0x00])
+            {
+                return fail(self, "builder shape differs");
+            }
+            let (Some(key_field), Some(set_template), Some(assign)) = (
+                lea(builder, 0x45, [0x48, 0x8D, 0x1D]),
+                branch(builder, 0x6F, 0xE8),
+                branch(builder, 0x95, 0xE8),
+            ) else {
+                return fail(self, "builder table/call sites differ");
+            };
+            let table = key_field.sub(8);
+            if let Some(known) = self.get_address("filter_button_panel_config") {
+                if known != set_template {
+                    return fail(self, "SetTemplate is not filter_button_panel_config");
+                }
+            }
+            if let Some(known) = self.get_address("string_assign") {
+                if known != assign {
+                    return fail(self, "builder string assign is not string_assign");
+                }
+            }
+            if !inside(table, 21 * 0x88) {
+                return fail(self, "title table outside the module");
+            }
+
+            // ── predicate ──
+            if lea(pred, 0x3A, [0x4C, 0x8D, 0x05]) != Some(table) {
+                return fail(self, "predicate LEA does not load the title table");
+            }
+            if !at(pred, 0x50, &PRED_LOOP) {
+                return fail(self, "predicate range loop differs");
+            }
+
+            // ── summary ──
+            let summary_count = summary.add(14);
+            let summary_lea = summary.sub(0x57);
+            if std::ptr::read_unaligned(summary_count as *const u32) != 20 {
+                return fail(self, "summary count is not 20");
+            }
+            if lea(summary_lea, 0, [0x48, 0x8D, 0x0D]) != Some(table) {
+                return fail(self, "summary LEA does not load the title table");
+            }
+            match lea(summary.sub(0x78), 0, [0x48, 0x8D, 0x15]) {
+                Some(seed) if inside(seed, 7) && at(seed, 0, b"TITLE \0") => {}
+                _ => return fail(self, "summary does not seed with \"TITLE \""),
+            }
+
+            // ── row break (FilterHeader) ──
+            if !at(
+                header,
+                0x63,
+                &[
+                    0x49, 0x8B, 0x47, 0x40, 0x4C, 0x8B, 0xA8, 0x28, 0x02, 0x00, 0x00,
+                ],
+            ) || !at(header, 0xD8, &[0x4C, 0x89, 0x6B, 0x60])
+            {
+                return fail(self, "row-break grid/parent stores differ");
+            }
+            let (Some(op_new), Some(ctor), Some(vt1), Some(vt2), Some(grow), Some(grow_b)) = (
+                branch(header, 0x05, 0xE8),
+                branch(header, 0x19, 0xE8),
+                lea(header, 0x1E, [0x48, 0x8D, 0x15]),
+                lea(header, 0x28, [0x48, 0x8D, 0x05]),
+                branch(header, 0x9D, 0xE8),
+                branch(header, 0xC2, 0xE8),
+            ) else {
+                return fail(self, "row-break call/vtable sites differ");
+            };
+            if grow != grow_b {
+                return fail(self, "row-break vector grow calls disagree");
+            }
+            if !inside(vt1, 0x40) || !inside(vt2, 0x10) {
+                return fail(self, "FilterHeader vtables outside the module");
+            }
+
+            for (name, addr) in [
+                ("title_filt_builder", builder),
+                ("title_filt_set_template", set_template),
+                ("title_filt_string_assign", assign),
+                ("title_filt_table", table),
+                ("title_filt_predicate_lea", pred.add(0x3A)),
+                ("title_filt_summary_lea", summary_lea),
+                ("title_filt_summary_count", summary_count),
+                ("title_filt_operator_new", op_new),
+                ("title_filt_component_ctor", ctor),
+                ("title_filt_header_vtable", vt1),
+                ("title_filt_header_vtable2", vt2),
+                ("title_filt_vector_grow", grow),
+            ] {
+                self.resolved.insert(name.into(), addr);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, addr as usize - base);
+            }
+        }
+    }
+
+    /// Every MUSIC TITLE layout site (see `derive_title_filter`), or `None`.
+    pub fn title_filter_sites(&self) -> Option<TitleFilterSites> {
+        Some(TitleFilterSites {
+            builder: self.get_address("title_filt_builder")?,
+            set_template: self.get_address("title_filt_set_template")?,
+            string_assign: self.get_address("title_filt_string_assign")?,
+            table: self.get_address("title_filt_table")?,
+            predicate_lea: self.get_address("title_filt_predicate_lea")?,
+            summary_table_lea: self.get_address("title_filt_summary_lea")?,
+            summary_count: self.get_address("title_filt_summary_count")?,
+            operator_new: self.get_address("title_filt_operator_new")?,
+            component_ctor: self.get_address("title_filt_component_ctor")?,
+            header_vtable: self.get_address("title_filt_header_vtable")?,
+            header_vtable2: self.get_address("title_filt_header_vtable2")?,
+            vector_grow: self.get_address("title_filt_vector_grow")?,
         })
     }
 

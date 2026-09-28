@@ -24,8 +24,8 @@ use crate::mods::mod_menu::MOD_MENU_STATE;
 use crate::mods::mod_trait::{EarlyContext, Mod, ModContext, ModRegistry};
 use crate::services::{
     afp_patcher, asset_loader, avs_layeredfs, bm2d_api, bm2d_package, bottom_text, cull_window,
-    custom_options, custom_options_persistence, game_audio, input_manager, judge_hook,
-    movie_policy, movie_sync, options_scroll, overlay_draw, render_notes_hook, scene3d,
+    custom_options, custom_options_persistence, filter_entry_count, game_audio, input_manager,
+    judge_hook, movie_policy, movie_sync, options_scroll, overlay_draw, render_notes_hook, scene3d,
     scene_manager, se_bank_synth, series_filter_scroll, song_rate, song_reset, stage_records,
     texture_resolver, widget_renderer,
 };
@@ -175,6 +175,7 @@ fn init() {
         Box::new(mods::hide_bottom_text::HideBottomTextMod::new()),
         Box::new(mods::split_ssq_auto_discovery::SplitSsqAutoDiscoveryMod::new()),
         Box::new(mods::series_expansion::SeriesExpansionMod::new()),
+        Box::new(mods::improved_song_title_sorting::ImprovedSongTitleSortingMod::new()),
         Box::new(mods::folder_expansion::FolderExpansionMod::new()),
         Box::new(mods::note_types_expansion::NoteTypesExpansionMod::new()),
         Box::new(mods::real_speed_fix::RealSpeedFixMod::new()),
@@ -598,6 +599,15 @@ fn init() {
         log_warn!("Bottom-text hide service unavailable -- stock bottom status text");
     }
     profiling::tick("bottom_text");
+
+    // 6f. Filter entry-count service — owner of the filtersort count detour
+    // (installed lazily by the first contributor: series_expansion for
+    // VERSION, improved_song_title_sorting for MUSIC TITLE).
+    if !filter_entry_count::init(&signatures) {
+        log_warn!(
+            "Filter entry-count service unavailable -- extra filter selections won't persist"
+        );
+    }
 
     // 7. Register mods. The instances were constructed in step 2c above
     // (so early_apply could run); here we move them into the registry
