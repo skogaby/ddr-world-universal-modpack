@@ -426,6 +426,32 @@ pub struct DdrSelSongInfoPanelSites {
     pub x_offset_sub: *const u8,
 }
 
+/// series_expansion's enhanced VERSION layout (`derive_series_enhanced`).
+/// All-or-nothing: either every site resolved and passed its shape checks,
+/// or none is published.
+#[derive(Clone, Copy, Debug)]
+pub struct SeriesEnhancedSites {
+    /// `void builder(u8* capture, std::function<FilterButton*(int)>* factory)`.
+    pub builder: *const u8,
+    /// `FilterButton* tab_factory(u8* capture, i32 g)` (g: 0 CLASSIC, 1 WHITE, 2 GOLD).
+    pub tab_factory: *const u8,
+    /// `void FilterButton::SetTemplate(FilterButton*, i32 template)`.
+    pub set_template: *const u8,
+    /// `std::string* std::string::assign(std::string*, const char*, usize)`.
+    pub string_assign: *const u8,
+    /// `void group_press(u8* captures, bool on)`.
+    pub group_press: *const u8,
+    /// `void clear_category(u8* state, i32 cat)`.
+    pub clear_category: *const u8,
+    /// `void set_one(u8* state, i32 cat, i32 idx, bool on)`.
+    pub set_one: *const u8,
+    /// `void notify(u8* filter_panel)`.
+    pub notify: *const u8,
+    /// The VERSION predicate loop head (`version_predicate_range` match):
+    /// table LEA at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34.
+    pub predicate_range: *const u8,
+}
+
 /// ddr_selection's theme stage-panel score sets (`derive_ddr_sel_score_set`):
 /// World's own-best record lookup and the `PlayerWork` score db it takes.
 #[derive(Clone, Copy, Debug)]
@@ -1486,6 +1512,43 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "flare_skill_classifier",
         pattern: "FF 92 ?? 00 00 00 44 0F B6 C0 33 C9 0F 1F 40 00 42 8B 94 29 ?? ?? ?? ?? 46 39 84 29 ?? ?? ?? ?? 7E 0C 48 83 E9 04 48 83 F9 F8 7D E4 33 D2",
         description: "CalcFlareSkill series->category walk. Cat-table disp32 at +20, threshold-table disp32 at +28, loop-bound imm8 at +41. series_expansion redirects both disp32s at a 4-entry extended table (adds 'series >= 22 -> category 0') and widens the bound -8 -> -12.",
+    },
+    // ── series_expansion enhanced layout (config-defined VERSION menu) ──
+    // All four verified unique on 20250805 / 20260224 / 20260721 / 20260825
+    // / 20260915, with identical instruction layouts after the match; the
+    // offsets consumed are checked in `derive_series_enhanced`.
+    //
+    // VERSION filter builder (lambda body `builder(capture, factory)`),
+    // matched at its entry: prologue, `R14 = factory`, `R15 = capture`,
+    // `MOV ESI,2` (tab loop), `LEA RBX,[group table]`.
+    SignatureDefinition {
+        name: "version_filter_builder",
+        pattern: "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC C0 00 00 00 48 C7 45 97 FE FF FF FF 48 89 9C 24 10 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 4C 8B F2 4C 8B F9 48 89 55 8F BE 02 00 00 00 48 8D 1D",
+        description: "VERSION filter builder fn(capture, factory) at entry. +0x55 CALL tab factory, +0x65/+0x27F CALL SetTemplate, +0x8B CALL std::string::assign(const char*, n). series_expansion enhanced mode detours it.",
+    },
+    // GROUP-tab press body (lambda60 body, reached by `ADD RCX,8; JMP`),
+    // matched at entry: `MOV EDX,[RCX+8]; MOV RBX,RCX; MOV RCX,[RCX];
+    // CALL clear_category`, then the group-table walk.
+    SignatureDefinition {
+        name: "version_group_press",
+        pattern: "48 89 5C 24 18 55 56 57 41 54 41 55 48 83 EC 30 8B 51 08 48 8B D9 48 8B 09 E8 ?? ?? ?? ?? 4C 63 5B 18 48 8B 53 10",
+        description: "VERSION GROUP-tab press body fn(captures{state,cat,group_table,g,panel}, on). +0x19 CALL clear-category, +0xD9 JMP notify. series_expansion enhanced mode detours it.",
+    },
+    // FilterButton toggle lambda (lambda93) body: `set_one(state, cat, idx,
+    // on)` then tail `JMP notify(panel)`.
+    SignatureDefinition {
+        name: "filter_toggle_one_body",
+        pattern: "40 53 48 83 EC 20 44 8B 41 14 44 0F B6 CA 8B 51 10 48 8B D9 48 8B 49 08 E8 ?? ?? ?? ?? 48 8B 4B 18 48 83 C4 20 5B E9",
+        description: "FilterButton toggle (lambda93) body. +0x18 CALL selection set-one(state, cat, idx, on), +0x26 JMP notify(panel).",
+    },
+    // VERSION predicate range loop (58 bytes, LEA disp32 wildcarded): the
+    // unique form of `version_predicate_lea`'s first match. The second
+    // compare's disp32 (`CMP EDI,[RAX+R8+0xB8]`, the next entry's start)
+    // sits at +0x34.
+    SignatureDefinition {
+        name: "version_predicate_range",
+        pattern: "48 8B 50 08 48 8B 0A 48 3B CA 74 36 4C 8D 05 ?? ?? ?? ?? 66 66 66 0F 1F 84 00 00 00 00 00 48 63 41 10 48 69 C0 88 00 00 00 42 39 7C 00 30 7F 0A 42 3B BC 00 B8 00 00 00 7C 15",
+        description: "VERSION predicate selection loop. LEA R8 table at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34 (0xB8). series_expansion enhanced mode repoints +0x34 to 0x34 (per-row end).",
     },
     // ── Folder Expansion signatures ─────────────────────────────────
     // Only folder_register and folder_has_songs are AOB-scanned.
@@ -3616,6 +3679,10 @@ impl SignatureStore {
         // Consumes `cmovieclip_create` (identity gate of the bg_root site) —
         // must stay after derive_cmovieclip_create.
         self.derive_scene3d();
+        // Cross-checks against `filter_button_panel_config`, `string_assign`,
+        // `ui_entry_loop`, `version_predicate_lea` and `series_mapper_bounds`
+        // (plain AOBs / derive_string_assign_via_pair, above).
+        self.derive_series_enhanced();
     }
 
     /// Derive the bottom-text service's two data addresses from the
@@ -8889,6 +8956,203 @@ impl SignatureStore {
     /// `+0x201`, identical on 20250805 / 20260825). Publishes
     /// `ddr_sel_best_record` + `ddr_sel_pw_score_db_off`; a miss ⇒ the theme
     /// panel's record fields stay hidden (one WARN).
+    /// series_expansion enhanced layout: verify the four enhanced AOBs and
+    /// derive the functions they call (design: the VERSION builder, the
+    /// GROUP-tab press and the selection primitives).
+    ///
+    /// * builder (`version_filter_builder`): opcode + shape checks at +0x55
+    ///   (CALL tab factory), +0x65 / +0x27F (CALL SetTemplate — both equal,
+    ///   and equal to `filter_button_panel_config` when resolved), +0x8B
+    ///   (CALL string assign — equal to `string_assign` when resolved),
+    ///   +0x1D0 `MOV RAX,[R15+0x40]`, +0x260 `MOV RCX,[R14+0x18]`,
+    ///   +0x278 `MOV EDX,[R15+0x48]`; `ui_entry_loop` (when resolved) sits
+    ///   at +0x249.
+    /// * tab factory: entry prologue; +0x9F `LEA R13,[group table]`, +0xAD
+    ///   `MOV ECX,0x30`, +0xC3 `LEA RAX,[lambda60 vtable]` whose slot 1 is
+    ///   `ADD RCX,8; JMP` to the `version_group_press` match.
+    /// * press body: +0x19 CALL clear-category, +0xD9 JMP notify.
+    /// * toggle body (`filter_toggle_one_body`): +0x18 CALL set-one, +0x26
+    ///   JMP equal to the press body's notify.
+    /// * predicate (`version_predicate_range`): equals the first
+    ///   `version_predicate_lea` match; its mapper CALL at −0x22 lands on
+    ///   `series_mapper_bounds − 0x5D`.
+    ///
+    /// Any failure un-resolves all four AOBs so no consumer can install half
+    /// of the enhanced mode.
+    fn derive_series_enhanced(&mut self) {
+        const TAG: &str = "series_enhanced";
+        const NAMES: [&str; 4] = [
+            "version_filter_builder",
+            "version_group_press",
+            "filter_toggle_one_body",
+            "version_predicate_range",
+        ];
+        const BUILDER_LEN: usize = 0x3D2;
+        const TAB_FACTORY_PROLOGUE: [u8; 15] = [
+            0x48, 0x8B, 0xC4, 0x55, 0x41, 0x54, 0x41, 0x55, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC,
+            0x70,
+        ];
+        let (Some(builder), Some(press), Some(toggle), Some(pred)) = (
+            self.get_address(NAMES[0]),
+            self.get_address(NAMES[1]),
+            self.get_address(NAMES[2]),
+            self.get_address(NAMES[3]),
+        ) else {
+            if NAMES.iter().any(|n| self.get_address(n).is_some()) {
+                for n in NAMES {
+                    self.resolved.remove(n);
+                }
+                log_warn!(
+                    "  [-] {} -- not every enhanced AOB resolved; un-resolved all",
+                    TAG
+                );
+            }
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8, len: usize| {
+            let off = (p as usize).wrapping_sub(base);
+            off < size && off.saturating_add(len) <= size
+        };
+        let fail = |this: &mut Self, why: &str| {
+            for n in NAMES {
+                this.resolved.remove(n);
+            }
+            log_warn!("  [-] {} -- {}; enhanced sites un-resolved", TAG, why);
+        };
+        if !inside(builder, BUILDER_LEN) || !inside(press, 0xDE) || !inside(toggle, 0x2B) {
+            return fail(self, "an enhanced function lies outside the module");
+        }
+        unsafe {
+            let at = |p: *const u8, off: usize, want: &[u8]| {
+                std::slice::from_raw_parts(p.add(off), want.len()) == want
+            };
+            // Decode a CALL (E8) / JMP (E9) rel32 at p+off after checking the opcode.
+            let branch = |p: *const u8, off: usize, op: u8| -> Option<*const u8> {
+                if *p.add(off) != op {
+                    return None;
+                }
+                let target = decode_call_rel32(p.add(off));
+                inside(target, 1).then_some(target)
+            };
+
+            // ── builder ──
+            if !at(builder, 0x1D0, &[0x49, 0x8B, 0x47, 0x40])
+                || !at(builder, 0x260, &[0x49, 0x8B, 0x4E, 0x18])
+                || !at(builder, 0x278, &[0x41, 0x8B, 0x57, 0x48])
+            {
+                return fail(self, "builder capture/factory loads differ");
+            }
+            let (Some(tab_factory), Some(set_template), Some(set_template_b), Some(assign)) = (
+                branch(builder, 0x55, 0xE8),
+                branch(builder, 0x65, 0xE8),
+                branch(builder, 0x27F, 0xE8),
+                branch(builder, 0x8B, 0xE8),
+            ) else {
+                return fail(self, "builder call sites differ");
+            };
+            if set_template != set_template_b {
+                return fail(self, "builder SetTemplate calls disagree");
+            }
+            if let Some(known) = self.get_address("filter_button_panel_config") {
+                if known != set_template {
+                    return fail(self, "SetTemplate is not filter_button_panel_config");
+                }
+            }
+            if let Some(known) = self.get_address("string_assign") {
+                if known != assign {
+                    return fail(self, "builder string assign is not string_assign");
+                }
+            }
+            if let Some(loop_site) = self.get_address("ui_entry_loop") {
+                if loop_site != builder.add(0x249) {
+                    return fail(self, "ui_entry_loop is not builder+0x249");
+                }
+            }
+
+            // ── tab factory → lambda60 → press body ──
+            if !inside(tab_factory, 0xCA)
+                || !at(tab_factory, 0, &TAB_FACTORY_PROLOGUE)
+                || !at(tab_factory, 0x9F, &[0x4C, 0x8D, 0x2D])
+                || !at(tab_factory, 0xAD, &[0xB9, 0x30, 0x00, 0x00, 0x00])
+                || !at(tab_factory, 0xC3, &[0x48, 0x8D, 0x05])
+            {
+                return fail(self, "tab factory shape differs");
+            }
+            let vt = decode_rip_relative(tab_factory.add(0xC6)) as *const *const u8;
+            if !inside(vt as *const u8, 0x10) {
+                return fail(self, "lambda60 vtable outside the module");
+            }
+            let thunk = *vt.add(1);
+            if !inside(thunk, 9)
+                || !at(thunk, 0, &[0x48, 0x83, 0xC1, 0x08])
+                || branch(thunk, 4, 0xE9) != Some(press)
+            {
+                return fail(self, "lambda60 slot 1 does not reach the press body");
+            }
+
+            // ── press body / toggle body ──
+            let (Some(clear), Some(notify)) =
+                (branch(press, 0x19, 0xE8), branch(press, 0xD9, 0xE9))
+            else {
+                return fail(self, "press body call sites differ");
+            };
+            let Some(set_one) = branch(toggle, 0x18, 0xE8) else {
+                return fail(self, "toggle body set-one call differs");
+            };
+            if branch(toggle, 0x26, 0xE9) != Some(notify) {
+                return fail(self, "toggle body notify differs from the press body's");
+            }
+
+            // ── predicate ──
+            if self.get_address("version_predicate_lea") != Some(pred) {
+                return fail(
+                    self,
+                    "version_predicate_range is not the first version_predicate_lea match",
+                );
+            }
+            let Some(mapper) = self.get_address("series_mapper_bounds") else {
+                return fail(self, "series_mapper_bounds unresolved");
+            };
+            if !inside(pred.sub(0x22), 5)
+                || branch(pred.sub(0x22), 0, 0xE8) != Some(mapper.sub(0x5D))
+            {
+                return fail(
+                    self,
+                    "predicate mapper call does not reach the series mapper",
+                );
+            }
+
+            for (name, addr) in [
+                ("series_enh_tab_factory", tab_factory),
+                ("series_enh_set_template", set_template),
+                ("series_enh_string_assign", assign),
+                ("series_enh_clear_category", clear),
+                ("series_enh_set_one", set_one),
+                ("series_enh_notify", notify),
+            ] {
+                self.resolved.insert(name.into(), addr);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, addr as usize - base);
+            }
+        }
+    }
+
+    /// Every enhanced-layout site (see `derive_series_enhanced`), or `None`.
+    pub fn series_enhanced_sites(&self) -> Option<SeriesEnhancedSites> {
+        Some(SeriesEnhancedSites {
+            builder: self.get_address("version_filter_builder")?,
+            tab_factory: self.get_address("series_enh_tab_factory")?,
+            set_template: self.get_address("series_enh_set_template")?,
+            string_assign: self.get_address("series_enh_string_assign")?,
+            group_press: self.get_address("version_group_press")?,
+            clear_category: self.get_address("series_enh_clear_category")?,
+            set_one: self.get_address("series_enh_set_one")?,
+            notify: self.get_address("series_enh_notify")?,
+            predicate_range: self.get_address("version_predicate_range")?,
+        })
+    }
+
     fn derive_ddr_sel_score_set(&mut self) {
         const TAG: &str = "ddr_sel_score_set";
         const HEAD: [u8; 7] = [0x44, 0x8B, 0x47, 0x04, 0x48, 0x8D, 0x8A];

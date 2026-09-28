@@ -45,6 +45,17 @@ pub struct ScrollConfig {
     pub visible_rows: usize,
     pub total_entries: usize,
     pub columns: usize,
+    pub tracking: Tracking,
+}
+
+/// How VERSION entry buttons are recognised in the CreateVisual detour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tracking {
+    /// Legacy: every template-2 button, rows by creation order.
+    Template2,
+    /// Enhanced layout: exactly the buttons the builder passed to
+    /// [`register_entry`] (any template; the GROUP tabs are never registered).
+    Registered,
 }
 
 struct FilterEntry {
@@ -93,6 +104,18 @@ static mut PANEL_BUILDER_HOOK: Option<GenericDetour<PanelBuilderFn>> = None;
 unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
     if let Some(ref hook) = *std::ptr::addr_of!(PANEL_BUILDER_HOOK) {
         hook.call(this);
+    }
+
+    let registered = matches!(
+        STATE
+            .lock()
+            .ok()
+            .and_then(|s| s.config.as_ref().map(|c| c.tracking)),
+        Some(Tracking::Registered)
+    );
+    if registered {
+        let _ = std::panic::catch_unwind(|| on_registered_visual(this));
+        return;
     }
 
     let category = (this.add(0xF0) as *const u32).read_unaligned();
@@ -158,6 +181,52 @@ unsafe extern "C" fn panel_builder_hook(this: *mut u8) {
     }
 }
 
+/// Registered tracking: CreateVisual ran for `this`. Record (or refresh — a
+/// visibility flip recreates the movie with a new layer id) its layer, and
+/// activate once every registered button has one.
+unsafe fn on_registered_visual(this: *mut u8) {
+    let bm2d_ptr = *(this.add(0x178) as *const *const u8);
+    if bm2d_ptr.is_null() {
+        return;
+    }
+    let layer_id = (bm2d_ptr.add(0x08) as *const u32).read_unaligned();
+    if layer_id == 0 {
+        return;
+    }
+    let Ok(mut state) = STATE.lock() else { return };
+    let Some(pos) = state.entries.iter().position(|e| e.this_ptr == this) else {
+        return;
+    };
+    let old = state.entries[pos].layer_id;
+    if old == layer_id {
+        return;
+    }
+    state.entries[pos].layer_id = layer_id;
+    {
+        let Ok(mut tracked) = TRACKED_LAYERS.lock() else {
+            return;
+        };
+        if old != 0 {
+            tracked.remove(&old);
+        }
+        tracked.insert(layer_id);
+    }
+    if state.active {
+        // Re-apply this entry's mask for the current window.
+        let visible_rows = state.config.as_ref().map(|c| c.visible_rows).unwrap_or(0);
+        let entry = &state.entries[pos];
+        apply_visibility(std::slice::from_ref(entry), state.scroll_row, visible_rows);
+        return;
+    }
+    if state.entries.iter().all(|e| e.layer_id != 0) {
+        let generation = state.pump.request();
+        drop(state);
+        if let Some(generation) = generation {
+            widget_renderer::run_on_render_thread(move || activate_scroll(generation));
+        }
+    }
+}
+
 // ── Set-position hook (injects scroll Y offset) ─────────────────────
 
 type SetPositionFn = unsafe extern "C" fn(*mut u8, *mut [i32; 2]);
@@ -215,6 +284,29 @@ pub fn configure(config: ScrollConfig) {
         config.visible_rows
     );
     state.config = Some(config);
+}
+
+/// Registered tracking: a new VERSION build pass starts (drops every
+/// previously registered button and deactivates scrolling).
+pub fn begin_build() {
+    deactivate_scroll();
+}
+
+/// Registered tracking: `button` is the VERSION entry on grid row `row`
+/// (rows counted below the GROUP tabs). Call from the builder, in order.
+pub fn register_entry(button: *mut u8, row: usize) {
+    let Ok(mut state) = STATE.lock() else { return };
+    if !matches!(
+        state.config.as_ref().map(|c| c.tracking),
+        Some(Tracking::Registered)
+    ) {
+        return;
+    }
+    state.entries.push(FilterEntry {
+        this_ptr: button,
+        layer_id: 0,
+        row,
+    });
 }
 
 pub fn init(signatures: &SignatureStore) -> bool {

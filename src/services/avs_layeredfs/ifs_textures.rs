@@ -395,6 +395,33 @@ pub fn handle_texture(norm_path: &str) -> Option<String> {
     }
 }
 
+/// Pre-convert `png_path` into the per-image cache blob LayeredFS serves for
+/// texture `name` of a per-image IFS (`argb8888rev`, AVSLZ, `width`×`height`
+/// — the form a cloned-atlas `<image>` entry declares). For callers that
+/// declare net-new names through a merged texturelist but keep their source
+/// PNGs outside the IFS mod folder (so LayeredFS never auto-injects them).
+/// Uses the same encoder and freshness check as an on-demand conversion; the
+/// PNG must not be larger than `width`×`height` (smaller is padded top-left).
+/// Returns true when the blob is present and up to date.
+pub fn prebuild_texture(
+    ifs_mod_path: &str,
+    name: &str,
+    png_path: &str,
+    width: u32,
+    height: u32,
+) -> bool {
+    let info = ImageInfo {
+        name: name.to_string(),
+        name_md5: format!("{:x}", md5::compute(name.as_bytes())),
+        format: ImgFormat::Argb8888Rev,
+        compression: CompressType::Avslz,
+        ifs_mod_path: ifs_mod_path.to_string(),
+        width,
+        height,
+    };
+    cache_texture(png_path, &info)
+}
+
 /// Purge a STOCK-NAME texture replacement: delete the converted cache file
 /// and drop its `CACHE_INDEX` entry so `handle_texture` stops short-circuiting
 /// to a file that no longer matches the caller's intent. Callers that stage

@@ -1,0 +1,127 @@
+{
+  "custom_series_enhanced": {
+    "num_columns": 3,
+    "filters": [
+      {
+        "label": "WORLD",
+        "series_start": 21,
+        "series_end": 21,
+        "texture": "world"
+      },
+      {
+        "label": "A3",
+        "series_start": 20,
+        "series_end": 20,
+        "texture": "a3"
+      },
+      {
+        "label": "A20 PLUS",
+        "series_start": 19,
+        "series_end": 19,
+        "texture": "a20plus"
+      },
+      {
+        "label": "A20",
+        "series_start": 18,
+        "series_end": 18,
+        "texture": "a20"
+      },
+      {
+        "label": "A",
+        "series_start": 17,
+        "series_end": 17,
+        "texture": "a"
+      },
+      {
+        "label": "2014",
+        "series_start": 15,
+        "series_end": 16,
+        "texture": "2014"
+      },
+      {
+        "label": "2013",
+        "series_start": 14,
+        "series_end": 14,
+        "texture": "2013"
+      },
+      {
+        "label": "X3 VS 2ndMIX",
+        "series_start": 13,
+        "series_end": 13,
+        "texture": "x3"
+      },
+      {
+        "label": "X2",
+        "series_start": 12,
+        "series_end": 12,
+        "texture": "x2"
+      },
+      {
+        "label": "X",
+        "series_start": 11,
+        "series_end": 11,
+        "texture": "x"
+      },
+      {
+        "label": "SuperNOVA2",
+        "series_start": 10,
+        "series_end": 10,
+        "texture": "supernova2"
+      },
+      {
+        "label": "SuperNOVA",
+        "series_start": 9,
+        "series_end": 9,
+        "texture": "supernova"
+      },
+      {
+        "label": "EXTREME",
+        "series_start": 8,
+        "series_end": 8,
+        "texture": "extreme"
+      },
+      {
+        "label": "MAX2",
+        "series_start": 7,
+        "series_end": 7,
+        "texture": "max2"
+      },
+      {
+        "label": "MAX",
+        "series_start": 6,
+        "series_end": 6,
+        "texture": "max"
+      },
+      {
+        "label": "5thMIX",
+        "series_start": 5,
+        "series_end": 5,
+        "texture": "5thmix"
+      },
+      {
+        "label": "4thMIX",
+        "series_start": 4,
+        "series_end": 4,
+        "texture": "4thmix"
+      },
+      {
+        "label": "3rdMIX",
+        "series_start": 3,
+        "series_end": 3,
+        "texture": "3rdmix"
+      },
+      {
+        "label": "2ndMIX",
+        "series_start": 2,
+        "series_end": 2,
+        "texture": "2ndmix"
+      },
+      {
+        "label": "1stMIX",
+        "series_start": 1,
+        "series_end": 1,
+        "texture": "1stmix"
+      }
+    ]
+  }
+}

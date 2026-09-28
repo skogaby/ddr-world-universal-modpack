@@ -19,8 +19,10 @@ string xref), never hardcode them.
 [filter_scroll_research.md](filter_scroll_research.md),
 [genre_filter_expansion_research.md](genre_filter_expansion_research.md),
 [afp_system.md](afp_system.md), [folder_system_research.md](folder_system_research.md).
-Existing consumers in the tree: `src/mods/series_expansion.rs`,
-`src/services/series_filter_scroll.rs`.
+Existing consumers in the tree: `src/mods/series_expansion/` (legacy table
+extension and the experimental enhanced layout, which follows strategy B of
+[9.2](#92-two-implementation-strategies)), `src/services/series_filter_scroll.rs`.
+Findings added by the enhanced-layout work: [section 15](#15-addenda-2026-09-27).
 
 ---
 
@@ -40,6 +42,7 @@ Existing consumers in the tree: `src/mods/series_expansion.rs`,
 12. [Corrections to earlier notes](#12-corrections-to-earlier-notes)
 13. [Address reference (20260915)](#13-address-reference-20260915)
 14. [Open questions](#14-open-questions)
+15. [Addenda (2026-09-27)](#15-addenda-2026-09-27)
 
 ---
 
@@ -999,3 +1002,40 @@ above are unique per build.
 6. Whether a cloned `filter_switch_base06` loads by index without an `afplist.xml` entry.
 7. Precise up/down column choice (`+0x1F8` usage in `FUN_18004B840`) — only needed if a
    custom layout wants non-geometric navigation.
+
+---
+
+## 15. Addenda (2026-09-27)
+
+Verified while building series_expansion's enhanced VERSION layout on all five supported
+builds (20250805, 20260224, 20260721, 20260825, 20260915); the builder, tab factory, press body,
+set-one, clear-category, SetTemplate, CreateVisual and the FilterButton dtor are
+instruction-identical across them (only rel32/disp32 values differ).
+
+* **Selection sets** are `std::map<int, stdext::hash_set<int>>`, not `std::list<int>` (§4.2).
+  `FUN_1801D5680(state, cat, idx, on)` inserts with dedupe or erases.
+* **FilterManager −0x20 layout** applies to 20260224 as well as 20250805 (§11).
+* **VERSION builder capture** (`lambda10`, 0x50 bytes after the vtable): +0x00 selection state
+  (`FilterManager+0x378`), +0x08 category, +0x10 FilterPanel, +0x18 prefix `std::string`
+  ("version"), +0x40 FilterPanel again, +0x48 entry template. The builder owns its by-value
+  factory `std::function` (impl at +0x18; vtable slot 1 invoke, slot 3 delete) and is reached
+  only through its `_Do_call` thunk.
+* **Group tabs:** the tab factory hardcodes the stock group table into each `lambda60` capture;
+  the press body (`FUN_180127810`) inlines the set-one insert and reaches notify
+  (`FUN_180137230`) by a tail `JMP`. Range select also fires the press of tabs inside the range.
+* **Predicate** (`FUN_180123E40`): the second compare's disp32 (`0xB8`) sits at a fixed
+  `version_predicate_lea + 0x34` on every build, and `+0x34` of a VERSION entry is never read or
+  written anywhere — repointing it gives each row its own end. Compares are signed.
+* **Chip summary** loop runs `0..=count` (the sentinel index is probed); runs are merged by
+  selection-index adjacency and printed as `first～last` (Shift-JIS fullwidth tilde) joined by
+  `", "`.
+* **Persistence** load uses `SHL RDX,CL` and save `ROL RDI,1` + `ADD`: indices ≥ 64 alias.
+* **CreateVisual is lazy**: it runs on a later Component tick only while the button's layout rect
+  intersects the virtual screen band (y < 864 in 1280×720), and can re-run with a new layer id
+  (§3.8's scrolling note: scrolling BM2D layers never builds an off-band row).
+* **Textures in `select_music_option_v3.ifs` are stored per image** (`tex/md5(image)`), not per
+  atlas (§6.1): a new name needs a texturelist `<image>` entry plus a per-image blob.
+* **Thumbnail loop** (`FUN_18003C270`): `CMP RSI,imm8` sign-extends before an unsigned `JBE`;
+  any bound ≥ 0x80 never terminates (pool exhaustion, then negative-index writes). Only
+  `jacket_thumbnails_ja_0..21.arc` ship.
+

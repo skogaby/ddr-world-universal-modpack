@@ -67,6 +67,22 @@ yourself. This is why the old `register_arc` (active `arc_load` of a real on-dis
 container) was the only way to register textures with no host IFS, and why
 removing it means demo-only textures with no host get dropped rather than ported.
 
+### Some IFSes serve textures per IMAGE — a cloned-atlas blob alone renders blank
+
+**Context:** series_expansion's enhanced layout (2026-09-27) declares per-width
+VERSION labels whose source PNGs live outside the IFS mod folder.
+
+`select_music_option_v3.ifs` (and its lang siblings) store one `tex/md5(<image
+name>)` file per `<image>`, not one per atlas: the package loader opens a file per
+image and builds the atlas itself, so the atlas blob `atlas_cloner` writes is never
+opened. A declared name is served from `_cache/<ifs>/md5(name)` or from a PNG at
+`<mod>/<ifs>/tex/<name>.png`; the legacy series labels only worked because their
+PNGs sat at that path. For sources kept elsewhere (to avoid loose-PNG
+auto-injection of unused variants), write the per-image blob yourself
+(`ifs_textures::prebuild_texture`) and declare the name through the merged
+texturelist. The server rejects a PNG larger than the declared size (blank) and
+pads a smaller one — normalise first.
+
 ---
 
 ## Rendering
@@ -1521,3 +1537,24 @@ display is a `sequence::SpriteLayer` of per-character bitmaps
 the atlas only ships A–Z, 0–9, `& $ ! - . ?` and `blank` — `(`, `)`, `[`, `]`
 render as blanks. Extra text next to a plate = a second SpriteLayer on the same
 parent clip + anchor (`multiplayer_bot::plate_label`).
+
+## FilterButton visuals are lazy and on-screen-gated — scrolling BM2D layers can't reveal an unbuilt row (2026-09-27)
+
+`FilterButton::CreateVisual` never runs inside the builder or factory. The generic
+Component tick calls it (vtable slot 3) when `visible && on_screen` flips, and
+`on_screen` tests the button's **layout** rect against the 1280×720 virtual screen
+with a 20 % margin (top < 864). `series_filter_scroll` scrolls by offsetting BM2D
+layer Y in `set_position`, leaving layout untouched, so a cell laid out below the
+band never gets a movie no matter how far you scroll. It can also re-run with a new
+layer id. Track buttons by `this` (registered from the builder), refresh the
+layer id on every CreateVisual, and cap grid rows (series_expansion enhanced mode:
+24 below the tab row).
+
+## `CMP r64, imm8` sign-extends: a loop bound of 128+ with an unsigned `JBE` never ends (2026-09-27)
+
+The jacket-thumbnail ARC loop is `INC RSI; CMP RSI,imm8; JBE`. Patching the imm8
+to 0x80..0xFF compares against `0xFFFF…FF80+`, so the loop runs until the 4096-slot
+resource pool is exhausted and then writes at negative indices — the real cause
+of the old "bound 255 crashed AVS" report. Clamp any imm8 bound patched into a
+`CMP r64` to 127 (series_expansion does, in both modes).
+
