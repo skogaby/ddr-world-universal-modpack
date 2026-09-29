@@ -293,6 +293,16 @@ Afro` and `Ultramix Lady`. The formats are documented in
 * **Winding.** A source in D3D left-handed space needs a mirror (negate Z) and a reversed triangle
   order to land in the game's right-handed convention. Quaternions follow as `(−x, −y, z, w)`,
   handled implicitly by conjugating every frame with the mirror.
+* **Sequels on the same rig (`examples/port_character_ultramix2.py`).** DDR ULTRAMIX 2 /
+  *Dancing Stage Unleashed 2* reuses the K3D formats. It ships as the six
+  `data_mods/custom_models/dancers/UMX2 *` folders. Three differences are handled:
+  - Each model leaves out some ancestor joints (afro has no `root`, robo has no `Sternum` /
+    `Clav_*1`, …). The missing joints and the role-bone joints are added as UNWEIGHTED helper
+    bones, with binds copied from a sibling model. All six binds are one skeleton, and every clip
+    animates every joint.
+  - The texture and clip pool come from the rip's `default_model.csv` (NORMAL P1) and
+    `animations.csv` (GROUP) tables.
+  - Clips play whole (`loop_in = 0`).
 
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 

@@ -89,7 +89,8 @@ def build_armature(key, names, binds):
     return arm
 
 
-def build_mesh(key, model, arm, tex_stem):
+def build_mesh(key, model, arm, tex_stem, tex_src=None):
+    """`tex_src`: the body texture image to load (default: the rip's `<ddm texture>.tga`)."""
     pos, nrm, uv, weights, tris = U.game_mesh(model)
     me = bpy.data.meshes.new(key + '_body')
     me.from_pydata([tuple(convert.vec_to_blender(p)) for p in pos], [], tris.tolist())
@@ -113,7 +114,7 @@ def build_mesh(key, model, arm, tex_stem):
     mod = ob.modifiers.new('Armature', 'ARMATURE')
     mod.object = arm
     P.white_color_attribute(ob)
-    src = os.path.join(DSU_DIR, model['texture'] + '.tga')
+    src = tex_src or os.path.join(DSU_DIR, model['texture'] + '.tga')
     me.materials.append(P.make_material(key + '_body', P.load_texture(tex_stem, src), two_sided=False, shader=SHADER))
     return ob
 
@@ -221,6 +222,7 @@ def preview(out_dir, key, first_clip):
                         Vector((0.0, 0.0, 0.9)), scale=2.4)
 
 
-for d in [s.strip() for s in os.environ.get('DANCERS', 'afro,lady').split(',') if s.strip()]:
-    port(d)
-print('DONE')
+if __name__ == '__main__':  # Blender runs --python scripts as __main__; port_character_ultramix2 imports this
+    for d in [s.strip() for s in os.environ.get('DANCERS', 'afro,lady').split(',') if s.strip()]:
+        port(d)
+    print('DONE')

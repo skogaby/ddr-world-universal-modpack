@@ -93,8 +93,6 @@ Songs with a background movie get a **BACKGROUND MOVIES** choice in the same sec
 ### Custom Background Dancers and Stages
 The cast is not limited to Konami's. Any character or stage built with the repo's Blender add-on (`tools/blender_ddr_addon/`) — or ripped from another game and ported with its playbook — can join the rotation: drop the add-on's exported folder into `data_mods/custom_models/`, inside a folder named after the character or stage, and it is treated exactly like the stock content — random picks, its own entry in the BACKGROUND DANCER / BACKGROUND STAGE rows, and a live 3D preview.
 
-A dancer can also bring **its own skeleton and its own dances** instead of wearing World's 33-bone rig: put its `.anm` clips in a `motion/` folder inside its `pl_<key>` folder and it plays only those (dancers without one keep the stock choreography of their sex). The bone names the mod looks for — `Hips`, `Spine2`, `Head`, `LeftToeBase` / `RightToeBase` for the floor shadow and BIG HEAD — may be extra alias entries in the body's `.b2it`. The first two dancers ported this way are *Dancing Stage Unleashed*'s (**ULTRAMIX AFRO** and **ULTRAMIX LADY**), with their original rigs and all 27 of their dance clips; `tools/blender_ddr_addon/examples/port_character_ultramix.py` rebuilds them from a disc rip.
-
 ![Custom Dancer Selection](screenshots/custom_dancer_selection.png)
 ![Custom Dancers and Stages](screenshots/custom_dancers.png)
 

@@ -9,8 +9,9 @@ approach?
 (`.agents/planning/2026-09-28-dsu-dancer-port/`; the dancers ship as
 `data_mods/custom_models/dancers/Ultramix {Afro,Lady}`, built by
 `tools/blender_ddr_addon/examples/port_character_ultramix.py`). CEL SHADING and SCENE OUTLINES now
-use DSU's toon ramp and black hull for the whole scene. The rest of this note is the original
-research.
+use DSU's toon ramp and black hull for the whole scene. The six DSU2 / ULTRAMIX 2 dancers followed
+(§11, `data_mods/custom_models/dancers/UMX2 *`, `port_character_ultramix2.py`; not yet
+cabinet-tested). The rest of this note is the original research.
 
 **Scope.** RE of the game rip plus a feasibility and approach write-up. Decoders were written and
 checked, and one Blender verification render was made (§3.4). Nothing is implemented in the DLL,
@@ -780,3 +781,83 @@ XBE functions worth reopening in Ghidra:
 | `0x62020` / `0x62AF0` | PS load |
 | `0x98980` | `animations.csv` parser |
 | `0x18A70` | RENDER STYLE parser |
+
+## 11. Addendum (2026-09-28): DDR ULTRAMIX 2 / Dancing Stage Unleashed 2 — ported
+
+The six DSU2 dancers are ported the Path B way. Output is `data_mods/custom_models/dancers/UMX2 *`,
+built by `tools/blender_ddr_addon/examples/port_character_ultramix2.py`.
+
+**Sources.**
+- Rip: `~/Desktop/dsu2/`, unpacked by `scripts/extract_ultramix_data.py dsu2_eu` into `extracted_full/`.
+- `dancing_stage_unleashed_2_default.xbe` in the GUI Ghidra project. Addresses below are VAs,
+  image base `0x10000`.
+
+**Formats.** `.ddm`, `.ani`, the toon ramp and the `.xpu` shaders are the DSU1 formats unchanged
+(§2–§5). All 26 clips pass the §3.2 `hierarchy` check (≤ 4e-6).
+
+**The dancer table is data.** It lives in `default_model.csv`, parsed by `FUN_00016170` into
+0x94-byte records owned by the `DancerDataManager` singleton at `0x28DC7C`. Columns:
+`TYPE, NAME, MODEL DATA, PLATE TEXTURE, NORMAL P1, BLINK P1, … NORMAL P4, BLINK P4,
+PREFER ANIM GROUP, ANIM GROUP 2, ANIM GROUP 3`.
+
+| TYPE | NAME | model | bones / verts / tris | P1 texture | anim groups |
+|---|---|---|---|---|---|
+| rage | Rage | `rage.ddm` | 36 / 2315 / 3530 | `1n_rage` | male, male, unisex |
+| emi | Emi | `emi.ddm` | 27 / 2222 / 3324 | `2n_emi` | girl, girl, unisex |
+| afro | Afro | `afro.ddm` | 38 / 2654 / 3956 | `4n_afro` | male, male, unisex |
+| lady | Lady | `lady.ddm` | 34 / 2524 / 3708 | `3n_lady` | woman, girl, unisex |
+| robo | Konsento:03 | `robo.ddm` | 23 / 4071 / 4084 | `1n_robo` | male, male, unisex |
+| maid | Maid-Zukin | `zukin.ddm` | 33 / 2425 / 3508 | `4n_zukin` | girl, girl, unisex |
+
+- Robo and Maid-Zukin are unlockables (`robo.unlock` / `zukin.unlock`).
+- Afro and Lady are DSU2 remodels. They are NOT the DSU1 files: their bone counts and meshes differ.
+
+**Costumes and blink.**
+- Each dancer has four colour costumes (P1–P4), `<n><n|c>_<dancer>.dds`, DXT1 512² with no mips.
+- `c` is the blink twin: the same texture with the eyes closed.
+- `FUN_000196a0` loads the model at record `+0x40` and one (normal, blink) pair from the costume
+  vector at `+0x78`, 0x38 bytes per costume.
+- The blink swaps the texture slot while `frame % 23 < 4` (`FUN_0002e530`). DSU1 used a random
+  timer instead (§4.3).
+- The `.ddm`'s own texture field (`02afro_al`, `new_emi`, …) is a stale tool leftover and is ignored.
+
+**Clip pool.**
+- `animations.csv` is `NAME, SPEED, SKIP, GROUP`, header-checked by `FUN_000b6af0`. The DSU1 DANCER
+  column is gone.
+- Groups: `male` 6, `woman` 8, `girl` 3, `unisex` 9 (26 clips; DSU1's `lady_break01.ani` still
+  ships but is unlisted).
+- `FUN_0007d0a0` picks `rand % 3` among the record's three group strings (`+0x88`). It steps to the
+  next group while the picked one is empty, then plays a random clip of that group:
+  `FUN_000af2a0(anim, 0, 0, 0.5, 0.2)`.
+- A duplicated PREFER group is therefore picked 2/3 of the time.
+- The World port plays the union of the groups (rage: 15 clips), uniformly shuffled. The 2:1
+  weighting is not reproduced.
+
+**Play window.** `FUN_000af2a0` plays from `start % frames` to `frames − 1`, and every DSU2 caller
+passes start 0. DSU2 plays whole clips, where DSU1 played `[15, n − 15]` (§4.1). The port converts
+with `loop_in = 0`.
+
+**Rig gaps.**
+- Every model leaves out joints that are ancestors of its weighted bones:
+  - afro and rage: `root`, `Hip_L_DUM`;
+  - emi: `root`, `Sternum`, `Wrist_*2`;
+  - robo: `root`, `Sternum`, `Clav_*1`, `Hip_R_DUM` (and no `Toe_*`);
+  - maid: `root`, `Hip_R_DUM`;
+  - lady: `Hip_R_DUM`.
+- DSU never composes local transforms (§3.1), so it never needed them.
+- All six bind skeletons agree to ≤ 1.5e-4 in rotation and 2.3e-4 units in position, and every clip
+  carries every track. The port therefore adds each missing joint, plus the `Toe_*` role joints, as
+  an UNWEIGHTED helper bone. The helper's bind is copied from a sibling model.
+- Rigs end at 30–40 bones. Clip joint error is ≤ 0.14 mm over all 89 converted clips.
+
+**Not ported:** the P2–P4 costumes (World has one texture per dancer key; each would be a separate
+key), the blink, and the 2:1 group weighting.
+
+| Address | Function |
+|---|---|
+| `0x16170` | `default_model.csv` parser |
+| `0x196A0` | model + costume texture pair load |
+| `0x2E530` | per-player dancer update (blink swap) |
+| `0x7D0A0` | clip pick from the 3 anim groups |
+| `0xAF2A0` | play clip (start, loop, crossfade) |
+| `0xB6AF0` | `animations.csv` header check |
