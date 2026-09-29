@@ -314,6 +314,51 @@ Afro` and `Ultramix Lady`. The formats are documented in
   - Separate male (`M_*.ani`) and female (`F_*.ani`) clip sets, picked by the GENDER column.
   - Per-model bind origins. A helper bone's bind is shifted by the offset between the two rigs.
 
+### A System 573 polygon dancer (`examples/port_character_sys573.py`)
+
+The same Omnimix path for the arcade dancers of DDR 3rdMIX PLUS / 4thMIX PLUS / 5thMIX (Konami
+System 573, 49 characters, 16 shared dance routines). All 49 ship as
+`data_mods/custom_models/dancers/<N>MIX <Name>` (keys `ddr<3|4|5><chara>00`). `3rdMIX Afro` was
+cabinet-tested 2026-09-29; the other 48 were ported the same day with the same checks. The
+decoders and all conversion math are pure numpy in `scripts/sys573_dancer_dump.py`
+(`world_bones`, `world_binds`, `world_mesh`, `world_atlas`, `routine_samples`,
+`routine_to_anm_spec`). Formats and RE: `docs/sys573_dancers_research.md`. Extract a mix first
+with `scripts/extract_sys573_data.py`.
+
+* **Rig.** 31 bones: `root` (the routine's travel), the 16 joints and 14 HELPER bones. The 573
+  draws one of 5 hand shapes per hand and one of 4 faces per frame. Here every alternate is in the
+  mesh, each on its own helper bone, and the clip scales the hidden ones' helpers to 1e-3 with
+  kind-10 scale tracks (key pairs one frame apart at each change). Helpers are leaves, so no
+  segment-scale compensation reaches anything else.
+* **Mesh.** One rigid-skinned mesh; every PSX object rides one bone. The texture is a 512×256
+  atlas: the PSX 256×256 page on the left, and the untextured polygons' flat colours (PSX `0x80` =
+  1.0, so doubled) as 16 px swatches on the right. It is upscaled 2× nearest-neighbour. PSX
+  triangles are clockwise from outside; the triangle order is reversed.
+* **Clips.** One `.anm` per routine, not per 573 clip: a 573 clip is ONE measure and only
+  flows into its successor when chained. 120 frames per measure (World's dance clock runs at
+  120 BPM under `bpm_sync`), keys every 2nd frame. A routine is 13–14 measures, 26–28 s at
+  120 BPM. The 1-measure `normal_*` idles are skipped.
+* **Root travel.** The 573 re-bases the root on the previous measure's end pose, so a routine
+  wanders up to ~3 m and ends turned. `ROOT_MODE`:
+  - `recentre` (default): the 573 path, shifted so its bounding-box centre is the dancer's mark;
+  - `travel`: exactly as the 573 plays it;
+  - `inplace`: root x/z translation removed; turns, hops and bobbing are kept.
+  Each routine ends somewhere else than it starts, so the next clip starts with a jump.
+* **Checks** per clip: joint positions of the written `.anm` against the 573 pose (< 1 mm; the
+  proof of concept measured ≤ 0.11 mm) and every helper's scale against the 573 draw selection
+  (0 mismatches). Model: codec round trip, unique bone identities, palette ≤ 52, ≤ 64 bones.
+* **Batch.** `DANCERS=all` ports every model of every extracted mix (~7 min for 49). Labels are
+  `3rdMIX` / `4thMIX` / `5thMIX` + the character name, ≤ 15 bytes (`display_name` drops a trailing
+  mix-number marker: `afro4` → `4thMIX Afro`, `zukin5a` → `5thMIX Zukin A`). Labels are
+  `<3rd|4th|5th> <Name>` (≤ 15 bytes) and keys `ddr<3|4|5><name>00`. The sidecar sex comes from
+  a hand-made table in the script (it only affects the shadow scale and the label).
+
+```bash
+SYS573_DIR=~/Desktop/ddr_573_extracted DANCERS=3rdmix_plus/afro PREVIEW=1 \
+  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_sys573.py
+```
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

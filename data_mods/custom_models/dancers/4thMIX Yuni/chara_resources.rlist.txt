@@ -1,0 +1,3 @@
+# DDR 4thmix_plus (Konami System 573) "yuni", ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_sys573.py; ROOT_MODE=recentre)
+ddr4yuni00, pl, F, A, 1.0, 0.75, 0.0
