@@ -11,7 +11,9 @@ approach?
 `tools/blender_ddr_addon/examples/port_character_ultramix.py`). CEL SHADING and SCENE OUTLINES now
 use DSU's toon ramp and black hull for the whole scene. The six DSU2 / ULTRAMIX 2 dancers followed
 (§11, `data_mods/custom_models/dancers/UMX2 *`, `port_character_ultramix2.py`; not yet
-cabinet-tested). The rest of this note is the original research.
+cabinet-tested). Then the eight DSU3 dancers (§12, `data_mods/custom_models/dancers/UMX3 *`,
+`port_character_ultramix3.py`; not yet cabinet-tested). The rest of this note is the original
+research.
 
 **Scope.** RE of the game rip plus a feasibility and approach write-up. Decoders were written and
 checked, and one Blender verification render was made (§3.4). Nothing is implemented in the DLL,
@@ -861,3 +863,132 @@ key), the blink, and the 2:1 group weighting.
 | `0x7D0A0` | clip pick from the 3 anim groups |
 | `0xAF2A0` | play clip (start, loop, crossfade) |
 | `0xB6AF0` | `animations.csv` header check |
+
+## 12. Addendum (2026-09-29): Dancing Stage Unleashed 3 — ported
+
+The eight DSU3 dancers are ported the Path B way. Output is `data_mods/custom_models/dancers/UMX3 *`,
+built by `tools/blender_ddr_addon/examples/port_character_ultramix3.py`.
+
+**Sources.**
+- Rip: `~/Desktop/dsu3/`, unpacked by `scripts/extract_ultramix_data.py dsu3_eu` into `extracted_full/`.
+- `dancing_stage_unleashed_3_default.xbe` in the GUI Ghidra project. Addresses below are VAs, image
+  base `0x10000`.
+
+**Archives.** They are the DSU2 formats (`.hbn` x_data TOC, `.sng` TOC at 0x800, XPR0 `.krc`, BKT).
+There are two differences:
+- The `.sng` TOC holds one leaked packer comment line. Its 20 bytes spell `// Begin US `. The
+  extractor skips entries whose tag starts with `//`.
+- Only `voice/VCLIP_M_e.BKT` is on the disc. All 1455 of its clips are kind 1 (PCM16 stereo,
+  22050 Hz).
+
+**`.ddm` revision 3** (loader `FUN_001f52c0`). The magic is unchanged: `srdd`. The header differs:
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x04` | 4 | material count *m* (4 for every dancer) |
+| `0x08` | 0x14C·*m* | per material: `D3DMATERIAL8` (0x44), texture name (0x100), `u32` first index, `u32` triangle count |
+| … | | bones, triangle list, vertices: unchanged from §2 |
+
+- Each material draws one contiguous triangle range, and the ranges cover the index list in order.
+  For every dancer the slots are cloth / face / pants / shoes.
+- `ultramix_k3d_dump.parse_ddm` reads both revisions. It tries the one-material layout and falls
+  back to the multi-material one; each layout must end exactly at EOF.
+- The `D3DMATERIAL8` and texture fields are uninitialised garbage or stale names. Afro's slots name
+  its `_b` costume. Rage's slots carry a Maya source path in which one `\r` was stored as a real
+  CR character.
+- The stage and HUD `.ddm`s use a different magic, `mrdd`. They are not dancer models and are not
+  decoded.
+
+**Dancer table.** `default_model.csv` is parsed by `FUN_000186a0`. Columns:
+`TYPE, NAME, HIDDEN, MODEL DATA, PLATE TEXTURE, COSTUME, GENDER`.
+
+| TYPE | NAME | model | bones / verts / tris | GENDER | clips |
+|---|---|---|---|---|---|
+| lady | Lady | `lady.ddm` | 29 / 2761 / 4275 | woman | 17 `F_*` |
+| b | B' (hidden) | `b.ddm` | 27 / 2205 / 3386 | male | 14 `M_*` |
+| rage | Rage | `rage.ddm` | 30 / 2180 / 3414 | male | 14 `M_*` |
+| hney | Honey (hidden) | `honey.ddm` | 30 / 2709 / 3952 | woman | 17 `F_*` |
+| emi | Emi | `emi.ddm` | 27 / 2532 / 4230 | girl | 11 `F_*` |
+| afro | Afro | `afro.ddm` | 25 / 2427 / 3874 | male | 14 `M_*` |
+| maid | Maid-Zukin | `zukin.ddm` | 25 / 2401 / 3506 | girl | 11 `F_*` |
+| robo | Konsento:03 | `robo.ddm` | 19 / 4018 / 4084 | male | 14 `M_*` |
+
+- GENDER is stored at record `+0x84` as `male` = 0, `woman` = 1, `girl` = 2.
+- These are all new models: the rigs, meshes and textures differ from DSU1 and DSU2. The `mini*.ddm`
+  models are the world-map chibi dancers and are not ported.
+
+**Costumes** (`FUN_00017db0`).
+- `<COSTUME>.csv` has the columns `COSTUME1..COSTUME4` and one row per material slot, in slot order.
+- A cell is `<texture>:<shader>`. The shader is `toonoutline` everywhere except Afro's shoes slot,
+  which is his sunglasses: `afro_shoes:glasses1..4`, a sphere environment-map texture.
+- A `face` texture's blink twin is `<dancer>_eye[_b|_c|_d]`.
+- All textures are DXT1 without mips, 128² to 512×256.
+- The port uses COSTUME1: four World materials, `mdl_ch_constant_vc`, textures `umx3<texture>`.
+  The glasses are drawn with their env-map texture as a plain UV texture.
+
+**Skeleton.** The joints use new Maya-style names, added to `ultramix_k3d_dump.HIERARCHY`:
+
+```text
+M_Root ─┬ M_Hip ─┬ L_Leg ─┬ L_Knee ─ L_Ankle            (R: R_Leg ─ R_knee ─ R_Ankle; lower-case k in the data)
+        │        │        └ L_SkirtTip
+        │        ├ M_BackskirtTip, M_FrontskirtTip
+        └ M_Spine ─ M_Chest ─┬ M_Neck ─ M_Neck2 ─ M_Head ─ M_Hair ─ L/R_SidehairRoot ─ L/R_SidehairKnot1
+                             ├ L_Clavicle ─ L_Shoulder ─ L_ShoulderTwistlocke ─ L_ShoulderHalf ─ L_Elbow ─ L_Wrist
+                             └ L_Breast ─ L_Breasttip   (+ R mirrors)
+```
+
+- `ultramix_k3d_dump.py hierarchy` over all 34 listed clips shows every joint rigid to its parent
+  to ≤ 3e-5. The four skirt tips are simulated and are not rigid to any joint, so they hang off
+  the nearest segment and carry animated local translations.
+- There are no toe or end joints. The World role aliases are Hips → `M_Root`, Spine2 → `M_Chest`,
+  Head → `M_Head`, Left/RightToeBase → `L/R_Ankle`. The shadow only uses the toes' x/z.
+- There are two skeleton families. The male models (afro, rage, robo, b) share bind rotations, as do
+  the female models (lady, emi, zukin); Honey is its own variant. The bind origins differ per model
+  (rage and b sit 8.7 units below afro).
+- Each family has its own clip set: `M_*.ani` has 32 tracks and `F_*.ani` has 39. Every model fits
+  its own gender's clips to ≤ 1e-5 in bone length. The robo helpers aside, every model also carries
+  every ancestor of its bones.
+- Robo leaves out `M_Neck`, `M_Neck2` and both shoulders' `Twistlocke` and `Half` joints. The port
+  adds them as unweighted helpers, with binds taken from afro, whose bind robo matches exactly.
+  `complete_rig` checks that the rotations match and that one translation offset fits.
+
+**Clip pool.**
+- `animations.csv` is `FEMALENAME, MALENAME, SPEED, SKIP, GROUP` (header check `FUN_00051720`).
+- Groups: male 6, woman 9, girl 3, unisex 8 (26 rows).
+- `FUN_0015b490` reads MALENAME for male dancers and FEMALENAME otherwise. For each pick it chooses
+  the gender's group or `unisex` 50/50 (`rand & 1`), then a clip of that group via `FUN_00051d70`.
+  It also nudges the players off pairs of identical unisex takes, using the F/M table at
+  `0x3AF3C0`.
+- The port plays the union of the two groups, uniformly shuffled: male 14, woman 17, girl 11 clips.
+  The 50/50 group weighting is not reproduced.
+
+**Play window.** `FUN_001f6040(anim, start, loop, 0.5, 0.2)` is DSU3's play call. It is the
+counterpart of DSU2's `FUN_000af2a0`. None of the callers trims the end of the clip. The start
+frame depends on the caller:
+- the dancer set-up `FUN_000bde70` passes 0;
+- `FUN_0014fd70` passes 0, or half the clip when a flag float is set;
+- `FUN_0015a770` passes `rand() % 6`.
+
+The last two were not traced further. Clips are 30 Hz; the root bob at 120 BPM has a period of
+about 15 frames. The port plays whole clips from frame 0 (`loop_in = 0`).
+
+**Result.** 112 clips converted, max joint error 0.13 mm. All rigs have 25–30 bones and 4 meshes.
+
+**Floor.** DSU's floor is clip-space y = 0. The lowest skinned vertex over each dancer's clips has a
+median of −0.004 to −0.061 m, i.e. shoe soles. Robo is the exception at −0.22 m, from the plug
+cord and base below his ankles. The DSU3 clip data itself puts him there. Whether DSU3 lifts robo
+at runtime was not checked; the port keeps the data as is.
+
+**Not ported:** the P2–P4 costumes, the blink (`_eye` face twin), the glasses env map, the
+self-shadow, and the 50/50 group weighting.
+
+| Address | Function |
+|---|---|
+| `0x186A0` | `default_model.csv` parser (GENDER → `+0x84`) |
+| `0x17DB0` | `<COSTUME>.csv` loader (4 costumes × material slots; `_eye` blink twin) |
+| `0x1F52C0` | `.ddm` loader (multi-material revision) |
+| `0x208940` | `.ani` loader |
+| `0x51720` | `animations.csv` header check |
+| `0x51D70` | collect clips of one GROUP |
+| `0x15B490` | per-dancer clip pick (gender column, group vs unisex) |
+| `0x1F6040` | play clip (start, loop, crossfade) |

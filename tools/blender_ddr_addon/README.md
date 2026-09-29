@@ -303,6 +303,16 @@ Afro` and `Ultramix Lady`. The formats are documented in
   - The texture and clip pool come from the rip's `default_model.csv` (NORMAL P1) and
     `animations.csv` (GROUP) tables.
   - Clips play whole (`loop_in = 0`).
+* **DSU3 (`examples/port_character_ultramix3.py`).** *Dancing Stage Unleashed 3* has eight new
+  dancers, which ship as `data_mods/custom_models/dancers/UMX3 *`. This port handles more
+  differences:
+  - A multi-material `.ddm` revision (cloth / face / pants / shoes). `parse_ddm` reads both
+    revisions, and each slot becomes a World material with the COSTUME1 texture from
+    `<COSTUME>.csv`.
+  - Maya-style joint names (`M_Root`, `L_Knee`, …) with no toe joints. The role aliases are
+    `M_Root` / `M_Chest` / `M_Head` / `L_Ankle` / `R_Ankle`.
+  - Separate male (`M_*.ani`) and female (`F_*.ani`) clip sets, picked by the GENDER column.
+  - Per-model bind origins. A helper bone's bind is shifted by the offset between the two rigs.
 
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 

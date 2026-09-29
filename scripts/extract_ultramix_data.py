@@ -31,8 +31,11 @@ Two core archive formats are supported, both flat and sector-aligned to 0x800:
       `loop_*` describes a looping preview stream for song-wheel (zero for
       UI/non-song audio). Main streams are extracted as `{tag}.wavm`,
       loops as `{tag}_loop.wavm`.
+      DSU3 uses the DSU2 layout, but one of its entries is a comment line ("// Begin US ")
+      from the packer's input list. The game looks streams up by tag and never reads it, so
+      the parser skips any entry whose tag starts with "//".
 
-DSU2 additionally ships two more archive types (both optional per game):
+DSU2 and DSU3 also ship two more archive types (both optional per game):
 
     resource krc/krh (UI/stage textures; DSU2 default.xbe FUN_00095150)
       The .krc is a standard Xbox XPR0 bundle: { "XPR0", total_size,
@@ -55,12 +58,17 @@ DSU2 additionally ships two more archive types (both optional per game):
       for Xbox ADPCM, so only true .sng-style streams carry the .wavm name.
       voice_manifest.csv records each clip's codec, channels and sample rate.
 
+Dancing Stage Unleashed 3 (dsu3_eu) uses the same x_data, krc and BKT formats as DSU2.
+Only VCLIP_M_e.BKT is in the rip. The XBE also names VCLIP_e and VCLIP_B_e, but those files
+are not on the disc. Every DSU3 clip is kind 1 (PCM16 stereo).
+
 Usage:
     extract_ultramix_data.py <game> <game_dir> <out_dir>
 
 Examples:
     extract_ultramix_data.py ultramix_us ~/Desktop/ultramix ./extracted
     extract_ultramix_data.py dsu2_eu ~/Desktop/dsu2 ./extracted_dsu2
+    extract_ultramix_data.py dsu3_eu ~/Desktop/dsu3 ~/Desktop/dsu3/extracted_full
 """
 
 import argparse
@@ -106,6 +114,16 @@ GAMES = {
         "magic": b"Konami Computer Entertainment Hawaii, Inc.",
         "krc": ("resource_EU.krc", "resource_EU.krh"),
         "voice_banks": ["voice/VCLIP_e.BKT", "voice/VCLIP_M_e.BKT", "voice/VCLIP_B_e.BKT"],
+    },
+    "dsu3_eu": {
+        "xdata_toc": "hbn",
+        "xdata_hbn": "x_data_EU.hbn",
+        "xdata_bin": "x_data_EU.bin",
+        "sng": "music_EU.sng",
+        "sng_toc_offset": 0x800,
+        "magic": b"Konami Computer Entertainment Hawaii, Inc.",
+        "krc": ("resource_EU.krc", "resource_EU.krh"),
+        "voice_banks": ["voice/VCLIP_M_e.BKT"],
     },
 }
 
@@ -228,14 +246,22 @@ def parse_hbn_toc(hbn_bytes, magic):
         yield name, size, offset
 
 
-def parse_sng_toc(sng_f, toc_offset):
-    """Yield (tag, offset, size, loop_offset, loop_size) for each .sng entry."""
+def parse_sng_toc(sng_f, toc_offset, skipped=None):
+    """Yield (tag, offset, size, loop_offset, loop_size) for each .sng entry.
+
+    Entries whose tag starts with "//" are comment lines from the packer's input list that leaked
+    into the TOC (DSU3 has one: the 20 bytes spell "// Begin US "). The game finds streams by tag,
+    so it never reads them; they are skipped, and their text is appended to `skipped` if given.
+    """
     (count,) = struct.unpack("<I", read_exact(sng_f, toc_offset, 4, "sng TOC count"))
     toc_bytes = read_exact(sng_f, toc_offset + 4, count * SNG_TOC_ENTRY_SIZE, "sng TOC")
     for i in range(count):
-        tag, offset, size, loop_offset, loop_size = struct.unpack_from(
-            "<4sIIII", toc_bytes, i * SNG_TOC_ENTRY_SIZE
-        )
+        raw = toc_bytes[i * SNG_TOC_ENTRY_SIZE : (i + 1) * SNG_TOC_ENTRY_SIZE]
+        if raw.startswith(b"//"):
+            if skipped is not None:
+                skipped.append(raw.rstrip(b"\x00").decode("ascii", "replace"))
+            continue
+        tag, offset, size, loop_offset, loop_size = struct.unpack("<4sIIII", raw)
         try:
             tag = tag.decode("ascii")
         except UnicodeDecodeError:
@@ -457,8 +483,14 @@ def main():
             )
         else:
             xdata_entries = list(parse_hbn_toc(toc_path.read_bytes(), magic))
+        sng_skipped = []
         with open(sng_path, "rb") as sng_f:
-            sng_entries = list(parse_sng_toc(sng_f, cfg["sng_toc_offset"]))
+            sng_entries = list(parse_sng_toc(sng_f, cfg["sng_toc_offset"], sng_skipped))
+            sng_f.seek(0, 2)
+            sng_size = sng_f.tell()
+        for tag, offset, size, loop_offset, loop_size in sng_entries:
+            if offset + size > sng_size or loop_offset + loop_size > sng_size:
+                raise ArchiveError(f"sng TOC entry {tag!r} points past the end of {sng_path.name}")
         textures = []
         if krc_paths:
             krc_path, krh_path = krc_paths
@@ -479,6 +511,8 @@ def main():
 
     print(f"x_data:  {xdata_count} files (manifest: xdata_manifest.csv)")
     print(f"sng:     {sng_count} files (manifest: sng_manifest.csv)")
+    for text in sng_skipped:
+        print(f"         skipped TOC comment entry {text!r}")
     if krc_count is not None:
         print(f"krc:     {krc_count} textures (manifest: resource_manifest.csv)")
     if voice_count is not None:

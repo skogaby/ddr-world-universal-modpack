@@ -1,9 +1,9 @@
 # Progress — DSU dancer port + DSU-exact cel/outline
 
-Updated: 2026-09-28
-Status: Step 5 of 5 — done (cabinet-validated by the maintainer 2026-09-28). Follow-up DSU2 port: content done, not yet cabinet-tested.
-NEXT ACTION: cabinet test of the six `UMX2 *` dancers (pin e.g. `DDR_DANCERS_PIN=umx2emi00,umx2robo00,umx2maid00`); the maintainer commits.
-Resume: read `design.md` (decisions D1–D4) and `docs/dancing_stage_unleashed_dancers_port_feasibility.md` (§11 = DSU2).
+Updated: 2026-09-29
+Status: Step 5 of 5 — done (cabinet-validated by the maintainer 2026-09-28). Follow-up DSU2 and DSU3 ports: content done, not yet cabinet-tested.
+NEXT ACTION: cabinet test of the `UMX2 *` and `UMX3 *` dancers (pin e.g. `DDR_DANCERS_PIN=umx3afro00,umx3robo00,umx3honey00`; UMX3 is the first multi-mesh UMX port — copy the whole folders, incl. 4 `.dds` each); the maintainer commits.
+Resume: read `design.md` (decisions D1–D4) and `docs/dancing_stage_unleashed_dancers_port_feasibility.md` (§11 = DSU2, §12 = DSU3).
 
 ## Done
 1. **D1 own motion pool.** Files: `selection.rs` (`DancerCandidate.motion`, `playlist_for`,
@@ -43,6 +43,24 @@ Resume: read `design.md` (decisions D1–D4) and `docs/dancing_stage_unleashed_d
      behaviour-neutral. It was not re-run, because the DSU1 rip is no longer on disk.
    - Blender previews of the re-imported exports look correct for all six.
      `validate_background_dancers.sh` is green.
+6. **DSU3 follow-up (content only, no DLL change).**
+   - `extract_ultramix_data.py dsu3_eu` unpacks the DSU3 rip into `~/Desktop/dsu3/extracted_full`.
+     It uses the DSU2 formats and skips one leaked `// Begin US ` comment entry in the `.sng` TOC.
+   - `ultramix_k3d_dump.py` changes:
+     - `parse_ddm` reads the multi-material `.ddm` revision. It returns `materials` for both
+       revisions; the DSU1/2 path is unchanged.
+     - `HIERARCHY` gains the DSU3 joint names. The `hierarchy` check is ≤ 3e-5 over 34 clips;
+       the skirt tips are simulated.
+   - `port_character_ultramix.py`: `add_role_aliases` and `exported_rig` take an optional
+     `aliases` argument. This is behaviour-neutral.
+   - `port_character_ultramix3.py` builds `UMX3 {Afro,Lady,Emi,Rage,Konsento,Maid-Zukin,B,Honey}`
+     (keys `umx3{afro,lady,emi,rage,robo,maid,b,honey}00`):
+     - 25–30 bones and 4 meshes / materials (COSTUME1 textures) per dancer;
+     - 14 / 17 / 11 / 14 / 14 / 11 / 14 / 17 clips, 112 in all, max joint error 0.13 mm;
+     - only robo needs helper bones (6 of them, binds taken from afro).
+   - Blender previews of the re-imported exports look correct for all eight.
+     `validate_background_dancers.sh` is green (196).
+   - The script's output is deterministic: a re-run is byte-identical.
 
 ## Deploy & test log
 - 2026-09-28, local CrossOver install.
@@ -65,3 +83,10 @@ Resume: read `design.md` (decisions D1–D4) and `docs/dancing_stage_unleashed_d
     unweighted root in all 6. Every UMX2 rig still has a single root.
   - DSU2 costumes P2–P4 would each need a separate key.
   - DSU2's 2:1 PREFER-group weighting is not reproduced.
+- DSU3 open items:
+  - First UMX port with 4 meshes / 4 textures per body. Multi-mesh custom bodies already ship
+    (Miku, Teto, CJ).
+  - Robo's plug and base reach 0.22 m below the floor (median). That is DSU3's own clip data.
+  - Afro's sunglasses slot draws the `glasses` env-map texture as a plain UV texture.
+  - The B' folder / label is `UMX3 B`: the apostrophe is kept out of the path.
+  - Not ported: the P2–P4 costumes, the blink, and the 50/50 group-vs-unisex weighting.

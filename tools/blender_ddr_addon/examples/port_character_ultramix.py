@@ -119,22 +119,22 @@ def build_mesh(key, model, arm, tex_stem, tex_src=None):
     return ob
 
 
-def add_role_aliases(b2it_path, names):
+def add_role_aliases(b2it_path, names, aliases=ROLE_ALIASES):
     entries = K.parse_b2it(open(b2it_path, 'rb').read())
     have = {n for n, _ in entries}
-    for role, joint in ROLE_ALIASES.items():
+    for role, joint in aliases.items():
         if role not in have and joint in names:
             entries.append((role, names.index(joint)))
     open(b2it_path, 'wb').write(K.write_b2it(entries))
-    return sorted(n for n, _ in entries if n in ROLE_ALIASES)
+    return sorted(n for n, _ in entries if n in aliases)
 
 
-def exported_rig(body_dir, body):
+def exported_rig(body_dir, body, aliases=ROLE_ALIASES):
     m = K.parse_model(open(os.path.join(body_dir, body + '.model'), 'rb').read())
     table = K.parse_b2it(open(os.path.join(body_dir, body + '.b2it'), 'rb').read())
     by_index = {}
     for n, i in table:
-        if n not in ROLE_ALIASES:
+        if n not in aliases:
             by_index[i] = n
     names = [by_index[i] for i in range(len(m['bones']))]
     parents = [b['parent'] for b in m['bones']]

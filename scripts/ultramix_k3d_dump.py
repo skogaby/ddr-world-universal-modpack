@@ -73,18 +73,62 @@ for _s in ("L", "R"):
         }
     )
 
+# DSU3 (Dancing Stage Unleashed 3) rigs use a different, Maya-style set of joint names, and
+# none of these names clash with the table above. Checked the same way: every child's offset
+# in its parent's frame stays constant over the dance clips. The exception is the skirt tips,
+# which are simulated and so are not rigid to any joint; they hang off the nearest segment.
+# `R_knee` (lower-case k) is spelled that way in the game data.
+HIERARCHY.update(
+    {
+        "M_Root": None,
+        "M_Hip": "M_Root",
+        "M_Spine": "M_Root",
+        "M_Chest": "M_Spine",
+        "M_Neck": "M_Chest",
+        "M_Neck2": "M_Neck",
+        "M_Head": "M_Neck2",
+        "M_Hair": "M_Head",
+        "M_BackskirtTip": "M_Hip",
+        "M_FrontskirtTip": "M_Hip",
+    }
+)
+for _s in ("L", "R"):
+    HIERARCHY.update(
+        {
+            f"{_s}_Clavicle": "M_Chest",
+            f"{_s}_Shoulder": f"{_s}_Clavicle",
+            f"{_s}_ShoulderTwistlocke": f"{_s}_Shoulder",
+            f"{_s}_ShoulderHalf": f"{_s}_ShoulderTwistlocke",
+            f"{_s}_Elbow": f"{_s}_ShoulderHalf",
+            f"{_s}_Wrist": f"{_s}_Elbow",
+            f"{_s}_Leg": "M_Hip",
+            f"{_s}_SkirtTip": f"{_s}_Leg",
+            f"{_s}_Breast": "M_Chest",
+            f"{_s}_Breasttip": f"{_s}_Breast",
+            f"{_s}_SidehairRoot": "M_Hair",
+            f"{_s}_SidehairKnot1": f"{_s}_SidehairRoot",
+        }
+    )
+HIERARCHY.update({"L_Knee": "L_Leg", "R_knee": "R_Leg", "L_Ankle": "L_Knee", "R_Ankle": "R_knee"})
+
 
 # ---------------------------------------------------------------------------
 # .ddm model
 # ---------------------------------------------------------------------------
-def parse_ddm(data: bytes) -> dict:
-    """`srdd` model: D3DMATERIAL8, texture name, bones, triangle list, vertices."""
-    if data[:4] != DDM_MAGIC:
-        raise ValueError("not a .ddm (magic %r)" % data[:4])
-    material = struct.unpack_from("<17f", data, 0x04)  # Diffuse, Ambient, Specular, Emissive, Power
-    texture = data[0x48:0x148].split(b"\0")[0].decode("latin1")
-    (bone_count,) = struct.unpack_from("<I", data, 0x148)
-    off, bones = 0x14C, []
+DDM3_MATERIAL_SIZE = 0x14C
+
+
+def _ddm_tail(data, off):
+    """Bones, triangle list and vertices, starting at the bone count. Returns
+    (bones, indices, vertex_count, vertex_offset), or None if the file does not end
+    exactly after the vertices."""
+    if off + 4 > len(data):
+        return None
+    (bone_count,) = struct.unpack_from("<I", data, off)
+    off += 4
+    if off + 0x84 * bone_count + 4 > len(data):
+        return None
+    bones = []
     for i in range(bone_count):
         inv_bind = struct.unpack_from("<16f", data, off)
         name = data[off + 0x40 : off + 0x80].split(b"\0")[0].decode("latin1")
@@ -92,16 +136,60 @@ def parse_ddm(data: bytes) -> dict:
         bones.append(dict(index=i, name=name, inverse_bind=inv_bind, vs_register=reg))
         off += 0x84
     (index_count,) = struct.unpack_from("<I", data, off)
+    if off + 4 + 2 * index_count + 4 > len(data):
+        return None
     indices = struct.unpack_from("<%dH" % index_count, data, off + 4)
     off += 4 + 2 * index_count
     (vertex_count,) = struct.unpack_from("<I", data, off)
     vertex_off = off + 4
-    off = vertex_off + 44 * vertex_count
-    if off != len(data):
-        raise ValueError(".ddm size mismatch: parsed %d of %d bytes" % (off, len(data)))
+    if vertex_off + 44 * vertex_count != len(data):
+        return None
+    return bones, indices, vertex_count, vertex_off
+
+
+def parse_ddm(data: bytes) -> dict:
+    """`srdd` model: material(s), bones, triangle list, vertices.
+
+    Two revisions share the magic:
+      * DSU1/DSU2: one D3DMATERIAL8 + one 0x100 texture name at 0x04.
+      * DSU3 (loader FUN_001f52c0): u32 material count at 0x04, then per material a
+        0x14C-byte record { D3DMATERIAL8 (0x44), texture name (0x100), u32 first index,
+        u32 triangle count }. Each material draws its own contiguous triangle range.
+    Both are returned with `materials` = [{material, texture, first_index, triangles}];
+    `texture` / `material` are the first material's (the DSU1/2 single-texture fields)."""
+    if data[:4] != DDM_MAGIC:
+        raise ValueError("not a .ddm (magic %r)" % data[:4])
+    tail = _ddm_tail(data, 0x148)
+    if tail is not None:
+        material = struct.unpack_from("<17f", data, 0x04)  # Diffuse, Ambient, Specular, Emissive, Power
+        texture = data[0x48:0x148].split(b"\0")[0].decode("latin1")
+        bones, indices, vertex_count, vertex_off = tail
+        materials = [dict(material=material, texture=texture, first_index=0, triangles=len(indices) // 3)]
+    else:
+        (count,) = struct.unpack_from("<I", data, 0x04)
+        off = 0x08 + DDM3_MATERIAL_SIZE * count
+        tail = _ddm_tail(data, off) if 0 < count < 256 else None
+        if tail is None:
+            raise ValueError(".ddm size mismatch: neither the DSU1/2 nor the DSU3 layout ends at EOF")
+        bones, indices, vertex_count, vertex_off = tail
+        materials = []
+        for i in range(count):
+            m = 0x08 + DDM3_MATERIAL_SIZE * i
+            first, tris = struct.unpack_from("<II", data, m + 0x144)
+            materials.append(dict(material=struct.unpack_from("<17f", data, m),
+                                  texture=data[m + 0x44 : m + 0x144].split(b"\0")[0].decode("latin1"),
+                                  first_index=first, triangles=tris))
+        at = 0
+        for mt in materials:
+            if mt["first_index"] != at:
+                raise ValueError(".ddm material %r does not start where the previous one ended" % mt["texture"])
+            at += 3 * mt["triangles"]
+        if at != len(indices):
+            raise ValueError(".ddm materials cover %d of %d indices" % (at, len(indices)))
     return dict(
-        material=material,
-        texture=texture,
+        material=materials[0]["material"],
+        texture=materials[0]["texture"],
+        materials=materials,
         bones=bones,
         indices=indices,
         vertex_count=vertex_count,
@@ -442,6 +530,9 @@ def cmd_ddm(path):
     print("%s: texture %r  bones %d  triangles %d  vertices %d" % (
         os.path.basename(path), m["texture"], len(m["bones"]), len(m["indices"]) // 3, m["vertex_count"]))
     print("material (D3DMATERIAL8 D/A/S/E rgba, power):", [round(x, 3) for x in m["material"]])
+    if len(m["materials"]) > 1:
+        for mt in m["materials"]:
+            print("  material %-24r first index %6d  triangles %5d" % (mt["texture"], mt["first_index"], mt["triangles"]))
     for b in m["bones"]:
         bind = np.linalg.inv(np.array(b["inverse_bind"]).reshape(4, 4))
         print("  %2d %-15s c[%4d]  bind pos (Z-up) %8.3f %8.3f %8.3f" % (b["index"], b["name"], b["vs_register"], *bind[3, :3]))
