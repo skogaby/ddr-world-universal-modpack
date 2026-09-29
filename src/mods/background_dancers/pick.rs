@@ -11,8 +11,8 @@
 //! carries the one parse-time switch the previews need (no floor shadow).
 
 use super::selection::{
-    camera_lists, dancer_x, pick_dancers, pick_stage, playlist, DancerCandidate, PickSource, Rng,
-    Sex, StageCandidate, SHADOW_ARC,
+    camera_lists, dancer_x, pick_dancers, pick_stage, playlist_for, DancerCandidate, PickSource,
+    Rng, Sex, StageCandidate, SHADOW_ARC,
 };
 
 /// Parse-time switches for a pick (design §4.8): gameplay parses the
@@ -48,7 +48,8 @@ pub struct Pick {
     pub movie_camera_non: Vec<String>,
     /// Side order: index 0 = the left dancer. May be empty (stage-only).
     pub dancers: Vec<DancerCandidate>,
-    /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`).
+    /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`, or the
+    /// dancer's own clip stems — `DancerCandidate::clip_member` maps either).
     pub playlists: Vec<Vec<String>>,
     /// Per dancer: the accessory parts whose arc exists (`head00`, …).
     pub parts: Vec<Vec<String>>,
@@ -97,7 +98,8 @@ impl Pick {
             }
         }
         for d in &self.dancers {
-            let a = format!("data/arc/{}.arc", d.sex.arc_stem());
+            // `mc_<sex>.arc`, or the body arc again for own motion (dedup).
+            let a = format!("data/arc/{}", d.motion_arc_name());
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -151,10 +153,19 @@ impl Pick {
         let clips: Vec<String> = self
             .playlists
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
+                let own = self.dancers.get(i).is_some_and(|d| d.has_own_motion());
                 p.iter()
                     .take(3)
-                    .map(|c| c.rsplit('_').nth(1).unwrap_or(c).to_string())
+                    .map(|c| {
+                        if own {
+                            // Own clips keep their authored stem.
+                            c.clone()
+                        } else {
+                            c.rsplit('_').nth(1).unwrap_or(c).to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(">")
             })
@@ -263,7 +274,7 @@ pub fn assemble_pick_opt(
         .and_then(|s| camera_rows.get(s.row))
         .map(|(_, f)| f.clone())
         .unwrap_or_default();
-    let playlists = dancers.iter().map(|d| playlist(rng, d.sex)).collect();
+    let playlists = dancers.iter().map(|d| playlist_for(rng, d)).collect();
     let parts = dancers
         .iter()
         .map(|d| d.parts_present(&arc_exists))
@@ -547,5 +558,55 @@ mod tests {
         assert_eq!(arcs[0], "data/arc/pl_emi01.arc");
         assert!(pick.summary().contains("dancers=[emi01(F) x=+0.0{option}]"));
         assert!(dancer_only(&mut rng, &dancers, "nobody00", |_| true).is_none());
+    }
+
+    #[test]
+    fn own_motion_dancer_plays_its_own_pool_from_its_body_arc() {
+        let (stages, camera_rows, dancers) = tables();
+        let boom = stage(&stages, "boom00");
+        let umx = DancerCandidate {
+            key: "umxafro00".into(),
+            row: 40,
+            sex: Sex::Male,
+            class: "A".into(),
+            model_scale: 1.0,
+            shadow_scale: 0.8,
+            motion: vec!["hh01_m".into(), "ht01_m".into(), "sfd01_m".into()],
+        };
+        let picked = vec![umx.clone(), dancer(&dancers, "rage00")];
+        let pick = assemble_pick(
+            &mut Rng::new(SEED),
+            boom,
+            &camera_rows,
+            picked,
+            false,
+            |a| !a.starts_with("pl_umxafro00_"),
+        );
+        let mut own = pick.playlists[0].clone();
+        own.sort();
+        assert_eq!(own, umx.motion);
+        assert!(pick.playlists[1].iter().all(|c| c.starts_with("mc_male_")));
+        assert!(pick.parts[0].is_empty());
+        let arcs = pick.arcs();
+        // The own pool rides in the body arc (listed once); rage00 still
+        // needs the male motion arc.
+        assert_eq!(
+            arcs.iter()
+                .filter(|a| *a == "data/arc/pl_umxafro00.arc")
+                .count(),
+            1
+        );
+        assert!(arcs.contains(&"data/arc/mc_male.arc".to_string()));
+        let summary = pick.summary();
+        assert!(
+            summary.contains(&pick.playlists[0][0]),
+            "own stems shown whole: {summary}"
+        );
+        // A pool of only own-motion dancers never loads a sex arc.
+        let solo = dancer_only(&mut Rng::new(SEED), &[umx], "umxafro00", |_| false).unwrap();
+        assert_eq!(
+            solo.arcs_for(&ParseOptions::PREVIEW),
+            vec!["data/arc/pl_umxafro00.arc".to_string()]
+        );
     }
 }

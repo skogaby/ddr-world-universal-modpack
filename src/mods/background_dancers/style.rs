@@ -1,14 +1,14 @@
 //! Scene style — the whole 3D scene's shading (stage props AND dancers):
 //! STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING (config `stock`/`lit`/`cel`),
-//! plus the inverted-hull outlines — on/off, INK or LAYERED style
-//! (`outline.rs`) and their per-kind widths — and the two A3 tempo
+//! plus the inverted-hull outlines (on/off — since 2026-09-28 CEL and the
+//! outline are DANCING STAGE UNLEASHED's own toon shading and ink,
+//! `shaders/src/mdl_cel.hlsl`, `outline.rs`) and the two A3 tempo
 //! switches. Owns the live values the session builder reads
-//! (`effective()`, `hull_plan()`, `outline_widths()`, `tempo_options()`,
+//! (`effective()`, `hull_plan()`, `tempo_options()`,
 //! and `movie_mode()` — the Background Movies choice the song window
 //! latches at entry, `movie_mode.rs`) plus the one the director reads every
 //! frame (`head_scale()` — BIG HEAD), the overlay rows under the
-//! Background Dancers header (the outline style + width rows are CHILDREN of
-//! SCENE OUTLINES — hidden while it is OFF, `mod_menu::set_row_show_when`),
+//! Background Dancers header,
 //! and the WHOLE-section persistence of `background_dancers`
 //! (`save_json_key` replaces the section, so every key is re-emitted from
 //! the live mirrors on each edit).
@@ -28,8 +28,8 @@
 //! players later (stock / enhanced lighting / enhanced lighting + cel);
 //! today they are operator experiment knobs (config + mod menu).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 
 use crate::mods::config;
 use crate::services::avs_layeredfs::shader_layout::SceneStyle;
@@ -38,32 +38,19 @@ use crate::{log_info, log_warn};
 
 use super::director_math::BIG_HEAD_SCALE;
 use super::movie_mode::MovieMode;
-use super::outline::{self, HullPlan, OutlineStyle};
+use super::outline::HullPlan;
 
 const MOD_ID: &str = "background-dancers";
 const ROW_KEY_STYLE: &str = "background-dancers-scene-style";
 const ROW_KEY_OUTLINES: &str = "background-dancers-scene-outlines";
-const ROW_KEY_OUTLINE_STYLE: &str = "background-dancers-outline-style";
-const ROW_KEY_PX_DANCER: &str = "background-dancers-outline-px";
-const ROW_KEY_PX_STAGE: &str = "background-dancers-outline-px-stage";
 const ROW_KEY_BPM_SYNC: &str = "background-dancers-bpm-sync";
 const ROW_KEY_STOP_SLOW: &str = "background-dancers-stop-slow";
 const ROW_KEY_CUSTOM_CONTENT: &str = "background-dancers-custom-content";
 const ROW_KEY_MOVIE_MODE: &str = "background-dancers-movie-mode";
 const ROW_KEY_BIG_HEAD: &str = "background-dancers-big-head";
-/// Rows shown only while SCENE OUTLINES is ON (`set_row_show_when`).
-const OUTLINE_CHILD_ROWS: [&str; 3] = [ROW_KEY_OUTLINE_STYLE, ROW_KEY_PX_DANCER, ROW_KEY_PX_STAGE];
-
-/// The outline-width rows step on a 0.25-px grid (values in HUNDREDTHS of a
-/// pixel — the row API is integer-valued); config values off the grid are
-/// kept live until the row is edited.
-const PX_GRID_MIN: i32 = 50;
-const PX_GRID_MAX: i32 = 600;
-const PX_GRID_STEP: i32 = 25;
 
 static LIVE_STYLE: AtomicU8 = AtomicU8::new(1); // SceneStyle::row_value
 static LIVE_OUTLINES: AtomicBool = AtomicBool::new(true);
-static LIVE_OUTLINE_STYLE: AtomicU8 = AtomicU8::new(0); // OutlineStyle::row_value
 static LIVE_BPM_SYNC: AtomicBool = AtomicBool::new(true);
 static LIVE_STOP_SLOW: AtomicBool = AtomicBool::new(true);
 /// CUSTOM DANCERS & STAGES as of the latest edit — persistence mirror only:
@@ -75,29 +62,6 @@ static LIVE_CUSTOM_CONTENT: AtomicBool = AtomicBool::new(true);
 static LIVE_MOVIE_MODE: AtomicU8 = AtomicU8::new(3); // MovieMode::DEFAULT (StageScreens)
 /// BIG HEAD — the one LIVE row: `director::produce` reads it every frame.
 static LIVE_BIG_HEAD: AtomicBool = AtomicBool::new(false);
-/// Outline rim widths (f32 bits): dancers / stage props.
-static LIVE_PX_DANCER: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0
-static LIVE_PX_STAGE: AtomicU32 = AtomicU32::new(0x3FC0_0000); // 1.5
-/// LAYERED palette override from config (never row-edited; re-emitted by
-/// `persist_section` so a row edit cannot drop it). `None` = the default
-/// black / red / blue.
-static LIVE_LAYER_PALETTE: Mutex<Option<Vec<[f32; 3]>>> = Mutex::new(None);
-
-pub const DEFAULT_OUTLINE_PX_DANCER: f32 = 2.0;
-pub const DEFAULT_OUTLINE_PX_STAGE: f32 = 1.5;
-
-/// The hull rim widths (720p px) a session applies: `(dancers, stage)`.
-pub fn outline_widths() -> (f32, f32) {
-    (
-        f32::from_bits(LIVE_PX_DANCER.load(Ordering::Relaxed)),
-        f32::from_bits(LIVE_PX_STAGE.load(Ordering::Relaxed)),
-    )
-}
-
-fn layer_palette() -> Option<Vec<[f32; 3]>> {
-    LIVE_LAYER_PALETTE.lock().ok().and_then(|g| g.clone())
-}
-
 /// The two A3 ConfigBank switches as of the latest edit (`bpm_sync`,
 /// `stop_slow`) — read at every session creation (next-song knobs).
 pub fn tempo_options() -> super::tempo::TempoOptions {
@@ -122,25 +86,6 @@ pub fn head_scale() -> f32 {
     } else {
         1.0
     }
-}
-
-/// Nearest row value (hundredths of a px on the 0.25 grid) for a width.
-fn px_to_row(px: f32) -> i32 {
-    let v = (px * 100.0).round() as i32;
-    let snapped = ((v - PX_GRID_MIN + PX_GRID_STEP / 2).div_euclid(PX_GRID_STEP)) * PX_GRID_STEP
-        + PX_GRID_MIN;
-    snapped.clamp(PX_GRID_MIN, PX_GRID_MAX)
-}
-
-fn px_grid() -> (Vec<i32>, Vec<String>) {
-    let values: Vec<i32> = (PX_GRID_MIN..=PX_GRID_MAX)
-        .step_by(PX_GRID_STEP as usize)
-        .collect();
-    let labels = values
-        .iter()
-        .map(|v| format!("{:.2} PX", *v as f32 / 100.0))
-        .collect();
-    (values, labels)
 }
 
 static ROWS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -168,21 +113,13 @@ pub fn requested() -> Requested {
     }
 }
 
-/// The requested outline style (INK / LAYERED) as of the latest edit.
-pub fn outline_style() -> OutlineStyle {
-    OutlineStyle::from_row_value(LIVE_OUTLINE_STYLE.load(Ordering::Relaxed) as i32)
-}
-
 /// The hull layers a session being created now builds: nothing unless
-/// `eff.hulls`; INK = one grey layer; LAYERED = the palette (config override
-/// or black / red / blue), each stroke as wide again as the ink width
-/// (`outline::HullPlan`).
+/// `eff.hulls`, else DSU's one black hull (`outline::HullPlan::ink`).
 pub fn hull_plan(eff: &Effective) -> HullPlan {
     if !eff.hulls {
         return HullPlan::none();
     }
-    let palette = layer_palette().unwrap_or_default();
-    HullPlan::for_style(outline_style(), &palette)
+    HullPlan::ink()
 }
 
 /// Pure gate (host-tested in `pure.rs`-style: no engine reads).
@@ -249,19 +186,17 @@ pub fn init_from_config() {
         }
     };
     let outlines = bd.scene_outlines(legacy);
-    let outline_style = match bd.outline_style.as_deref() {
-        None => OutlineStyle::Ink,
-        Some(s) => OutlineStyle::parse(s).unwrap_or_else(|| {
-            log_warn!(
-                "BackgroundDancers: background_dancers.outline_style = '{}' is not ink/layered -- using ink",
-                s
-            );
-            OutlineStyle::Ink
-        }),
-    };
+    if bd.outline_style.is_some()
+        || bd.outline_px.is_some()
+        || bd.outline_px_stage.is_some()
+        || bd.outline_layer_colors.is_some()
+    {
+        log_info!(
+            "BackgroundDancers: outline_style / outline_px / outline_px_stage / outline_layer_colors are retired (the outline is DSU's own since 2026-09-28) -- ignored, dropped at the next row edit"
+        );
+    }
     LIVE_STYLE.store(style.row_value() as u8, Ordering::Relaxed);
     LIVE_OUTLINES.store(outlines, Ordering::Relaxed);
-    LIVE_OUTLINE_STYLE.store(outline_style.row_value() as u8, Ordering::Relaxed);
     LIVE_BPM_SYNC.store(bd.bpm_sync, Ordering::Relaxed);
     LIVE_STOP_SLOW.store(bd.stop_slow, Ordering::Relaxed);
     LIVE_CUSTOM_CONTENT.store(bd.custom_content, Ordering::Relaxed);
@@ -279,27 +214,6 @@ pub fn init_from_config() {
     };
     LIVE_MOVIE_MODE.store(movie_mode.row_value() as u8, Ordering::Relaxed);
     LIVE_BIG_HEAD.store(bd.big_head, Ordering::Relaxed);
-    let px_d = config::clamp_outline_px(bd.outline_px.unwrap_or(DEFAULT_OUTLINE_PX_DANCER));
-    let px_s = config::clamp_outline_px(bd.outline_px_stage.unwrap_or(DEFAULT_OUTLINE_PX_STAGE));
-    LIVE_PX_DANCER.store(px_d.to_bits(), Ordering::Relaxed);
-    LIVE_PX_STAGE.store(px_s.to_bits(), Ordering::Relaxed);
-    // LAYERED palette override: 1..=MAX_LAYERS entries, channels clamped.
-    let palette = match bd.outline_layer_colors.as_ref() {
-        None => None,
-        Some(v) if v.is_empty() || v.len() > outline::MAX_LAYERS => {
-            log_warn!(
-                "BackgroundDancers: background_dancers.outline_layer_colors has {} entr{} (need 1..={}) -- using the default black/red/blue",
-                v.len(),
-                if v.len() == 1 { "y" } else { "ies" },
-                outline::MAX_LAYERS
-            );
-            None
-        }
-        Some(v) => Some(v.iter().map(|c| outline::clamp_rgb(*c)).collect::<Vec<_>>()),
-    };
-    if let Ok(mut g) = LIVE_LAYER_PALETTE.lock() {
-        *g = palette.clone();
-    }
     log_info!(
         "BackgroundDancers: background movies -- {} (applies per song)",
         movie_mode.key()
@@ -310,16 +224,9 @@ pub fn init_from_config() {
         BIG_HEAD_SCALE
     );
     log_info!(
-        "BackgroundDancers: scene style -- {} outlines={} style={} (rim px dancers={} stage={}; layered palette={}; variants {}, outline programs {}; applies per song)",
+        "BackgroundDancers: scene style -- {} outlines={} (cel + outline = DSU toon; variants {}, outline programs {}; applies per song)",
         style.key(),
         outlines,
-        outline_style.key(),
-        px_d,
-        px_s,
-        match palette.as_ref() {
-            Some(p) => format!("{} custom", p.len()),
-            None => "default".to_string(),
-        },
         if shader_synthesis::variants_available() {
             "served"
         } else {
@@ -335,9 +242,6 @@ pub fn init_from_config() {
         register_rows(
             style,
             outlines,
-            outline_style,
-            px_d,
-            px_s,
             bd.bpm_sync,
             bd.stop_slow,
             bd.custom_content,
@@ -350,25 +254,15 @@ pub fn init_from_config() {
 /// Write the whole `background_dancers` section from the live values.
 fn persist_section() {
     let style = SceneStyle::from_row_value(LIVE_STYLE.load(Ordering::Relaxed) as i32);
-    let mut section = serde_json::json!({
+    let section = serde_json::json!({
         "bpm_sync": LIVE_BPM_SYNC.load(Ordering::Relaxed),
         "stop_slow": LIVE_STOP_SLOW.load(Ordering::Relaxed),
         "style": style.key(),
         "outlines": LIVE_OUTLINES.load(Ordering::Relaxed),
-        "outline_style": outline_style().key(),
-        "outline_px": f32::from_bits(LIVE_PX_DANCER.load(Ordering::Relaxed)),
-        "outline_px_stage": f32::from_bits(LIVE_PX_STAGE.load(Ordering::Relaxed)),
         "custom_content": LIVE_CUSTOM_CONTENT.load(Ordering::Relaxed),
         "movie_mode": movie_mode().key(),
         "big_head": LIVE_BIG_HEAD.load(Ordering::Relaxed),
     });
-    // Optional key: absent means "default", so it is emitted only when set
-    // (the palette is operator-authored and must survive every row edit).
-    if let Some(map) = section.as_object_mut() {
-        if let Some(pal) = layer_palette() {
-            map.insert("outline_layer_colors".to_string(), serde_json::json!(pal));
-        }
-    }
     config::save_json_key("background_dancers", section);
 }
 
@@ -389,36 +283,6 @@ fn set_outlines(value: i32) {
     log_info!(
         "BackgroundDancers: SCENE OUTLINES set to {} (applies from the next song)",
         if on { "ON" } else { "OFF" }
-    );
-}
-
-fn set_outline_style(value: i32) {
-    let s = OutlineStyle::from_row_value(value);
-    LIVE_OUTLINE_STYLE.store(s.row_value() as u8, Ordering::Relaxed);
-    persist_section();
-    log_info!(
-        "BackgroundDancers: OUTLINE STYLE set to {} (applies from the next song)",
-        s.key().to_ascii_uppercase()
-    );
-}
-
-fn set_px_dancer(value: i32) {
-    let px = config::clamp_outline_px(value as f32 / 100.0);
-    LIVE_PX_DANCER.store(px.to_bits(), Ordering::Relaxed);
-    persist_section();
-    log_info!(
-        "BackgroundDancers: OUTLINE WIDTH (DANCERS) set to {:.2} px (applies from the next song)",
-        px
-    );
-}
-
-fn set_px_stage(value: i32) {
-    let px = config::clamp_outline_px(value as f32 / 100.0);
-    LIVE_PX_STAGE.store(px.to_bits(), Ordering::Relaxed);
-    persist_section();
-    log_info!(
-        "BackgroundDancers: OUTLINE WIDTH (STAGE) set to {:.2} px (applies from the next song)",
-        px
     );
 }
 
@@ -476,21 +340,18 @@ fn set_big_head(value: i32) {
 fn register_rows(
     style: SceneStyle,
     outlines: bool,
-    outline_style: OutlineStyle,
-    px_dancer: f32,
-    px_stage: f32,
     bpm_sync: bool,
     stop_slow: bool,
     custom_content: bool,
     movie_mode: MovieMode,
     big_head: bool,
 ) {
-    use crate::mods::mod_menu::{register_enum_row, set_row_show_when, EnumRowSpec};
+    use crate::mods::mod_menu::{register_enum_row, EnumRowSpec};
     let on_off = || (vec![0, 1], vec!["OFF".to_string(), "ON".to_string()]);
     register_enum_row(EnumRowSpec {
         key: ROW_KEY_STYLE.to_string(),
         label: "Lighting Style".to_string(),
-        hint: "Shading of the 3D stage and dancers: the game's unlit look, smooth key-light shading, or the same light in cel bands with ink. Next song.".to_string(),
+        hint: "Shading of the 3D stage and dancers: the game's unlit look, smooth key-light shading, or Dancing Stage Unleashed's two-band toon shading. Next song.".to_string(),
         parent_row_key: Some(MOD_ID.to_string()),
         values: vec![0, 1, 2],
         labels: vec![
@@ -505,43 +366,12 @@ fn register_rows(
     register_enum_row(EnumRowSpec {
         key: ROW_KEY_OUTLINES.to_string(),
         label: "Scene Outlines".to_string(),
-        hint: "Ink outline around the 3D stage props and dancers (needs a shaded lighting style). Next song.".to_string(),
+        hint: "Dancing Stage Unleashed's black ink outline around the 3D stage props and dancers (needs a shaded lighting style). Next song.".to_string(),
         parent_row_key: Some(MOD_ID.to_string()),
         values: v,
         labels: l,
         initial_value: i32::from(outlines),
         on_change: Arc::new(set_outlines),
-    });
-    register_enum_row(EnumRowSpec {
-        key: ROW_KEY_OUTLINE_STYLE.to_string(),
-        label: "Outline Style".to_string(),
-        hint: "INK: one black stroke. LAYERED: stacked strokes like the game's UI text -- black, then red, then blue.".to_string(),
-        parent_row_key: Some(MOD_ID.to_string()),
-        values: vec![0, 1],
-        labels: vec!["INK".to_string(), "LAYERED".to_string()],
-        initial_value: outline_style.row_value(),
-        on_change: Arc::new(set_outline_style),
-    });
-    let (v, l) = px_grid();
-    register_enum_row(EnumRowSpec {
-        key: ROW_KEY_PX_DANCER.to_string(),
-        label: "Outline Width (Dancers)".to_string(),
-        hint: "Outline thickness on the dancers, in 720p pixels. Next song.".to_string(),
-        parent_row_key: Some(MOD_ID.to_string()),
-        values: v.clone(),
-        labels: l.clone(),
-        initial_value: px_to_row(px_dancer),
-        on_change: Arc::new(set_px_dancer),
-    });
-    register_enum_row(EnumRowSpec {
-        key: ROW_KEY_PX_STAGE.to_string(),
-        label: "Outline Width (Stage)".to_string(),
-        hint: "Outline thickness on the stage props, in 720p pixels. Next song.".to_string(),
-        parent_row_key: Some(MOD_ID.to_string()),
-        values: v,
-        labels: l,
-        initial_value: px_to_row(px_stage),
-        on_change: Arc::new(set_px_stage),
     });
     let (v, l) = on_off();
     register_enum_row(EnumRowSpec {
@@ -599,39 +429,11 @@ fn register_rows(
         initial_value: i32::from(big_head),
         on_change: Arc::new(set_big_head),
     });
-    // The three outline detail rows are CHILDREN of SCENE OUTLINES: hidden
-    // while it is OFF (their values persist unchanged underneath).
-    for key in OUTLINE_CHILD_ROWS {
-        set_row_show_when(key, ROW_KEY_OUTLINES, 1);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn px_grid_round_trips() {
-        let (values, labels) = px_grid();
-        assert_eq!(values.first(), Some(&50));
-        assert_eq!(values.last(), Some(&600));
-        assert_eq!(values.len(), labels.len());
-        assert_eq!(labels[0], "0.50 PX");
-        assert_eq!(
-            labels[values.iter().position(|&v| v == 150).unwrap()],
-            "1.50 PX"
-        );
-        // Defaults sit on the grid; off-grid config snaps to the nearest step.
-        assert_eq!(px_to_row(DEFAULT_OUTLINE_PX_DANCER), 200);
-        assert_eq!(px_to_row(DEFAULT_OUTLINE_PX_STAGE), 150);
-        assert_eq!(px_to_row(1.3), 125);
-        assert_eq!(px_to_row(1.4), 150);
-        assert_eq!(px_to_row(0.1), 50);
-        assert_eq!(px_to_row(9.0), 600);
-        for v in &values {
-            assert_eq!(px_to_row(*v as f32 / 100.0), *v);
-        }
-    }
 
     #[test]
     fn gate_matrix() {

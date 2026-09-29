@@ -134,12 +134,14 @@ impl RenderItem {
         memory::write_u32(f, v);
     }
 
-    /// Per-item outline rim width (720p px) for a HULL twin — `ModelParameters.w`,
-    /// a constant no stock shader reads (`layout::ITEM_OUTLINE_PX`).
+    /// Per-item outline push multiplier for a HULL twin — `ModelParameters.w`,
+    /// a constant no stock shader reads (`layout::ITEM_OUTLINE_PX`, named for
+    /// the retired 720p pixel width). The outline VS scales DSU's
+    /// depth-scaled push by it (1.0 = DSU, 0 reads as 1 — `mdl_cel.hlsl`).
     /// # Safety
     /// As [`set_world`](Self::set_world).
-    pub unsafe fn set_outline_width(&self, px: f32) {
-        memory::write_f32(self.ptr.add(layout::ITEM_OUTLINE_PX), px);
+    pub unsafe fn set_outline_push_scale(&self, scale: f32) {
+        memory::write_f32(self.ptr.add(layout::ITEM_OUTLINE_PX), scale);
     }
 
     /// Write `rgba` into EVERY draw record's own colour (`REC_COLOR`, 1.0

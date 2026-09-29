@@ -21,7 +21,7 @@
 #   Step 6  mods/background_dancers/{selection,schedule}.rs (picks, playlists, dance/camera timelines;
 #                                                    schedule reaches selection::Rng via `super::` — both
 #                                                    mount at the crate root, as in the DLL's mod dir)
-#   2026-09-21 mods/background_dancers/outline.rs   (scene-outline layer plan: INK / LAYERED widths + palette)
+#   2026-09-21 mods/background_dancers/outline.rs   (scene-outline plan; since 2026-09-28 DSU's one black hull)
 #   2026-09-21 services/scene3d/camera_math.rs      (the engine's LookAtRH view + D3D off-centre projection, row-vector)
 #   2026-09-21 services/scene3d/viewport_pass_layout.rs (ClearViewport repr(C) pins, gd Clear record bytes, canvas→RT rect, prio/bit tables)
 #   2026-09-21 mods/background_dancers/catalog.rs   (option-row catalog: sorted keys → ≤15-byte labels, load clamp;

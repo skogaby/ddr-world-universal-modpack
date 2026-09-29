@@ -1,47 +1,58 @@
-// mdl_cel — the CEL style (banded lighting + rim ink) and the inverted-hull
-// OUTLINE pair for the synthesized `mdl_bg_lambert` / `mdl_ch_lambert`
-// model containers ("Dancer Lighting" experiments, 2026-09-17).
+// mdl_cel — the CEL style and the inverted-hull OUTLINE pair for the
+// synthesized model containers, reproducing DANCING STAGE UNLEASHED / DDR
+// ULTRAMIX (Xbox, 2004) exactly (2026-09-28; replaces the 2026-09-17 3-band +
+// rim-ink cel and the screen-space-width outline). RE:
+// docs/dancing_stage_unleashed_dancers_port_feasibility.md §4.4 / §5.
 //
 // Container layout when the cel style is selected (shader_layout::
 // model_programs): program 0 = outline VS + outline PS (bound ONLY for draw
 // records carrying flag bit 31 — the DLL's hull items), programs 1..3 = cel
 // VS + cel PS (ordinary records; the model pass binds program 2). The
 // outline pair is packed with the LIT style too (program 0 is inert without
-// bit-31 records). RE: docs/background_dancers_research.md §4.6.
+// bit-31 records). World RE: docs/background_dancers_research.md §4.6.
 //
-// Why the ramp lives in the PIXEL shader: a stepped value interpolated
-// across a triangle smears back into gradients, so the VS passes N·L and
-// the view-frame vectors in TEXCOORD1/2 and the PS quantizes per pixel.
-// The PS otherwise reproduces the stock gs_model_default PS exactly:
-// `tex2D(s0, uv) × COLOR0` and the 32×32 stipple dissolve
-// `texkill(c2.y − tex2D(s15, frac(vPos/32)).y)` (c2 = ModelParameters,
-// .y = 1.0 ⇒ no kill).
+// ── CEL = DSU's ToonLitShadowMapPixelShader.xpu + the "Toon vertex shader
+// for K3DModel objects" ──────────────────────────────────────────────────
+//   VS: oT1.xy = dp3(N_skinned, c16)  — N·L per VERTEX, on the skinned normal
+//       as blended (NOT renormalised), against the model-space light
+//       direction; interpolated across the triangle.
+//   PS: rgb = tex0 · toon(oT1) · lightColour · (shadowed ? 0.5 : 1)
+//       toon.tga: 128 texels, 0..63 = 142/255, 64..127 = 255, sampled
+//       BILINEAR + CLAMP (stage-1 states, FUN_0006cd70) — so the band edge is
+//       the lerp between texel centres 63.5/128 and 64.5/128, and N·L < 0
+//       clamps to the dark band.
+//   Reproduced here per pixel on the interpolated per-vertex N·L (the same
+//   structure — the step is taken in the PS so it stays hard). Light:
+//   DSU's LIGHT POSITION 2 (46 of 47 songs start there, 45 keep it; 1-based into the
+//   48-entry table of FUN_0006a440: 30° above, 45° around from the front, on
+//   the dancer's RIGHT, aimed at the chest) mapped into World's space (dancer
+//   faces +Z, its left is +X): L = normalize(−0.673, 0.305, 0.673). Light
+//   colour = LIGHT COLOR 1, white. NOT reproduced: the 1024² self-shadow
+//   buffer (× 0.5 where occluded) — World has no depth pass for models.
+//   Everything else is the stock gs_model_default PS: `tex2D(s0, uv) ×
+//   COLOR0` (the per-draw tint / vertex colour stay multiplied in) and the
+//   32×32 stipple dissolve `texkill(c2.y − tex2D(s15, frac(vPos/32)).y)`.
 //
-// Outline geometry (no cull-mode control — render states come from the
-// shared GPU record): each hull vertex is offset in SCREEN space along the
-// projected normal by a constant pixel width, and the outline PS emulates the
-// classic inverted hull's FRONT-FACE CULL per pixel — `clip(dot(n_view,
-// pos_view))` discards every shell fragment whose surface faces the camera.
-// The surviving back-facing shell sits behind the body by the body's own
-// thickness (no depth push needed to hide it — only a 1 mm constant margin
-// in world metres against z-fighting) and pokes out OUTLINE_PX beyond EVERY
-// silhouette, including an arm's edge over the chest (the 2026-09-21 fix:
-// the first hull used a facing-dependent depth push of up to ~20 mm, which
-// lost to a chest 0–20 mm behind a crossed arm; RE §4.7).
-//
-// Outline COLOUR = COLOR0 (c23 = the collector's `record colour × item
-// tint`) verbatim — the DLL owns it. It writes the layer colour into every
-// hull record's own colour at build (`render_item::set_record_colors`; the
-// frame board republishes only the item TINT per frame, which stays the
-// body's white), so ONE outline pair serves every layer of the LAYERED style
-// (black, then red, then blue — `background_dancers/outline.rs`): the layers
-// are separate hull items, each as wide again as the base width, and the
-// z-test stacks them
-// (a narrower hull's back-facing shell fragment comes from a vertex nearer
-// the silhouette — shallower on the far side — than a wider hull's at the
-// same pixel, so the narrowest is always on top, in any draw order). The
-// ink default lives DLL-side (`outline::INK_RGB` = 0.03 grey, the same value
-// the first hull baked in here as OUTLINE_RGB × a white tint).
+// ── OUTLINE = DSU's "Toon outline vertex shader for K3DModel objects" ────
+//   pos += N_skinned · (c18.x + c18.y · clip.w · c18.w), c18 = {0.03, 0.3, 0,
+//   0.001} in DSU MODEL units (then × the 1.25 model scale), colour
+//   c3 = (0, 0, 0, 1), drawn with CULL CCW (the inverted hull). In metres
+//   (0.0821 m per DSU world unit — the pelvis-height match of the port):
+//   world push = OUTLINE_BASE_M + OUTLINE_DEPTH_K · w, w = view depth (m).
+//   The push is applied in MODEL space along the unnormalised skinned
+//   normal, divided by the item's uniform World scale so it is metres in the
+//   world. ModelParameters.w (`item+0x4C`, read by no stock shader) is a
+//   multiplier the DLL writes (1.0 = DSU); 0 reads as 1.
+//   No cull-mode control here (render states come from the shared GPU
+//   record), so the outline PS emulates the FRONT-FACE CULL per pixel —
+//   `clip(dot(n_view, pos_view))` discards every shell fragment whose
+//   surface faces the camera; the surviving back-facing shell sits behind
+//   the body and pokes out beyond every silhouette. No depth margin (DSU
+//   has none; the push is ≥ 3 mm).
+//   Colour = COLOR0 (c23 = the collector's `record colour × item tint`),
+//   written by the DLL into every hull record (`outline::INK_RGB`, black).
+//   Texture alpha is kept so cutout cards (stock hair) stay cut out; DSU's
+//   own textures are opaque.
 //
 // Variant defines (scripts/build_shaders.sh `/D`):
 //   VCOLOR  (VS) multiply COLOR0 into the tint — the `_vc` stage shapes
@@ -57,58 +68,41 @@
 
 #include "mdl_common.hlsli"
 
-// ── Tunables ─────────────────────────────────────────────────────────────
-// World-space key (same rig as the lit style — preset B).
-#define CEL_KEY_DIR    float3(0.7, 0.6, 0.5)
-// Three-band ramp over N·L: levels (multipliers on the texture) + the two
-// thresholds + the half-width of each soft edge.
-#define CEL_LEVEL0     0.55    // shadow band
-#define CEL_LEVEL1     0.90    // mid band
-#define CEL_LEVEL2     1.20    // lit band (past stock, like preset B)
-#define CEL_THRESH0    0.15    // shadow → mid
-#define CEL_THRESH1    0.55    // mid → lit
-#define CEL_SOFT       0.03
-// Rim ink: darken where 1 − |N·V| passes INK_LO..INK_HI.
-#define INK_LO         0.62
-#define INK_HI         0.78
-#define INK_STRENGTH   0.85    // 1 = pure black rim
-// Inverted hull.
-// Rim width in 720p pixels — the DEFAULT when the item carries none: the DLL
-// writes a per-item width into ModelParameters.w (`item+0x4C`, read by no
-// stock shader — `.x/.z` feed the bone texture, `.y` the stipple), so stage
-// props and dancers can differ (`background_dancers.outline_px[_stage]`).
-#define OUTLINE_PX       2.0
-// Metres; the width is CONSTANT on screen up to here and shrinks ∝ 1/w
-// beyond (deploy #4/#5 used 5 m and stage props 8–30 m away got a
-// sub-pixel rim — invisible — RE §4.7).
-#define OUTLINE_REF_DIST 25.0
-#define OUTLINE_PUSH_M   0.001  // constant depth margin, WORLD metres (z-fight guard only)
-// (No colour constant: the outline colour is COLOR0, written per hull item by
-// the DLL — see the header comment.)
+// ── DSU constants ────────────────────────────────────────────────────────
+// Toward the light, World space (DSU LIGHT POSITION 2, see the header).
+#define TOON_LIGHT_DIR   float3(-0.673, 0.305, 0.673)
+// toon.tga's two texel values (gamma-space, like every World/Xbox shader).
+#define TOON_DARK        (142.0 / 255.0)
+#define TOON_LIT         1.0
+// Bilinear edge: texel centres 63.5/128 → 64.5/128.
+#define TOON_EDGE_LO     (63.5 / 128.0)
+#define TOON_EDGE_SCALE  128.0
+// Outline push, world metres: 1.25 · 0.03 DSU units · 0.0821 m, and the
+// dimensionless 1.25 · 0.3 · 0.001 per metre of view depth.
+#define OUTLINE_BASE_M   0.00308
+#define OUTLINE_DEPTH_K  0.000375
 
 // ═══════════════════════════ CEL STYLE ═══════════════════════════════════
 
 struct CelVSOut
 {
-    float4 pos  : POSITION;
-    float2 uv   : TEXCOORD0;
-    float4 col  : COLOR0;    // per-draw tint (unlit)
-    float4 nv   : TEXCOORD1; // xyz = n_view (unnormalized), w = N·L (world)
-    float3 pv   : TEXCOORD2; // pos_view (camera → vertex, unnormalized)
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+    float4 col : COLOR0;    // per-draw tint (unlit)
+    float  ndl : TEXCOORD1; // DSU oT1: N·L per vertex (skinned normal, not renormalised)
 };
 
 CelVSOut cel_out(float3 ps, float3 ns, float2 uv, float4 vcol)
 {
     CelVSOut o;
-    float4 clip  = to_clip(ps);
-    float4 nclip = to_clip_dir(ns);
-    ViewFrame f = view_frame(clip, nclip);
-    float3 L = normalize(CEL_KEY_DIR);
-    o.pos = clip;
+    // DSU dots the model-space normal with a model-space light; with a
+    // uniform-scale World that is the world normal / scale against the
+    // world light.
+    float s = length(World0.xyz);
+    o.pos = to_clip(ps);
     o.uv  = anim_uv(uv);
     o.col = Tint * vcol;
-    o.nv  = float4(f.n_view, dot(normalize(to_world_normal(ns)), L));
-    o.pv  = f.pos_view;
+    o.ndl = dot(to_world_normal(ns) / s, normalize(TOON_LIGHT_DIR));
     return o;
 }
 
@@ -168,12 +162,10 @@ float4 PsModelParameters     : register(c2); // .y = dissolve threshold (1 ⇒ n
 float4 PsConstColor          : register(c4); // parameters.vConstatntColor (_c shapes)
 float4 PsOffsetColor         : register(c5); // parameters.vOffsetColor
 
-float cel_band(float ndl)
+// toon.tga at u = N·L, bilinear + clamp.
+float toon_ramp(float ndl)
 {
-    float b = CEL_LEVEL0;
-    b += (CEL_LEVEL1 - CEL_LEVEL0) * smoothstep(CEL_THRESH0 - CEL_SOFT, CEL_THRESH0 + CEL_SOFT, ndl);
-    b += (CEL_LEVEL2 - CEL_LEVEL1) * smoothstep(CEL_THRESH1 - CEL_SOFT, CEL_THRESH1 + CEL_SOFT, ndl);
-    return b;
+    return lerp(TOON_DARK, TOON_LIT, saturate((ndl - TOON_EDGE_LO) * TOON_EDGE_SCALE));
 }
 
 float4 ps_cel_main(CelVSOut i, float2 vpos : VPOS) : COLOR
@@ -187,10 +179,7 @@ float4 ps_cel_main(CelVSOut i, float2 vpos : VPOS) : COLOR
 #else
     float4 tex = tex2D(Material, i.uv);
 #endif
-    float band = cel_band(i.nv.w);
-    float ndv  = abs(dot(normalize(i.nv.xyz), normalize(i.pv)));
-    float ink  = smoothstep(INK_LO, INK_HI, 1.0 - ndv) * INK_STRENGTH;
-    float3 rgb = tex.rgb * i.col.rgb * band * (1.0 - ink);
+    float3 rgb = tex.rgb * i.col.rgb * toon_ramp(i.ndl);
 #if defined(CCOLOR)
     rgb = rgb * PsConstColor.rgb + PsOffsetColor.rgb;
 #endif
@@ -211,23 +200,17 @@ struct OutlineVSOut
 OutlineVSOut outline_out(float3 ps, float3 ns, float2 uv)
 {
     OutlineVSOut o;
-    float4 clip  = to_clip(ps);
+    // DSU: w of the UN-pushed vertex scales the push (`m4x4 r1, r0, c12`).
+    float w = to_clip(ps).w;
+    float s = length(World0.xyz);
+    float k = ModelParameters.w > 0.0 ? ModelParameters.w : 1.0;
+    float push_m = (OUTLINE_BASE_M + OUTLINE_DEPTH_K * w) * k;
+    float3 pushed = ps + ns * (push_m / s);
+
+    float4 clip  = to_clip(pushed);
     float4 nclip = to_clip_dir(ns);
     ViewFrame f = view_frame(clip, nclip);
-
-    // Exact screen-space direction of the normal at this vertex:
-    // d/dt of (clip.xy + t·nclip.xy) / (clip.w + t·nclip.w) at t = 0.
-    float2 sd = nclip.xy * clip.w - clip.xy * nclip.w;
-    // Pixel space is 16:9 — weight before normalizing so the width is
-    // isotropic in pixels, then back to NDC per axis.
-    float2 nd = normalize(sd * float2(16.0, 9.0) + 1e-6);
-    float px_base = ModelParameters.w > 0.0 ? ModelParameters.w : OUTLINE_PX;
-    float px = px_base * saturate(OUTLINE_REF_DIST / max(clip.w, 1e-3));
-    float2 ndc_off = nd * px * float2(2.0 / 1280.0, 2.0 / 720.0);
-
-    // Constant depth margin in WORLD metres: Δclip.z = P22 · Δ (clip.z is
-    // linear in view depth with slope P22; w untouched so xy stay put).
-    o.pos = float4(clip.xy + ndc_off * clip.w, clip.z + f.p22 * OUTLINE_PUSH_M, clip.w);
+    o.pos = clip;
     o.uv  = anim_uv(uv);
     o.col = Tint;
     o.nv  = f.n_view;
@@ -254,9 +237,8 @@ OutlineVSOut vs_outline_ch_main(VSInCh i)
 
 float4 ps_outline_main(OutlineVSOut i, float2 vpos : VPOS) : COLOR
 {
-    // Emulated front-face cull: keep only shell fragments whose surface
-    // faces AWAY from the camera (the far side of the character, which the
-    // body hides everywhere except the OUTLINE_PX beyond each silhouette).
+    // Emulated front-face cull (DSU draws the hull with CULL CCW): keep only
+    // shell fragments whose surface faces AWAY from the camera.
     clip(dot(i.nv, i.pv));
     float stipple = tex2D(StippleMaskPattern, frac(vpos * (1.0 / 32.0))).y;
     clip(PsModelParameters.y - stipple);
@@ -264,7 +246,7 @@ float4 ps_outline_main(OutlineVSOut i, float2 vpos : VPOS) : COLOR
     float alpha = i.col.a;
 #else
     // Texture alpha keeps cutout shapes (hair cards) through the stock
-    // alpha test; colour is the DLL-written layer colour (COLOR0).
+    // alpha test; colour is the DLL-written ink (COLOR0).
     float alpha = tex2D(Material, i.uv).a * i.col.a;
 #endif
     return float4(i.col.rgb, alpha);

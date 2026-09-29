@@ -37,8 +37,7 @@ pub enum InstanceKind {
     /// bit-31 program selector so the synthesized variant container's
     /// outline pair (program 0) draws it. Shares `of`'s frame-board slot —
     /// never published itself (RE §4.6). `layer` indexes the session's
-    /// `HullPlan`: INK has one layer; LAYERED stacks one hull per palette
-    /// colour, each a band wider (`outline.rs`).
+    /// `HullPlan` (DSU's ink: one black layer — `outline.rs`).
     Hull { of: usize, layer: usize },
 }
 

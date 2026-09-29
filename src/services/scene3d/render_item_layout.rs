@@ -28,7 +28,8 @@ pub const ITEM_MODEL_PARAMS: usize = 0x40;
 /// `ModelParameters.w` (`item+0x4C`): read by NO stock shader (`.x/.z` = the
 /// bone texture height, `.y` = the stipple threshold), so the DLL uses it as
 /// a per-item constant — the synthesized outline VS reads it as the hull's
-/// rim width in 720p pixels (0 ⇒ the shader's default).
+/// push multiplier (1.0 = DSU's outline; 0 ⇒ 1). The name is the retired
+/// 720p pixel-width meaning (2026-09-21..28).
 pub const ITEM_OUTLINE_PX: usize = 0x4C;
 /// `f32[4]` tint, multiplied into every draw record's colour → VS c23.
 pub const ITEM_TINT: usize = 0x50;

@@ -264,6 +264,36 @@ what was different:
   a rigid bake tears.
 * **Small textures are fine:** 256², 128², 128×256 and 64² load at native size (no upscaling).
 
+### A dancer with ITS OWN rig and clips (`examples/port_character_ultramix.py`)
+
+This is the Omnimix path: no donor rig, no conform and no weight retarget. The source skeleton, its
+proportions and its own choreography are kept as they are. First used for *Dancing Stage
+Unleashed* / DDR ULTRAMIX (Xbox), 2026-09-28. It ships as `data_mods/custom_models/dancers/Ultramix
+Afro` and `Ultramix Lady`. The formats are documented in
+`docs/dancing_stage_unleashed_dancers_port_feasibility.md`.
+
+* **Rig.** Build it from the source bind matrices in GAME space (Y-up metres, facing +Z, left at +X)
+  and set each edit bone with `edit_bone.matrix = convert.rowmat_to_blender(bind)`. Blender makes
+  every bone's local Y point along the bone, but that does not matter: the clips are converted
+  against the EXPORTED bind frames (`Q = B_exported · B_source⁻¹`), so any rigid re-framing leaves
+  the skinning product unchanged. Export as usual. Any bone count works up to 52 per mesh palette
+  and 64 posed bones per instance (`frame_board`).
+* **Clips** go to `pl_<key>/motion/<clip>.anm`. Write them as LOCAL TRS against the exported
+  parents: `local = world · world_parent⁻¹`, kind `0x1C` rotations and `0x1D` translations, flag 0
+  like the stock `_exec` clips. When the source runs slower than the game, place its keys on
+  EXPLICIT times, e.g. `[0, 2, 4, …]` for a 30 Hz source on the 60 fps timeline. That needs no
+  resampling: the evaluator slerps between keys. Every clip is checked with `anm_dump.evaluate_pose`
+  against the source world transforms (< 1 mm).
+* **The DLL** plays a body that carries `motion/*.anm` members from that pool only, ignoring the
+  sex pool (`selection::DancerCandidate::motion`). The sidecar sex then only labels the dancer.
+* **Role bones.** The shadow, BIG HEAD and the part attach points look up `Hips`, `Spine2`,
+  `Head`, `LeftToeBase`, `RightToeBase` and `LeftForeArmRoll` BY NAME in the body's `.b2it`. Append
+  ALIAS entries to it (extra name, same index; `K.write_b2it` keeps the table sorted). The World
+  engine never opens a body `.b2it`, only the DLL does.
+* **Winding.** A source in D3D left-handed space needs a mirror (negate Z) and a reversed triangle
+  order to land in the game's right-handed convention. Quaternions follow as `(−x, −y, z, w)`,
+  handled implicitly by conjugating every frame with the mirror.
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

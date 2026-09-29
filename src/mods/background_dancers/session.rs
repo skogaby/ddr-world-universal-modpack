@@ -44,8 +44,8 @@ use super::instance_plan::{
 use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
 use super::selection::{
-    camanm_member_path, clip_member_path, part_attach_bone, Sex, GROUND_BONES, HEAD_BONE,
-    HIPS_BONE, MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
+    camanm_member_path, part_attach_bone, Sex, GROUND_BONES, HEAD_BONE, HIPS_BONE,
+    MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
 };
 use super::tempo::{TempoOptions, BEAT_TAU};
 
@@ -189,6 +189,15 @@ fn parse_clip(
     }
 }
 
+/// Highest bone index any track of `anm` drives (0 for a trackless clip).
+fn max_track_target(anm: &Anm) -> usize {
+    anm.bone_tracks
+        .iter()
+        .map(|t| t.target as usize)
+        .max()
+        .unwrap_or(0)
+}
+
 fn parse_skeleton(
     reader: &ArcReader,
     member: &str,
@@ -264,8 +273,10 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         }
     }
 
-    // Dancers: body skeleton + playlist clips (one motion arc per sex).
-    let mut motion: Vec<(Sex, Option<ArcReader>)> = Vec::new();
+    // Dancers: body skeleton + playlist clips — from the motion arc of each
+    // dancer's sex, or its OWN clips inside its body arc (design 2026-09-28
+    // D1: a dancer ported with its original rig brings its choreography).
+    let mut motion: Vec<(String, Option<ArcReader>)> = Vec::new();
     for (i, d) in pick.dancers.iter().enumerate() {
         let body_arc = format!("data/arc/{}", d.body_arc_name());
         let Some(body) = ArcReader::open(&body_arc) else {
@@ -283,27 +294,47 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         ) else {
             continue;
         };
-        if motion.iter().all(|(s, _)| *s != d.sex) {
-            let arc = format!("data/arc/{}.arc", d.sex.arc_stem());
-            let r = ArcReader::open(&arc);
-            if r.is_none() {
-                warnings.push(format!("{arc}: unreadable -- no choreography for that sex"));
-            }
-            motion.push((d.sex, r));
-        }
         let mut clips = Vec::new();
-        if let Some((_, Some(reader))) = motion.iter().find(|(s, _)| *s == d.sex) {
+        let mut load_clips = |reader: &ArcReader, warnings: &mut Vec<String>| {
             for clip in pick.playlists.get(i).into_iter().flatten() {
-                if let Some(c) =
-                    parse_clip(reader, &clip_member_path(d.sex, clip), clip, &mut warnings)
-                {
+                if let Some(c) = parse_clip(reader, &d.clip_member(clip), clip, warnings) {
                     clips.push(c);
                 }
+            }
+        };
+        if d.has_own_motion() {
+            load_clips(&body, &mut warnings);
+        } else {
+            let arc = format!("data/arc/{}", d.motion_arc_name());
+            if motion.iter().all(|(a, _)| *a != arc) {
+                let r = ArcReader::open(&arc);
+                if r.is_none() {
+                    warnings.push(format!("{arc}: unreadable -- no choreography for that sex"));
+                }
+                motion.push((arc.clone(), r));
+            }
+            if let Some((_, Some(reader))) = motion.iter().find(|(a, _)| *a == arc) {
+                load_clips(reader, &mut warnings);
             }
         }
         if clips.is_empty() {
             warnings.push(format!("dancer {} has no playable clip -- dropped", d.key));
             continue;
+        }
+        if let Some(c) = clips
+            .iter()
+            .find(|c| max_track_target(&c.anm) >= skeleton.bone_count())
+        {
+            // Stock clips address the 33-bone HumanIK rig by index; a foreign
+            // rig must bring its own clips (tracks past its bone count are
+            // skipped by the evaluator, so this only warns).
+            warnings.push(format!(
+                "dancer {}: clip {} targets bone {} but {model_name} has {} bones -- pose will be partial",
+                d.key,
+                c.name,
+                max_track_target(&c.anm),
+                skeleton.bone_count()
+            ));
         }
         let seed = seed_local_trs(&skeleton);
 
@@ -634,8 +665,8 @@ pub struct Session {
     /// The scene style every eligible material is re-pointed at (per song).
     pub style: SceneStyle,
     /// The outline layers built for every restyle-eligible instance (empty =
-    /// no hulls; INK = one grey layer; LAYERED = one hull per palette
-    /// colour, one band wider each — `outline.rs`). Frozen per song.
+    /// no hulls; the DSU ink = one black hull — `outline.rs`). Frozen per
+    /// song.
     pub hulls: HullPlan,
     pub schedule: Option<DanceSchedule>,
     pub instances: Vec<Instance>,
@@ -667,7 +698,7 @@ impl Session {
     /// inverted-hull outline layers to build for every restyle-eligible
     /// instance — empty when SCENE OUTLINES is off, the style is stock or the
     /// synthesized containers lack the outline pair (`style::hull_plan`
-    /// decides); INK = one layer, LAYERED = one hull per palette colour.
+    /// decides; the DSU ink is one black hull).
     /// `slot_base`: the first frame-board slot (gameplay 0; P1 previews 0,
     /// P2 previews 16 — design §5.3); the owner budget is what remains of
     /// the board above it. `item_pass_mask`: `Some(bit)` stamps every
@@ -1038,18 +1069,11 @@ fn build_one(
         // SAFETY: our own fresh block, not yet attached.
         let st = unsafe { item.restyle_materials(true, screen_hash, &variant_for) };
         if let InstanceKind::Hull { layer, .. } = inst.kind {
-            // Per-kind rim width (the hull VS reads ModelParameters.w): the
-            // twin's model_name is the body's, so a `gm_` prefix = stage prop.
             // The layer's colour rides the records (collector → c23 → the
-            // outline PS emits it verbatim); its width is the base plus
-            // `step` bands (`outline.rs`). A layer index outside the plan
-            // can only come from a plan/instances mismatch — draw nothing.
-            let (px_dancer, px_stage) = super::style::outline_widths();
-            let base = if inst.model_name.starts_with("gm_") {
-                px_stage
-            } else {
-                px_dancer
-            };
+            // outline PS emits it verbatim); `ModelParameters.w` is the
+            // multiplier on DSU's depth-scaled push (the hull VS,
+            // `outline.rs`). A layer index outside the plan can only come
+            // from a plan/instances mismatch — draw nothing.
             let Some(spec) = hulls.layers.get(layer) else {
                 log_warn!(
                     "BackgroundDancers: {} [hull L{}] has no layer in the plan ({} layer(s)) -- item freed, skipped this song",
@@ -1061,21 +1085,20 @@ fn build_one(
                 inst.status = InstanceStatus::Skipped;
                 return false;
             };
-            let px = hulls.width(base, spec.step);
             // SAFETY: as above.
             let (marked, hidden) = unsafe {
-                item.set_outline_width(px);
+                item.set_outline_push_scale(spec.push_scale);
                 item.set_record_colors(spec.rgba);
                 item.mark_hull_records(&st.record_restyled)
             };
             log_info!(
-                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), rim {:.2} px; materials restyled={} kept: blend={} no-variant={} screen={}",
+                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), push x{:.2}; materials restyled={} kept: blend={} no-variant={} screen={}",
                 inst.model_name,
                 layer,
                 outline::hex(spec.rgba),
                 marked,
                 hidden,
-                px,
+                spec.push_scale,
                 st.restyled,
                 st.kept_blend,
                 st.kept_no_variant,

@@ -461,41 +461,32 @@ pub struct BackgroundDancersConfig {
     pub stop_slow: bool,
     /// SCENE STYLE — how the whole 3D scene (stage props AND dancers) is
     /// shaded: `"stock"` (the game's unlit shaders), `"lit"` (a fixed key
-    /// light, smooth) or `"cel"` (the SAME key light, banded per pixel + rim
-    /// ink). Applied per SONG by re-pointing the render items' material
+    /// light, smooth) or `"cel"` (Dancing Stage Unleashed's toon shading —
+    /// its two-band ramp on per-vertex N·L under its default light, since
+    /// 2026-09-28). Applied per SONG by re-pointing the render items' material
     /// copies at the synthesized variant containers; additive glows,
     /// translucents, the skydome part and the floor shadow always stay stock.
     /// Absent ⇒ the legacy `shader_fixes.dancer_lighting` / `lit_models`,
     /// else `lit`. Mod menu (GLOBAL SETTINGS, Background Dancers), next song.
     #[serde(default)]
     pub style: Option<String>,
-    /// SCENE OUTLINES — inverted-hull ink outline around every restyled mesh
-    /// (needs a non-stock style). Absent ⇒ the legacy
-    /// `shader_fixes.dancer_outlines`, else `true`. Next song.
+    /// SCENE OUTLINES — Dancing Stage Unleashed's black inverted-hull ink
+    /// around every restyled mesh (needs a non-stock style). Absent ⇒ the
+    /// legacy `shader_fixes.dancer_outlines`, else `true`. Next song.
     #[serde(default)]
     pub outlines: Option<bool>,
-    /// Outline rim width in 720p pixels for the dancers (bodies + parts),
-    /// default 2.0 (clamped 0.5..=6). Constant on screen up to 25 m of camera
-    /// distance. Operator knob, next song.
+    /// RETIRED 2026-09-28 (the outline width is DSU's own depth-scaled push):
+    /// read only to log that it is ignored; the next row edit's whole-section
+    /// write drops it.
     #[serde(default)]
     pub outline_px: Option<f32>,
-    /// Outline rim width for the stage props, default 1.5 (large flat props
-    /// read heavier than a figure at the same width). Same clamp.
+    /// RETIRED 2026-09-28 — see `outline_px`.
     #[serde(default)]
     pub outline_px_stage: Option<f32>,
-    /// OUTLINE STYLE (experimental, 2026-09-21): `"ink"` (default — one
-    /// black stroke) or `"layered"` — the DDR World UI text look: several
-    /// strokes stacked, narrowest on top (black, then red, then blue by
-    /// default), each a separate hull as wide again as the kind's outline
-    /// width (2/4/6 px on dancers, 1.5/3/4.5 on props). Absent/unknown ⇒
-    /// ink. Next song.
+    /// RETIRED 2026-09-28 (the INK / LAYERED outline styles) — see `outline_px`.
     #[serde(default)]
     pub outline_style: Option<String>,
-    /// LAYERED only: operator palette override, innermost first, `[r, g, b]`
-    /// in 0..=1, 1..=4 entries (each entry = one extra draw of every
-    /// outlined mesh). Absent ⇒ black / red / blue
-    /// (`background_dancers::outline::DEFAULT_LAYERED_RGB`). Re-emitted
-    /// verbatim by the row edits' whole-section write; not row-editable.
+    /// RETIRED 2026-09-28 (the LAYERED palette) — see `outline_px`.
     #[serde(default)]
     pub outline_layer_colors: Option<Vec<[f32; 3]>>,
     /// CUSTOM DANCERS & STAGES (2026-09-22): also discover community dancers
@@ -531,15 +522,6 @@ pub struct BackgroundDancersConfig {
     /// the next frame. `docs/big_head_mode_feasibility.md`.
     #[serde(default)]
     pub big_head: bool,
-}
-
-/// Clamp an outline width to the range the hull VS was tuned for.
-pub fn clamp_outline_px(px: f32) -> f32 {
-    if px.is_finite() {
-        px.clamp(0.5, 6.0)
-    } else {
-        2.0
-    }
 }
 
 impl Default for BackgroundDancersConfig {

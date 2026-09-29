@@ -52,8 +52,9 @@
 //! blobs resolve, else the style pair again. `_lit` = our lit VS + the
 //! NAME's OWN stock PS sliced from the arc (the lit factor rides COLOR0, so
 //! every stock pixel path — `_c` constant/offset colour, `_notex`, the
-//! fallback's stipple — stays bit-exact); `_cel` = our banded VS/PS pair
-//! (same key light, ramp + rim ink per pixel). Hashes COMPUTED
+//! fallback's stipple — stays bit-exact); `_cel` = our toon VS/PS pair
+//! (Dancing Stage Unleashed's 2-band ramp on per-vertex N·L under its own
+//! default light, `shaders/src/mdl_cel.hlsl`). Hashes COMPUTED
 //! (`shader_layout::fnv1_32(name)`) — the only computed hashes here.
 //! Missing style blobs drop the whole variant set (one WARN); missing
 //! outline blobs drop only the outline pair (one WARN).

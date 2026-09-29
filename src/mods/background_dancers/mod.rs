@@ -36,7 +36,8 @@
 //! never filtered. Missing dependencies degrade to THUMBNAIL with one WARN.
 //!
 //! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
-//! Outlines** (INK or LAYERED inverted-hull twins, per-kind widths): applied
+//! Outlines** (one black inverted-hull twin per mesh; CEL + outline are
+//! Dancing Stage Unleashed's toon shading and ink since 2026-09-28): applied
 //! per song at item build by re-pointing each item's private material copies
 //! at the `<material>_lit` / `_cel` containers that
 //! `services/avs_layeredfs/shader_synthesis.rs` packs when `shader-fixes` is
@@ -75,10 +76,11 @@
 //!
 //! **Config** `background_dancers` (DLL-written, rewritten whole by
 //! `style.rs` on every GLOBAL SETTINGS edit): `style`, `outlines`,
-//! `outline_style`, `outline_px`, `outline_px_stage`, `bpm_sync`,
-//! `stop_slow`, `movie_mode`, `custom_content`, `big_head`, plus the
-//! operator-set `outline_layer_colors` (re-emitted when present). All apply
-//! next song except `custom_content` (next launch) and `big_head` (live).
+//! `bpm_sync`, `stop_slow`, `movie_mode`, `custom_content`, `big_head`
+//! (the retired `outline_style` / `outline_px` / `outline_px_stage` /
+//! `outline_layer_colors` are logged as ignored and dropped by the next
+//! write). All apply next song except `custom_content` (next launch) and
+//! `big_head` (live).
 //! Legacy `shader_fixes.dancer_*` / `lit_models` seed `style` / `outlines`
 //! when absent.
 //!

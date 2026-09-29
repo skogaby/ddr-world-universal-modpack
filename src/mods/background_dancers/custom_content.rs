@@ -40,7 +40,8 @@
 
 use super::catalog::{label_for, split_key, MAX_LABEL_BYTES};
 use super::selection::{
-    dancer_candidates, stage_candidates, DancerCandidate, StageCandidate, PART_NAMES,
+    dancer_candidates, own_motion_from_members, stage_candidates, DancerCandidate, StageCandidate,
+    OWN_MOTION_DIR, PART_NAMES,
 };
 
 /// `(key, fields)` — the `core::anm::rlist::Row` shape, spelled locally so the
@@ -499,6 +500,8 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 }
             };
             let row = stock.next_dancer_row + out.dancers.len();
+            // Own choreography (D1): `motion/*.anm` inside the body folder/arc.
+            let motion = own_motion_from_members(&key, members);
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
@@ -509,7 +512,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             out.mounts
                 .push((format!("data/arc/{}", arc.name), arc.path.clone()));
             out.notes.push(format!(
-                "custom dancer {} ({}) from {} -- sex {} class {} scale {}/{}{}",
+                "custom dancer {} ({}) from {} -- sex {} class {} scale {}/{}{}, motion: {}",
                 label.as_deref().unwrap_or("<key rule>"),
                 key,
                 arc.source,
@@ -524,12 +527,21 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                     " (sidecar row)"
                 } else {
                     " (no sidecar row -- stock male defaults)"
+                },
+                if motion.is_empty() {
+                    "the stock pool of its sex".to_string()
+                } else {
+                    format!("{} own clip(s) in {OWN_MOTION_DIR}/", motion.len())
                 }
             ));
             if let Some(l) = label {
                 out.labels.push((key.clone(), l));
             }
-            out.dancers.push(DancerCandidate { row, ..cand });
+            out.dancers.push(DancerCandidate {
+                row,
+                motion,
+                ..cand
+            });
             dancer_keys.push(key.clone());
             accepted_here.push(key);
         }
@@ -1034,6 +1046,70 @@ mod tests {
             .collect();
         assert!(body_model_present("peter00", &b));
         assert!(!body_model_present("peter01", &b));
+    }
+
+    #[test]
+    fn own_motion_folder_becomes_the_candidates_pool() {
+        // The add-on export layout + a `motion/` subfolder (design 2026-09-28
+        // D1): the folder walk maps the clips next to the body's members.
+        let role = classify_folder_name("pl_umxlady00");
+        let mut members: Vec<String> = body_members("umxlady00")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for rel in [
+            "motion/lady_soul01.anm",
+            "motion\\hh01_m.anm",
+            "motion/notes.txt",
+        ] {
+            members.push(folder_member_path(&role, "pl_umxlady00", rel));
+        }
+        assert!(members.contains(&"data/chara/pl_umxlady00/motion/hh01_m.anm".to_string()));
+        let dir = PackDir {
+            dir: "./data_mods/custom_models/dancers/Ultramix Lady".into(),
+            folder: Some("Ultramix Lady".into()),
+            arcs: vec![ArcFile {
+                name: "pl_umxlady00.arc".into(),
+                path: "./data_mods/_cache/custom_models/pl_umxlady00-0.arc".into(),
+                source: "./data_mods/custom_models/dancers/Ultramix Lady/pl_umxlady00".into(),
+                members: Some(members),
+            }],
+            chara_rows: parse_text_rlist("umxlady00, pl, F, A, 1.0, 0.75, 0.0"),
+            ..Default::default()
+        };
+        // A stock-rig custom dancer in the same scan keeps the sex pool.
+        let peter = PackDir {
+            dir: "./data_mods/custom_models/dancers/Peter Griffin".into(),
+            folder: Some("Peter Griffin".into()),
+            arcs: vec![arc(
+                "pl_peter00.arc",
+                "./data_mods/custom_models/dancers/Peter Griffin",
+                Some(body_members("peter00")),
+            )],
+            ..Default::default()
+        };
+        let p = plan(&[dir, peter], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.dancers.len(), 2);
+        let lady = &p.dancers[0];
+        assert_eq!(lady.key, "umxlady00");
+        assert_eq!(lady.sex, Sex::Female);
+        assert_eq!(
+            lady.motion,
+            vec!["hh01_m".to_string(), "lady_soul01".to_string()]
+        );
+        assert_eq!(lady.motion_arc_name(), "pl_umxlady00.arc");
+        assert!(
+            p.notes[0].contains("2 own clip(s) in motion/"),
+            "{}",
+            p.notes[0]
+        );
+        assert!(p.dancers[1].motion.is_empty());
+        assert!(
+            p.notes[1].contains("the stock pool of its sex"),
+            "{}",
+            p.notes[1]
+        );
     }
 
     #[test]

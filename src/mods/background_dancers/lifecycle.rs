@@ -984,7 +984,7 @@ fn drive_live(w: &mut Window) {
     // decided here, when the parse lands: the operator's request gated on
     // what the synthesis actually serves this boot (a bit-31 twin against a
     // stock 4×(0,0,0) container would just draw the body twice). The hull
-    // plan (INK / LAYERED colours + width bands) is frozen per song.
+    // plan (DSU's one black hull) is frozen per song.
     let has_built = w.scene.drive_assets(|pick, parsed, requested_at| {
         let eff = super::style::effective();
         let hulls = super::style::hull_plan(&eff);

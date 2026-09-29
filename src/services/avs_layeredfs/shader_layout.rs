@@ -47,10 +47,11 @@ pub const MODEL_PROGRAM_ENTRIES: u8 = 4;
 pub const MODEL_HULL_PROGRAM_INDEX: u8 = 0;
 
 /// How the 3D scene's models are shaded (`background_dancers.style`).
-/// `Stock` re-points nothing (the engine's own shaders — unlit). `Lit` and
-/// `Cel` share ONE fixed world-space key light; `Lit` applies it smoothly per
-/// vertex, `Cel` quantizes the same N·L into bands per pixel and adds rim ink
-/// (+ the hull outlines when enabled) — there is no "stock light + cel".
+/// `Stock` re-points nothing (the engine's own shaders — unlit). `Lit`
+/// applies a fixed world-space key light smoothly per vertex; `Cel` is
+/// Dancing Stage Unleashed's toon shading (its 2-band `toon.tga` ramp on
+/// per-vertex N·L under its default light, `shaders/src/mdl_cel.hlsl`), plus
+/// DSU's black hull outlines when enabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SceneStyle {
     Stock,

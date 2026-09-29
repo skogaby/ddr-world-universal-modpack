@@ -176,11 +176,41 @@ pub struct DancerCandidate {
     pub class: String,
     pub model_scale: f32,
     pub shadow_scale: f32,
+    /// The dancer's OWN choreography: clip stems of the body arc's
+    /// `data/chara/pl_<key>/motion/<stem>.anm` members, sorted (custom
+    /// dancers ported with their original rig — design 2026-09-28 D1). Empty
+    /// = the stock pool of `sex` from `mc_<sex>.arc` (every stock dancer).
+    pub motion: Vec<String>,
 }
+
+/// The body-folder subdirectory holding a dancer's own clips.
+pub const OWN_MOTION_DIR: &str = "motion";
 
 impl DancerCandidate {
     pub fn body_arc_name(&self) -> String {
         format!("pl_{}.arc", self.key)
+    }
+    /// Plays its own clips (from its body arc) instead of the sex pool.
+    pub fn has_own_motion(&self) -> bool {
+        !self.motion.is_empty()
+    }
+    /// The arc file its clips live in: the body arc for own motion, else
+    /// `mc_<sex>.arc`.
+    pub fn motion_arc_name(&self) -> String {
+        if self.has_own_motion() {
+            self.body_arc_name()
+        } else {
+            format!("{}.arc", self.sex.arc_stem())
+        }
+    }
+    /// Arc member path of one of its playlist clips (a name from
+    /// [`playlist_for`]).
+    pub fn clip_member(&self, clip: &str) -> String {
+        if self.has_own_motion() {
+            own_clip_member_path(&self.key, clip)
+        } else {
+            clip_member_path(self.sex, clip)
+        }
     }
     pub fn body_model_name(&self) -> String {
         format!("pl_{}", self.key)
@@ -379,6 +409,7 @@ pub fn dancer_candidates(
             class: fields[2].trim().to_string(),
             model_scale,
             shadow_scale,
+            motion: Vec::new(),
         });
     }
     out
@@ -408,9 +439,46 @@ pub fn playlist(rng: &mut Rng, sex: Sex) -> Vec<String> {
         .collect()
 }
 
+/// A dancer's playlist: its own clips shuffled when it has them (one
+/// shuffle — the same rng draw count as the stock path, so every other
+/// element of a pick draws identically), else [`playlist`] of its sex.
+pub fn playlist_for(rng: &mut Rng, dancer: &DancerCandidate) -> Vec<String> {
+    if !dancer.has_own_motion() {
+        return playlist(rng, dancer.sex);
+    }
+    let mut names = dancer.motion.clone();
+    rng.shuffle(&mut names);
+    names
+}
+
 /// Arc member path of a choreography clip: `data/chara/mc_<sex>/<clip>.anm`.
 pub fn clip_member_path(sex: Sex, clip: &str) -> String {
     format!("data/chara/{}/{}.anm", sex.arc_stem(), clip)
+}
+
+/// Arc member path of a dancer's OWN clip:
+/// `data/chara/pl_<key>/motion/<clip>.anm`.
+pub fn own_clip_member_path(key: &str, clip: &str) -> String {
+    format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{clip}.anm")
+}
+
+/// The own-motion clip stems among an arc's members for body `key`
+/// (`data/chara/pl_<key>/motion/<stem>.anm`, case-sensitive, direct
+/// children only), sorted and deduplicated. Empty ⇒ the dancer uses the
+/// stock pool of its sex.
+pub fn own_motion_from_members(key: &str, members: &[String]) -> Vec<String> {
+    let prefix = format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/");
+    let mut out: Vec<String> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".anm"))
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The stage-mode camera lists: names containing `_non` are the cut-away
@@ -1022,6 +1090,82 @@ mod tests {
             clip_member_path(Sex::Female, "mc_female_sf01_exec"),
             "data/chara/mc_female/mc_female_sf01_exec.anm"
         );
+    }
+
+    fn own_motion_dancer(motion: &[&str]) -> DancerCandidate {
+        DancerCandidate {
+            key: "umxafro00".into(),
+            row: 40,
+            sex: Sex::Male,
+            class: "A".into(),
+            model_scale: 1.0,
+            shadow_scale: 0.8,
+            motion: motion.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn own_motion_members_are_direct_anm_children_sorted() {
+        let members: Vec<String> = [
+            "data/chara/pl_umxafro00/pl_umxafro00.model",
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/brk02_m_t7.anm",
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/deeper/x.anm",
+            "data/chara/pl_umxafro00/motion/readme.txt",
+            "data/chara/pl_umxafro00/motion/.anm",
+            "data/chara/pl_other00/motion/hh01_m.anm",
+            "data/chara/pl_umxafro00/ht02_m.anm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            own_motion_from_members("umxafro00", &members),
+            vec!["brk02_m_t7".to_string(), "ht01_m".to_string()]
+        );
+        assert!(own_motion_from_members("nobody00", &members).is_empty());
+    }
+
+    #[test]
+    fn own_motion_routes_arc_member_and_playlist() {
+        let stock = DancerCandidate {
+            motion: vec![],
+            ..own_motion_dancer(&[])
+        };
+        assert!(!stock.has_own_motion());
+        assert_eq!(stock.motion_arc_name(), "mc_male.arc");
+        assert_eq!(
+            stock.clip_member("mc_male_hh01_exec"),
+            "data/chara/mc_male/mc_male_hh01_exec.anm"
+        );
+        // A stock candidate's playlist is exactly the sex playlist.
+        assert_eq!(
+            playlist_for(&mut Rng::new(7), &stock),
+            playlist(&mut Rng::new(7), Sex::Male)
+        );
+
+        let own = own_motion_dancer(&["a_m", "b_m", "c_m", "d_m", "e_m"]);
+        assert!(own.has_own_motion());
+        assert_eq!(own.motion_arc_name(), "pl_umxafro00.arc");
+        assert_eq!(
+            own.clip_member("b_m"),
+            "data/chara/pl_umxafro00/motion/b_m.anm"
+        );
+        let a = playlist_for(&mut Rng::new(7), &own);
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(sorted, own.motion, "a permutation of the own pool");
+        assert_eq!(playlist_for(&mut Rng::new(7), &own), a, "seeded");
+        assert_ne!(playlist_for(&mut Rng::new(8), &own), a);
+        // Exactly one shuffle either way: the rng is left in the same state
+        // as after the stock path's shuffle of a pool of the same length.
+        let mut r1 = Rng::new(99);
+        let _ = playlist_for(&mut r1, &own);
+        let mut r2 = Rng::new(99);
+        let mut five = vec![0, 1, 2, 3, 4];
+        r2.shuffle(&mut five);
+        assert_eq!(r1.below(1000), r2.below(1000));
     }
 
     #[test]
