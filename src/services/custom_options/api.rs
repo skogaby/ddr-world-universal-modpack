@@ -412,7 +412,11 @@ pub type OnChangeFn = fn(player_side: u8, new_value: i32);
 /// `seop_item_<id>`; mods ship the matching PNG at
 /// `data_mods/custom_options/select_music_option_lang_eng_v3_ifs/tex/seop_item_<id>.png`
 /// and the framework automatically clones the stock option-row atlas to
-/// include the new texture.
+/// include the new texture. A row may instead BORROW another row's textures
+/// through [`label_texture_like`](Self::label_texture_like) /
+/// [`preview_texture_like`](Self::preview_texture_like) — runtime-named
+/// sibling rows (one per discovered content source) then share one shipped
+/// label PNG and one preview chrome.
 #[derive(Debug, Clone)]
 pub struct RegisterSpec {
     /// Stable identifier for this option. Used as the kbin element-name
@@ -466,6 +470,16 @@ pub struct RegisterSpec {
     /// One-line description shown in the overlay's footer while the row is
     /// selected. `None` falls back to empty.
     pub description: Option<&'static str>,
+
+    /// Render the row label from ANOTHER option's texture (`seop_item_<alias>`)
+    /// instead of `seop_item_<id>`. `None` = this row's own. The alias is an
+    /// option id (or any stem a shipped `seop_item_*.png` exists for).
+    pub label_texture_like: Option<&'static str>,
+
+    /// Draw the preview-box chrome from ANOTHER option's textures
+    /// (`seop_image_<alias>` and, for enum values with a preview key,
+    /// `seop_image_<alias>_<key>`) instead of this id's. `None` = own.
+    pub preview_texture_like: Option<&'static str>,
 }
 
 impl RegisterSpec {
@@ -504,6 +518,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -531,6 +547,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -565,6 +583,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -592,6 +612,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -708,6 +730,21 @@ impl RegisterSpec {
     /// Set the one-line footer description for the overlay menu.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = Some(description);
+        self
+    }
+
+    /// Render this row's label from `seop_item_<alias>` instead of its own
+    /// id-derived texture (see [`RegisterSpec::label_texture_like`]).
+    pub fn label_texture_like(mut self, alias: &'static str) -> Self {
+        self.label_texture_like = Some(alias);
+        self
+    }
+
+    /// Draw this row's preview chrome from `seop_image_<alias>` (and
+    /// `seop_image_<alias>_<key>` for keyed enum values) instead of its own
+    /// (see [`RegisterSpec::preview_texture_like`]).
+    pub fn preview_texture_like(mut self, alias: &'static str) -> Self {
+        self.preview_texture_like = Some(alias);
         self
     }
 }

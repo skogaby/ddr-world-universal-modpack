@@ -389,6 +389,102 @@ DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --fact
   --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~6 min for 45
 ```
 
+### A DDR SuperNova (PS2) dancer (`examples/port_character_supernova.py`)
+
+SuperNova's eight dancers (AFRO, BABYLON, EMI, GUS, JENNY, RAGE, ROBOZUKIN, RUBY) are a new,
+XSI-exported engine: skinned strip meshes with up to three weights per vertex on a 22-joint
+HumanIK-named skeleton, and 30 Hz quaternion routines. Decoders and the World-space math are in
+`scripts/tzm_dump.py`; formats and RE in `docs/ps2_ddr_filedata_research.md` §7.4. Ported
+2026-09-30 and round-trip previewed (all eight re-import and render, rest and mid-clip); not yet
+cabinet-tested. Staged as one folder per character (`Afro`, `Baby-Lon`, `Emi`, `Gus`, `Jenny`,
+`Rage`, `Robo-Zukin`, `Ruby`; keys `sn<name>00`) under `OUT_BASE` (default `~/Desktop/SuperNova
+Dancers`, not `data_mods/custom_models/` while that layout is being reworked).
+
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract supernova_jp <disc>
+  <out>` (`SN_DIR`): `files/IMAGE/model/chara/skin/<name>.TZM` and `chara/motion/<clip>.TZM`.
+* **Rig.** The TZM's own bones, bind = the file's GLOBAL bind pose (`T2`, `R2`), in game space
+  through one scale (`tzm_dump.GAME_SCALE` = 0.970 / 9.655: the Hip at World's Hips height; the
+  TZM frame already faces +Z with its left at +X, so no mirror). BABYLON's `SCALE` node (0.6) is
+  folded into that scale and dropped. The exported rest pose is the T-pose lifted onto the floor.
+* **Mesh.** Every mesh of every object joined into one, object transforms applied (AFRO's muffler
+  is authored in its own frame), the file's normals via `ddr_normal`, strip winding made
+  consistent with the normals (the GS never culled, so the strips face either way), the 512² CLUT
+  sheet as `sn<name>_tex`. Vertex colours are kept where a mesh has them: GUS's 60 %-alpha glasses
+  go to a second, alpha-blended material slot (`MESH_FLAG_TRANSPARENT`).
+* **Clips.** The character's OWN routine list from the ELF character table (AFRO jazz + soul-funk,
+  RAGE break + hip-hop + house, ...; the 4 s `*_NE_01` idles are left out), one `.anm` per
+  routine, 30 Hz keys on even frames of the 60 fps timeline (the clips are authored at 120 BPM
+  like World's — `MM_NE_01` is 241 frames, `mc_*_ne01_loop` 242). Each clip is checked against
+  the TZM pose (< 0.15 mm per joint). Role aliases `Hips` / `LeftToeBase` / `RightToeBase` →
+  `Hip` / `LeftToes` / `RightToes` (`Spine2` and `Head` are named alike).
+* **Sidecar.** `sn<name>00, pl, <sex>, A, 1.0, <0.75 F / 0.8 M>, 0.0`; the sex is the table's.
+
+```bash
+DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~25 s for 8
+```
+
+### The DDR SuperNova (PS2) stages (`examples/port_stage_supernova.py`)
+
+SuperNova's 20 stages (+ `system_bg001`) are XSI scenes: objects grouped under blend-layer roots
+(`dec` opaque, `add` additive, `sub` subtractive, `glo` glow, `ble` alpha), coloured strip meshes
+(format 0x152), a `stageNNN` MOTION record with SRT tracks on the animated parts (a 4 s / 8-beat
+loop at 60 fps, 8 s at 29.97) and material fcurves, and a `cameraNNN` record with ten shots + a
+neutral one. World's own stage parts carry the same layer names (`gm_dawnstreet00_{dec,ble,glo}` —
+`dawnstreet00` is DDR X's `st005`), so one layer becomes one part with the stock flag conventions.
+Ported 2026-09-30 (geometry, object loops, material animation, cameras) and round-trip previewed
+(every part re-imports; the Workbench render shows the additive layers opaque); not yet
+cabinet-tested.
+Staged as `SN Stage 01` .. `SN Stage 20` + `SN System BG` (keys `snstage001`..) under `OUT_BASE`
+(default `~/Desktop/SuperNova Stages`).
+
+* **Parts / flags.** `bg` (the skydome subtree of `dec`, `:-2`) and `dec` two-sided opaque
+  `0x0001`; `ble` alpha `0x02C1` (`:-1`); `add` additive `0x06C1` + `flags2 4`; `sub` subtractive
+  `0x06C1` + `flags2 8`; `glo` = an opaque copy with the `_t` sheet PLUS an additive copy with the
+  `_g` glow sheet. Two-sided everywhere because the GS never culled. Vertex RGBA colours are kept
+  (`_vc`), the MATERIALLIST maps each mesh's (0x18-byte, truncated) material name to its textures.
+* **Rig / loop.** Per part a `root` bone plus one FLAT bone per animated object (a mesh's anchor
+  is its deepest animated ancestor; the static sub-chain is baked into the vertices; bind = the
+  rigid part of the anchor's rest world; a zero rest scale — flattened decals — is baked too).
+  `gm_<key>_<part>_play_loop.anm` (loop bit) carries q / t / relative scale per key with a wrap
+  key, checked against the TZM object worlds (rotation < 3e-4, translation < 1e-4 relative). Flat
+  bones side-step World's segment-scale compensation.
+* **Foot panel.** `model/footpanel.TZM`'s unlit `ftpnl` mesh as `footpanel` (texture
+  `snfootpanel`); its arrow layout matches the stock `gm_boom00_footpanel`.
+* **Material animation.** The `stageNNN` record's material fcurves (`tzm_dump.material_animation`:
+  kind 503 texture translation, 504 colour, 1302 glow strength — RE doc §7.4) become one
+  `gm_<key>_<part>_play_loop.sanm` per part in World's own material-clip layout (`anm_dump.write_anm`
+  `material_tracks` / `material_targets`, format doc §7): one kind-8 key per record frame plus a
+  wrap key, on parameter floats 2 / 3 (`m_vTexAnime` offU / offV — the `_uvani` conveyors, water and
+  light strips scroll), 4..6 (`vConstatntColor` rgb: the 504 pulse on the base pass, the 1302 glow
+  on the `_g` additive copy). Materials driven on 4..6 are exported with `mdl_ch_constant_c_vc` and
+  their frame-0 values in `ddr_params` (`mat["ddr_sn_material"]` / `["ddr_sn_pass"]` record the
+  source). The hook DLL samples the `.sanm` on the stage clock into the part's private material
+  copies (`src/core/anm/sanm.rs`); without that build the model shows the frame-0 state.
+* **Cameras.** Each camera record's `Camera_001..010` → `camera/<key>_st01..10.camanm` (the
+  director's main rotation), `Camera_neu` → `<key>_non01`, and — `CHARA_CAMERAS=1` (default) — the
+  shared `stage_chara_camera.TZM` close-ups → `_non02..11` (`tzm_dump.camera_to_camanm_spec`): one key
+  per record frame at 60 fps (`60 / fps` apart: 4 s clips, 8 s for the 29.97 fps stages), position
+  × `GAME_SCALE` in cm, the look-at orientation with roll, near 0.1 / far 32768 / aspect 1.333, and
+  the FOV through the inverse of the game's projection. SuperNova's kind-7 FOV is XSI's HORIZONTAL
+  angle of the 4:3 frame (0.93616 rad = 53.638°, XSI's default — and exactly A3's stock 41.53°
+  vertical at 1.333); `FOV_KEEP=vertical` (default) keeps that vertical extent on 16:9 (game hFOV
+  68°: what SuperNova showed top to bottom stays in frame, the sides widen), `horizontal` keeps the
+  horizontal extent (top / bottom cropped). Static shots collapse to single keys. With `PREVIEW=1`
+  the stage and a ported dancer (`PREVIEW_DANCER`, default the DDR SuperNova Afro under
+  `data_mods/custom_models/`) are rendered through the written clips as the game projects them
+  (`import_anm.load_camanm`): `<key>_cam_non01_f0.png`, `<key>_cam_st01..03_f<mid>.png`.
+* **Sidecar** `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1,
+  footpanel` (present parts).
+* **Not ported:** the `_conf.PTF` lighting; the material diffuse colour (0.7 grey on 19 materials —
+  whether SuperNova multiplies it into the draw is untraced); a texture scale / rotation fcurve
+  would be reported as UNSUPPORTED (none exist).
+
+```bash
+STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~40 s for 21
+```
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

@@ -267,6 +267,18 @@ LABELS = {
         "ja": '背景ステージ',
         "ko": '배경 스테이지',
     },
+    # Background Dancers custom-content SOURCE rows (2026-09-30): which set
+    # the model row above picks from (RANDOM / STOCK / one custom source).
+    "background_dancer_source": {
+        "en": 'DANCER SOURCE',
+        "ja": '背景ダンサーソース',
+        "ko": '배경 댄서 소스',
+    },
+    "background_stage_source": {
+        "en": 'STAGE SOURCE',
+        "ja": '背景ステージソース',
+        "ko": '배경 스테이지 소스',
+    },
     "ddr_selection": {
         "en": 'DDR SELECTION',
         "ja": 'DDR SELECTION',

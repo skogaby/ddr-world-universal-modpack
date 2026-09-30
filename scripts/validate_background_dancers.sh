@@ -36,6 +36,10 @@
 #   2026-09-22 mods/background_dancers/custom_content.rs (custom dancers/stages from data_mods: arc-name classification,
 #                                                    folder/key labels, text-rlist grammar, defaults, the planner;
 #                                                    reaches selection + catalog via `super::`)
+#   2026-09-30 mods/background_dancers/sources.rs (custom-content SOURCES: slug / label / implicit CUSTOM,
+#                                                    directory roles, option-row ids; reaches custom_content via `super::`)
+#   2026-09-30 mods/background_dancers/options_logic.rs (the source / model rows' pure decisions: row table,
+#                                                    Request mapping, preview key, bounds, labels; reaches catalog + sources)
 #   2026-09-22 mods/background_dancers/movie_mode.rs (Background Movies: OFF / THUMBNAIL / STAGE SCREENS / FULLSCREEN — movie-size
 #                                                    override table, fullscreen-backdrop classification, scene mask;
 #                                                    2026-09-23: degrade/window-mode rules, the `offscreen1.dds`
@@ -61,7 +65,7 @@ note() { echo "[*] $*"; }
 # module name -> repo-relative source path. Names must be unique. Only
 # dependency-free modules can mount here (engine-facing files stay
 # cabinet-validated).
-declare -a MODULE_NAMES=(scene3d_pure scene3d_render_item_layout scene3d_node_layout scene3d_frame_board scene3d_camera_math scene3d_viewport_pass_layout anm selection schedule director_math clock tempo outline catalog pick instance_plan preview_layout preview_state custom_content movie_mode movie_camera)
+declare -a MODULE_NAMES=(scene3d_pure scene3d_render_item_layout scene3d_node_layout scene3d_frame_board scene3d_camera_math scene3d_viewport_pass_layout anm selection schedule director_math clock tempo outline catalog pick instance_plan preview_layout preview_state custom_content sources options_logic movie_mode movie_camera)
 declare -a MODULE_PATHS=(
   "src/services/scene3d/pure.rs"
   "src/services/scene3d/render_item_layout.rs"
@@ -82,6 +86,8 @@ declare -a MODULE_PATHS=(
   "src/mods/background_dancers/preview/layout.rs"
   "src/mods/background_dancers/preview/state.rs"
   "src/mods/background_dancers/custom_content.rs"
+  "src/mods/background_dancers/sources.rs"
+  "src/mods/background_dancers/options_logic.rs"
   "src/mods/background_dancers/movie_mode.rs"
   "src/mods/background_dancers/movie_camera.rs"
 )

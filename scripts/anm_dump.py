@@ -183,7 +183,8 @@ def parse_anm(data: bytes) -> dict:
             C["names"] = [decode6(r.u64(co + 8 + 8 * i)) for i in range(C["h4"])]
         elif typ == 15:
             C["entries"] = [dict(identity=r.u64(co + 8 + 32 * i), name=decode6(r.u64(co + 8 + 32 * i)),
-                                 identity2=r.u64(co + 16 + 32 * i), u32=r.u32(co + 24 + 32 * i))
+                                 identity2=r.u64(co + 16 + 32 * i), u32=r.u32(co + 24 + 32 * i),
+                                 flags=r.u32(co + 28 + 32 * i))
                             for i in range(C["h4"])]
         chunks.append(C)
     return dict(header=hdr, chunks=chunks, data=data)
@@ -312,8 +313,16 @@ def write_anm(spec):
         hierarchy=[parent_or_-1, ...],    # optional -> type-1 chunk (skeletal files)
         tracks=[track, ...],              # optional -> type-0 chunk (bone tracks, target = bone index)
         camera=[track|None]*6,            # optional -> type-4 chunk (slots 0..5)
+        material_tracks=[track, ...],     # optional -> type-14 chunk (.sanm: kind-8 floats, target =
+                                          #   index into material_targets, sub = float index 0..31
+                                          #   of the material's parameters block, doc §3.7 / §7)
+        material_targets=[dict(identity=u64, identity2=u64, hash=u32, flags=u32), ...],
+                                          # optional -> type-15 chunk (32-byte entries; the
+                                          #   .model material identity, the shading group's,
+                                          #   FNV-1 of the shader name, 0x2000 in stock files)
     )
     track = dict(kind, target, sub=0, times=None|[frame,...], keys=[tuple,...], base=None)
+    A .sanm = header (fps 60, +0xC 1) + a type-14 and a type-15 chunk (stock chunk order).
     """
     chunks = []  # list of (builder(abs_off) -> bytes)
     if spec.get("hierarchy") is not None:
@@ -346,6 +355,27 @@ def write_anm(spec):
             rel = [(next(it) - off) if t is not None else 0 for t in slots]
             return struct.pack("<IHH", CHUNK_BASE + 4, 0, 0) + struct.pack("<6I", *rel) + blob
         chunks.append(build_c)
+    if spec.get("material_tracks") is not None:
+        mtracks = spec["material_tracks"]
+
+        def build_m(off, tracks=mtracks):
+            # the offset list is padded so the first track (and, each being 16-byte padded,
+            # every track's times / values) sits 16-byte aligned in the FILE like stock .sanm
+            list_len = _align(off + 8 + 4 * (len(tracks) + 1)) - off
+            blob, offs = _layout_tracks(tracks, off + list_len)
+            head = struct.pack("<IHH", CHUNK_BASE + 14, 0, 0) + struct.pack("<%dI" % len(offs), *(o - off for o in offs))
+            head += b"\0" * (list_len - len(head))
+            return head + blob
+        chunks.append(build_m)
+    if spec.get("material_targets") is not None:
+        targets = spec["material_targets"]
+
+        def build_mt(off, targets=targets):
+            body = struct.pack("<IHH", CHUNK_BASE + 15, len(targets), 0)
+            for e in targets:
+                body += struct.pack("<QQIIQ", e["identity"], e.get("identity2", 0), e.get("hash", 0), e.get("flags", 0x2000), 0)
+            return body
+        chunks.append(build_mt)
     if not chunks:
         raise ValueError("nothing to write")
 
@@ -370,8 +400,8 @@ def anm_to_spec(parsed):
     """Rebuild a write_anm spec from a parsed file (decoded keys, kinds/times kept)."""
     data = parsed["data"]
     hdr = parsed["header"]
-    has_camera = any(c["type"] == 4 for c in parsed["chunks"])
-    spec = dict(frame_count=hdr["frame_count"], flag=hdr["flag"], fps=hdr["fps_or_one"] if has_camera else None)
+    has_fps = any(c["type"] in (4, 14) for c in parsed["chunks"])
+    spec = dict(frame_count=hdr["frame_count"], flag=hdr["flag"], fps=hdr["fps_or_one"] if has_fps else None)
 
     def conv(T):
         t: dict = dict(kind=T["kind"], target=T["target"], sub=T["sub"], tag=T["f2"], times=T["times"],
@@ -387,6 +417,12 @@ def anm_to_spec(parsed):
             spec["tracks"] = [conv(T) for T in c["tracks"]]
         elif c["type"] == 4:
             spec["camera"] = [conv(T) if T else None for T in c["tracks"]]
+        elif c["type"] == 14:
+            spec["material_tracks"] = [conv(T) for T in c["tracks"]]
+            spec["fps"] = hdr["fps_or_one"]
+        elif c["type"] == 15:
+            spec["material_targets"] = [dict(identity=e["identity"], identity2=e["identity2"], hash=e["u32"], flags=e["flags"])
+                                        for e in c["entries"]]
     return spec
 
 
@@ -484,6 +520,20 @@ def evaluate_pose(anm, frame, parents):
             world[i] = _mul(local, world[par])
         p["world"] = world[i]
     return pose
+
+
+def evaluate_materials(anm, frame):
+    """The `.sanm` material parameters at `frame`: {material slot: {float index: value}} over the
+    type-14 tracks (target = slot into the type-15 list, sub = index into the 32-float
+    parameters block), sampled like the bone tracks. The reference for the DLL's evaluator."""
+    data = anm["data"]
+    out: dict = {}
+    for C in anm["chunks"]:
+        if C["type"] != 14:
+            continue
+        for T in C["tracks"]:
+            out.setdefault(T["target"], {})[T["sub"]] = sample_track(data, T, frame)[0]
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -1582,3 +1582,52 @@ Only the VERSION builder builds one, but its construction is a short fixed seque
 (`filter_header_alloc`: `operator new(0xF8)`, Component ctor, two vtables, field inits,
 `children.push_back`, `+0x60` = grid) that a builder detour can replay —
 `improved_song_title_sorting/hooks.rs::push_row_break`.
+
+## A pack's decoded offsets may count the chunk header you stripped; node kinds can share a record and differ in the links (2026-09-30)
+
+SuperNova's `.TZM` MODEL / MOTION offsets are relative to the chunk WITH its header
+(0x30 / 8 bytes) in front of the decompressed data — every section landed 0x30
+"inside" its first record until the header size was subtracted, which is what made
+the 0xD0 node record look name-last and conjured a 23rd unnamed bone that overran the
+file by 0x50. When a layout hypothesis leaves a record straddling EOF, shift the base,
+don't invent a field. The same 0xD0 record serves objects and joints but its
+`links[8]` differ: joints `{parent, first_child, next_sibling, prev_sibling, 0, 3,
+0, 0}`, objects `{mesh_slot, 0x80000000, parent, first_child, next_sibling,
+prev_sibling, 0, 0}` — reading the joint layout on objects gave a plausible-looking
+chain (each object "parented" to the previous) that only the stages exposed. Verify
+a hierarchy read against geometry (a rotated part must land where the art needs it),
+not against whether the indices look sane. And a uniform `SCALE` node folded into the
+unit scale must be dropped from the world composition too, or it applies twice
+(`tzm_dump.unscaled_bones`): the check that catches it is a clip re-evaluation
+against the source pose, which the port runs on every clip.
+
+## An fcurve key's "zero" float is an int; a camera FOV is only a number until you know its axis (2026-09-30)
+
+SuperNova's MOTION fcurve keys (`flag 3`, 7 floats) carry the interpolation TYPE in the
+4th slot as a raw u32 (1 linear, 2 Bezier) — printed as a float it is `1.4e-45` and
+rounds to 0, which made the whole slot look like padding. Any "always 0" float in a
+record of otherwise sensible floats deserves a `view(uint32)` before it is declared
+unused (`tzm_dump.fcurve_interpolation`). The binder that settled it was found by
+searching the ELF for the track KIND constants (`li v0,0x516`), not the key layout.
+Likewise the camera's kind-7 "FOV 0.936 rad" only became actionable once its axis was
+pinned: 0.93616 = 53.638° = XSI's default (HORIZONTAL) camera FOV, and exactly the
+horizontal angle of A3's stock Maya cameras (41.53° vertical at aspect 1.333) — two
+independent tools agreeing on one number is the evidence, not the value itself. For a
+16:9 port keep the VERTICAL extent; World's camanm recipe then yields a legitimately
+NEGATIVE slot-2 degrees for game hFOVs past 90° (`atan2` handles it in the game, the
+DLL and the add-on alike) — don't "fix" the sign.
+
+## World's `.sanm` is alive in the DLL now; its tracks are packed but file-aligned (2026-09-30)
+
+The engine never played `*_play_loop.sanm` (registry collision, format doc §8), but the
+data in the stock arcs is real: `gm_boom00_bg` scrolls its sky, `gm_dawnstreet00_glo`
+pulses its `_c` glow. The Background Dancers director now samples a part's `.sanm` on
+the stage clock into the item's private material copies (`core::anm::sanm`, frame-board
+material lane, `render_item::set_material_params_raw`), so those stock effects PLAY as
+well as the SuperNova port's — a fidelity change to stock stages worth knowing when a
+sky or glow "suddenly moves". Writer trap: the stock type-14 chunk pads its offset list
+so every track's times / values sit 16-byte aligned in the FILE while the tracks
+themselves are packed back to back; `anm_dump._layout_tracks`'s relative alignment only
+matches when the first track starts aligned (`write_anm` pads the list for that).
+Anything that reads material copies per frame must not `is_readable`-probe (a
+VirtualQuery per part per frame); the resource header was probed at build.

@@ -579,6 +579,9 @@ pub enum PickSource {
     /// The plain random path.
     #[default]
     Random,
+    /// A random draw WITHIN the source the DANCER SOURCE / STAGE SOURCE row
+    /// names (2026-09-30).
+    Source,
     /// The BACKGROUND DANCER / BACKGROUND STAGE option row.
     Option,
     /// The developer `DDR_DANCERS_PIN`.
@@ -589,34 +592,54 @@ impl PickSource {
     pub fn tag(self) -> &'static str {
         match self {
             PickSource::Random => "random",
+            PickSource::Source => "source",
             PickSource::Option => "option",
             PickSource::Pin => "pin",
         }
     }
 }
 
-/// Resolve the BACKGROUND STAGE / BACKGROUND DANCER row choices into
-/// candidates (design §4.3). `stage_key = Some(k)` ⇒ uniform over the rows
-/// with key `k` (a stage with two rlist rows shows either, like
-/// [`pick_stage`]'s second draw); `None` ⇒ [`pick_stage`]. `dancer_keys[i]`
-/// (one per entered side, in entered order) `Some(k)` ⇒ that candidate,
-/// `None` ⇒ one uniform pick. An unknown key anywhere ⇒ `None` (the caller
-/// WARNs and retries with that element cleared); empty `dancer_keys` or empty
-/// tables ⇒ `None`. With every element `None` the draws are exactly
-/// `pick_stage` followed by `pick_dancers`, so RANDOM reproduces the plain
-/// random path under the same seed.
+/// One element of a pick request: an explicit stage key, or a random draw
+/// from an explicit pool of rows (the global screen-rule pool, or one
+/// source's rows — design 2026-09-30 §4.6).
+#[derive(Debug, Clone, Copy)]
+pub enum StageChoice<'a> {
+    Key(&'a str),
+    Random(&'a [StageCandidate]),
+}
+
+/// One dancer slot of a pick request: an explicit key, or a random draw from
+/// an explicit pool (every dancer, or one source's).
+#[derive(Debug, Clone, Copy)]
+pub enum DancerChoice<'a> {
+    Key(&'a str),
+    Random(&'a [DancerCandidate]),
+}
+
+/// Resolve the option rows' request into candidates (design §4.3 / 2026-09-30
+/// §4.6). `StageChoice::Key(k)` ⇒ uniform over the rows with key `k` in the
+/// FULL `stages` table (a stage with two rlist rows shows either, like
+/// [`pick_stage`]'s second draw); `Random(pool)` ⇒ [`pick_stage`] over the
+/// pool. `dancer_choices[i]` (one per entered side, in entered order):
+/// `Key(k)` ⇒ that candidate from the full `dancers` table, `Random(pool)` ⇒
+/// one uniform draw over the pool. An unknown key or an empty pool anywhere
+/// ⇒ `None` (the caller WARNs and retries with that element cleared); empty
+/// `dancer_choices` or empty tables ⇒ `None`. With `Random(&stages)` and
+/// `Random(&dancers)` everywhere the draws are exactly `pick_stage` followed
+/// by `pick_dancers`, so RANDOM reproduces the plain random path under the
+/// same seed.
 pub fn resolve_choice(
     rng: &mut Rng,
     stages: &[StageCandidate],
     dancers: &[DancerCandidate],
-    stage_key: Option<&str>,
-    dancer_keys: &[Option<&str>],
+    stage: StageChoice,
+    dancer_choices: &[DancerChoice],
 ) -> Option<(StageCandidate, Vec<DancerCandidate>)> {
-    if dancer_keys.is_empty() || dancers.is_empty() {
+    if dancer_choices.is_empty() || dancers.is_empty() {
         return None;
     }
-    let stage = match stage_key {
-        Some(key) => {
+    let stage = match stage {
+        StageChoice::Key(key) => {
             let rows: Vec<&StageCandidate> = stages.iter().filter(|s| s.key == key).collect();
             if rows.is_empty() {
                 return None;
@@ -624,16 +647,50 @@ pub fn resolve_choice(
             let i = rng.below(rows.len() as u32) as usize;
             (*rows.get(i)?).clone()
         }
-        None => pick_stage(rng, stages)?.clone(),
+        StageChoice::Random(pool) => pick_stage(rng, pool)?.clone(),
     };
-    let mut picked = Vec::with_capacity(dancer_keys.len());
-    for key in dancer_keys {
-        match key {
-            Some(k) => picked.push(dancers.iter().find(|d| &d.key == k)?.clone()),
-            None => picked.push(dancers[rng.below(dancers.len() as u32) as usize].clone()),
+    let mut picked = Vec::with_capacity(dancer_choices.len());
+    for choice in dancer_choices {
+        match choice {
+            DancerChoice::Key(k) => picked.push(dancers.iter().find(|d| d.key == *k)?.clone()),
+            DancerChoice::Random(pool) => {
+                if pool.is_empty() {
+                    return None;
+                }
+                picked.push(pool[rng.below(pool.len() as u32) as usize].clone());
+            }
         }
     }
     Some((stage, picked))
+}
+
+/// The within-source RANDOM stage pool (2026-09-30 §4.6 / R17): the rows of
+/// `stages` whose key is in `keys` (table order), run through the caller's
+/// screen rule like the global pool — `All` / `Filtered` / `NoneLeft` are
+/// RELATIVE TO THE SOURCE. Returns the source's rows alongside so a
+/// `NoneLeft` draw falls back to the whole SOURCE, never the whole table.
+pub fn source_stage_pool(
+    stages: &[StageCandidate],
+    keys: &[String],
+    keep: impl Fn(&str) -> bool,
+) -> (Vec<StageCandidate>, StagePool) {
+    let subset: Vec<StageCandidate> = stages
+        .iter()
+        .filter(|s| keys.iter().any(|k| *k == s.key))
+        .cloned()
+        .collect();
+    let pool = random_stage_pool(&subset, keep);
+    (subset, pool)
+}
+
+/// The within-source RANDOM dancer pool: the candidates whose key is in
+/// `keys`, in table order (unknown keys ignored).
+pub fn source_dancer_pool(dancers: &[DancerCandidate], keys: &[String]) -> Vec<DancerCandidate> {
+    dancers
+        .iter()
+        .filter(|d| keys.iter().any(|k| *k == d.key))
+        .cloned()
+        .collect()
 }
 
 /// Test fixtures shared with the sibling pure modules (`catalog.rs` mounts
@@ -1284,6 +1341,8 @@ mod tests {
         let stages = stage_candidates(&real_map_rows(), |_| true);
         let dancers = dancer_candidates(&real_chara_rows(), |_| true);
         assert_eq!(dancers.len(), 26);
+        let any_stage = StageChoice::Random(&stages);
+        let any_dancer = DancerChoice::Random(&dancers);
 
         // A chosen stage key ⇒ only that key's rows, every row reachable.
         let mut rows_seen = [false; 2];
@@ -1294,8 +1353,8 @@ mod tests {
                 &mut rng,
                 &stages,
                 &dancers,
-                Some("boom00"),
-                &[Some("emi01"), None],
+                StageChoice::Key("boom00"),
+                &[DancerChoice::Key("emi01"), any_dancer],
             )
             .expect("resolvable");
             assert_eq!(stage.key, "boom00");
@@ -1309,22 +1368,71 @@ mod tests {
 
         // Unknown keys anywhere ⇒ None (the caller clears + retries).
         let mut rng = Rng::new(3);
-        assert!(resolve_choice(&mut rng, &stages, &dancers, Some("nope"), &[None]).is_none());
-        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[Some("nobody")]).is_none());
-        assert!(
-            resolve_choice(&mut rng, &stages, &dancers, None, &[None, Some("nobody")]).is_none()
-        );
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Key("nope"),
+            &[any_dancer]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[DancerChoice::Key("nobody")]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[any_dancer, DancerChoice::Key("nobody")]
+        )
+        .is_none());
         // Degenerate inputs.
-        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[]).is_none());
-        assert!(resolve_choice(&mut rng, &stages, &[], None, &[None]).is_none());
-        assert!(resolve_choice(&mut rng, &[], &dancers, None, &[None]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &dancers, any_stage, &[]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &[], any_stage, &[any_dancer]).is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &[],
+            &dancers,
+            StageChoice::Random(&[]),
+            &[any_dancer]
+        )
+        .is_none());
+        // Empty pools ⇒ None.
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[DancerChoice::Random(&[])]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Random(&[]),
+            &[any_dancer]
+        )
+        .is_none());
 
         // All-RANDOM reproduces the plain random path under the same seed.
         for seed in 1..=200u64 {
             let mut a = Rng::new(seed);
             let mut b = Rng::new(seed);
-            let (stage, picked) =
-                resolve_choice(&mut a, &stages, &dancers, None, &[None, None]).unwrap();
+            let (stage, picked) = resolve_choice(
+                &mut a,
+                &stages,
+                &dancers,
+                any_stage,
+                &[any_dancer, any_dancer],
+            )
+            .unwrap();
             let want_stage = pick_stage(&mut b, &stages).unwrap().clone();
             let want_dancers = pick_dancers(&mut b, &dancers, 2);
             assert_eq!(stage, want_stage);
@@ -1334,9 +1442,127 @@ mod tests {
         // Stage chosen, dancer RANDOM: the dancer draw still follows the
         // stage's single row draw.
         let mut rng = Rng::new(9);
-        let (stage, picked) =
-            resolve_choice(&mut rng, &stages, &dancers, Some("club00"), &[None]).unwrap();
+        let (stage, picked) = resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Key("club00"),
+            &[any_dancer],
+        )
+        .unwrap();
         assert_eq!(stage.key, "club00");
         assert_eq!(picked.len(), 1);
+    }
+
+    #[test]
+    fn random_pools_are_respected() {
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let stage_pool: Vec<StageCandidate> = stages
+            .iter()
+            .filter(|s| s.key == "club00" || s.key == "disco00")
+            .cloned()
+            .collect();
+        let dancer_pool: Vec<DancerCandidate> = dancers
+            .iter()
+            .filter(|d| d.key == "emi01" || d.key == "gus00")
+            .cloned()
+            .collect();
+        assert_eq!(dancer_pool.len(), 2);
+        let mut stage_keys = std::collections::HashSet::new();
+        let mut dancer_keys = std::collections::HashSet::new();
+        for seed in 1..=500u64 {
+            let mut rng = Rng::new(seed);
+            let (stage, picked) = resolve_choice(
+                &mut rng,
+                &stages,
+                &dancers,
+                StageChoice::Random(&stage_pool),
+                &[
+                    DancerChoice::Random(&dancer_pool),
+                    DancerChoice::Key("zero00"),
+                ],
+            )
+            .unwrap();
+            stage_keys.insert(stage.key.clone());
+            dancer_keys.insert(picked[0].key.clone());
+            assert_eq!(picked[1].key, "zero00");
+        }
+        let want: std::collections::HashSet<String> = ["club00", "disco00"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(stage_keys, want);
+        let want: std::collections::HashSet<String> =
+            ["emi01", "gus00"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(dancer_keys, want);
+    }
+
+    #[test]
+    fn source_pools() {
+        // a (screens), b (no screens), c (screens); the table also holds z.
+        let stages = stage_candidates(
+            &fixtures::rows(&[
+                ("a00", &["000000", "000000", "bg"]),
+                ("b00", &["000000", "000000", "bg"]),
+                ("c00", &["000000", "000000", "bg"]),
+                ("z00", &["000000", "000000", "bg"]),
+            ]),
+            |_| true,
+        );
+        let has_screens = |k: &str| k == "a00" || k == "c00";
+        let keys = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["a00", "b00"]), has_screens);
+        assert_eq!(subset.len(), 2);
+        match &pool {
+            StagePool::Filtered { rows, excluded } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, "a00");
+                assert_eq!(*excluded, 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        let (subset, pool) =
+            source_stage_pool(&stages, &keys(&["a00", "b00"]), |k| !has_screens(k));
+        assert_eq!(
+            pool.rows(&subset)
+                .iter()
+                .map(|s| s.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b00"]
+        );
+        // Nothing in the source matches ⇒ NoneLeft over the SOURCE's rows, not the table.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["c00"]), |k| !has_screens(k));
+        assert_eq!(pool, StagePool::NoneLeft);
+        assert_eq!(
+            pool.rows(&subset)
+                .iter()
+                .map(|s| s.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c00"]
+        );
+        // Everything kept ⇒ All over the source's rows.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["a00", "b00"]), |_| true);
+        assert_eq!(pool, StagePool::All);
+        assert_eq!(pool.rows(&subset).len(), 2);
+        // Unknown keys are ignored; an empty source is an empty subset.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["nope"]), |_| true);
+        assert!(subset.is_empty());
+        assert_eq!(pool, StagePool::All);
+
+        // Dancer pool: table order, unknown keys ignored.
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let third = dancers[2].key.clone();
+        let first = dancers[0].key.clone();
+        let pool = source_dancer_pool(
+            &dancers,
+            &[third.clone(), "nobody".to_string(), first.clone()],
+        );
+        assert_eq!(
+            pool.iter().map(|d| d.key.clone()).collect::<Vec<_>>(),
+            vec![first, third]
+        );
+        assert!(source_dancer_pool(&dancers, &[]).is_empty());
     }
 }

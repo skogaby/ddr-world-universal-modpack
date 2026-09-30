@@ -27,7 +27,7 @@ note() { echo "[*] $*"; }
 
 MOD_SRC="$REPO_ROOT/src/services/custom_options"
 MODULES=(api.rs observers.rs ordering.rs registry.rs)
-TEST_MODULES=(persist_matrix_tests.rs scalar_format_tests.rs)
+TEST_MODULES=(persist_matrix_tests.rs scalar_format_tests.rs texture_alias_tests.rs)
 for f in "${MODULES[@]}" "${TEST_MODULES[@]}"; do
   [[ -r "$MOD_SRC/$f" ]] || die "module source missing: src/services/custom_options/$f"
 done

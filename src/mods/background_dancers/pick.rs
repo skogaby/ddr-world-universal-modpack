@@ -122,7 +122,7 @@ impl Pick {
     }
 
     /// The one-line per-song INFO. Every element carries its provenance
-    /// (`{random}` / `{option}` / `{pin}`) so a field log shows whether the
+    /// (`{random}` / `{source}` / `{option}` / `{pin}`) so a field log shows whether the
     /// option rows were honoured. A dancer-only pick reads `stage=none{…}`.
     pub fn summary(&self) -> String {
         let n = self.dancers.len();
@@ -490,6 +490,20 @@ mod tests {
         let summary = pick.summary();
         assert!(summary.starts_with("stage=boom00[0]{option}"), "{summary}");
         assert!(summary.ends_with(" (PINNED)"), "{summary}");
+
+        // A within-source draw (2026-09-30) renders `{source}` per element.
+        let pick = assemble_pick(
+            &mut rng,
+            stage(&stages, "boom00"),
+            &camera_rows,
+            vec![dancer(&dancers, "emi01")],
+            false,
+            |_| true,
+        )
+        .with_sources(PickSource::Source, vec![PickSource::Source]);
+        let summary = pick.summary();
+        assert!(summary.starts_with("stage=boom00[0]{source}"), "{summary}");
+        assert!(summary.contains("emi01(F) x=+0.0{source}"), "{summary}");
     }
 
     #[test]

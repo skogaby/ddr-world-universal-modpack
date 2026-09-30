@@ -25,6 +25,7 @@
 
 use crate::core::memory;
 
+use super::frame_board::MatParam;
 use super::model_registry::ResourceView;
 use super::render_item_layout::{self as layout, Counts, TextureStats};
 use super::{sites, texture};
@@ -387,6 +388,42 @@ pub unsafe fn set_bones_raw(item: *mut u8, bones: &[[f32; 16]], bone_count: usiz
     }
     let n = bones.len().min(bone_count);
     std::ptr::copy_nonoverlapping(bones.as_ptr() as *const u8, dst, n * layout::MATRIX_SIZE);
+}
+/// Write `.sanm` material parameters into the item's PRIVATE material copies
+/// (`frame_board::MatParam` → `mat + MAT_PARAMS + 4·index`): the material index
+/// is bounded by the resource's material count, the float index by the
+/// material's own `param_count` (`layout::material_param_offset`), so a stale
+/// or foreign clip can never write outside a copy. Returns the writes applied.
+/// # Safety
+/// As [`set_world_raw`]; the copies were allocated by `build`.
+pub unsafe fn set_material_params_raw(item: *mut u8, params: &[MatParam]) -> usize {
+    if params.is_empty() {
+        return 0;
+    }
+    let mats = memory::read_ptr(item.add(layout::ITEM_MATERIALS)) as *mut u8;
+    let res = memory::read_ptr(item.add(layout::ITEM_RES));
+    if mats.is_null() || res.is_null() {
+        return 0;
+    }
+    // `build` probed this resource's header and the copies were sized from
+    // it; the resource outlives the item (no per-frame VirtualQuery here —
+    // this runs in `visit(2)` for every animated part).
+    let count = memory::read_u32(res.add(super::model_registry::RES_MATERIAL_COUNT)) as usize;
+    let mut applied = 0;
+    for p in params {
+        let mi = p.material as usize;
+        if mi >= count {
+            continue;
+        }
+        let mat = mats.add(mi * layout::MATERIAL_SIZE);
+        let param_count = (mat.add(layout::MAT_PARAM_COUNT) as *const u16).read_unaligned();
+        let Some(off) = layout::material_param_offset(param_count, p.index) else {
+            continue;
+        };
+        memory::write_f32(mat.add(off), p.value);
+        applied += 1;
+    }
+    applied
 }
 /// # Safety
 /// As [`set_world_raw`].

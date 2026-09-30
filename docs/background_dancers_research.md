@@ -1250,7 +1250,67 @@ are a possible follow-up, not a stage property.
 **Discovery cost.** The scan runs once at enable on the enabling thread: per model folder a directory
 walk + fingerprint stat (a full read + pack only when stale), per ready arc a 64 KiB prefix read (header
 + cue table + string table sit at the front; the whole file is read only when the string table runs past
-the prefix), per directory the sidecar files.
+the prefix), per directory the sidecar files — plus, since sources (below), one `read_dir` per friendly
+folder to classify its parent.
+
+### 6.1 Sources — one folder level above the characters (2026-09-30)
+
+No RE either; a menu and data-contract change. 115 custom dancer folders in one flat BACKGROUND DANCER
+row made a specific pick tedious, and the source was already spelled into every folder name
+(`3rdMIX Afro`, `Strike Akira1`, …), eating the 15-byte label budget. The layout gains an optional
+SOURCE level and the menu a DANCER SOURCE / STAGE SOURCE row per kind (design
+`.agents/planning/2026-09-30-custom-model-sources/design/detailed-design.md`).
+
+**Layout.** `data_mods/custom_models/dancers/<Source>/<Friendly>/pl_<key>/…` puts the dancer in source
+`<Source>`; `dancers/<Source>/pl_<key>/…` too, with the key-rule label; the pre-2026-09-30 placements
+(`dancers/<Friendly>/pl_<key>/`, `dancers/pl_<key>/`) belong to the implicit source **CUSTOM**. A
+directory directly under `dancers/` / `stages/` is a SOURCE exactly when it holds at least one
+*friendly folder* — a non-model directory with a model folder or a body/stage `.arc` inside — so an
+author's junk subdirectory (`textures_src/`) never promotes its parent, and the old two-level layout is
+untouched. (One behaviour change: a legacy friendly folder that carried a nested model-bearing
+subdirectory now becomes a source; that nested content was silently ignored before.) Sidecars apply to
+their own directory as before: a source-level `chara_resources.rlist` covers the source's flat models.
+
+**Identity.** A source is its folder name's SLUG (`sources::slug`: ASCII-lowercased, `[^a-z0-9]+` → `_`,
+trimmed, ≤ 32 bytes) — `DDR STRIKE` → `ddr_strike`; two spellings with one slug are one source (so a
+real `Custom/` folder IS the implicit CUSTOM; one INFO names the spellings). The label is the folder
+name through the folder-label rule (upper, `_` → space, ≤ 15 bytes). The slug `source` is reserved (it
+would collide with the source row's id) and a name with nothing printable has none — such a folder is
+refused with one WARN and its content skipped. Keys stay unique across stock and every source (the same
+collision WARN as before).
+
+**Rows.** Per kind, when at least one custom source exists: `background_dancer_source` (0 RANDOM ·
+1 STOCK · 2… the custom sources sorted by label), then ONE model row PER SOURCE — `background_dancer`
+is the STOCK row (id and values unchanged, so a cached stock pick keeps meaning the same dancer),
+`background_dancer_<slug>` one per source (0 RANDOM · 1..=count, entries sorted by label then key) —
+each a `ShowWhen::Equals` child of the source row, so a player sees the source row plus the one model
+row it names; source RANDOM hides them all. Without a custom source of a kind the kind keeps its single
+stock row, always visible. Every model row borrows the kind's shipped `BACKGROUND DANCER` label and
+preview chrome (the framework's `RegisterSpec::label_texture_like` / `preview_texture_like`, added for
+this); the source rows ship their own `DANCER SOURCE` / `STAGE SOURCE` labels. All rows persist locally
+(`custom_options.p1/p2.<id>`) with the per-row load clamp; a value cached under a source that went away
+is ignored on load and dropped at the next save. The stage rows are cabinet-wide (versus-mirrored) —
+through a value-changed OBSERVER now, because a plain `on_change` fn cannot know which of N
+runtime-named rows fired. Because every existing `mod-config.json` lists only the old two ids in
+`option_menu_settings`, the framework's ordering gained family adjacency: an unlisted `ShowWhen` parent
+is placed right before its listed child, unlisted children right after their family's last placed
+member (`custom_options::ordering::compute_order`); the shipped config lists the two source ids too.
+
+**Pick.** Per element the rows yield a `Request`: source RANDOM ⇒ `Any` — exactly the old global draw
+(seed-identical: `resolve_choice` with `Random(global pools)` draws `pick_stage` then `pick_dancers`);
+source S + model RANDOM ⇒ `Within(S)` — uniform over S's dancers / S's stage rows kept by the song's
+screen rule (§8), falling back to ALL of S with one WARN when nothing in S qualifies (a monitor-less
+source on a movie song still draws a stage of that source); source S + model M ⇒ `Key(M)`, never
+screen-filtered. The per-song summary tags each element `{random}` / `{source}` / `{option}` / `{pin}`.
+A source row focused in the options modal previews the side's EFFECTIVE pick (the named source's model
+row value) or the RANDOM badge.
+
+**Pure vs engine.** `sources.rs` (slug / label / roles / ids), `custom_content.rs` (the planner carries a
+`SourceRef` per entry), `catalog.rs` (`SourceCatalog`, STOCK block byte-identical), `selection.rs`
+(`StageChoice` / `DancerChoice`, `source_stage_pool`, `source_dancer_pool`) and `options_logic.rs` (row
+table, `Request` mapping, preview key) are host-tested by `scripts/validate_background_dancers.sh`;
+`custom_scan.rs` (the three-level walk), `options.rs` (registration, observer) and `lifecycle::option_pick`
+are cabinet-validated.
 
 ## 7. Background movies — where World draws a gameplay movie (2026-09-22, 20260825 + 20250805)
 

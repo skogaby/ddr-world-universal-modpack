@@ -118,6 +118,9 @@ unsafe extern "C" fn node_visit(this: *mut SceneNode, pass: i32, ctx: *mut u8) -
                         &snap.bones[..snap.bone_count],
                         snap.bone_count,
                     );
+                    if snap.mat_count > 0 {
+                        render_item::set_material_params_raw(item, &snap.mats[..snap.mat_count]);
+                    }
                     render_item::set_hidden_raw(item, snap.hidden);
                 }
             }

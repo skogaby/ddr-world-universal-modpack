@@ -112,7 +112,7 @@ unsafe fn walk(rm: *const u8, hash: u32) -> Option<*const u8> {
 const RES_FLAGS: usize = 0x1C; // bit0 = skinned
 const RES_BONE_COUNT: usize = 0x20;
 const RES_DRAW_RECORD_COUNT: usize = 0x24;
-const RES_MATERIAL_COUNT: usize = 0x28;
+pub(super) const RES_MATERIAL_COUNT: usize = 0x28;
 const RES_PALETTE_COUNT: usize = 0x30;
 const RES_BIND: usize = 0x48; // f32[16] × bones
 const RES_INVERSE_BIND: usize = 0x50; // f32[16] × bones

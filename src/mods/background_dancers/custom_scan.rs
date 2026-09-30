@@ -1,5 +1,7 @@
 //! Custom dancers & stages from `data_mods` — the IMPURE half: walk the ONE
-//! custom-models base (`data_mods/custom_models/dancers/` and `/stages/`),
+//! custom-models base (`data_mods/custom_models/dancers/` and `/stages/`) —
+//! three levels: `<kind>/<Source>/<Friendly>/<model>` with the source and
+//! friendly levels each optional (`sources::dir_role`; design 2026-09-30) —
 //! turn every MODEL FOLDER into a cache arc the engine can open (nobody packs
 //! arcs by hand — the `LayeredFS` `arc_handler` convention: `ArcArchive`
 //! into `data_mods/_cache/`, `CacheHasher` on the member paths + mtimes so
@@ -27,6 +29,7 @@ use super::custom_content::{
     parse_text_rlist, plan, ArcFile, ArcRole, ContentKind, PackDir, Plan, SidecarList,
     StockContext,
 };
+use super::sources::{dir_role, has_model_content, is_model_folder_name, DirRole};
 
 /// The single base every custom dancer / stage lives under (design 2026-09-22
 /// D2, maintainer: one folder, not one LayeredFS pack per character).
@@ -98,11 +101,18 @@ pub fn discover_and_mount_in(base: &str, stock: &StockContext) -> Plan {
             );
         }
     } else {
+        let sources: Vec<String> = plan
+            .source_counts()
+            .iter()
+            .map(|(s, n)| format!("{} {}", s.label, n))
+            .collect();
         log_info!(
-            "BackgroundDancers: custom content -- {} dancer(s) + {} stage(s) from {}, {} arc(s) mounted",
+            "BackgroundDancers: custom content -- {} dancer(s) + {} stage(s) from {} in {} source(s): {}; {} arc(s) mounted",
             plan.dancers.len(),
             plan.stages.len(),
             base,
+            sources.len(),
+            sources.join(", "),
             plan.mounts.len()
         );
     }
@@ -133,50 +143,79 @@ fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (files, dirs)
 }
 
-fn is_model_folder(name: &str) -> bool {
-    matches!(
-        classify_folder_name(name),
-        ArcRole::Body { .. }
-            | ArcRole::Part { .. }
-            | ArcRole::Stage { .. }
-            | ArcRole::GoldStage { .. }
-    )
+fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
-/// The `dancers/` or `stages/` root: the root itself (flat arcs and model
-/// folders) plus one [`PackDir`] per friendly-name subfolder (any subfolder
-/// whose name is NOT itself a model folder), each holding that folder's
-/// arcs, model folders and sidecars.
+fn names(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|p| file_name(p)).collect()
+}
+
+/// Split a listing's directories into model folders and the rest.
+fn partition_models(dirs: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    dirs.into_iter()
+        .partition(|d| is_model_folder_name(&file_name(d)))
+}
+
+/// The `dancers/` or `stages/` root, three levels deep: the root itself (flat
+/// arcs and model folders ⇒ the implicit CUSTOM source), then every non-model
+/// subdirectory classified by `sources::dir_role` — a SOURCE folder (it holds
+/// at least one friendly folder) yields one [`PackDir`] for its own flat
+/// content plus one per friendly folder inside it, all tagged with the
+/// source; a FRIENDLY folder (models directly inside — the pre-2026-09-30
+/// layout) yields one untagged [`PackDir`]; anything else is ignored. One
+/// extra `read_dir` per friendly folder decides the role — deterministic from
+/// names alone.
 fn walk_kind_root(root: &str) -> Vec<PackDir> {
-    let root_path = Path::new(root);
-    let (files, dirs) = list_dir(root_path);
-    let (model_dirs, friendly_dirs): (Vec<PathBuf>, Vec<PathBuf>) =
-        dirs.into_iter().partition(|d| {
-            d.file_name()
-                .map(|n| is_model_folder(&n.to_string_lossy()))
-                .unwrap_or(false)
-        });
-    let mut out = vec![read_pack_dir(root, None, &files, &model_dirs)];
-    for sub in friendly_dirs {
-        let folder = sub
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (inner_files, inner_dirs) = list_dir(&sub);
-        let inner_models: Vec<PathBuf> = inner_dirs
+    let (files, dirs) = list_dir(Path::new(root));
+    let (model_dirs, other_dirs) = partition_models(dirs);
+    let mut out = vec![read_pack_dir(root, None, None, &files, &model_dirs)];
+    for sub in other_dirs {
+        let name = file_name(&sub);
+        let (sub_files, sub_dirs) = list_dir(&sub);
+        let (sub_models, sub_others) = partition_models(sub_dirs);
+        // A friendly child is a non-model directory with model content.
+        let friendly_children: Vec<PathBuf> = sub_others
             .into_iter()
-            .filter(|d| {
-                d.file_name()
-                    .map(|n| is_model_folder(&n.to_string_lossy()))
-                    .unwrap_or(false)
+            .filter(|f| {
+                let (ff, fd) = list_dir(f);
+                has_model_content(&names(&ff), &names(&fd))
             })
             .collect();
-        out.push(read_pack_dir(
-            &sub.to_string_lossy(),
-            Some(folder),
-            &inner_files,
-            &inner_models,
-        ));
+        let own_content = has_model_content(&names(&sub_files), &names(&sub_models));
+        match dir_role(false, !friendly_children.is_empty(), own_content) {
+            DirRole::Source => {
+                let source = Some(name.clone());
+                out.push(read_pack_dir(
+                    &sub.to_string_lossy(),
+                    None,
+                    source.clone(),
+                    &sub_files,
+                    &sub_models,
+                ));
+                for friendly in friendly_children {
+                    let (ff, fd) = list_dir(&friendly);
+                    let (fm, _) = partition_models(fd);
+                    out.push(read_pack_dir(
+                        &friendly.to_string_lossy(),
+                        Some(file_name(&friendly)),
+                        source.clone(),
+                        &ff,
+                        &fm,
+                    ));
+                }
+            }
+            DirRole::Friendly => out.push(read_pack_dir(
+                &sub.to_string_lossy(),
+                Some(name),
+                None,
+                &sub_files,
+                &sub_models,
+            )),
+            DirRole::Model | DirRole::Ignored => {}
+        }
     }
     out
 }
@@ -186,12 +225,14 @@ fn walk_kind_root(root: &str) -> Vec<PackDir> {
 fn read_pack_dir(
     dir: &str,
     folder: Option<String>,
+    source: Option<String>,
     files: &[PathBuf],
     model_dirs: &[PathBuf],
 ) -> PackDir {
     let mut pack = PackDir {
         dir: dir.replace('\\', "/"),
         folder,
+        source,
         ..Default::default()
     };
     for path in files {

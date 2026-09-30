@@ -148,6 +148,30 @@ pub const SHADER_NAME_HASH: usize = 0x00;
 pub const SHADER_PROGRAM_COUNT: usize = 0x04;
 pub const SHADER_PROGRAMS: usize = 0x08;
 
+// ── Material shader parameters (RE §3.7 / §4.3; `FUN_180274070` writes them,
+// the material bind `FUN_18026cce0` uploads them as VS c24.. / PS c3..) ────
+
+/// `u16` number of `float4` parameters the material uploads (2 or 3).
+pub const MAT_PARAM_COUNT: usize = 0x18;
+/// The `parameters` block: `float4 × MAT_PARAM_COUNT` — `[0] m_vTexAnime
+/// (scaleU, scaleV, offU, offV)`, `[1] vConstatntColor`, `[2] vOffsetColor`.
+/// A `.sanm` float index `i` (0..31) addresses `MAT_PARAMS + 4·i` of an
+/// item's PRIVATE copy; only `i < 4 · param_count` reaches a shader.
+pub const MAT_PARAMS: usize = 0x28;
+/// Floats the record has room for (`0x28 + 32·4 = 0xA8 ≤ MATERIAL_SIZE`).
+pub const MAT_PARAM_FLOATS: usize = 32;
+
+/// Byte offset of `.sanm` float `index` inside a material record, or `None`
+/// when the float is beyond the material's uploaded `param_count` (writing it
+/// would be a silent no-op) or the block.
+pub fn material_param_offset(param_count: u16, index: u8) -> Option<usize> {
+    let i = index as usize;
+    if i >= MAT_PARAM_FLOATS || i >= 4 * param_count as usize {
+        return None;
+    }
+    Some(MAT_PARAMS + 4 * i)
+}
+
 /// Per-material eligibility for the whole-scene restyle: a material copy is
 /// re-pointed only when EVERY draw record using it is opaque / alpha-tested
 /// (blend group 0 — additive glows and alpha-blended translucents keep their
@@ -402,6 +426,20 @@ pub fn entry_resolved(entry_hash: u32, pointee_hash: Option<u32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_param_offsets_stay_inside_the_uploaded_block() {
+        assert_eq!(material_param_offset(3, 0), Some(0x28));
+        assert_eq!(material_param_offset(3, 2), Some(0x30));
+        assert_eq!(material_param_offset(3, 6), Some(0x40));
+        assert_eq!(material_param_offset(3, 11), Some(0x54));
+        assert_eq!(material_param_offset(3, 12), None); // vOffsetColor is the last float4
+        assert_eq!(material_param_offset(2, 4), Some(0x38));
+        assert_eq!(material_param_offset(2, 8), None);
+        assert_eq!(material_param_offset(8, 31), Some(0x28 + 31 * 4));
+        assert_eq!(material_param_offset(8, 32), None);
+        assert!(MAT_PARAMS + 4 * MAT_PARAM_FLOATS <= MATERIAL_SIZE);
+    }
 
     #[test]
     fn footpanel_layout() {

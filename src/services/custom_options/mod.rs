@@ -41,6 +41,8 @@ mod persist_matrix_tests;
 mod scalar_bounds_tests;
 #[cfg(test)]
 mod scalar_format_tests;
+#[cfg(test)]
+mod texture_alias_tests;
 
 #[allow(unused_imports)]
 pub use api::{
@@ -222,6 +224,9 @@ pub fn register_option(spec: RegisterSpec) -> Result<OptionHandle, RegisterError
     let default_value = spec.default_value;
     let on_change = spec.on_change;
     let registered_in_game = spec.menus.in_game;
+    // The label atlas entry is named after the label STEM — the alias when
+    // the row borrows another row's label (`label_texture_like`), else the id.
+    let label_stem: &'static str = spec.label_texture_like.unwrap_or(id);
 
     let handle = {
         let mut state = registry::STATE.lock().unwrap();
@@ -244,8 +249,10 @@ pub fn register_option(spec: RegisterSpec) -> Result<OptionHandle, RegisterError
     log_info!("custom_options: registered {id:?} (default={default_value})");
 
     // Generate (or regenerate) the row-label atlas entry for this option.
-    // The PNG must exist at data_mods/.../tex/seop_item_<id>.png; the
-    // cloner warns and skips if missing without blocking registration.
+    // The PNG must exist at data_mods/.../tex/seop_item_<stem>.png (stem =
+    // the id, or the label alias); the cloner warns and skips if missing
+    // without blocking registration. Rows sharing an alias share one entry
+    // (the registrar dedups by name).
     // Skipped when the row's RESOLVED in-game placement is false (overlay-
     // only rows never render an in-game label; config override wins) —
     // fail-open: any doubt generates.
@@ -253,7 +260,7 @@ pub fn register_option(spec: RegisterSpec) -> Result<OptionHandle, RegisterError
         .0
         .unwrap_or(registered_in_game);
     if effective_in_game {
-        asset_gen::register_label_for(id);
+        asset_gen::register_label_for(label_stem);
     } else {
         log_info!("custom_options: {id:?} is not placed in-game — label texture skipped");
     }

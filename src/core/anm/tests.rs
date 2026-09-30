@@ -1133,3 +1133,31 @@ fn ktmdl_bone_table_round_trip() {
         Err(super::FormatError::BadMagic)
     );
 }
+
+#[test]
+fn ktmdl_material_identities_in_file_order() {
+    let sk = synthetic_rig();
+    let mut img = build_ktmdl(&sk);
+    // no material table declared: an empty list, not an error
+    assert_eq!(ktmdl::material_identities(&img), Ok(vec![]));
+    let off = img.len() as u32;
+    img[0x48..0x4C].copy_from_slice(&3u32.to_le_bytes());
+    img[0x4C..0x50].copy_from_slice(&off.to_le_bytes());
+    for id in [0x32984D471C75C80Du64, 0x42171DC71C75C88D, 0x11] {
+        let m = img.len();
+        img.resize(m + ktmdl::MATERIAL_STRIDE, 0);
+        img[m..m + 8].copy_from_slice(&id.to_le_bytes());
+    }
+    assert_eq!(
+        ktmdl::material_identities(&img),
+        Ok(vec![0x32984D471C75C80D, 0x42171DC71C75C88D, 0x11])
+    );
+    assert_eq!(
+        ktmdl::material_identities(&img[..img.len() - ktmdl::MATERIAL_STRIDE + 4]),
+        Err(super::FormatError::Truncated)
+    );
+    assert_eq!(
+        ktmdl::material_identities(b"KTMDX\0\0\0"),
+        Err(super::FormatError::BadMagic)
+    );
+}

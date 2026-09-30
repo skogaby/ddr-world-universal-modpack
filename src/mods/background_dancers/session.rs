@@ -22,10 +22,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::core::anm::pose::{seed_local_trs, Skeleton, Trs};
-use crate::core::anm::{anm as anmfile, b2it, ktmdl, Anm, Mat4};
+use crate::core::anm::{anm as anmfile, b2it, ktmdl, sanm, Anm, Mat4};
 use crate::core::arc as arcfile;
 use crate::services::avs_layeredfs::shader_layout::{self, SceneStyle};
-use crate::services::scene3d::frame_board::{self, NO_SLOT};
+use crate::services::scene3d::frame_board::{self, MatParam, NO_SLOT};
 use crate::services::scene3d::render_item_layout::{
     scale_translation, IDENTITY, PASS_MASK_DANCER, PASS_MASK_LOWPRIO, PASS_MASK_STAGE,
 };
@@ -80,6 +80,16 @@ impl Clip {
     }
 }
 
+/// A part's `_play_loop.sanm` (material parameters: UV scroll, colour /
+/// glow pulses — `core::anm::sanm`) with its slots bound to the part's
+/// material indices.
+pub struct MaterialClip {
+    pub bytes: Arc<Vec<u8>>,
+    pub sanm: sanm::Sanm,
+    /// `.sanm` slot → material index in the `.model` (= the item's copies).
+    pub binding: Vec<Option<u16>>,
+}
+
 pub struct ParsedStagePart {
     pub part: String,
     pub priority: Option<i32>,
@@ -89,6 +99,7 @@ pub struct ParsedStagePart {
     /// A3 bind seed (partial loops keep the authored pose — RE doc §3.2).
     pub seed: Vec<Trs>,
     pub loop_clip: Option<Clip>,
+    pub material_clip: Option<MaterialClip>,
 }
 
 /// One rigid accessory part hung off a body bone.
@@ -189,6 +200,66 @@ fn parse_clip(
     }
 }
 
+/// A part's `<dir>/<model>_play_loop.sanm`, when the arc carries one: parsed
+/// and bound to the `.model`'s material identities. A clip whose targets
+/// are all foreign to the model is dropped (WARN) — it would animate
+/// nothing.
+fn parse_material_clip(
+    reader: &ArcReader,
+    member: &str,
+    model_member: &str,
+    warnings: &mut Vec<String>,
+) -> Option<MaterialClip> {
+    let bytes = reader.get(member)?;
+    let parsed = match sanm::parse(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("{member}: {e}"));
+            return None;
+        }
+    };
+    let identities = match reader
+        .get(model_member)
+        .map(|m| ktmdl::material_identities(&m))
+    {
+        Some(Ok(ids)) => ids,
+        Some(Err(e)) => {
+            warnings.push(format!("{model_member}: material table: {e}"));
+            return None;
+        }
+        None => return None,
+    };
+    let binding = sanm::bind_targets(&parsed, &identities);
+    let bound = binding.iter().filter(|b| b.is_some()).count();
+    if bound == 0 || parsed.tracks.is_empty() {
+        warnings.push(format!(
+            "{member}: {} track(s), {} of {} material target(s) found in the model -- ignored",
+            parsed.tracks.len(),
+            bound,
+            binding.len()
+        ));
+        return None;
+    }
+    // One INFO line per process (previews re-parse on every option scroll).
+    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log_info!(
+            "BackgroundDancers: {member}: material animation -- {} track(s) on {}/{} material(s), {} frames @ {} fps{} (first .sanm this session; the director samples it into the part's material copies)",
+            parsed.tracks.len(),
+            bound,
+            binding.len(),
+            parsed.frame_count,
+            parsed.fps,
+            if parsed.loops { ", loop" } else { "" }
+        );
+    }
+    Some(MaterialClip {
+        bytes: Arc::new(bytes),
+        sanm: parsed,
+        binding,
+    })
+}
+
 /// Highest bone index any track of `anm` drives (0 for a trackless clip).
 fn max_track_target(anm: &Anm) -> usize {
     anm.bone_tracks
@@ -240,11 +311,9 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                 for (part, priority) in &stage.parts {
                     let model_name = format!("gm_{}_{}", stage.key, part);
                     let dir = format!("data/map/{model_name}");
-                    let Some(skeleton) = parse_skeleton(
-                        &reader,
-                        &format!("{dir}/{model_name}.model"),
-                        &mut warnings,
-                    ) else {
+                    let model_member = format!("{dir}/{model_name}.model");
+                    let Some(skeleton) = parse_skeleton(&reader, &model_member, &mut warnings)
+                    else {
                         continue;
                     };
                     let loop_member = format!("{dir}/{model_name}_play_loop.anm");
@@ -258,6 +327,12 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                     } else {
                         None
                     };
+                    let sanm_member = format!("{dir}/{model_name}_play_loop.sanm");
+                    let material_clip = if reader.entries.iter().any(|e| e.path == sanm_member) {
+                        parse_material_clip(&reader, &sanm_member, &model_member, &mut warnings)
+                    } else {
+                        None
+                    };
                     let seed = seed_local_trs(&skeleton);
                     stage_parts.push(ParsedStagePart {
                         part: part.clone(),
@@ -266,6 +341,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                         skeleton,
                         seed,
                         loop_clip,
+                        material_clip,
                     });
                 }
                 stage_reader = Some(reader);
@@ -688,6 +764,8 @@ pub struct Session {
     /// Per-frame evaluation scratch (sized once).
     pub scratch: Vec<Trs>,
     pub bones: Vec<Mat4>,
+    /// Per-frame `.sanm` samples of the stage part being published.
+    pub mat_params: Vec<MatParam>,
     pub requested_at: Instant,
     pub built_at: Option<Instant>,
 }
@@ -784,6 +862,7 @@ impl Session {
             movie_camera_state: None,
             scratch: vec![Trs::IDENTITY; plan.max_bones],
             bones: vec![IDENTITY; plan.max_bones],
+            mat_params: Vec::with_capacity(frame_board::MAX_MAT_PARAMS),
             requested_at,
             built_at: None,
         }

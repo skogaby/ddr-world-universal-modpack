@@ -789,7 +789,24 @@ are kind 8 floats.
   The record is seeded from the model's own material params at bind time and
   written back into the render item's material copy every frame (§3.7), so a
   `.sanm` literally animates VS `c24..` / PS `c3..`. Stock `.sanm`s animate
-  components 4,5,6 (fade 1 → 0) — effective only on `_c` shader variants.
+  components 4,5,6 (fade 1 → 0) — effective only on `_c` shader variants —
+  and `gm_boom00_bg` / `gm_boom00_stage` scroll components 2 / 3 (a sky).
+  Type-15 entry (32 bytes): `u64 material identity, u64 shading-group identity
+  (`ljxukconst`…), u32 FNV-1(shader name), u32 0x2000, u64 0`. Stock layout
+  detail: the type-14 offset list is padded so every track's times and values
+  land 16-byte aligned in the FILE (tracks themselves are packed, unaligned);
+  `anm_dump.write_anm` (`material_tracks` / `material_targets`) reproduces
+  that and `scripts/test_anm_dump.py` round-trips it.
+  **World-side consumer (modpack, 2026-09-30):** the Background Dancers
+  director does not use the engine's player, but it now parses a stage part's
+  `<part>_play_loop.sanm` itself (`src/core/anm/sanm.rs`, targets bound to the
+  `.model`'s material identities in file order), samples it on the part's
+  clock and writes the floats into the render item's PRIVATE material copies
+  at `+0x28 + 4·index` (`render_item::set_material_params_raw`, bounded by the
+  material's `param_count`) through the frame board — so the stock clips above
+  play (boom00's sky scroll; dawnstreet00's glow pulse, its `glo` material IS
+  `mdl_ch_constant_c_vc`) and custom stages can ship UV scrolls / colour and
+  glow pulses (the SuperNova port does).
 * **`.tanm` (type 10, object `+0x20`):** target byte `+6` = 0..4 (and 15..17),
   `+7` = 0; frame-0 values `(0,0,1,1,0)` — a legacy UV-transform layout.
   **No evaluator exists for `+0x20`** (see §8) — safe to omit from an exporter.

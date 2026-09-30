@@ -1,0 +1,3 @@
+# DDR SuperNova (PS2) stage003, ported with its layers as parts and its object animation
+# (tools/blender_ddr_addon/examples/port_stage_supernova.py)
+snstage003, 000000, 000000, bg:-2, glo, add, footpanel

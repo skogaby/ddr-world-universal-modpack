@@ -58,28 +58,59 @@ pub(crate) struct RegisteredOption {
     pub(crate) display_name: Option<&'static str>,
     /// Optional overlay footer description; `None` falls back to empty.
     pub(crate) description: Option<&'static str>,
+    /// Label texture alias: render `seop_item_<alias>` instead of
+    /// `seop_item_<id>` (`RegisterSpec::label_texture_like`).
+    pub(crate) label_texture_like: Option<&'static str>,
+    /// Preview chrome alias: `seop_image_<alias>[_<key>]` instead of this
+    /// id's (`RegisterSpec::preview_texture_like`).
+    pub(crate) preview_texture_like: Option<&'static str>,
 }
 
 impl RegisteredOption {
-    /// Row-label texture name derived from the option id. Matches the
-    /// convention enforced at `register_label_for` time; the PNG must
-    /// exist at `data_mods/custom_options/.../tex/seop_item_<id>.png`.
-    pub(crate) fn label_texture_name(&self) -> String {
-        format!("seop_item_{}", self.id)
+    /// The id of this option's `ShowWhen` parent (`Equals` / `NotEquals`),
+    /// `None` for an unconditional row. Both menus' ordering builds the
+    /// family mask from it (`ordering::parent_positions`).
+    pub(crate) fn show_when_parent_id(&self) -> Option<&str> {
+        match &self.show_when {
+            ShowWhen::Always => None,
+            ShowWhen::Equals { parent_id, .. } | ShowWhen::NotEquals { parent_id, .. } => {
+                Some(parent_id.as_str())
+            }
+        }
     }
 
-    /// Base preview-image texture name for this option (`seop_image_<id>`).
-    /// Used as the fallback for enum values without a `preview_key`, and as
-    /// the sole preview for scalar/boolean rows. The mod ships the matching
-    /// PNG via LayeredFS into the options IFS, same atlas-injection path as
-    /// the row labels. See `docs/option_preview_image_box.md`.
+    /// The stem the label texture is named after: the alias when set, else
+    /// the option id.
+    pub(crate) fn label_texture_stem(&self) -> &str {
+        self.label_texture_like.unwrap_or(&self.id)
+    }
+
+    /// The stem the preview textures are named after (alias or id).
+    fn preview_texture_stem(&self) -> &str {
+        self.preview_texture_like.unwrap_or(&self.id)
+    }
+
+    /// Row-label texture name: `seop_item_<stem>` where the stem is the
+    /// option id or its label alias. Matches the convention enforced at
+    /// `register_label_for` time; the PNG must exist at
+    /// `data_mods/custom_options/.../tex/seop_item_<stem>.png`.
+    pub(crate) fn label_texture_name(&self) -> String {
+        format!("seop_item_{}", self.label_texture_stem())
+    }
+
+    /// Base preview-image texture name for this option (`seop_image_<stem>`,
+    /// the stem being the id or its preview alias). Used as the fallback for
+    /// enum values without a `preview_key`, and as the sole preview for
+    /// scalar/boolean rows. The mod ships the matching PNG via LayeredFS into
+    /// the options IFS, same atlas-injection path as the row labels. See
+    /// `docs/option_preview_image_box.md`.
     pub(crate) fn preview_image_base_name(&self) -> String {
-        format!("seop_image_{}", self.id)
+        format!("seop_image_{}", self.preview_texture_stem())
     }
 
     /// Preview-image texture name to show when value `value` is selected.
     /// For an enum value carrying a `preview_key`, this is
-    /// `seop_image_<id>_<key>`; otherwise it falls back to the base name.
+    /// `seop_image_<stem>_<key>`; otherwise it falls back to the base name.
     /// Scalar options always return the base name (their preview is fixed,
     /// matching native scalar rows).
     pub(crate) fn preview_image_name_for_value(&self, value: i32) -> String {
@@ -89,7 +120,7 @@ impl RegisteredOption {
                 .find(|v| v.value == value)
                 .and_then(|v| v.preview_key.as_deref())
             {
-                return format!("seop_image_{}_{}", self.id, key);
+                return format!("seop_image_{}_{}", self.preview_texture_stem(), key);
             }
         }
         self.preview_image_base_name()
@@ -116,7 +147,7 @@ impl RegisteredOption {
             needs_base = allowed_values.iter().any(|v| v.preview_key.is_none());
             for v in allowed_values {
                 if let Some(key) = v.preview_key.as_deref() {
-                    let name = format!("seop_image_{}_{}", self.id, key);
+                    let name = format!("seop_image_{}_{}", self.preview_texture_stem(), key);
                     if !names.contains(&name) {
                         names.push(name);
                     }
@@ -221,6 +252,8 @@ impl FrameworkState {
             menus: spec.menus,
             display_name: spec.display_name,
             description: spec.description,
+            label_texture_like: spec.label_texture_like,
+            preview_texture_like: spec.preview_texture_like,
         });
         Ok(handle)
     }
@@ -543,16 +576,16 @@ fn overlay_row(state: &FrameworkState, idx: usize, side: u8) -> OverlayRowInfo {
 /// Compose the overlay snapshot: candidates = options passing availability
 /// AND resolved overlay placement (`overlay_override(id)` — the operator's
 /// config — wins over the registered `menus.overlay`), ordered by
-/// `order_for` over the candidates' (ids, header-mask) — the SAME
-/// composition shape as the builder hook's in-game path, so both menus
-/// honor `option_menu_settings` identically. Pure: the ordering/placement
-/// closures are injected (the runtime facade passes `ordering`'s real
-/// queries; tests pass synthetics).
+/// `order_for` over the candidates' (ids, header-mask, ShowWhen-parent
+/// positions) — the SAME composition shape as the builder hook's in-game
+/// path, so both menus honor `option_menu_settings` identically. Pure: the
+/// ordering/placement closures are injected (the runtime facade passes
+/// `ordering`'s real queries; tests pass synthetics).
 pub(crate) fn overlay_snapshot_rows(
     state: &FrameworkState,
     side: u8,
     overlay_override: &dyn Fn(&str) -> Option<bool>,
-    order_for: &dyn Fn(&[&str], &[bool]) -> Vec<usize>,
+    order_for: &dyn Fn(&[&str], &[bool], &[Option<usize>]) -> Vec<usize>,
 ) -> Vec<OverlayRowInfo> {
     let candidates: Vec<usize> = state
         .options
@@ -573,8 +606,13 @@ pub(crate) fn overlay_snapshot_rows(
         .iter()
         .map(|&i| matches!(state.options[i].ui_kind, UiKind::Header))
         .collect();
+    let parent_ids: Vec<Option<&str>> = candidates
+        .iter()
+        .map(|&i| state.options[i].show_when_parent_id())
+        .collect();
+    let parent = super::ordering::parent_positions(&ids, &parent_ids);
 
-    order_for(&ids, &is_header)
+    order_for(&ids, &is_header, &parent)
         .into_iter()
         .filter_map(|display_idx| candidates.get(display_idx).copied())
         .map(|option_idx| overlay_row(state, option_idx, side))
@@ -591,7 +629,7 @@ mod overlay_snapshot_tests {
     /// Identity order over non-header candidates + listed headers — the
     /// unconfigured `display_order_for` semantics, reimplemented for test
     /// injection (the real ordering module is exercised by its own tests).
-    fn identity_order(ids: &[&str], is_header: &[bool]) -> Vec<usize> {
+    fn identity_order(ids: &[&str], is_header: &[bool], _parent: &[Option<usize>]) -> Vec<usize> {
         (0..ids.len())
             .filter(|&i| !is_header.get(i).copied().unwrap_or(false))
             .collect()
@@ -656,7 +694,9 @@ mod overlay_snapshot_tests {
         register(&mut state, RegisterSpec::bool_toggle("b"));
         register(&mut state, RegisterSpec::bool_toggle("c"));
 
-        let reversed = |ids: &[&str], _h: &[bool]| -> Vec<usize> { (0..ids.len()).rev().collect() };
+        let reversed = |ids: &[&str], _h: &[bool], _p: &[Option<usize>]| -> Vec<usize> {
+            (0..ids.len()).rev().collect()
+        };
         let rows = overlay_snapshot_rows(&state, 0, &no_override, &reversed);
         assert_eq!(ids(&rows), vec!["c", "b", "a"]);
     }
@@ -824,7 +864,9 @@ mod overlay_snapshot_tests {
         register(&mut state, RegisterSpec::header("header_training"));
         register(&mut state, RegisterSpec::bool_toggle("a"));
         // Injected order that LISTS the header (identity_order would drop it).
-        let listed = |ids: &[&str], _h: &[bool]| -> Vec<usize> { (0..ids.len()).collect() };
+        let listed = |ids: &[&str], _h: &[bool], _p: &[Option<usize>]| -> Vec<usize> {
+            (0..ids.len()).collect()
+        };
         let rows = overlay_snapshot_rows(&state, 0, &no_override, &listed);
         assert_eq!(rows[0].kind, OverlayRowKind::Header);
         assert_eq!(rows[0].display_name, "Header Training");

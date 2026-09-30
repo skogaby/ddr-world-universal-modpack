@@ -233,9 +233,11 @@ fn on_preview_request(side: u8, option_id: &str) {
     if !ENABLED.load(Ordering::Acquire) || side > 1 {
         return;
     }
+    // Any of our rows (source rows included): a model row previews its own
+    // value, a source row the side's effective pick (design 2026-09-30 R21).
     let kind = options::kind_for_option(option_id);
     let wanted: Option<Identity> =
-        kind.and_then(|k| options::choice_key(k, side).map(|key| (k, key)));
+        kind.and_then(|k| options::row_choice_key(option_id, side).map(|key| (k, key)));
     let now = now_ms();
     if let Ok(mut slots) = SLOTS.lock() {
         let s = &mut slots[side as usize];

@@ -170,7 +170,17 @@
         "in_game": true
       },
       {
+        "id": "background_dancer_source",
+        "overlay": false,
+        "in_game": true
+      },
+      {
         "id": "background_dancer",
+        "overlay": false,
+        "in_game": true
+      },
+      {
+        "id": "background_stage_source",
         "overlay": false,
         "in_game": true
       },

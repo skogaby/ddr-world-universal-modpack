@@ -13,6 +13,8 @@ Outputs (all values rounded to 6 significant decimals):
   dance_clips.json    every .anm of mc_male.arc + mc_female.arc
   stage_loops.json    every *_play_loop.anm of every mapset_*.arc
   stage_cameras.json  every .camanm of camera/stage_camera.arc (raw slot samples)
+  stage_sanm.json     every *_play_loop.sanm of every mapset_*.arc (material targets, tracks,
+                      samples) + the .model material identities they bind to
   rlists.json         the four startup.arc rlists
   pl_emi00.json       pl_emi00.b2it + the pl_emi00.model bone table
 
@@ -35,7 +37,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from anm_dump import decode_key, evaluate_pose, parse_anm, sample_track  # noqa: E402
+from anm_dump import decode_key, evaluate_materials, evaluate_pose, parse_anm, sample_track  # noqa: E402
 from ktmdl_dump import parse_b2it, parse_model, parse_rlist  # noqa: E402
 from unpack_arc import ARC  # noqa: E402
 
@@ -134,6 +136,24 @@ def camera_fixture(path, data):
     return fx
 
 
+def sanm_fixture(arc_name, path, data, model_data):
+    anm = parse_anm(data)
+    H = anm["header"]
+    tracks = next(c for c in anm["chunks"] if c["type"] == 14)["tracks"]
+    targets = next(c for c in anm["chunks"] if c["type"] == 15)["entries"]
+    m = quiet(parse_model, model_data)
+    frames = frames_for(H["frame_count"])
+    return dict(arc=arc_name, path=path, frame_count=H["frame_count"], fps=float(H["fps_or_one"]),
+                loops=bool(H["flag"] & 1),
+                targets=[dict(identity="%016x" % e["identity"], hash=e["u32"]) for e in targets],
+                model_identities=["%016x" % mm["identity"] for mm in m["materials"]],
+                tracks=[dict(kind=T["kind"], target=T["target"], sub=T["sub"], keys=T["key_count"],
+                             times=T["times"], first=r6(decode_key(anm["data"], T, 0)[0])) for T in tracks],
+                frames=frames,
+                samples=[{"%d:%d" % (slot, sub): r6(v) for slot, subs in evaluate_materials(anm, f).items()
+                          for sub, v in subs.items()} for f in frames])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--install", default=os.environ.get("DDR_WORLD_INSTALL"),
@@ -168,6 +188,17 @@ def main():
                 loops.append(clip_fixture(arc_name, path, quiet(a.get_file, path)))
     write(args.out, "stage_loops.json", loops)
     print("stage_loops.json: %d loops (%d fully tracked)" % (len(loops), sum(c["fully_tracked"] for c in loops)))
+
+    # --- stage material clips (.sanm) -------------------------------------
+    sanms = []
+    for arc_name in sorted(f for f in os.listdir(arcdir) if f.startswith("mapset_") and f.endswith(".arc")):
+        a = open_arc(arc_name)
+        for path in sorted(a.list_files()):
+            if path.endswith("_play_loop.sanm"):
+                model = path[:-len("_play_loop.sanm")] + ".model"
+                sanms.append(sanm_fixture(arc_name, path, quiet(a.get_file, path), quiet(a.get_file, model)))
+    write(args.out, "stage_sanm.json", sanms)
+    print("stage_sanm.json: %d material clips" % len(sanms))
 
     # --- stage cameras -----------------------------------------------------
     a = open_arc(os.path.join("camera", "stage_camera.arc"))

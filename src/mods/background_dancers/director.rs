@@ -3,7 +3,9 @@
 //! frame board for the node's `visit(2)`.
 //!
 //! Step 8 scope: stage parts (`_play_loop` wrapped, or the bind pose for
-//! parts without a loop), dancer bodies (playlist clip at the schedule's
+//! parts without a loop; a `_play_loop.sanm` beside it is sampled on the same
+//! clock into the part's material parameters — UV scroll / colour / glow —
+//! and rides the same board slot), dancer bodies (playlist clip at the schedule's
 //! segment, A3 placement), each dancer's rigid accessory PARTS
 //! (`part_world(mirror, bones[attach], body)`) and its `pl_shadow00` quad
 //! (the A3 shadow rule over the ground bones, low-passed per frame). The
@@ -17,6 +19,7 @@
 
 use crate::core::anm::camera::sample_camera;
 use crate::core::anm::pose::evaluate_into;
+use crate::core::anm::sanm;
 use crate::services::scene3d::{frame_board, scene_graph};
 
 use super::director_math::{
@@ -62,7 +65,12 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         let Some(p) = sess.parsed.stage_parts.get(i) else {
             continue;
         };
-        let Session { scratch, bones, .. } = sess;
+        let Session {
+            scratch,
+            bones,
+            mat_params,
+            ..
+        } = sess;
         match &p.loop_clip {
             Some(clip) => {
                 let frame = clip_frame(t, clip.anm.duration_s(), clip.anm.fps, true);
@@ -84,12 +92,28 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
                 }
             }
         }
-        frame_board::publish(
+        // Material animation: its own clip length (normally the loop's), the
+        // same dance clock, always wrapped.
+        mat_params.clear();
+        if let Some(mc) = &p.material_clip {
+            let frame = clip_frame(t, mc.sanm.duration_s(), mc.sanm.fps, true);
+            sanm::sample_writes(&mc.sanm, &mc.bytes, frame, &mc.binding, |w| {
+                if mat_params.len() < frame_board::MAX_MAT_PARAMS {
+                    mat_params.push(frame_board::MatParam {
+                        material: w.material,
+                        index: w.index,
+                        value: w.value,
+                    });
+                }
+            });
+        }
+        frame_board::publish_with_materials(
             slot,
             &world,
             WHITE,
             stage_hidden,
             &bones[..bone_count.min(bones.len())],
+            mat_params,
         );
     }
 

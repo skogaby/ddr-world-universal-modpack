@@ -144,8 +144,9 @@ def texture_atlas(path):
 # ---------------------------------------------------------------------------
 def parse_cmd(data):
     """.cmd -> list of objects; object = list of sub-meshes:
-    {verts Nx3, normals Mx3 (unit), tris [(v0,v1,v2),(n0,n1,n2)], uvs [3x(u,v)] | None, color}."""
-    if data[:8] != bytes(8) or _u32(data, 8) != 0x1C:
+    {verts Nx3, normals Mx3 (unit), tris [(v0,v1,v2),(n0,n1,n2)], uvs [3x(u,v)] | None, color}.
+    28 objects (chara.lst), or 20 (chara20.lst: one hand shape per hand, PS2 Party Collection)."""
+    if data[:8] != bytes(8) or _u32(data, 8) not in (0x14, 0x1C):
         raise ValueError('not a 573 dancer .cmd')
     nobj = _u32(data, 8)
     objects = []

@@ -9,6 +9,12 @@
 //! frame. Readers: the job thread, one bounded `read_slot_into` per node per
 //! frame — no locks, no allocation, no logging, never spins unbounded.
 //!
+//! Besides the pose, a slot carries up to [`MAX_MAT_PARAMS`] material
+//! parameter writes (material index, float index into the 32-float
+//! `parameters` block, value) — the `.sanm` material animation of a stage
+//! part (`core::anm::sanm`), applied to the item's PRIVATE material copies
+//! by the same `visit(2)` copy. An empty list leaves the copies alone.
+//!
 //! The board is deliberately std-only (no `crate::`): the host harness
 //! mounts it. Copying the payload INTO a render item happens in `node.rs`
 //! (the raw item setters live there); this module only moves numbers.
@@ -22,10 +28,42 @@ pub const MAX_INSTANCES: usize = 32;
 pub const MAX_BONES: usize = 64;
 /// `SceneNode.instance` value meaning "no board slot" (static item).
 pub const NO_SLOT: u32 = u32::MAX;
+/// Material parameter writes per slot (a SuperNova stage layer animates
+/// ≤ 3 materials × ≤ 5 floats; stock `.sanm`s ≤ 6 tracks).
+pub const MAX_MAT_PARAMS: usize = 48;
 /// Bounded seqlock retries before a reader gives up for this frame.
 const MAX_READ_RETRIES: usize = 8;
 
 pub type Mat4 = [f32; 16];
+
+/// One material parameter write: float `index` (0..31) of material
+/// `material`'s parameters block ← `value`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatParam {
+    pub material: u16,
+    pub index: u8,
+    pub value: f32,
+}
+
+impl MatParam {
+    pub const ZERO: MatParam = MatParam {
+        material: 0,
+        index: 0,
+        value: 0.0,
+    };
+    #[inline]
+    fn key(&self) -> u32 {
+        (self.material as u32) << 8 | self.index as u32
+    }
+    #[inline]
+    fn from_key(key: u32, value: u32) -> MatParam {
+        MatParam {
+            material: (key >> 8) as u16,
+            index: (key & 0xFF) as u8,
+            value: f32::from_bits(value),
+        }
+    }
+}
 
 struct Slot {
     seq: AtomicU32,
@@ -34,6 +72,9 @@ struct Slot {
     world: [AtomicU32; 16],
     tint: [AtomicU32; 4],
     bones: [AtomicU32; MAX_BONES * 16],
+    mat_count: AtomicU32,
+    mat_keys: [AtomicU32; MAX_MAT_PARAMS],
+    mat_values: [AtomicU32; MAX_MAT_PARAMS],
 }
 
 const ZERO: AtomicU32 = AtomicU32::new(0);
@@ -44,6 +85,9 @@ const EMPTY_SLOT: Slot = Slot {
     world: [ZERO; 16],
     tint: [ZERO; 4],
     bones: [ZERO; MAX_BONES * 16],
+    mat_count: ZERO,
+    mat_keys: [ZERO; MAX_MAT_PARAMS],
+    mat_values: [ZERO; MAX_MAT_PARAMS],
 };
 
 static BOARD: [Slot; MAX_INSTANCES] = [EMPTY_SLOT; MAX_INSTANCES];
@@ -55,6 +99,8 @@ pub struct SlotRead {
     pub hidden: bool,
     pub bone_count: usize,
     pub bones: [Mat4; MAX_BONES],
+    pub mat_count: usize,
+    pub mats: [MatParam; MAX_MAT_PARAMS],
 }
 
 impl SlotRead {
@@ -65,6 +111,8 @@ impl SlotRead {
             hidden: true,
             bone_count: 0,
             bones: [[0.0; 16]; MAX_BONES],
+            mat_count: 0,
+            mats: [MatParam::ZERO; MAX_MAT_PARAMS],
         }
     }
 }
@@ -75,10 +123,24 @@ fn slot(i: u32) -> Option<&'static Slot> {
 }
 
 /// Game thread: publish an instance's frame. `bones` beyond [`MAX_BONES`]
-/// are truncated. Out-of-range slots are ignored.
+/// are truncated. Out-of-range slots are ignored. No material writes.
 pub fn publish(slot_idx: u32, world: &Mat4, tint: [f32; 4], hidden: bool, bones: &[Mat4]) {
+    publish_with_materials(slot_idx, world, tint, hidden, bones, &[]);
+}
+
+/// [`publish`] plus the frame's material parameter writes (`mats` beyond
+/// [`MAX_MAT_PARAMS`] are truncated).
+pub fn publish_with_materials(
+    slot_idx: u32,
+    world: &Mat4,
+    tint: [f32; 4],
+    hidden: bool,
+    bones: &[Mat4],
+    mats: &[MatParam],
+) {
     let Some(s) = slot(slot_idx) else { return };
     let n = bones.len().min(MAX_BONES);
+    let nm = mats.len().min(MAX_MAT_PARAMS);
     // Enter the write: seq becomes odd.
     let start = s.seq.load(Ordering::Relaxed);
     let odd = if start & 1 == 1 {
@@ -101,6 +163,11 @@ pub fn publish(slot_idx: u32, world: &Mat4, tint: [f32; 4], hidden: bool, bones:
         for (k, v) in m.iter().enumerate() {
             s.bones[base + k].store(v.to_bits(), Ordering::Relaxed);
         }
+    }
+    s.mat_count.store(nm as u32, Ordering::Relaxed);
+    for (i, p) in mats.iter().take(nm).enumerate() {
+        s.mat_keys[i].store(p.key(), Ordering::Relaxed);
+        s.mat_values[i].store(p.value.to_bits(), Ordering::Relaxed);
     }
     // Leave the write: seq becomes even and ≥ 2 (never 0 again).
     let mut even = odd.wrapping_add(1);
@@ -216,11 +283,19 @@ pub fn read_slot_into(slot_idx: u32, out: &mut SlotRead) -> bool {
                 out.bones[b][k] = f32::from_bits(s.bones[base + k].load(Ordering::Relaxed));
             }
         }
+        let nm = (s.mat_count.load(Ordering::Relaxed) as usize).min(MAX_MAT_PARAMS);
+        for i in 0..nm {
+            out.mats[i] = MatParam::from_key(
+                s.mat_keys[i].load(Ordering::Relaxed),
+                s.mat_values[i].load(Ordering::Relaxed),
+            );
+        }
         fence(Ordering::Acquire);
         let s2 = s.seq.load(Ordering::Acquire);
         if s1 == s2 {
             out.hidden = hidden;
             out.bone_count = n;
+            out.mat_count = nm;
             return true;
         }
     }
@@ -362,6 +437,59 @@ mod tests {
         };
         assert_eq!(r, Some((false, 0)));
         assert_eq!(w2, mat(7.0));
+    }
+
+    #[test]
+    fn material_params_ride_the_slot() {
+        let mut out = SlotRead::zeroed();
+        let mats = [
+            MatParam {
+                material: 3,
+                index: 2,
+                value: -0.5,
+            },
+            MatParam {
+                material: 3,
+                index: 3,
+                value: 0.25,
+            },
+            MatParam {
+                material: 0,
+                index: 4,
+                value: 1.0,
+            },
+        ];
+        publish_with_materials(17, &mat(1.0), [1.0; 4], false, &[mat(0.0)], &mats);
+        assert!(read_slot_into(17, &mut out));
+        assert_eq!(out.bone_count, 1);
+        assert_eq!(out.mat_count, 3);
+        assert_eq!(&out.mats[..3], &mats[..]);
+        // a plain publish clears them again
+        publish(17, &mat(1.0), [1.0; 4], false, &[mat(0.0)]);
+        assert!(read_slot_into(17, &mut out));
+        assert_eq!(out.mat_count, 0);
+        // more than the capacity: truncated, never out of bounds
+        let many: Vec<MatParam> = (0..(MAX_MAT_PARAMS + 5) as u16)
+            .map(|i| MatParam {
+                material: i,
+                index: 2,
+                value: i as f32,
+            })
+            .collect();
+        publish_with_materials(17, &mat(1.0), [1.0; 4], false, &[], &many);
+        assert!(read_slot_into(17, &mut out));
+        assert_eq!(out.mat_count, MAX_MAT_PARAMS);
+        assert_eq!(
+            out.mats[MAX_MAT_PARAMS - 1].material,
+            (MAX_MAT_PARAMS - 1) as u16
+        );
+        // key packing keeps every material index / float index apart
+        let p = MatParam {
+            material: 0x1234,
+            index: 31,
+            value: 2.5,
+        };
+        assert_eq!(MatParam::from_key(p.key(), p.value.to_bits()), p);
     }
 
     #[test]

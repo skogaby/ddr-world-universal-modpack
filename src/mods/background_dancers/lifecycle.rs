@@ -49,11 +49,12 @@ use super::movie_mode::{
     self, Backdrop, Capabilities, MovieMode, SceneMask, ScreenFilter, SongMovie,
 };
 use super::movie_size;
+use super::options::Request;
 use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::screen_route;
 use super::selection::{
     apply_pin, dancer_candidates, parse_pin, random_stage_pool, seed_from, stage_candidates,
-    DancerCandidate, PickSource, Pin, Rng, StageCandidate, StagePool,
+    DancerCandidate, DancerChoice, PickSource, Pin, Rng, StageCandidate, StageChoice, StagePool,
 };
 use super::session::{assemble_pick, make_pick, CameraSet, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
@@ -79,9 +80,9 @@ struct Tables {
     camera_rows: Vec<(String, Vec<String>)>,
     dancers: Vec<DancerCandidate>,
     pin: Option<Pin>,
-    /// `(key, label)` of every CUSTOM entry (`data_mods/custom_models`) — the catalog
-    /// appends these after the stock block with their folder-derived names.
-    custom_labels: Vec<(String, String)>,
+    /// Every CUSTOM entry (`data_mods/custom_models`) with its label and
+    /// SOURCE — the catalog groups these after the stock block.
+    custom: Vec<super::sources::CustomEntry>,
     /// Stage keys whose arc carries video screens (an `offscreen1.dds`
     /// member — `movie_mode::arc_members_have_screen`), for Background
     /// Movies = STAGE SCREENS. Built once at enable, stock + custom +
@@ -147,7 +148,7 @@ pub fn init_tables() -> bool {
     // Custom dancers / stages from `data_mods/custom_models` (design
     // 2026-09-22): appended AFTER the stock rows so stock row indices and
     // option values never move; the stage camera rows stay row-parallel.
-    let (stages, camera_rows, dancers, custom_labels) = if bd.custom_content {
+    let (stages, camera_rows, dancers, custom) = if bd.custom_content {
         let default_camera_row = stages
             .first()
             .and_then(|s| camera_rows.get(s.row))
@@ -178,7 +179,7 @@ pub fn init_tables() -> bool {
         }
         stages.extend(plan.stages);
         dancers.extend(plan.dancers);
-        (stages, camera_rows, dancers, plan.labels)
+        (stages, camera_rows, dancers, plan.entries)
     } else {
         log_info!(
             "BackgroundDancers: custom content OFF -- data_mods/custom_models is not scanned"
@@ -203,13 +204,20 @@ pub fn init_tables() -> bool {
             "BackgroundDancers: DDR_DANCERS_STATIC -- poses published once per song (bisect mode)"
         );
     }
+    let custom_sources = {
+        let mut slugs: Vec<&str> = custom.iter().map(|e| e.source.slug.as_str()).collect();
+        slugs.sort_unstable();
+        slugs.dedup();
+        slugs.len()
+    };
     log_info!(
-        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows, {} custom{}",
+        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows, {} custom in {} source(s){}",
         stages.len(),
         distinct,
         dancers.len(),
         camera_rows.len(),
-        custom_labels.len(),
+        custom.len(),
+        custom_sources,
         match &pin {
             Some(p) => format!(" (DDR_DANCERS_PIN honoured: {:?})", p),
             None => String::new(),
@@ -222,7 +230,7 @@ pub fn init_tables() -> bool {
             camera_rows,
             dancers,
             pin,
-            custom_labels,
+            custom,
             screen_stages,
         });
     }
@@ -287,13 +295,13 @@ fn stage_has_screens(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `(key, label)` of the custom (`data_mods/custom_models`) entries in the tables — empty
-/// with the toggle off or nothing installed.
-pub(super) fn custom_labels_snapshot() -> Vec<(String, String)> {
+/// The custom (`data_mods/custom_models`) entries in the tables — key, label
+/// and source — empty with the toggle off or nothing installed.
+pub(super) fn custom_entries_snapshot() -> Vec<super::sources::CustomEntry> {
     TABLES
         .lock()
         .ok()
-        .and_then(|t| t.as_ref().map(|t| t.custom_labels.clone()))
+        .and_then(|t| t.as_ref().map(|t| t.custom.clone()))
         .unwrap_or_default()
 }
 
@@ -711,7 +719,14 @@ fn window_entry(scene_id: i32) {
                     );
                 }
                 // 2. The BACKGROUND DANCER / BACKGROUND STAGE rows.
-                match option_pick(&mut rng, t, random_stages, &sides, &arc_exists) {
+                match option_pick(
+                    &mut rng,
+                    t,
+                    random_stages,
+                    screen_filter,
+                    &sides,
+                    &arc_exists,
+                ) {
                     Some(p) => p,
                     // 3. Plain random.
                     None => match make_pick(
@@ -789,80 +804,152 @@ fn log_random_pool(
     }
 }
 
-/// The option rows' pick (design §4.3 / FR-6): the first entered side's
-/// BACKGROUND STAGE (mirrored in versus, so both sides agree) and each
-/// entered side's BACKGROUND DANCER for that side's dancer index. `None`
-/// when every element is RANDOM (the plain random path then runs). A key the
-/// catalog no longer covers (data drift between the cached value and the
-/// install) ⇒ one WARN naming it, that element falls back to RANDOM.
-/// `random_stages` is the RANDOM stage pool (the screen rule applied); an
-/// explicitly chosen stage is looked up in the whole table.
+/// The option rows' pick (design §4.3 / FR-6; sources 2026-09-30 §4.7): the
+/// first entered side's stage request (the stage rows are mirrored in
+/// versus, so both sides agree) and each entered side's dancer request for
+/// that side's dancer index. `None` when every element is `Any` (the plain
+/// random path then runs). Per element: an explicit key the tables no longer
+/// hold (data drift between the cached value and the install) ⇒ one WARN
+/// naming it, `Any` for this song; `Within` a source ⇒ that source's pool —
+/// the stage pool through the song's screen rule, falling back to the WHOLE
+/// SOURCE (one WARN) when nothing in it qualifies; `Any` ⇒ the global pools
+/// (`random_stages` is the RANDOM stage pool with the screen rule applied).
 fn option_pick(
     rng: &mut Rng,
     t: &Tables,
     random_stages: &[StageCandidate],
+    screen_filter: ScreenFilter,
     sides: &[u8],
     arc_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Pick> {
-    let mut stage_key = sides.first().and_then(|&s| super::options::stage_choice(s));
-    let mut dancer_keys: Vec<Option<String>> = sides
+    let mut stage_req = sides
+        .first()
+        .map(|&s| super::options::stage_request(s))
+        .unwrap_or(Request::Any);
+    let mut dancer_reqs: Vec<Request> = sides
         .iter()
-        .map(|&s| super::options::dancer_choice(s))
+        .map(|&s| super::options::dancer_request(s))
         .collect();
-    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+    if stage_req == Request::Any && dancer_reqs.iter().all(|r| *r == Request::Any) {
         return None;
     }
-    // Drop unknown keys up front (resolve_choice refuses the whole request
-    // on any unknown key, so validate element by element).
-    if let Some(k) = stage_key.as_deref() {
-        if !t.stages.iter().any(|s| s.key == k) {
+    // Drop unknown keys and empty sources up front (resolve_choice refuses
+    // the whole request on any unresolvable element).
+    if let Request::Key(k) = &stage_req {
+        if !t.stages.iter().any(|s| s.key == *k) {
             log_warn!(
                 "BackgroundDancers: BACKGROUND STAGE names unknown stage {:?} -- RANDOM for this song",
                 k
             );
-            stage_key = None;
+            stage_req = Request::Any;
         }
     }
-    for (i, key) in dancer_keys.iter_mut().enumerate() {
-        if let Some(k) = key.as_deref() {
-            if !t.dancers.iter().any(|d| d.key == k) {
+    for (i, req) in dancer_reqs.iter_mut().enumerate() {
+        let side = sides.get(i).map(|s| s + 1).unwrap_or(0);
+        match req {
+            Request::Key(k) if !t.dancers.iter().any(|d| d.key == *k) => {
                 log_warn!(
                     "BackgroundDancers: BACKGROUND DANCER (P{}) names unknown dancer {:?} -- RANDOM for this song",
-                    sides.get(i).map(|s| s + 1).unwrap_or(0),
+                    side,
                     k
                 );
-                *key = None;
+                *req = Request::Any;
             }
+            Request::Within { source, keys }
+                if super::selection::source_dancer_pool(&t.dancers, keys).is_empty() =>
+            {
+                log_warn!(
+                    "BackgroundDancers: DANCER SOURCE (P{}) {} has no loadable dancer -- RANDOM for this song",
+                    side,
+                    source
+                );
+                *req = Request::Any;
+            }
+            _ => {}
         }
     }
-    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+    if stage_req == Request::Any && dancer_reqs.iter().all(|r| *r == Request::Any) {
         return None;
     }
-    let stage_src = if stage_key.is_some() {
-        PickSource::Option
-    } else {
-        PickSource::Random
-    };
-    let dancer_src: Vec<PickSource> = dancer_keys
-        .iter()
-        .map(|k| {
-            if k.is_some() {
-                PickSource::Option
+    // The within-source stage pool (owned here so the choice can borrow it).
+    let source_pool: Option<Vec<StageCandidate>> = match &stage_req {
+        Request::Within { source, keys } => {
+            let (subset, pool) = super::selection::source_stage_pool(&t.stages, keys, |k| {
+                screen_filter.keeps(t.screen_stages.contains(k))
+            });
+            if subset.is_empty() {
+                log_warn!(
+                    "BackgroundDancers: STAGE SOURCE {} has no loadable stage -- RANDOM for this song",
+                    source
+                );
+                stage_req = Request::Any;
+                None
             } else {
-                PickSource::Random
+                match &pool {
+                    StagePool::NoneLeft => log_warn!(
+                        "BackgroundDancers: no stage in source {} matches ({}); drawing from all {} row(s) of {}",
+                        source,
+                        screen_filter.label(),
+                        subset.len(),
+                        source
+                    ),
+                    StagePool::All => log_info!(
+                        "BackgroundDancers: random stage pool -- source {}: all {} row(s) ({})",
+                        source,
+                        subset.len(),
+                        screen_filter.label()
+                    ),
+                    StagePool::Filtered { rows, excluded } => log_info!(
+                        "BackgroundDancers: random stage pool -- source {}: {} of {} row(s), {} stage(s) excluded ({})",
+                        source,
+                        rows.len(),
+                        subset.len(),
+                        excluded,
+                        screen_filter.label()
+                    ),
+                }
+                Some(pool.rows(&subset).to_vec())
             }
+        }
+        _ => None,
+    };
+    let dancer_pools: Vec<Option<Vec<DancerCandidate>>> = dancer_reqs
+        .iter()
+        .map(|r| match r {
+            Request::Within { keys, .. } => {
+                Some(super::selection::source_dancer_pool(&t.dancers, keys))
+            }
+            _ => None,
         })
         .collect();
-    let refs: Vec<Option<&str>> = dancer_keys.iter().map(Option::as_deref).collect();
-    // resolve_choice draws a RANDOM stage from `stages` and looks a chosen
-    // key up in it: the pool for RANDOM, the whole table for a choice.
-    let stages = if stage_key.is_some() {
-        &t.stages[..]
-    } else {
-        random_stages
+    let stage_choice = match (&stage_req, &source_pool) {
+        (Request::Key(k), _) => StageChoice::Key(k),
+        (Request::Within { .. }, Some(pool)) => StageChoice::Random(pool),
+        _ => StageChoice::Random(random_stages),
     };
-    let (stage, dancers) =
-        super::selection::resolve_choice(rng, stages, &t.dancers, stage_key.as_deref(), &refs)?;
+    let dancer_choices: Vec<DancerChoice> = dancer_reqs
+        .iter()
+        .zip(dancer_pools.iter())
+        .map(|(r, pool)| match (r, pool) {
+            (Request::Key(k), _) => DancerChoice::Key(k),
+            (Request::Within { .. }, Some(pool)) => DancerChoice::Random(pool),
+            _ => DancerChoice::Random(&t.dancers),
+        })
+        .collect();
+    let provenance = |r: &Request| match r {
+        Request::Any => PickSource::Random,
+        Request::Within { .. } => PickSource::Source,
+        Request::Key(_) => PickSource::Option,
+    };
+    let stage_src = provenance(&stage_req);
+    let dancer_src: Vec<PickSource> = dancer_reqs.iter().map(provenance).collect();
+    let (stage, dancers) = super::selection::resolve_choice(
+        rng,
+        &t.stages,
+        &t.dancers,
+        stage_choice,
+        &dancer_choices,
+    )?;
     Some(
         assemble_pick(rng, stage, &t.camera_rows, dancers, false, arc_exists)
             .with_sources(stage_src, dancer_src),

@@ -126,6 +126,7 @@ pub mod movie_camera;
 pub mod movie_mode;
 pub mod movie_size;
 pub mod options;
+pub mod options_logic;
 pub mod outline;
 pub mod pick;
 pub mod preview;
@@ -135,6 +136,7 @@ pub mod screen_route;
 pub mod selection;
 pub mod session;
 pub mod song_movie;
+pub mod sources;
 pub mod style;
 pub mod tempo;
 pub mod tempo_source;
@@ -218,7 +220,7 @@ impl Mod for BackgroundDancersMod {
         // ⇒ random picks, one WARN inside).
         match lifecycle::tables_snapshot() {
             Some((stages, _camera_rows, dancers)) => {
-                let custom = lifecycle::custom_labels_snapshot();
+                let custom = lifecycle::custom_entries_snapshot();
                 options::register(catalog::build_catalog_with_custom(
                     &stages, &dancers, &custom,
                 ));

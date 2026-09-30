@@ -10,27 +10,45 @@
 //! Layout (ONE base, `data_mods/custom_models/` — maintainer: every custom
 //! dancer and stage goes there, no per-character mod folders; models are
 //! FOLDERS holding the arc's contents — nobody has to pack an arc, the
-//! scanner packs a cache arc for the engine — a ready `.arc` is accepted too):
+//! scanner packs a cache arc for the engine — a ready `.arc` is accepted too).
+//! One optional SOURCE level (design 2026-09-30) groups the content into the
+//! DANCER SOURCE / STAGE SOURCE rows:
 //! ```text
-//! data_mods/custom_models/dancers/<Friendly Name>/pl_<key>/             body folder (required)
-//!     pl_<key>.model, pl_<key>.b2it, *.dds …                            (the add-on's export layout — flat)
-//!     — or —  data/chara/pl_<key>/…                                      (a literally unpacked arc)
-//! data_mods/custom_models/dancers/<Friendly Name>/pl_<key>_<part>/      optional accessory parts
-//! data_mods/custom_models/dancers/<Friendly Name>/chara_resources.rlist optional sidecar (or .rlist.txt)
-//! data_mods/custom_models/stages/<Friendly Name>/mapset_<key>/          stage folder (required; `_g` ignored)
-//!     gm_<key>_<part>/gm_<key>_<part>.model, *.dds …                     one dir per part
-//!     camera/<shot>.camanm …  (any `*.camanm` anywhere in the folder = the stage's own camera set;
-//!                              names containing `_non` are the cut-aways)
-//!     — or —  data/map/…, data/camera/…
-//! data_mods/custom_models/stages/<Friendly Name>/map_resources.rlist    optional sidecar (parts[:prio])
-//! data_mods/custom_models/stages/<Friendly Name>/stage_camera_resources.rlist  optional (camera names)
+//! data_mods/custom_models/dancers/
+//!   <Source>/                          source folder: any name; id = its slug, label ≤ 15 bytes
+//!     <Friendly>/pl_<key>/…            dancer labelled <FRIENDLY>, in source <Source>
+//!         pl_<key>.model, pl_<key>.b2it, *.dds …   (the add-on's export layout — flat)
+//!         — or —  data/chara/pl_<key>/…             (a literally unpacked arc)
+//!     <Friendly>/pl_<key>_<part>/…     optional accessory parts (same folder as the body)
+//!     <Friendly>/chara_resources.rlist optional sidecar (or .rlist.txt) for that folder
+//!     pl_<key>/…                       dancer labelled by the key rule, in source <Source>
+//!     chara_resources.rlist            optional sidecar for the flat models of <Source>
+//!   <Friendly>/pl_<key>/…              dancer labelled <FRIENDLY>, in the implicit source CUSTOM
+//!   pl_<key>/…                         dancer labelled by the key rule, in CUSTOM
+//! data_mods/custom_models/stages/      the same shape with mapset_<key>/ folders (`_g` ignored):
+//!   …/mapset_<key>/gm_<key>_<part>/gm_<key>_<part>.model, *.dds …   one dir per part
+//!       + gm_<key>_<part>_play_loop.anm    the part's object loop (optional)
+//!       + gm_<key>_<part>_play_loop.sanm   its material loop — UV scroll / colour / glow
+//!                                          parameters the director samples every frame
+//!                                          (`core::anm::sanm`; optional)
+//!   …/mapset_<key>/camera/<shot>.camanm …  (any `*.camanm` anywhere in the folder = the stage's
+//!                                           own camera set; names containing `_non` are the cut-aways)
+//!   …/map_resources.rlist              optional sidecar (parts[:prio]);  …/stage_camera_resources.rlist
 //! ```
-//! A model directly in `dancers/` / `stages/` takes the stock key rule for
-//! its label (`_` → space); one in a subfolder takes the FOLDER NAME. The key
-//! ALWAYS comes from the model folder / arc name — the engine keys models by
-//! the member stems (`data/chara/pl_<key>/pl_<key>.model`), which the
-//! discovery verifies ([`folder_member_path`] maps a folder file to the member
-//! path the engine will see).
+//! A directory directly under `dancers/` / `stages/` is a SOURCE when it holds
+//! at least one friendly folder (a non-model folder with models inside);
+//! otherwise it is a friendly folder of the implicit `CUSTOM` source, exactly
+//! the pre-2026-09-30 layout. A source is identified by the slug of its name
+//! (`sources::slug`): two spellings with one slug are one source (`Custom/`
+//! IS the implicit source); the slug `source` is reserved and an unprintable
+//! name has none — such a folder is refused with one WARN and its content is
+//! skipped. A model in a friendly folder takes the FOLDER NAME as its label;
+//! one directly in a source (or at the root) takes the stock key rule
+//! (`_` → space). The key ALWAYS comes from the model folder / arc name — the
+//! engine keys models by the member stems (`data/chara/pl_<key>/pl_<key>.model`),
+//! which the discovery verifies ([`folder_member_path`] maps a folder file to
+//! the member path the engine will see) — and must be unique across stock
+//! and every source.
 //!
 //! Sidecar rows use the stock rlist grammar (`chara_resources`:
 //! `[pl, sex, class, model_scale, shadow_scale, unlock]`; `map_resources`:
@@ -43,6 +61,7 @@ use super::selection::{
     dancer_candidates, own_motion_from_members, stage_candidates, DancerCandidate, StageCandidate,
     OWN_MOTION_DIR, PART_NAMES,
 };
+use super::sources::{resolve_source, CustomEntry, SourceRef};
 
 /// `(key, fields)` — the `core::anm::rlist::Row` shape, spelled locally so the
 /// harness mount needs no `core` import.
@@ -258,13 +277,20 @@ pub struct ArcFile {
 }
 
 /// One directory the scanner walked: the `dancers/` or `stages/` root of a
-/// base (`folder: None`) or one friendly-name subfolder.
+/// base (`folder: None`), one friendly-name folder, a SOURCE folder's own
+/// level (`folder: None, source: Some(..)`) or a friendly folder inside a
+/// source.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackDir {
     /// Filesystem path (logs only).
     pub dir: String,
-    /// The friendly-name folder, `None` at the root.
+    /// The friendly-name folder, `None` at the root (or at a source's own
+    /// level).
     pub folder: Option<String>,
+    /// The SOURCE folder this directory sits under, as written on disk;
+    /// `None` = the root / a legacy friendly folder ⇒ the implicit `CUSTOM`
+    /// source (`sources::resolve_source`).
+    pub source: Option<String>,
     pub arcs: Vec<ArcFile>,
     /// Sidecar rows found in this directory (binary + text concatenated).
     pub chara_rows: Vec<Row>,
@@ -294,8 +320,8 @@ pub struct Plan {
     /// `(row, camera names)` — one per custom stage, at that stage's row.
     pub camera_rows: Vec<(usize, Vec<String>)>,
     pub dancers: Vec<DancerCandidate>,
-    /// `(key, label)` for every accepted entry (dancers and stages).
-    pub labels: Vec<(String, String)>,
+    /// Every accepted entry (dancers and stages) with its label and SOURCE.
+    pub entries: Vec<CustomEntry>,
     /// `(logical game path, filesystem path)`.
     pub mounts: Vec<(String, String)>,
     /// INFO lines (one per accepted entry).
@@ -307,6 +333,81 @@ pub struct Plan {
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.stages.is_empty() && self.dancers.is_empty()
+    }
+
+    /// `(key, label)` of every accepted entry — the source-blind view.
+    pub fn labels(&self) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .map(|e| (e.key.clone(), e.label.clone()))
+            .collect()
+    }
+
+    /// Distinct sources in first-seen order with their entry counts — the
+    /// scanner's summary INFO.
+    pub fn source_counts(&self) -> Vec<(SourceRef, usize)> {
+        let mut out: Vec<(SourceRef, usize)> = Vec::new();
+        for e in &self.entries {
+            match out.iter_mut().find(|(s, _)| s.slug == e.source.slug) {
+                Some((_, n)) => *n += 1,
+                None => out.push((e.source.clone(), 1)),
+            }
+        }
+        out
+    }
+}
+
+/// Resolve a `PackDir`'s source once per directory: `Err` ⇒ one WARN per
+/// distinct folder name (the caller skips the directory); two spellings of
+/// one slug ⇒ one INFO note, the first spelling's label kept.
+struct SourceResolver {
+    /// `(slug, first spelling, label)` of every accepted source folder.
+    seen: Vec<(String, String, String)>,
+    /// Folder names already refused (WARN emitted once).
+    refused: Vec<String>,
+}
+
+impl SourceResolver {
+    fn new() -> Self {
+        SourceResolver {
+            seen: Vec::new(),
+            refused: Vec::new(),
+        }
+    }
+
+    fn resolve(&mut self, dir: &PackDir, out: &mut Plan) -> Option<SourceRef> {
+        let spelling = dir.source.clone().unwrap_or_default();
+        match resolve_source(dir.source.as_deref()) {
+            Ok(mut src) => {
+                match self.seen.iter().find(|(slug, _, _)| *slug == src.slug) {
+                    Some((_, first, label)) => {
+                        if dir.source.is_some() && *first != spelling {
+                            let note = format!(
+                                "sources {first:?} and {spelling:?} merge as {label} (same id {:?})",
+                                src.slug
+                            );
+                            if !out.notes.contains(&note) {
+                                out.notes.push(note);
+                            }
+                        }
+                        src.label = label.clone();
+                    }
+                    None => {
+                        self.seen
+                            .push((src.slug.clone(), spelling, src.label.clone()));
+                    }
+                }
+                Some(src)
+            }
+            Err(reason) => {
+                if !self.refused.contains(&spelling) {
+                    out.warnings
+                        .push(format!("{}: {reason} -- its content is skipped", dir.dir));
+                    self.refused.push(spelling);
+                }
+                None
+            }
+        }
     }
 }
 
@@ -433,10 +534,14 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
     let mut dancer_keys: Vec<String> = stock.dancer_keys.clone();
     // Key-rule labels are resolved after the pass so the `#k` family count
     // covers every flat arc of the kind.
-    let mut pending_key_labels: Vec<(String, ContentKind)> = Vec::new();
+    let mut pending_key_labels: Vec<(String, ContentKind, SourceRef)> = Vec::new();
+    let mut sources = SourceResolver::new();
 
     // ---- dancers ----
     for dir in dancer_dirs {
+        let Some(source) = sources.resolve(dir, &mut out) else {
+            continue;
+        };
         let mut accepted_here: Vec<String> = Vec::new();
         for arc in &dir.arcs {
             let ArcRole::Body { key } = classify_arc_name(&arc.name) else {
@@ -505,16 +610,17 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
-                    pending_key_labels.push((key.clone(), ContentKind::Dancer));
+                    pending_key_labels.push((key.clone(), ContentKind::Dancer, source.clone()));
                     None
                 }
             };
             out.mounts
                 .push((format!("data/arc/{}", arc.name), arc.path.clone()));
             out.notes.push(format!(
-                "custom dancer {} ({}) from {} -- sex {} class {} scale {}/{}{}, motion: {}",
+                "custom dancer {} ({}) in source {} from {} -- sex {} class {} scale {}/{}{}, motion: {}",
                 label.as_deref().unwrap_or("<key rule>"),
                 key,
+                source.label,
                 arc.source,
                 match cand.sex {
                     super::selection::Sex::Male => "M",
@@ -535,7 +641,11 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 }
             ));
             if let Some(l) = label {
-                out.labels.push((key.clone(), l));
+                out.entries.push(CustomEntry {
+                    key: key.clone(),
+                    label: l,
+                    source: source.clone(),
+                });
             }
             out.dancers.push(DancerCandidate {
                 row,
@@ -585,6 +695,9 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
 
     // ---- stages ----
     for dir in stage_dirs {
+        let Some(source) = sources.resolve(dir, &mut out) else {
+            continue;
+        };
         for arc in &dir.arcs {
             let ArcRole::Stage { key } = classify_arc_name(&arc.name) else {
                 continue;
@@ -673,16 +786,17 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
-                    pending_key_labels.push((key.clone(), ContentKind::Stage));
+                    pending_key_labels.push((key.clone(), ContentKind::Stage, source.clone()));
                     None
                 }
             };
             out.mounts
                 .push((format!("data/arc/{}", arc.name), arc.path.clone()));
             out.notes.push(format!(
-                "custom stage {} ({}) from {} -- {} part(s) [{}] ({}), camera set: {} name(s) ({})",
+                "custom stage {} ({}) in source {} from {} -- {} part(s) [{}] ({}), camera set: {} name(s) ({})",
                 label.as_deref().unwrap_or("<key rule>"),
                 key,
+                source.label,
                 arc.source,
                 parts.len(),
                 parts
@@ -698,7 +812,11 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 camera_src
             ));
             if let Some(l) = label {
-                out.labels.push((key.clone(), l));
+                out.entries.push(CustomEntry {
+                    key: key.clone(),
+                    label: l,
+                    source: source.clone(),
+                });
             }
             out.camera_rows.push((row, camera));
             out.stages.push(StageCandidate {
@@ -711,20 +829,25 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
     }
 
     // Key-rule labels (flat arcs), with the `#k` family count per kind.
-    for (key, kind) in &pending_key_labels {
+    for (key, kind, source) in &pending_key_labels {
         let family: Vec<String> = pending_key_labels
             .iter()
-            .filter(|(_, k)| k == kind)
-            .map(|(k, _)| k.clone())
+            .filter(|(_, k, _)| k == kind)
+            .map(|(k, _, _)| k.clone())
             .collect();
-        out.labels.push((key.clone(), label_from_key(key, &family)));
+        out.entries.push(CustomEntry {
+            key: key.clone(),
+            label: label_from_key(key, &family),
+            source: source.clone(),
+        });
     }
     // Fit every label to the SSO budget (one WARN per cut).
-    for (key, label) in out.labels.iter_mut() {
-        let full = label.clone();
-        if fit_label(label) {
+    for entry in out.entries.iter_mut() {
+        let full = entry.label.clone();
+        if fit_label(&mut entry.label) {
             out.warnings.push(format!(
-                "label {full:?} for {key:?} is longer than {MAX_LABEL_BYTES} bytes -- shown as {label:?}"
+                "label {full:?} for {:?} is longer than {MAX_LABEL_BYTES} bytes -- shown as {:?}",
+                entry.key, entry.label
             ));
         }
     }
@@ -1176,7 +1299,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            p.labels,
+            p.labels(),
             vec![
                 ("peter00".to_string(), "PETER GRIFFIN".to_string()),
                 ("griffin00".to_string(), "GRIFFIN HOUSE".to_string())
@@ -1248,8 +1371,8 @@ mod tests {
         assert_eq!(p.dancers[1].sex, Sex::Female);
         assert_eq!(p.dancers[1].model_scale, 0.9);
         assert_eq!(p.dancers[2].sex, Sex::Male);
-        let labels: Vec<(&str, &str)> = p
-            .labels
+        let labels = p.labels();
+        let labels: Vec<(&str, &str)> = labels
             .iter()
             .map(|(k, l)| (k.as_str(), l.as_str()))
             .collect();
@@ -1406,7 +1529,7 @@ mod tests {
         };
         let p = plan(&[a, b], &[], &stock());
         assert_eq!(p.dancers.len(), 1);
-        assert_eq!(p.labels, vec![("dup00".to_string(), "ONE".to_string())]);
+        assert_eq!(p.labels(), vec![("dup00".to_string(), "ONE".to_string())]);
         assert_eq!(p.warnings.len(), 1);
         assert_eq!(p.mounts.len(), 1);
     }
@@ -1424,8 +1547,8 @@ mod tests {
             ..Default::default()
         };
         let p = plan(&[d], &[], &stock());
-        assert_eq!(p.labels[0].1, "AN EXTREMELY LO");
-        assert_eq!(p.labels[0].1.len(), MAX_LABEL_BYTES);
+        assert_eq!(p.labels()[0].1, "AN EXTREMELY LO");
+        assert_eq!(p.labels()[0].1.len(), MAX_LABEL_BYTES);
         assert!(p.warnings.iter().any(|w| w.contains("longer than")));
     }
 
@@ -1511,13 +1634,13 @@ mod tests {
         assert_eq!(p.dancers[1].key, "teto00");
         assert_eq!(p.dancers[1].row, 27);
         assert_eq!(
-            p.labels,
+            p.labels(),
             vec![
                 ("miku00".to_string(), "HATSUNE MIKU".to_string()),
                 ("teto00".to_string(), "KASANE TETO".to_string()),
             ]
         );
-        assert!(p.labels.iter().all(|(_, l)| l.len() <= MAX_LABEL_BYTES));
+        assert!(p.labels().iter().all(|(_, l)| l.len() <= MAX_LABEL_BYTES));
         assert_eq!(p.mounts.len(), 2);
         assert!(p.notes.iter().all(|n| n.contains("(sidecar row)")));
     }
@@ -1565,10 +1688,222 @@ mod tests {
             (1.0, 0.8)
         );
         assert_eq!(
-            p.labels,
+            p.labels(),
             vec![("cj00".to_string(), "CARL JOHNSON".to_string())]
         );
         assert_eq!(p.mounts.len(), 1);
         assert!(p.notes.iter().all(|n| n.contains("(sidecar row)")));
+    }
+
+    // ── Sources (2026-09-30) ─────────────────────────────────────────
+
+    fn src(slug: &str, label: &str) -> SourceRef {
+        SourceRef {
+            slug: slug.to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    fn body_dir(dir: &str, folder: Option<&str>, source: Option<&str>, key: &str) -> PackDir {
+        PackDir {
+            dir: dir.into(),
+            folder: folder.map(str::to_string),
+            source: source.map(str::to_string),
+            arcs: vec![arc(
+                &format!("pl_{key}.arc"),
+                dir,
+                Some(body_members(Box::leak(key.to_string().into_boxed_str()))),
+            )],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn source_folder_entries_carry_the_source() {
+        // dancers/DDR STRIKE/{Akira1, Alice1}/pl_*  +  dancers/DDR STRIKE/pl_flat00 (key rule,
+        // source-level sidecar).
+        let base = "./data_mods/custom_models/dancers/DDR STRIKE";
+        let akira = body_dir(
+            &format!("{base}/Akira1"),
+            Some("Akira1"),
+            Some("DDR STRIKE"),
+            "akira01",
+        );
+        let alice = body_dir(
+            &format!("{base}/Alice1"),
+            Some("Alice1"),
+            Some("DDR STRIKE"),
+            "alice01",
+        );
+        let mut flat = body_dir(base, None, Some("DDR STRIKE"), "flat00");
+        flat.chara_rows = parse_text_rlist("flat00, pl, F, A, 0.9, 0.75, 0.0");
+        let p = plan(&[flat, akira, alice], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.dancers.len(), 3);
+        let strike = src("ddr_strike", "DDR STRIKE");
+        assert!(
+            p.entries.iter().all(|e| e.source == strike),
+            "{:?}",
+            p.entries
+        );
+        let by_key = |k: &str| p.entries.iter().find(|e| e.key == k).unwrap();
+        assert_eq!(by_key("akira01").label, "AKIRA1");
+        assert_eq!(by_key("alice01").label, "ALICE1");
+        assert_eq!(by_key("flat00").label, "FLAT");
+        // The source-level sidecar row applied to the flat model.
+        assert_eq!(p.dancers[0].sex, Sex::Female);
+        assert!(
+            p.notes[0].contains("in source DDR STRIKE"),
+            "{}",
+            p.notes[0]
+        );
+        assert_eq!(p.mounts.len(), 3);
+        assert_eq!(p.source_counts(), vec![(strike, 3)]);
+    }
+
+    #[test]
+    fn legacy_placements_land_in_custom() {
+        let teto = body_dir(
+            "./data_mods/custom_models/dancers/Kasane Teto",
+            Some("Kasane Teto"),
+            None,
+            "teto00",
+        );
+        let flat = body_dir("./data_mods/custom_models/dancers", None, None, "bob00");
+        let p = plan(&[flat, teto], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        let custom = src("custom", "CUSTOM");
+        assert_eq!(p.entries.len(), 2);
+        assert!(
+            p.entries.iter().all(|e| e.source == custom),
+            "{:?}",
+            p.entries
+        );
+        assert_eq!(
+            p.labels(),
+            vec![
+                ("teto00".to_string(), "KASANE TETO".to_string()),
+                ("bob00".to_string(), "BOB".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_folder_merges_with_the_implicit_source() {
+        let explicit = body_dir(
+            "./data_mods/custom_models/dancers/Custom/Big Smoke",
+            Some("Big Smoke"),
+            Some("Custom"),
+            "smoke00",
+        );
+        let legacy = body_dir(
+            "./data_mods/custom_models/dancers/Carl Johnson",
+            Some("Carl Johnson"),
+            None,
+            "carl00",
+        );
+        let p = plan(&[explicit, legacy], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(p.entries.iter().all(|e| e.source.slug == "custom"));
+        // Same spelling as the implicit label ⇒ no merge note.
+        assert!(
+            !p.notes.iter().any(|n| n.contains("merge")),
+            "{:?}",
+            p.notes
+        );
+        assert_eq!(p.source_counts().len(), 1);
+    }
+
+    #[test]
+    fn two_spellings_of_one_slug_merge_with_one_note() {
+        let a = body_dir(
+            "./data_mods/custom_models/dancers/DDR STRIKE/A",
+            Some("A"),
+            Some("DDR STRIKE"),
+            "a00",
+        );
+        let b = body_dir(
+            "./data_mods/custom_models/dancers/ddr_strike/B",
+            Some("B"),
+            Some("ddr_strike"),
+            "b00",
+        );
+        let p = plan(&[a, b], &[], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        let strike = src("ddr_strike", "DDR STRIKE");
+        assert!(
+            p.entries.iter().all(|e| e.source == strike),
+            "{:?}",
+            p.entries
+        );
+        let merges: Vec<&String> = p.notes.iter().filter(|n| n.contains("merge")).collect();
+        assert_eq!(merges.len(), 1, "{:?}", p.notes);
+        assert!(merges[0].contains("\"DDR STRIKE\"") && merges[0].contains("\"ddr_strike\""));
+    }
+
+    #[test]
+    fn a_refused_source_skips_its_content_with_one_warning() {
+        let reserved_a = body_dir(
+            "./data_mods/custom_models/dancers/Source/X",
+            Some("X"),
+            Some("Source"),
+            "x00",
+        );
+        let reserved_b = body_dir(
+            "./data_mods/custom_models/dancers/Source",
+            None,
+            Some("Source"),
+            "y00",
+        );
+        let ok = body_dir(
+            "./data_mods/custom_models/dancers/Fine",
+            Some("Fine"),
+            None,
+            "z00",
+        );
+        let p = plan(&[reserved_a, reserved_b, ok], &[], &stock());
+        assert_eq!(p.dancers.len(), 1);
+        assert_eq!(p.dancers[0].key, "z00");
+        assert_eq!(p.mounts.len(), 1);
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("\"Source\"") && p.warnings[0].contains("reserved"));
+        // Stages through the same gate.
+        let stage_dir = PackDir {
+            dir: "./data_mods/custom_models/stages/♥♥/Room".into(),
+            folder: Some("Room".into()),
+            source: Some("♥♥".into()),
+            arcs: vec![arc(
+                "mapset_room00.arc",
+                "./data_mods/custom_models/stages/♥♥/Room",
+                Some(stage_members("room00", &["bg"], &[])),
+            )],
+            ..Default::default()
+        };
+        let p = plan(&[], &[stage_dir], &stock());
+        assert!(p.stages.is_empty());
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn duplicate_key_across_sources_keeps_the_first_source() {
+        let a = body_dir(
+            "./data_mods/custom_models/dancers/UMX2/Afro",
+            Some("Afro"),
+            Some("UMX2"),
+            "dup00",
+        );
+        let b = body_dir(
+            "./data_mods/custom_models/dancers/UMX3/Afro",
+            Some("Afro"),
+            Some("UMX3"),
+            "dup00",
+        );
+        let p = plan(&[a, b], &[], &stock());
+        assert_eq!(p.dancers.len(), 1);
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.entries[0].source, src("umx2", "UMX2"));
+        assert_eq!(p.warnings.len(), 1);
+        assert!(p.warnings[0].contains("already exists"));
     }
 }
