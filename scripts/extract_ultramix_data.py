@@ -97,7 +97,7 @@ GAMES = {
         "sng": "music_US.sng",
         "sng_toc_offset": 0,
     },
-    "ultramix_uk": {
+    "dsu1_eu": {
         "xdata_toc": "xbe",
         "xdata_toc_offset": 0x1B06B0,
         "xdata_count": 737,

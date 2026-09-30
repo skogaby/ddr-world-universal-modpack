@@ -91,6 +91,25 @@ class MotionTests(unittest.TestCase):
     def test_value_shift(self):
         self.assertEqual(D.sample(_key_block([(0, 64), (1920, 64), (0xFFFF, 64)], 5), 0, 100), 2)
 
+    def test_ps2_key_block(self):
+        # DDR STRIKE (FUN_001b3030): u16 value shift, 8 u16 segment offsets (t >> 8), keys at +0x14
+        blk = struct.pack('<9H', 1, *[0x14] * 8) + b'\x33\x10'
+        blk += b''.join(struct.pack('<Hh', t, v) for t, v in [(0, 0), (960, 1920), (1920, -1920)])
+        self.assertEqual(D.sample(blk, 0, 480, layout='ps2'), 480)
+        self.assertEqual(D.sample(blk, 0, 1440, layout='ps2'), 0)
+        self.assertEqual(D.sample(blk, 0, 1000, step=True, layout='ps2'), 960)
+
+    def test_ps2_cmm_layout(self):
+        # one clip, one track {u8 index, u8, u8 trans, u8, u32 nchan, u32 -> channels}, one
+        # channel {u8 type, 3 pad} with its key block inline at +4
+        chan = bytes(4) + struct.pack('<9H', 0, *[0x14] * 8) + bytes(2) + struct.pack('<HhHh', 0, 7, 1920, 7)
+        track = bytes([0, 0, 0, 0]) + struct.pack('<II', 1, 0xC) + struct.pack('<I', 0x10) + chan
+        clip = struct.pack('<IHHI', 0, 1, 1920, 0xC) + struct.pack('<I', 0x10) + track
+        data = struct.pack('<HHI', 0x53, 1, 8) + struct.pack('<II', 16, 24) + b'clip\x00\x00\x00\x00' + clip
+        c = D.parse_cmm(data)['clip']
+        self.assertEqual(c['layout'], 'ps2')
+        self.assertEqual(D.sample(data, c['tracks'][0]['chans'][D.CH_RX], 500, layout='ps2'), 7)
+
     def test_rotation_matches_psx_rotmatrixzyx(self):
         # RotMatrixZYX(vx=0, vy, vz) as decompiled from 3rdMIX PLUS (0x8003dbf0), rows m[i][j]
         vy, vz = 700, -1300

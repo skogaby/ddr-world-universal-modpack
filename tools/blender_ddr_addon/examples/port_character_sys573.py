@@ -222,6 +222,16 @@ def port(mix, chara):
     label, key = names_for(mix, chara)
     chara_dir = os.path.join(SYS573_DIR, mix, 'data', 'chara')
     ch = S.load_character(chara_dir, chara)
+    routines = sorted(routines_of(os.path.join(SYS573_DIR, mix, 'data', 'motion')).items())
+    return port_loaded(ch, label, key, 'F' if chara in FEMALE else 'M', routines,
+                       'DDR %s (Konami System 573) "%s"' % (mix, chara))
+
+
+def port_loaded(ch, label, key, sex, routines, source, model_scale=1.0,
+                script='port_character_sys573.py'):
+    """Steps 1-5 for a loaded 573-engine character (`sys573_dancer_dump.load_character`
+    shape) and its [(routine name, (clips, clip names))]; also used by the DDR STRIKE port
+    (port_character_strike.py), whose data is the same engine's."""
     P.fresh_scene()
     arm = build_armature(key, ch)
     build_mesh(key, ch, arm)
@@ -251,7 +261,7 @@ def port(mix, chara):
     print('B2IT role aliases', aliases)
 
     clip_names = []
-    for rname, (clips, names) in sorted(routines_of(os.path.join(SYS573_DIR, mix, 'data', 'motion')).items()):
+    for rname, (clips, names) in routines:
         samples = S.routine_samples(clips, names, ch['rest'], ROOT_MODE)
         spec, frames, worlds, visible = S.routine_to_anm_spec(ch, samples, file_names, parents, file_binds)
         data = A.write_anm(spec)
@@ -264,11 +274,11 @@ def port(mix, chara):
             rname, len(names), spec['frame_count'], len(data), err))
 
     sidecar = os.path.join(out_dir, 'chara_resources.rlist.txt')
-    sex = 'F' if chara in FEMALE else 'M'
     with open(sidecar, 'w') as f:
-        f.write('# DDR %s (Konami System 573) "%s", ported with its own rig and choreography\n' % (mix, chara))
-        f.write('# (tools/blender_ddr_addon/examples/port_character_sys573.py; ROOT_MODE=%s)\n' % ROOT_MODE)
-        f.write('%s, pl, %s, A, 1.0, %s, 0.0\n' % (key, sex, export_character.fmt_num(0.75 if sex == 'F' else 0.8)))
+        f.write('# %s, ported with its own rig and choreography\n' % source)
+        f.write('# (tools/blender_ddr_addon/examples/%s; ROOT_MODE=%s)\n' % (script, ROOT_MODE))
+        f.write('%s, pl, %s, A, %s, %s, 0.0\n' % (key, sex, export_character.fmt_num(model_scale),
+                                                 export_character.fmt_num(0.75 if sex == 'F' else 0.8)))
     print('SIDECAR', sidecar)
     if PREVIEW:
         preview(out_dir, key, clip_names[0] if clip_names else None)

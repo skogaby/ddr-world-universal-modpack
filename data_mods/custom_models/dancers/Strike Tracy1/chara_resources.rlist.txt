@@ -1,0 +1,3 @@
+# DDR STRIKE (PS2) "TRACY1" (FILEDATA id 0x0CCB), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py; ROOT_MODE=recentre)
+strktracy100, pl, F, A, 1.0, 0.75, 0.0

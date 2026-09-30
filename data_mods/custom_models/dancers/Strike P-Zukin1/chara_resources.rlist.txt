@@ -1,0 +1,3 @@
+# DDR STRIKE (PS2) "PRINCESS-ZUKIN1" (FILEDATA id 0x0CD2), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py; ROOT_MODE=recentre)
+strkpzukin100, pl, F, A, 0.93, 0.75, 0.0

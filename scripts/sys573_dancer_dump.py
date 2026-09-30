@@ -14,6 +14,10 @@ that output (`data/chara/...`, `data/motion/...`).
   chara.pos            17 x int16 xyz; entry j+1 = joint j's offset in its parent
   <motion>.cmm         'S' container of named clips, one clip = one measure (1920 time units)
 
+DDR STRIKE (PS2) ships the same engine's data: `parse_cmd` reads its meshes unchanged, and
+`parse_cmm` / `sample` also read its PS2 key-block layout (docs/ps2_ddr_filedata_research.md §4;
+port: tools/blender_ddr_addon/examples/port_character_strike.py).
+
 Rig: a root (track 0, carries the travel) + 16 joints (tracks 1..16). Per joint, per frame:
 R = Rx(rx) . Rz(rz) . Ry(ry) (PSX 4096 = 360 deg; column vectors), t = pos[j+1] unless the
 track animates translation. Tracks 14/15/16 (hand L, hand R, head) also carry a stepped
@@ -215,8 +219,22 @@ def visible_objects(ch, sel):
 # ---------------------------------------------------------------------------
 # motion
 # ---------------------------------------------------------------------------
+def cmm_layout(data, track):
+    """'573' or 'ps2' for the track header at `track`. The PS2 port (DDR STRIKE; SLPM_662.42
+    FUN_001b3140) drops the 573 track's `size` word, so its channel-table offset (0xC) sits
+    where 573 has the channel count (at most 7)."""
+    return 'ps2' if _u32(data, track + 8) == 0xC else '573'
+
+
 def parse_cmm(data):
-    """.cmm -> {clip name: clip}. clip = {last, tracks: [{trans, chans: {type: key block}}]}."""
+    """.cmm -> {clip name: clip}. clip = {last, layout, tracks: [{trans, chans: {type: key block}}]}.
+
+    Both key-block layouts are read (`sample` takes the clip's `layout`):
+      573  track {u8 index, u8, u8 has_translation, u8, u32 size, u32 nchan, u32 -> channels};
+           channel {u8 type, ..., +8 u32 -> key block}
+      ps2  track {u8 index, u8, u8 has_translation, u8, u32 nchan, u32 -> channels};
+           channel {u8 type, u8 x3}, key block inline at +4
+    The container and clip header are the same in both."""
     if data[0] != 0x53:
         raise ValueError('not a .cmm')
     clips = {}
@@ -225,28 +243,38 @@ def parse_cmm(data):
         name = data[name_off:data.index(b'\0', name_off)].decode('latin1')
         ntracks, last = _u16(data, clip + 4), _u16(data, clip + 6)
         table = clip + _u32(data, clip + 8)
+        layout = cmm_layout(data, clip + _u32(data, table))
         tracks = []
         for k in range(ntracks):
             t = clip + _u32(data, table + 4 * k)
-            ctab = t + _u32(data, t + 0xC)
+            if layout == 'ps2':
+                nchan, ctab = _u32(data, t + 4), t + _u32(data, t + 8)
+            else:
+                nchan, ctab = _u32(data, t + 8), t + _u32(data, t + 0xC)
             chans = {}
-            for c in range(_u32(data, t + 8)):
+            for c in range(nchan):
                 ch = t + _u32(data, ctab + 4 * c)
-                chans[data[ch]] = ch + _u32(data, ch + 8)
+                chans[data[ch]] = ch + 4 if layout == 'ps2' else ch + _u32(data, ch + 8)
             tracks.append(dict(trans=bool(data[t + 2]), chans=chans))
-        clips[name] = dict(name=name, last=last, tracks=tracks, data=data)
+        clips[name] = dict(name=name, last=last, layout=layout, tracks=tracks, data=data)
     return clips
 
 
-def sample(data, blk, t, step=False):
-    """FUN_8003c304 / the selector read in FUN_8003c420. Key block: +2 u16 and +0xD u8 sum
-    to the segment-index shift, +6 u16 = value shift, +0x16 + 4*i u16 = segment i offset;
-    a segment is a run of (u16 time, s16 value) keys. Linear interpolation, C division."""
-    sh = (_u16(data, blk + 2) + data[blk + 0xD]) & 31
-    p = blk + _u16(data, blk + ((t >> sh) * 4) + 0x16) + 4
+def sample(data, blk, t, step=False, layout='573'):
+    """FUN_8003c304 / the selector read in FUN_8003c420 (PS2: SLPM_662.42 FUN_001b3030).
+    573 key block: +2 u16 and +0xD u8 sum to the segment-index shift, +6 u16 = value shift,
+    +0x16 + 4*i u16 = segment i offset. PS2 key block: +0 u16 = value shift, +2 + 2*i u16 =
+    segment i offset, a fixed segment shift of 8. A segment is a run of (u16 time, s16 value)
+    keys. Linear interpolation, C division."""
+    if layout == 'ps2':
+        p = blk + _u16(data, blk + 2 + 2 * (t >> 8)) + 4
+        vs = _u16(data, blk) & 31
+    else:
+        sh = (_u16(data, blk + 2) + data[blk + 0xD]) & 31
+        p = blk + _u16(data, blk + ((t >> sh) * 4) + 0x16) + 4
+        vs = _u16(data, blk + 6) & 31
     while _u16(data, p) < t:
         p += 4
-    vs = _u16(data, blk + 6) & 31
     t0, v0, t1, v1 = _u16(data, p - 4), _s16(data, p - 2), _u16(data, p), _s16(data, p + 2)
     if step or v0 == v1 or t == t0:
         return v0 >> vs
@@ -278,7 +306,8 @@ def local_pose(clip, t, rest):
         t %= clip['last'] + 1
     mats, sel = [], {}
     for k, tr in enumerate(clip['tracks'][:17]):
-        v = {c: sample(clip['data'], blk, t, c == CH_SEL) for c, blk in tr['chans'].items()}
+        layout = clip.get('layout', '573')
+        v = {c: sample(clip['data'], blk, t, c == CH_SEL, layout) for c, blk in tr['chans'].items()}
         m = np.eye(4)
         # RotMatrixZYX(0, ry, rz) = Rz.Ry, then RotMatrixX(rx) left-multiplies: Rx.Rz.Ry
         m[:3, :3] = _rx(v.get(CH_RX, 0)) @ _rz(v.get(CH_RZ, 0)) @ _ry(v.get(CH_RY, 0))

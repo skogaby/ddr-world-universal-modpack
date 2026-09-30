@@ -359,6 +359,36 @@ SYS573_DIR=~/Desktop/ddr_573_extracted DANCERS=3rdmix_plus/afro PREVIEW=1 \
   --python tools/blender_ddr_addon/examples/port_character_sys573.py
 ```
 
+### A DDR STRIKE (PS2) dancer (`examples/port_character_strike.py`)
+
+DDR STRIKE's 45 polygon dancers (22 characters in two costumes, plus the gold RHYTHM3) are the
+System 573 engine's data on the PS2, so the port is the 573 one (`port_character_sys573.port_loaded`)
+with a different loader. All 45 ship as `data_mods/custom_models/dancers/Strike <Name><n>` (keys
+`strk<name><n>00`), ported and round-trip previewed 2026-09-29; not yet cabinet-tested. RE:
+`docs/ps2_ddr_filedata_research.md` §4.
+
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract strike_jp <disc>
+  <out> --unpack` (`STRIKE_DIR`): `unpacked/<id>/001.cmd` meshes and `000.tcb` textures,
+  `unpacked/0ca9..0cb1/*.cmm` motion sets, and `elf/chara.lst` / `elf/chara.pos`.
+* **Differences from the 573 port.**
+  - The texture is a 192×256 8 bpp TCB at the left of the 256² page the UVs address. Palette
+    alpha 0 is transparent and anything else opaque.
+  - The motion files use the PS2 key-block layout, which `sys573_dancer_dump.parse_cmm`
+    detects. The 16 routines are the 5thMIX set; each is taken once from the 8 sets.
+  - Names, the sex call and the model scale come from the game's character table (ELF VA
+    0x2B0410), hard-coded in the script. The table's scale is uniform: BABY-LON is 0.4 and
+    AKIRA 1.06. It goes into the sidecar's model_scale column.
+  - Labels are `Strike ` + the game's name with its costume digit. Three names are shortened
+    to fit 15 bytes: BABY-LON → BabyLon, PRINCESS-ZUKIN → P-Zukin, ROBO2001 → Robo.
+* **Checks.** They are the 573 port's. The worst joint error over all 45 × 16 clips is
+  0.11 mm, and a re-run is byte-identical. All 45 dancers share one rig, so their `.anm` files
+  are identical.
+
+```bash
+DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~6 min for 45
+```
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

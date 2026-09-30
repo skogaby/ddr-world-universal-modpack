@@ -13,6 +13,9 @@ faces/hands, dance animation) as a basis for a port?
 - **MAX, MAX 2 and EXTREME use pre-rendered video.** Their dancers and backgrounds are `.SBS`
   clips: headerless PSX MDEC frames, 304×176, 80 frames each, decoded here. There is no
   character geometry in those mixes.
+- **The PS2's DDR STRIKE carries this engine.** It has 45 dancers in the `.cmd` / `chara.lst` /
+  `chara.pos` layouts and the 5thMIX routine set, in a PS2 motion key-block layout that the
+  decoder also reads. See docs/ps2_ddr_filedata_research.md §4.
 
 **Tools** (all host-only Python and all self-contained; nothing is vendored):
 - `tools/blender_ddr_addon/examples/port_character_sys573.py`: the conversion to a DDR World
