@@ -11,7 +11,10 @@ SuperNova 2, X and X2 differ?)
   FILEDT02.BIN and FILEDT03.BIN form that space back to back. No heuristics are needed to
   cut the archive into files (§1–§2).
 - **Party Collection and Festival use the same FILEDATA layout** without the `0xFFFF`
-  terminator, and carry the same System 573 dancer rig as STRIKE (§6).
+  terminator, and carry the same System 573 dancer rig as STRIKE (§6). **All 86 dancers are
+  ported** (2026-10-03, §6.1): Festival's 26 as `dancers/DDR FESTIVAL/`, Party Collection's 60
+  (the cast of 1st..7thMIX and the CS mixes) as `dancers/DDR PARTY COLLN/`. Neither disc has
+  any 3D stage: the gameplay backgrounds are IPU movies. Not yet cabinet-tested.
 - **SuperNova .. X2 replaced FILEDATA with four named archives** (SYSTEM / IMAGE / SOUND /
   MDB `.DAT`), each with its own table in the ELF: names, exact sizes, dates and a byte-sum
   checksum per file. All 8954 files of the four discs verify (§7).
@@ -25,7 +28,7 @@ SuperNova 2, X and X2 differ?)
   - The motion files keep 573's semantics in a PS2 key-block layout (§4.3), which
     `parse_cmm` / `sample` now read.
   - The game's character table (§4.4) names all 45 dancers and gives each one a scale.
-  - **All 45 are ported** as `data_mods/custom_models/dancers/Strike *`
+  - **All 45 are ported** as `data_mods/custom_models/dancers/DDR Strike/<Name> <n>`
     (`tools/blender_ddr_addon/examples/port_character_strike.py`). They are not yet
     cabinet-tested.
 - The song backgrounds are MPEG-1 clip sets. The attract movies show pre-rendered
@@ -262,11 +265,11 @@ id of 0xCB2–0xCE4):
 | Offset | Field | Getter / use |
 |---|---|---|
 | +0x00 | f32 scale | `FUN_001ae980`. `FUN_001aef40` stores `scale × 0.01`. `FUN_001b1430` multiplies every joint's world translation by it, and `FUN_001adda0` divides the floor position by it, i.e. a uniform character scale (1.0; RAGE 0.97/0.98, P-ZUKIN 0.93, YUNI 0.96, ROBO 0.98, NAOKI 1.01, AKIRA 1.06, BABY-LON **0.4**) |
-| +0x04 | f32 | `FUN_001ae860` → `FUN_001b1010` scales two draw parameters by it (0.55–0.75; likely the outline) |
+| +0x04 | f32 | `FUN_001ae860` → `FUN_001b1010` scales two draw parameters by it (0.55–0.75); the same engine's debug info in Party Collection names it `get_shadow_bri` (§6.1) |
 | +0x08 | u32 flags | bits 0–1 = `chara.lst` type (always 1 here); bit 2 set on costume 1 |
 | +0x0C | ptr | → a 0x40-byte block, or a runtime buffer for the first 8 (`FUN_001ae960`) |
-| +0x10 | ptr | its first byte is read by `FUN_001ae8d0` |
-| +0x14 | ptr | 16 × 16-byte per-joint entries (`FUN_001ae880(k, joint)`) |
+| +0x10 | ptr | its first byte is read by `FUN_001ae8d0`; the motion-set list (`get_dancer_default_mot`, §6.1) |
+| +0x14 | ptr | 16 × 16-byte per-joint entries (`FUN_001ae880(k, joint)`; `get_edge_info`, §6.1) |
 | +0x18 | char * | the name |
 
 The names, in id order: BLUES, RHYTHM, DRUM, BASS, RAGE, EMI, ASTRO, CHARMY, ALICE, BABY-LON,
@@ -349,6 +352,90 @@ Each comes as `<NAME>1` / `<NAME>2`, the two costumes; RHYTHM3 (gold) is last.
 - `DATA/SOUND/SD.BIN` is outside the archive and not extracted: in PC it starts with an
   `Svag` header (plus `DDRPC.HD` / `.BD` / `.TD` beside it), in Festival it is a
   `TYOSD v-2.00` bank like STRIKE's 0x069E.
+
+### 6.1 The dancers and their port (2026-10-03)
+
+**Files.** Each dancer is a `pairs` table `{TCB 192×256 8 bpp, .cmd}` as in STRIKE. The motion
+sets are `offsets` tables of 17 routine slots, the same 16 routines plus the `normal` idles:
+
+| | PC | Festival |
+|---|---|---|
+| Dancers (ids, minus multiples of 8) | 0x134–0x177 (60) | 0x3DF–0x3FC (26) |
+| Motion sets | 0x12B–0x12F, 0x131–0x133 | 0x3D6, 0x3D7, 0x3D9–0x3DE |
+| Re-bundle (byte-identical, ignored) | 0x179: all 60 + set 0x12B | 0x4B6: all 26 + set 0x3D6 |
+| Character table (VA) | 0x29E270, 60 records | 0x29ED80, 26 records |
+
+Neither ELF refers to a re-bundle's TOC entry; the per-set pointer tables (PC 0x28B630,
+Festival 0x28A6E0) point only at the eight sets.
+
+**Debug info.** Both ELFs keep a DWARF 1 `.debug` section (`.line` too): names, source files and
+`low_pc` / `high_pc` of 328 (PC) / 1100 (Festival) functions, e.g. the dancer engine under
+`E:\DDR\ddrb2\src\AM\s573\doll\*.c` (PC; Festival `ddrf`). Each record is `{u32 length, u16 tag,
+attributes}`, an attribute `u16 (name << 4 | form)`. Subroutines (tags 0x06 / 0x0A) carry
+`AT_name` (0x03, string), `AT_low_pc` (0x11) and `AT_high_pc` (0x12). The Ghidra programs
+don't carry these names yet. The names below come from the section.
+
+**Character table.** STRIKE's 0x1C-byte record (§4.4), record k = the k-th dancer id. Its getters
+in `doll/ddata.c` (PC VAs) give each field a name:
+
+| Offset | Getter | Meaning |
+|---|---|---|
+| +0x00 | `get_dancer_scale` 0x23EF70 | the uniform scale (§4.4) |
+| +0x04 | `get_shadow_bri` 0x23EE50 | the floor shadow's brightness (`draw_dancer_model` × 1.27); STRIKE's "likely the outline" field |
+| +0x08 & 3 | `get_chara_lst_id` 0x23EE20 | 1 = `chara.lst`, 0 = `chara20.lst` (`dancer_model_setup`) |
+| +0x08 bit 2 | `get_chara_hide` 0x23EDF0 | `ps2dancerInitHide` sets a bitmask bit per flagged dancer (the hide / unlock semantics were not traced). Set on PC's six 1stMIX characters and on Festival's costume 1s |
+| +0x0C | `get_primdt_tbl` 0x23EF50 | the per-object primitive table |
+| +0x10 | `get_dancer_default_mot` / `rnd_get_dancer_mot` | 4 motion-set indices (values 1–7; the base was not traced): the default is byte 0, otherwise one is drawn at random per song |
+| +0x14 | `get_edge_info` 0x23EE70 | 16 per-joint `{f32 x, y, z, u32 enable}` (0.87–1.09): the toon edge (outline) of each joint |
+
+- Six PC dancers are type 0 and their meshes have 20 objects: KONSENTO:01, SPACE MAN,
+  KONSENTO:02, TAMAKO, OSHARE-ZUKIN, KAERU-ZUKIN.
+- The motion-set lists give the sex. `01010103` .. `04040402` are the male sets and `05050505` /
+  `05050606` / `07070705` the female ones: PC records 0–30 male, 31–59 female; Festival BLUES /
+  DRUM / DISCO / RAGE male. Every port still gets all 16 routines, as STRIKE's did.
+- The shadow brightness and the edge info are draw style; World draws its own shadow and
+  outlines, so the port does not carry them.
+- Names: PC `AFRO(1st)` .. `BUS(7th)` (`<NAME>(<mix>)`, CS = the console mixes, 7th = MAX2,
+  plus `EMI(unpublished)`); Festival `BLUES1` .. `EMI3` (eight characters × 3–4 costumes).
+
+**Overlap with other sources.** Fingerprinting every port's vertex buffer and `.dds` gives:
+- **Festival reuses PC's dancers.** DISCO 1/2/3 = PC's AFRO 1st / 2nd / 5th, EMI 1/2/3 = EMI
+  3rd / EMI(1) 4th / EMI 5th, RAGE 1/2/3 = RAGE 3rd / 4th / 5th, LADY 1 = LADY 1st (mesh and
+  texture identical).
+- **Festival to STRIKE.** Festival's LADY 3 is STRIKE's LADY1 exactly. BLUES 3 and DRUM 2 are
+  STRIKE's BLUES1 / DRUM1 meshes in other colours.
+- **PC to the arcade ports.** Several PC dancers wear an arcade 573 texture on a different
+  mesh: Akira 4th = 4thMIX Xman, Astro 4th = 4thMIX Space M B, Charmy 4th = Space F B,
+  Konsento 4th = Robo B, Rage 4th = Yaro B, Baby-Lon 5th = STRIKE Baby-Lon 1.
+
+All are shipped anyway: each source carries its game's whole cast, as STRIKE did beside the
+3rd–5thMIX ports.
+
+**No stages.** Both games draw the polygon dancers over the song's IPU background clips (PC
+259, Festival 866).
+- A structural scan of every extracted file for `.cmd`-shaped data finds exactly the 120 / 52
+  dancer meshes.
+- The debug info names no stage or set-piece module. The only other geometry is `draw_floor`, a
+  static in `doll/dancer.c` (PC 0x23E3C0, called from `ps2dancerDispStep`). It is procedural: a
+  7×7-vertex grid of 5-unit cells that follows the dancer, faded by distance from it and scaled by
+  its `bri` (brightness) argument. No asset is involved, and World draws its own floor and shadow.
+- The other unrecognized payloads are 2D: `PS2D`-tagged layouts, step charts, a CSV, and two
+  large packed blobs (PC 0x1AF, Festival 0x4AF) that are neither Bemani LZ nor mesh-shaped.
+
+There is nothing to port as a World stage.
+
+**Port** (`port_character_strike.py GAME=festival|pc`): the STRIKE / 573 pipeline unchanged,
+except that 20-object meshes take `chara20.lst` (a 21-bone rig: root, the 16 joints and the 4
+face helpers; one hand shape per hand, so no hand helpers).
+- Labels: Festival `<Name> <n>` (`Blues 1`), PC `<Name> <mix>` (`Afro 1st`, `Space Man CS1st`,
+  `Emi Unpublished`). Shortened: OSHARE-ZUKIN → O-Zukin, PRINCESS-ZUKIN → P-Zukin,
+  KONSENTO:03/2 (4th) → Konsento 4th.
+- Keys: `fest<name><n>00` / `pc<name><mix>00`. Model scale is the table's.
+- The source folder is `DDR PARTY COLLN`: the requested `DDR PARTY COLL.` ends in a period,
+  which Windows cannot store.
+- The worst joint error over all 86 × 16 clips is 0.11 mm. Every dancer re-imports and renders.
+  The script checks its hard-coded tables against the ELF beside the extraction (names, scales,
+  sex lists, object table type).
 
 ## 7. SuperNova .. X2 (DAT archives)
 
@@ -829,6 +916,17 @@ python3 scripts/extract_ps2_ddr_data.py extract supernova_jp "$G" "$G/extracted_
 All six runs: 0 checksum mismatches, 0 conversion errors (3641 / 4103 / 1064 / 1044 / 869 /
 1341 PNGs). `--wav` is not part of those runs: it decodes about 50× faster than real time,
 so a full disc's songs take minutes.
+
+The Festival and Party Collection dancers (§6.1; `GAME=festival` / `GAME=pc`, defaulting to the
+extractions above, writing straight into their source folders). A Blender run ports one dancer
+in ~5–10 s, so run the two games in separate Blender processes:
+
+```bash
+GAME=festival DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+    --python tools/blender_ddr_addon/examples/port_character_strike.py   # ~4 min -> dancers/DDR FESTIVAL/ (26)
+GAME=pc DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+    --python tools/blender_ddr_addon/examples/port_character_strike.py   # ~8 min -> dancers/DDR PARTY COLLN/ (60)
+```
 
 The SuperNova TZM packs (§7.4):
 

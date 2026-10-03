@@ -1,0 +1,3 @@
+# DDR PARTY COLLECTION (PS2) "LADY(2nd)" (FILEDATA id 0x015E), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py GAME=pc; ROOT_MODE=recentre)
+pclady2nd00, pl, F, A, 1.02, 0.75, 0.0

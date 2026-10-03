@@ -1,0 +1,3 @@
+# DDR PARTY COLLECTION (PS2) "SPACE MAN(CS1st)" (FILEDATA id 0x0136), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py GAME=pc; ROOT_MODE=recentre)
+pcspacemancs1st00, pl, M, A, 0.97, 0.8, 0.0

@@ -1667,3 +1667,17 @@ chain's and only the orientation carries the spin; and a 30 fps dance clip keyed
 scene frames sits half a key off a 30 fps loop keyed at even ones — slerp the fractional
 index, don't snap. The `.anm` evaluator then reproduces the record (3°/frame) with no
 new runtime code.
+
+## Content folder names must be legal on the Windows cabinet, not just on the Mac (2026-10-03)
+
+A source or friendly folder under `data_mods/custom_models/` IS the menu label, so it is
+tempting to spell game names verbatim. macOS accepts names that Windows cannot hold. A
+trailing dot or space (the requested `DDR PARTY COLL.`) is silently stripped by Windows
+extraction / scp, and Git for Windows (`core.protectNTFS`) refuses to check it out.
+`< > : " / \ | ? *` are invalid outright, and Party Collection's own names carry `:` and `/`
+(`KONSENTO:01(1st)`, `KONSENTO:03/2(4th)`). The tree then checks out fine on the Mac and breaks
+only on the cabinet or a tester's PC. Spell labels from the allowed set (letters, digits,
+space, `-`, `.` mid-name), ≤ 15 bytes, and check the whole tree before handing back:
+`find data_mods/custom_models -name '*[. ]' -o -name '*[:<>|?*"\\]*'` must print nothing. The
+slug (`sources::slug`) ignores punctuation, so renaming the folder for Windows keeps the same
+option-row id.

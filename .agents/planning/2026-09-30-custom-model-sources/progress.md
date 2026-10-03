@@ -1,6 +1,6 @@
 # Progress — Custom dancer / stage SOURCES
 
-Updated: 2026-09-30
+Updated: 2026-10-03
 Status: DONE — Steps 1–5 complete, cabinet-validated 2026-09-30 (maintainer: "everything works perfectly");
 uncommitted — maintainer commits manually.
 NEXT ACTION (maintainer): commit (`git add -A data_mods/custom_models` pairs the content move as renames).
@@ -81,6 +81,31 @@ steps until a cabinet test is needed (2026-09-30); no commits — maintainer com
   Pin dancers with `DDR_DANCERS_PIN=xafro01,xconcent01,x2pix01,xbabylon01`. Host validation done:
   `test_tzm_dump.py` (36), `validate_ps2_ddr_tools.sh` on both extractions (0 problems),
   `validate_background_dancers.sh` (222), SN / SN2 regeneration byte-identical to the shipped files.
+
+- 2026-10-03 — TWO NEW DANCER SOURCES, content-only, uncommitted, NOT yet cabinet-tested:
+  `data_mods/custom_models/dancers/DDR FESTIVAL/` (26: `Blues 1..3` .. `Emi 1..3`, `Rhythm` / `Bass` 1..4;
+  keys `fest<name><n>00`) and `dancers/DDR PARTY COLLN/` (60: `Afro 1st` .. `Bus 7th`, CS dancers as
+  `Space Man CS1st` etc.; keys `pc<name><mix>00`). The maintainer asked for `DDR PARTY COLL.` and chose
+  `DDR PARTY COLLN` (a trailing dot can't exist on Windows; learnings 2026-10-03). No stages: neither disc
+  has 3D stage geometry (IPU movie backgrounds), so the maintainer chose dancers only. Produced by
+  `port_character_strike.py GAME=festival|pc`. That script now also writes STRIKE into `DDR Strike/<Name> <n>`;
+  its table was checked against the shipped folders but STRIKE was not re-run (no extraction on disk).
+  RE: `docs/ps2_ddr_filedata_research.md` §6.1. Things to watch on the cabinet:
+  1. Boot INFO lists the two new sources (`ddr_festival` 26, `ddr_party_colln` 60) with no key-collision
+     or label-length WARNs. Total custom dancers: 257.
+  2. The six **20-object** Party Collection dancers (`pckonsento1st00`, `pcspacemancs1st00`,
+     `pckonsento2nd00`, `pctamakocs1st00`, `pcosharezukin1st00`, `pckaeruzukin2nd00`) have a 21-bone rig
+     (no hand helpers). Check that their faces still swap and their hands render.
+  3. **DISK A / DISK B** (`pcdiska1st00`, `pcdiskb1st00`) are stacks of thin rings + a ♂/♀ symbol. Check
+     they read as intended at World's camera distance. **Baby-Lon 5th** plays at the table's 0.4 scale,
+     like STRIKE's.
+  4. Duplicates are shipped deliberately (each source = its game's whole cast). Festival's Disco / Emi /
+     Rage 1..3 and Lady 1 are PC's Afro / Emi / Rage / Lady meshes and textures, and Festival `Lady 3` is
+     STRIKE `Lady 1` (research §6.1 lists them all). Prune if they clutter RANDOM.
+  Pin with `DDR_DANCERS_PIN=pckonsento1st00,pcdiska1st00,festblues100`. Host validation done:
+  `validate_ps2_ddr_tools.sh` on both extractions (0 problems), all 1376 clips < 0.11 mm,
+  `validate_background_dancers.sh` (222), re-run byte-identical (one dancer per game), all 86 previews re-import
+  and render.
 
 ## Deploy & test log
 

@@ -228,16 +228,17 @@ def port(mix, chara):
 
 
 def port_loaded(ch, label, key, sex, routines, source, model_scale=1.0,
-                script='port_character_sys573.py'):
+                script='port_character_sys573.py', out_base=None):
     """Steps 1-5 for a loaded 573-engine character (`sys573_dancer_dump.load_character`
-    shape) and its [(routine name, (clips, clip names))]; also used by the DDR STRIKE port
-    (port_character_strike.py), whose data is the same engine's."""
+    shape) and its [(routine name, (clips, clip names))]; also used by the PS2 ports of the
+    same engine (port_character_strike.py: STRIKE, Festival, Party Collection). `out_base`
+    (default OUT_BASE) is the folder the `<label>/` folder goes in, e.g. a source folder."""
     P.fresh_scene()
     arm = build_armature(key, ch)
     build_mesh(key, ch, arm)
     bpy.context.view_layer.update()
 
-    out_dir = os.path.join(OUT_BASE, label)
+    out_dir = os.path.join(out_base or OUT_BASE, label)
     body = 'pl_' + key
     body_dir = os.path.join(out_dir, body)
     motion_dir = os.path.join(body_dir, 'motion')

@@ -1,0 +1,3 @@
+# DDR PARTY COLLECTION (PS2) "DISK:A(1st)" (FILEDATA id 0x0137), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py GAME=pc; ROOT_MODE=recentre)
+pcdiska1st00, pl, M, A, 1.0, 0.8, 0.0

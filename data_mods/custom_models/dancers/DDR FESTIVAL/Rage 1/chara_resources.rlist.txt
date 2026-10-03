@@ -1,0 +1,3 @@
+# DDR FESTIVAL (PS2) "RAGE1" (FILEDATA id 0x03EA), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py GAME=festival; ROOT_MODE=recentre)
+festrage100, pl, M, A, 0.97, 0.8, 0.0

@@ -359,34 +359,51 @@ SYS573_DIR=~/Desktop/ddr_573_extracted DANCERS=3rdmix_plus/afro PREVIEW=1 \
   --python tools/blender_ddr_addon/examples/port_character_sys573.py
 ```
 
-### A DDR STRIKE (PS2) dancer (`examples/port_character_strike.py`)
+### A DDR STRIKE / FESTIVAL / PARTY COLLECTION (PS2) dancer (`examples/port_character_strike.py`)
 
 DDR STRIKE's 45 polygon dancers (22 characters in two costumes, plus the gold RHYTHM3) are the
 System 573 engine's data on the PS2, so the port is the 573 one (`port_character_sys573.port_loaded`)
-with a different loader. All 45 ship as `data_mods/custom_models/dancers/Strike <Name><n>` (keys
+with a different loader. All 45 ship as `data_mods/custom_models/dancers/DDR Strike/<Name> <n>` (keys
 `strk<name><n>00`), ported and round-trip previewed 2026-09-29; not yet cabinet-tested. RE:
-`docs/ps2_ddr_filedata_research.md` §4.
+`docs/ps2_ddr_filedata_research.md` §4. DDR FESTIVAL (`GAME=festival`, 26 dancers) and DDR PARTY
+COLLECTION (`GAME=pc`, 60: the dancers of 1st..7thMIX and the CS mixes) are the same engine again
+(RE §6.1) and ship as `dancers/DDR FESTIVAL/<Name> <n>` (keys `fest<name><n>00`) and
+`dancers/DDR PARTY COLLN/<Name> <mix>` (keys `pc<name><mix>00`), ported 2026-10-03; not yet
+cabinet-tested. Neither disc has 3D stages.
 
-* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract strike_jp <disc>
-  <out> --unpack` (`STRIKE_DIR`): `unpacked/<id>/001.cmd` meshes and `000.tcb` textures,
-  `unpacked/0ca9..0cb1/*.cmm` motion sets, and `elf/chara.lst` / `elf/chara.pos`.
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract strike_jp | festival_jp |
+  party_collection_jp <disc> <out> --unpack` (`PS2_DIR`; `STRIKE_DIR` still works for STRIKE):
+  `unpacked/<id>/001.cmd` meshes and `000.tcb` textures, the 8 `unpacked/<set>/*.cmm` motion
+  sets, and `elf/chara.lst` / `chara20.lst` / `chara.pos`. `GAMES` in the script has each disc's
+  ids and table address.
 * **Differences from the 573 port.**
   - The texture is a 192×256 8 bpp TCB at the left of the 256² page the UVs address. Palette
     alpha 0 is transparent and anything else opaque.
   - The motion files use the PS2 key-block layout, which `sys573_dancer_dump.parse_cmm`
     detects. The 16 routines are the 5thMIX set; each is taken once from the 8 sets.
-  - Names, the sex call and the model scale come from the game's character table (ELF VA
-    0x2B0410), hard-coded in the script. The table's scale is uniform: BABY-LON is 0.4 and
-    AKIRA 1.06. It goes into the sidecar's model_scale column.
-  - Labels are `Strike ` + the game's name with its costume digit. Three names are shortened
-    to fit 15 bytes: BABY-LON → BabyLon, PRINCESS-ZUKIN → P-Zukin, ROBO2001 → Robo.
-* **Checks.** They are the 573 port's. The worst joint error over all 45 × 16 clips is
-  0.11 mm, and a re-run is byte-identical. All 45 dancers share one rig, so their `.anm` files
-  are identical.
+  - A 20-object mesh (six of Party Collection's) uses `chara20.lst`: one hand shape per hand, so
+    the rig has no hand helpers (21 bones).
+  - Names, the sex call and the model scale come from the game's character table, hard-coded in
+    the script and checked against the ELF when it sits beside the extraction. The table's
+    scale is uniform: BABY-LON is 0.4 and AKIRA 1.06. It goes into the sidecar's model_scale
+    column. The sex comes from the record's motion-set list (male / female routine sets);
+    STRIKE's is judged from the models.
+  - The script writes `OUT_BASE/<source>/<label>/` directly: `DDR Strike`, `DDR FESTIVAL`,
+    `DDR PARTY COLLN`. Labels are the game's names with the costume digit (`Blues 1`) or the mix
+    (`Afro 1st`), shortened to 15 bytes where needed: BABY-LON → Baby-Lon, PRINCESS-ZUKIN →
+    P-Zukin, OSHARE-ZUKIN → O-Zukin, ROBO2001 → Robo (STRIKE).
+* **Checks.** They are the 573 port's. The worst joint error over all 131 × 16 clips is
+  0.11 mm, and a re-run is byte-identical. The clips depend only on the object table: every
+  28-object dancer of the three discs has byte-identical `.anm` files, and the six 20-object ones
+  share a second set.
 
 ```bash
 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
   --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~6 min for 45
+GAME=festival DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~4 min for 26
+GAME=pc DANCERS='AFRO(1st),BUS(7th)' /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # names as in the table
 ```
 
 ### A DDR SuperNova / SuperNova 2 / X / X2 (PS2) dancer (`examples/port_character_supernova.py`)

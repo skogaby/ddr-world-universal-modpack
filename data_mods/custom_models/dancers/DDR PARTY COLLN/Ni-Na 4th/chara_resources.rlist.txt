@@ -1,0 +1,3 @@
+# DDR PARTY COLLECTION (PS2) "NI-NA(4th)" (FILEDATA id 0x016D), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_strike.py GAME=pc; ROOT_MODE=recentre)
+pcnina4th00, pl, F, A, 1.01, 0.75, 0.0
