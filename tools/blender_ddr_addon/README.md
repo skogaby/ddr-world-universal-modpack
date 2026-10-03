@@ -389,19 +389,60 @@ DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --fact
   --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~6 min for 45
 ```
 
-### A DDR SuperNova (PS2) dancer (`examples/port_character_supernova.py`)
+### A DDR SuperNova / SuperNova 2 / X / X2 (PS2) dancer (`examples/port_character_supernova.py`)
 
 SuperNova's eight dancers (AFRO, BABYLON, EMI, GUS, JENNY, RAGE, ROBOZUKIN, RUBY) are a new,
 XSI-exported engine: skinned strip meshes with up to three weights per vertex on a 22-joint
 HumanIK-named skeleton, and 30 Hz quaternion routines. Decoders and the World-space math are in
 `scripts/tzm_dump.py`; formats and RE in `docs/ps2_ddr_filedata_research.md` §7.4. Ported
-2026-09-30 and round-trip previewed (all eight re-import and render, rest and mid-clip); not yet
-cabinet-tested. Staged as one folder per character (`Afro`, `Baby-Lon`, `Emi`, `Gus`, `Jenny`,
-`Rage`, `Robo-Zukin`, `Ruby`; keys `sn<name>00`) under `OUT_BASE` (default `~/Desktop/SuperNova
-Dancers`, not `data_mods/custom_models/` while that layout is being reworked).
+2026-09-30 and round-trip previewed (all eight re-import and render, rest and mid-clip). Staged as
+one folder per character (`Afro`, `Baby-Lon`, ...; keys `sn<name>00`) under `OUT_BASE` (default
+`~/Desktop/SuperNova Dancers`); shipped under `data_mods/custom_models/dancers/DDR SUPRNVA 1+2/`
+as `Afro 1` .. `Ruby 1` beside the SuperNova 2 content below.
 
-* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract supernova_jp <disc>
-  <out>` (`SN_DIR`): `files/IMAGE/model/chara/skin/<name>.TZM` and `chara/motion/<clip>.TZM`.
+**SuperNova 2** (`GAME=sn2`, 2026-10-03): twelve characters × two costumes (`<skin>01` / `02`:
+the eight above + YUNI, ALICE, CONCENT, JULIO) dancing the same 29 routine packs byte for byte.
+The costume-01 bodies of the returning eight ARE the SuperNova skins (same sheets — EMI's and
+ROBOZUKIN's recoloured — same rigs, same geometry), so `DANCERS=all` ports the sixteen that are
+new (every costume 02 + both costumes of the four new characters; `DANCERS=afro01` still works),
+labelled `<Name> 2` / `<Name> 1`, keys `sn2<skin>`. Two things changed in the packs:
+* the body meshes have **no face** — the eyes / mouth triangles moved to `<skin>_face.TZM`, an
+  unskinned mask (`face01` neutral, `face02` smile, `face03` eyes shut; three 128² sheets) hung
+  off the Head joint through a `trans_null` whose rotation is the Head bind rotation's inverse.
+  `tzm_dump.face_overlay` puts the chosen sheet (`FACE`, default `face01`) into the body's game
+  space (`Head_bind · W_object · v`, verified on all 24 packs) and the port joins it to the body
+  mesh as its own material slot (`sn2<skin>_face`), weighted 1.0 to `Head`;
+* the root node is named after the pack (`afro01`, `concent01`) instead of `globalSRT` while the
+  clips still carry the original rig's static root track — `tzm_dump.clip_worlds` matches the
+  rig root by position (CONCENT's root carries a 0.41 pose offset the game discards; with it the
+  character would hover 4 cm). JULIO 1 (`SCALE` 0.9) and BABY-LON 2 (0.4, a chibi) fold their
+  scale like BABYLON. Not ported: the two other expressions.
+* CONCENT's chest fan (`body01 > body_trans_null > fan01` in its face pack, hung off `Spine1`,
+  spun -720° per 4 s loop by the pack's own `ddr_concent_fan` record) is ported SPINNING: the fan
+  object becomes a 24th joint `fan01` under `Spine1` (`tzm_dump.attach_part_bone`: pose = the
+  chain below the pack root, bind = Spine1's bind × that chain — exactly where
+  `tzm_dump.part_overlay` puts its vertices, which weight 1.0 to it, slot `sn2<skin>_body01`), and
+  every dance clip gets a `fan01` rotation track = the chain's static tilt × the spin sampled at
+  the clip's own key frames, wrapping over the 240-frame loop (`tzm_dump.part_spin_track`). The
+  `.anm` evaluates to one revolution per 2 s relative to Spine1. `SPIN=0` joins it static instead.
+
+**DDR X / X2** (`GAME=x` / `GAME=x2`, 2026-10-03): the same engine, routines and face-pack layout
+once more (RE doc §7.6). Both games bundle SuperNova 2's skins (X's costumes 02 / 03, X2's 03) and
+add their own — X's costume 01 for all twelve characters, `babylon02`, BONNIE, ZERO; X2's costume
+02 (X's 01 bodies on new sheets), `bonnie02` / `zero02` and the four PIX pigs (`SCALE` 0.45).
+`DANCERS=all` ports only what SuperNova 2 does not have (15 + 18), and the two games ship into ONE
+source folder, `data_mods/custom_models/dancers/DDR X + X2/` (`Afro 1` = X's 01, `Afro 2` = X2's
+recolour, `Baby-Lon 1/2` X, `Baby-Lon 3` X2, `Pix 1..4`; keys `x<skin>` / `x2<skin>`). The X
+tables carry what SuperNova 2's did not: the per-costume face root (`face01`; PIX
+`jx_pixNN_face1`) and face pack (X2's bonnie02 / zero02 reuse the 01 masks), the sex flag (PIX
+dances a mixed MM/FF six), the game's own shadow scale (+0x8C: BABYLON / PIX 0.35 .. CONCENT
+0.85 — the sidecar's), and CONCENT's fan from `parts/convent01_body01.tzm` on `Spine1`
+(`x<skin>_body01`). Not ported: the DISK-A/B/? ring mannequins (`wakka_*`, zero-area strips) and
+X2's `dmm/` board-game chibis (another rig). Routine lists are long here — 12–14 per character.
+
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract supernova_jp |
+  supernova2_jp <disc> <out>` (`SN_DIR`): `files/IMAGE/model/chara/skin/<name>.TZM` and
+  `chara/motion/<clip>.TZM`.
 * **Rig.** The TZM's own bones, bind = the file's GLOBAL bind pose (`T2`, `R2`), in game space
   through one scale (`tzm_dump.GAME_SCALE` = 0.970 / 9.655: the Hip at World's Hips height; the
   TZM frame already faces +Z with its left at +X, so no mirror). BABYLON's `SCALE` node (0.6) is
@@ -417,16 +458,24 @@ Dancers`, not `data_mods/custom_models/` while that layout is being reworked).
   like World's — `MM_NE_01` is 241 frames, `mc_*_ne01_loop` 242). Each clip is checked against
   the TZM pose (< 0.15 mm per joint). Role aliases `Hips` / `LeftToeBase` / `RightToeBase` →
   `Hip` / `LeftToes` / `RightToes` (`Spine2` and `Head` are named alike).
-* **Sidecar.** `sn<name>00, pl, <sex>, A, 1.0, <0.75 F / 0.8 M>, 0.0`; the sex is the table's.
+* **Sidecar.** `sn<name>00, pl, <sex>, A, 1.0, <0.75 F / 0.8 M>, 0.0`; the sex is the routine
+  family's (`FF_*` / `MM_*`, which is what the table's flag says too).
 
 ```bash
 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
   --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~25 s for 8
+GAME=sn2 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~60 s for the 16 SuperNova 2 ones
+GAME=x DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~2 min for the 15 X-only ones
+GAME=x2 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~2 min for the 18 X2-only ones
 ```
 
-### The DDR SuperNova (PS2) stages (`examples/port_stage_supernova.py`)
+### The DDR SuperNova / SuperNova 2 / X (PS2) stages (`examples/port_stage_supernova.py`)
 
-SuperNova's 20 stages (+ `system_bg001`) are XSI scenes: objects grouped under blend-layer roots
+SuperNova's 20 stages (+ `system_bg001`; SuperNova 2 ships the same packs byte for byte and adds
+only `system_bg002` — `GAME=sn2`, 2026-10-03) are XSI scenes: objects grouped under blend-layer roots
 (`dec` opaque, `add` additive, `sub` subtractive, `glo` glow, `ble` alpha), coloured strip meshes
 (format 0x152), a `stageNNN` MOTION record with SRT tracks on the animated parts (a 4 s / 8-beat
 loop at 60 fps, 8 s at 29.97) and material fcurves, and a `cameraNNN` record with ten shots + a
@@ -435,8 +484,26 @@ neutral one. World's own stage parts carry the same layer names (`gm_dawnstreet0
 Ported 2026-09-30 (geometry, object loops, material animation, cameras) and round-trip previewed
 (every part re-imports; the Workbench render shows the additive layers opaque); not yet
 cabinet-tested.
-Staged as `SN Stage 01` .. `SN Stage 20` + `SN System BG` (keys `snstage001`..) under `OUT_BASE`
-(default `~/Desktop/SuperNova Stages`).
+Staged as `Stage 01` .. `Stage 20` + `System BG 1` (keys `snstage001`.., `snsystembg001`) under
+`OUT_BASE` (default `~/Desktop/SuperNova Stages`; `GAME=sn2`: `System BG 2`, `snsystembg002`, under
+`~/Desktop/SuperNova 2 Stages`); shipped together under `data_mods/custom_models/stages/DDR SUPRNVA
+1+2/` (the source folder supplies the label prefix).
+
+**DDR X** (`GAME=x`, 2026-10-03): six stages of its own (`stage001..006`; X2 ships them again plus
+SuperNova 2's `system_bg002` byte for byte, so there is no `GAME=x2` here), the same layer / record
+layout with 29.97 fps records on 001 / 002 and camera records named `jx_stNNN_cam_FIX2`
+(`Camera_001..008`, `Camera_neu`, `Camera_non_chara01..04` → `_st01..08`, `_non01..05`, then the
+shared close-ups `_non06..15`; `is_camera_record` now classifies by content). `Stage 01` is read
+from `stage001_2play.TZM` — the 1P pack plus the eighteen beat-pulsing speakers the game overlays
+from `stage001_speaker.TZM`, same cameras; the other `_2play` packs are reduced two-player dressings
+and are skipped. Shipped as `data_mods/custom_models/stages/DDR X + X2/Stage 01..06` (keys
+`xstage001..006`, texture stems `x001...`). **Stage 02's TVs are movie screens**: X drew its
+sub-monitor feed on the `Render*` objects (`RenderBIGTV`, `RenderSBTOPTV`, `RenderSBTVa/b/c`), so
+the port textures them `offscreen1` (the "Stage screens" section above — World's STAGE SCREENS mode
+then plays the song's movie on them), remaps each surface's authored v band onto the square's 16:9
+band (0.21875–0.78125; u already runs left to right as seen), paints them white and skips material
+animation on them; `RenderBIGTV2`, a coplanar glass over the big TV with a gradient placeholder, is
+dropped. `CFG['screens']` / `CFG['drop']` carry the per-game object-name rules.
 
 * **Parts / flags.** `bg` (the skydome subtree of `dec`, `:-2`) and `dec` two-sided opaque
   `0x0001`; `ble` alpha `0x02C1` (`:-1`); `add` additive `0x06C1` + `flags2 4`; `sub` subtractive
@@ -449,8 +516,10 @@ Staged as `SN Stage 01` .. `SN Stage 20` + `SN System BG` (keys `snstage001`..) 
   `gm_<key>_<part>_play_loop.anm` (loop bit) carries q / t / relative scale per key with a wrap
   key, checked against the TZM object worlds (rotation < 3e-4, translation < 1e-4 relative). Flat
   bones side-step World's segment-scale compensation.
-* **Foot panel.** `model/footpanel.TZM`'s unlit `ftpnl` mesh as `footpanel` (texture
-  `snfootpanel`); its arrow layout matches the stock `gm_boom00_footpanel`.
+* **Foot panel.** `FOOTPANEL=1` adds `model/footpanel.TZM`'s unlit `ftpnl` mesh as `footpanel`
+  (texture `snfootpanel`; its arrow layout matches the stock `gm_boom00_footpanel`). Off by
+  default: stock World stages carry that part only on the lesson-only `boom00`, and the shipped
+  SuperNova stages dropped theirs.
 * **Material animation.** The `stageNNN` record's material fcurves (`tzm_dump.material_animation`:
   kind 503 texture translation, 504 colour, 1302 glow strength — RE doc §7.4) become one
   `gm_<key>_<part>_play_loop.sanm` per part in World's own material-clip layout (`anm_dump.write_anm`
@@ -471,11 +540,11 @@ Staged as `SN Stage 01` .. `SN Stage 20` + `SN System BG` (keys `snstage001`..) 
   vertical at 1.333); `FOV_KEEP=vertical` (default) keeps that vertical extent on 16:9 (game hFOV
   68°: what SuperNova showed top to bottom stays in frame, the sides widen), `horizontal` keeps the
   horizontal extent (top / bottom cropped). Static shots collapse to single keys. With `PREVIEW=1`
-  the stage and a ported dancer (`PREVIEW_DANCER`, default the DDR SuperNova Afro under
-  `data_mods/custom_models/`) are rendered through the written clips as the game projects them
+  the stage and a ported dancer (`PREVIEW_DANCER`, default the SuperNova `Afro 1` under
+  `data_mods/custom_models/dancers/DDR SUPRNVA 1+2/`) are rendered through the written clips as the game projects them
   (`import_anm.load_camanm`): `<key>_cam_non01_f0.png`, `<key>_cam_st01..03_f<mid>.png`.
-* **Sidecar** `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1,
-  footpanel` (present parts).
+* **Sidecar** `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1`
+  (present parts; `footpanel` last when `FOOTPANEL=1`).
 * **Not ported:** the `_conf.PTF` lighting; the material diffuse colour (0.7 grey on 19 materials —
   whether SuperNova multiplies it into the draw is untraced); a texture scale / rotation fcurve
   would be reported as UNSUPPORTED (none exist).
@@ -483,6 +552,10 @@ Staged as `SN Stage 01` .. `SN Stage 20` + `SN System BG` (keys `snstage001`..) 
 ```bash
 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
   --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~40 s for 21
+GAME=sn2 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # system_bg002 only
+GAME=x STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~1 min for the 6 DDR X stages
 ```
 
 ### A room / stage from a .blend (`examples/port_room_stage.py`)

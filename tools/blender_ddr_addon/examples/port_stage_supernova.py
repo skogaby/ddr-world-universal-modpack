@@ -1,6 +1,6 @@
-"""EXAMPLE / PORT: the DanceDanceRevolution SuperNova (PS2, JP 2006) 3D stages as Background
-Dancers custom stages, fed by the TZM decoders in scripts/tzm_dump.py (formats + RE:
-docs/ps2_ddr_filedata_research.md §7.4).
+"""EXAMPLE / PORT: the DanceDanceRevolution SuperNova (PS2, JP 2006) 3D stages -- and SuperNova 2's
+(JP 2008) one new one -- as Background Dancers custom stages, fed by the TZM decoders in
+scripts/tzm_dump.py (formats + RE: docs/ps2_ddr_filedata_research.md §7.4).
 
 A SuperNova stage pack is an XSI scene: objects grouped under blend-layer roots (`dec` opaque,
 `add` additive, `sub` subtractive, `glo` glow = base texture + additive glow texture, `ble` alpha),
@@ -38,22 +38,33 @@ Every mesh is two-sided because the PS2 GS never culled. Per part:
      `<key>_non01`, the shared `stage_chara_camera.TZM` close-ups -> `_non02..11`
      (tzm_dump.camera_to_camanm_spec: 60 fps keys, cm, look-at orientation, the FOV through the
      inverse of the game's projection keeping SuperNova's vertical extent -- see FOV_KEEP);
-  6. the SuperNova foot panel (`model/footpanel.TZM`, the unlit `ftpnl` mesh) as part `footpanel`;
-  7. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1,
-     footpanel` (present parts only).
+  6. (FOOTPANEL=1 only) the SuperNova foot panel (`model/footpanel.TZM`, the unlit `ftpnl` mesh)
+     as part `footpanel` -- off by default: stock World stages carry a `footpanel` part only on the
+     lesson-only `boom00`, and the shipped SuperNova stages dropped theirs;
+  7. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1`
+     (present parts only).
 `stage011..020`'s recoloured twins are ported as their own stages. Not ported: the `_conf.PTF`
 lighting, the material diffuse colour.
 
+SuperNova 2 (GAME=sn2) ships the SAME twenty stage packs byte for byte (+ `stage_chara_camera`,
+`footpanel`); its only new stage is `system_bg002` (grid + light beams + stars, an 8 s loop),
+so `STAGES=all` there means just that one, keyed `snsystembg002` beside SuperNova's
+`snsystembg001`.
+
 Inputs (environment):
-  SN_DIR         the extraction (scripts/extract_ps2_ddr_data.py extract supernova_jp ...),
-                 default ~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova (Japan)/extracted_full
-  STAGES         comma list (stage001 .. stage020, system_bg001; default stage001), or 'all'
-  OUT_BASE       default ~/Desktop/SuperNova Stages (one folder per stage, `SN Stage 01`)
+  GAME           sn (default: SuperNova) | sn2 (SuperNova 2) -- the extraction, stage list, staging folder
+  SN_DIR         the extraction (scripts/extract_ps2_ddr_data.py extract supernova_jp | supernova2_jp ...),
+                 default ~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova[ 2] (Japan)/extracted_full
+  STAGES         comma list (sn: stage001 .. stage020, system_bg001; sn2: system_bg002; default the
+                 first), or 'all'
+  OUT_BASE       default ~/Desktop/SuperNova Stages | ~/Desktop/SuperNova 2 Stages (one folder per
+                 stage, `Stage 01` / `System BG 1` / `System BG 2`)
+  FOOTPANEL      1 = also write the `gm_<key>_footpanel` part (default 0)
   PREVIEW        1 = render Workbench previews of the RE-IMPORTED parts into PREVIEW_DIR, plus the
                  stage + PREVIEW_DANCER through the written .camanm clips
   CHARA_CAMERAS  1 (default) adds the dancer close-ups as `_non02..11`
   FOV_KEEP       vertical (default) | horizontal: which extent of SuperNova's 4:3 frame survives 16:9
-Run: /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+Run: GAME=sn2 STAGES=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
        --python tools/blender_ddr_addon/examples/port_stage_supernova.py
 """
 import os
@@ -75,18 +86,48 @@ from blender_ddr_addon import convert, export_model, import_anm, import_model  #
 from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
-SN_DIR = os.path.expanduser(os.environ.get(
-    'SN_DIR', '~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova (Japan)/extracted_full'))
+GAMES = {
+    'sn': dict(title='DDR SuperNova (PS2)', prefix='sn',
+               dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova (Japan)/extracted_full',
+               out='~/Desktop/SuperNova Stages',
+               stages=['stage%03d' % i for i in range(1, 21)] + ['system_bg001']),
+    'sn2': dict(title='DDR SuperNova 2 (PS2)', prefix='sn',
+                dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova 2 (Japan)/extracted_full',
+                out='~/Desktop/SuperNova 2 Stages',
+                stages=['system_bg002']),   # stage001..020 + system_bg001 are SuperNova's packs byte for byte
+    # DDR X: six stages; `stage001` ships its eighteen beat-pulsing speakers in a separate
+    # `stage001_speaker.TZM` the 1P game overlays, and `stage001_2play.TZM` is exactly the two merged
+    # (same cameras), so that pack IS Stage 01. The other `_2play` packs are the reduced 2P dressings
+    # (002 / 003) or a stub (005) and `stage006` carries the 10th-anniversary logo X2 blanked. DDR X2
+    # ships these six packs again (stage006 minus the logo) and SuperNova 2's `system_bg002` byte
+    # for byte -- nothing of its own, so there is no GAME=x2 here.
+    'x': dict(title='DDR X (PS2)', prefix='x',
+              dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution X (Japan)/extracted_full',
+              out='~/Desktop/DDR X Stages',
+              stages=['stage001', 'stage002', 'stage003', 'stage004', 'stage005', 'stage006'],
+              packs={'stage001': 'stage001_2play'},
+              screens='Render', drop={'RenderBIGTV2'}),
+}
+GAME = os.environ.get('GAME', 'sn')
+if GAME not in GAMES:
+    sys.exit('GAME must be one of %s' % ', '.join(GAMES))
+CFG = GAMES[GAME]
+SN_DIR = os.path.expanduser(os.environ.get('SN_DIR', CFG['dir']))
 MODEL_DIR = os.path.join(SN_DIR, 'files', 'IMAGE', 'model')
-OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', '~/Desktop/SuperNova Stages'))
+OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', CFG['out']))
+FOOTPANEL = os.environ.get('FOOTPANEL', '0') == '1'
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'supernova_stage_previews')
-# a ported SuperNova dancer to stand at the origin in the camera previews (the add-on's export
-# folder layout: <Character>/pl_<key>/pl_<key>.model); '' = stage only
+# a ported dancer to stand at the origin in the camera previews (the add-on's export folder
+# layout: <Character>/pl_<key>/pl_<key>.model): the game's own Afro when shipped, else SuperNova's;
+# '' = stage only
+_DANCERS = os.path.join(REPO, 'data_mods', 'custom_models', 'dancers')
+_PREVIEW_DANCERS = [os.path.join(_DANCERS, 'DDR X + X2', 'Afro 1', 'pl_xafro01', 'pl_xafro01.model')] if GAME == 'x' else []
+_PREVIEW_DANCERS.append(os.path.join(_DANCERS, 'DDR SUPRNVA 1+2', 'Afro 1', 'pl_snafro00', 'pl_snafro00.model'))
 PREVIEW_DANCER = os.path.expanduser(os.environ.get(
-    'PREVIEW_DANCER', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', 'DDR SuperNova', 'Afro', 'pl_snafro00', 'pl_snafro00.model')))
+    'PREVIEW_DANCER', next((p for p in _PREVIEW_DANCERS if os.path.exists(p)), _PREVIEW_DANCERS[-1])))
 
-STAGES = ['stage%03d' % i for i in range(1, 21)] + ['system_bg001']
+STAGES = CFG['stages']
 # World mesh flags per SuperNova blend layer: (flags, flags2)
 LAYER_FLAGS = {
     'dec': (0x0001, 0), 'bg': (0x0001, 0),
@@ -108,26 +149,46 @@ CHARA_CAMERAS = os.environ.get('CHARA_CAMERAS', '1') == '1'
 # frame's vertical extent on World's 16:9 output (more visible at the sides), 'horizontal'
 # keeps the horizontal extent (top / bottom cropped)
 FOV_KEEP = os.environ.get('FOV_KEEP', 'vertical')
+# Stage SCREENS (DDR X's `Render*` objects: the TVs the game drew its render-to-texture sub-monitor
+# feed on): their material is textured `offscreen1`, the name World registers its 1280² movie
+# render target under (tools/blender_ddr_addon/README.md "Stage screens"), so the song's movie
+# plays on them. The movie is contain-fitted into that square -- a 16:9 one covers v 0.21875 ..
+# 0.78125 -- and X's TVs sample a v band of their own 4:3-ish target (0.2 .. 0.8), so each screen's
+# authored v range is remapped onto World's band; u is kept (left to right as seen, unmirrored).
+SCREEN_TEXTURE = export_model.SCREEN_TEXTURE_KEY
+SCREEN_BAND = (0.21875, 0.78125)
+SCREEN_OBJECTS = CFG.get('screens')     # object-name prefix marking a screen; None = no screens
+DROP_OBJECTS = CFG.get('drop', set())   # screen duplicates (X's coplanar `RenderBIGTV2` glass over `RenderBIGTV`)
 
 
 def stage_label(stage):
-    return 'SN Stage %s' % stage[-2:] if stage.startswith('stage') else 'SN System BG'
+    """The friendly folder = the options-row label (the SOURCE folder supplies the game prefix):
+    `Stage 01` .. `Stage 20`, `System BG 1` / `System BG 2` (`System BG` where a game has one)."""
+    if stage in CFG.get('labels', {}):
+        return CFG['labels'][stage]
+    return 'Stage %s' % stage[-2:] if stage.startswith('stage') else 'System BG %d' % int(stage[-3:])
 
 
 def stage_key(stage):
-    return 'sn' + re.sub(r'[^a-z0-9]', '', stage.lower())
+    return CFG['prefix'] + re.sub(r'[^a-z0-9]', '', stage.lower())
+
+
+def stage_pack(stage):
+    """The TZM file stem a stage is read from (X's Stage 01 = `stage001_2play`)."""
+    return CFG.get('packs', {}).get(stage, stage)
 
 
 # ---------------------------------------------------------------------------
 # source
 # ---------------------------------------------------------------------------
 def is_camera_record(rec):
-    n = rec['name'].lower()
-    return n.startswith('cam') or n.endswith('_cam')
+    """A record is the camera set when it carries camera tracks (position / interest / FOV --
+    tzm_dump.camera_tracks); SuperNova names them `cameraNNN` / `*_cam`, X `jx_stNNN_cam_FIX2`."""
+    return bool(Z.camera_tracks(rec))
 
 
 def load_stage(stage):
-    chunks = Z.load_tzm(os.path.join(MODEL_DIR, 'stage', stage + '.TZM'))
+    chunks = Z.load_tzm(os.path.join(MODEL_DIR, 'stage', stage_pack(stage) + '.TZM'))
     d = dict(chunks)
     model = Z.parse_model(d['MODEL'])
     materials = Z.parse_materiallist(d['MATERIALLIST'])
@@ -156,8 +217,21 @@ def layer_and_part(model, oi):
     return layer, part, chain
 
 
-def texture_png(stage, tex):
-    stem = re.sub(r'[^a-z0-9]', '', ('sn%s' % stage[-3:]) + tex['name'].lower().replace('_png', ''))[:20]
+def is_screen(model, oi):
+    """A render-target screen: an object (or ancestor) named with the game's screen prefix."""
+    if not SCREEN_OBJECTS:
+        return False
+    return any(model['objects'][i]['name'].startswith(SCREEN_OBJECTS) for i in Z.object_chain(model, oi))
+
+
+def is_dropped(model, oi):
+    return any(model['objects'][i]['name'] in DROP_OBJECTS for i in Z.object_chain(model, oi))
+
+
+def texture_png(key, tex):
+    """(DDS stem, PNG path) of a stage texture: `<game prefix><stage number><texture name>`, alnum,
+    <= 20 characters (`sn001haikei`, `x002jxst0020501`) -- unique within a stage."""
+    stem = re.sub(r'[^a-z0-9]', '', CFG['prefix'] + key[-3:] + tex['name'].lower().replace('_png', ''))[:20]
     out = os.path.join(tempfile.gettempdir(), 'supernova_stage_textures', stem + '.png')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     Z.P.write_png(out, tex['width'], tex['height'], tex['rgba'].tobytes())
@@ -247,16 +321,20 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
     arm['ddr_bone_order'] = bone_names
 
     objects = []
+    screens = 0
     S = np.diag([scale, scale, scale, 1.0])
     for k, anchor in zip(mesh_ids, anchors):
         me_src = model['meshes'][k]
         oi = model['mesh_object'][k]
         obj_src = model['objects'][oi]
+        if is_dropped(model, oi):
+            continue
+        screen = is_screen(model, oi)
         mat_rec = Z.material_for(src['materials'], me_src['material']) or {}
         tex_names = [t for t in mat_rec.get('textures', []) if t in src['textures']]
         layer, _part, _chain = layer_and_part(model, oi)
         passes = [(tex_names[0] if tex_names else None, LAYER_FLAGS[layer], 'base')]
-        if layer == 'glo' and len(tex_names) > 1:
+        if layer == 'glo' and len(tex_names) > 1 and not screen:
             passes.append((tex_names[1], ADDITIVE, 'glow'))
         W = S @ worlds_rest[oi]
         pos = (np.c_[me_src['positions'], np.ones(me_src['count'])] @ W.T)[:, :3]
@@ -266,6 +344,13 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
         if not len(tris):
             continue
         bone = 'root' if anchor is None else '%s.%d' % (model['objects'][anchor]['name'], anchor)
+        src_uv = me_src['uv']
+        if screen:
+            # the authored v band of the game's render target -> World's 16:9 movie band
+            v_lo, v_hi = float(src_uv[:, 1].min()), float(src_uv[:, 1].max())
+            src_uv = src_uv.copy()
+            src_uv[:, 1] = SCREEN_BAND[0] + (src_uv[:, 1] - v_lo) / max(v_hi - v_lo, 1e-6) * (SCREEN_BAND[1] - SCREEN_BAND[0])
+            screens += 1
         for tex_name, (flags, flags2), tag in passes:
             name = 'gm_%s_%s_%02d_%s_%s' % (key, part, k, obj_src['name'], tag)
             me = bpy.data.meshes.new(name)
@@ -274,7 +359,7 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
             lay = me.uv_layers.new(name='UVMap')
             loops_v = np.zeros(len(me.loops), dtype=np.int64)
             me.loops.foreach_get('vertex_index', loops_v)
-            luv = me_src['uv'][loops_v].copy()
+            luv = src_uv[loops_v].copy()
             luv[:, 1] = 1.0 - luv[:, 1]
             lay.data.foreach_set('uv', luv.astype(np.float32).ravel())
             exact = me.attributes.new('ddr_normal', 'FLOAT_VECTOR', 'POINT')
@@ -287,20 +372,25 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
             mod = ob.modifiers.new('Armature', 'ARMATURE')
             mod.object = arm
             col = P.white_color_attribute(ob)
-            if me_src['colours'] is not None:
+            if me_src['colours'] is not None and not screen:   # a screen shows the movie at full strength
                 rgba = me_src['colours'][loops_v].astype(np.float32)
                 if tag == 'glow':
                     rgba[:, 3] = 1.0  # the glow copy adds at full strength
                 col.data.foreach_set('color', rgba.ravel())
-            if tex_name:
-                stem, png = texture_png(src['name'], src['textures'][tex_name])
+            if screen:
+                # the image NAME is what matters (the exporter writes the 8x8 `offscreen1.dds` marker and
+                # the game binds its movie render target); the pixels only dress the Blender preview
+                stem, png = texture_png(key, src['textures'][tex_name]) if tex_name else (None, None)
+                image = P.load_texture(SCREEN_TEXTURE, png) if png else P.palette_texture(SCREEN_TEXTURE, [(0.0, 0.0, 0.0)], size=8)
+            elif tex_name:
+                stem, png = texture_png(key, src['textures'][tex_name])
                 image = P.load_texture(stem, png)
             else:
-                image = P.palette_texture('sn%s_white' % src['name'][-3:], [(1.0, 1.0, 1.0)], size=8)
+                image = P.palette_texture('%s%s_white' % (CFG['prefix'], key[-3:]), [(1.0, 1.0, 1.0)], size=8)
             mat = P.make_material(name, image, two_sided=True)
             if flags & 0x0040:
                 mat.surface_render_method = 'BLENDED'
-            sn_name = sn_material_name(src, mat_rec) if mat_rec else None
+            sn_name = sn_material_name(src, mat_rec) if mat_rec and not screen else None
             if sn_name:
                 mat['ddr_sn_material'] = sn_name
                 mat['ddr_sn_pass'] = tag
@@ -314,6 +404,8 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
             ob['ddr_flags'] = flags
             ob['ddr_flags2'] = flags2
             objects.append(ob)
+    if screens:
+        print('  SCREENS %s: %d mesh(es) textured %s (v -> %.5f..%.5f)' % (part, screens, SCREEN_TEXTURE, *SCREEN_BAND))
     return arm, objects, bone_names, bone_objs, binds
 
 
@@ -556,6 +648,8 @@ def port(stage):
     written_parts = []
     for part in PART_ORDER:
         if part == 'footpanel':
+            if not FOOTPANEL:
+                continue
             P.fresh_scene()
             ob = build_footpanel(key)
             pdir = os.path.join(set_dir, 'gm_%s_footpanel' % key)
@@ -614,8 +708,8 @@ def port(stage):
         written_parts.append(part)
 
     with open(os.path.join(out_dir, 'map_resources.rlist.txt'), 'w') as f:
-        f.write('# DDR SuperNova (PS2) %s, ported with its layers as parts and its object animation\n' % stage)
-        f.write('# (tools/blender_ddr_addon/examples/port_stage_supernova.py)\n')
+        f.write('# %s %s, ported with its layers as parts and its object animation\n' % (CFG['title'], stage))
+        f.write('# (tools/blender_ddr_addon/examples/port_stage_supernova.py GAME=%s)\n' % GAME)
         fields = ['%s:%d' % (p, PART_PRIORITY[p]) if p in PART_PRIORITY else p for p in written_parts]
         f.write('%s, 000000, 000000, %s\n' % (key, ', '.join(fields)))
     print('SIDECAR', os.path.join(out_dir, 'map_resources.rlist.txt'), fields)
@@ -678,7 +772,7 @@ def render_persp(path, pos, target, lens=24.0, res=(960, 540)):
 
 
 if __name__ == '__main__':
-    want = os.environ.get('STAGES', 'stage001')
+    want = os.environ.get('STAGES', STAGES[0])
     todo = STAGES if want == 'all' else [s.strip() for s in want.split(',') if s.strip()]
     for stage in todo:
         port(stage)

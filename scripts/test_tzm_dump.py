@@ -170,7 +170,7 @@ def materiallist(mats):
 def arm_model():
     objects = [node('globalSRT', mesh_slot=-1, first_child=1), node('body', mesh_slot=0, parent=0, first_child=2),
                node('gem', mesh_slot=1, parent=1, T=(0, 0, 2), R=(0, 0, math.pi / 2))]
-    bones = [node('globalSRT', first_child=1),
+    bones = [node('globalSRT', S2=(0, 0, 0), first_child=1),   # a root has no bind
              node('Hip', T=(0, 10, 0), T2=(0, 1, 0), parent=0, first_child=2),      # bind frame 9 below the root frame
              node('Spine', T=(2, 0, 0), R=(0, 0, math.pi / 2), T2=(0, 3, 0), R2=(0, 0, math.pi / 2), parent=1)]
     # a strip of two triangles then an ADC restart with one more triangle
@@ -329,6 +329,33 @@ class MotionTests(unittest.TestCase):
         np.testing.assert_allclose(W[2][:3, 3], (2 * math.cos(1.0), 11 + 2 * math.sin(1.0), 0), atol=1e-6)
         np.testing.assert_allclose(W[2][:3, :3], Z.rot_z(1.0 + math.pi / 2), atol=1e-6)
 
+    def test_rig_root_is_matched_by_position_not_name(self):
+        """A SuperNova 2 skin: the root is `concent01` with a 0.41 pose offset, the clip's root track
+        is still the original rig's name. The root takes the clip's root track; the channels the
+        track lacks are the identity, NOT the file pose (the game drops the 0.41 -- feet on the floor)."""
+        bones = [node('concent01', T=(0, 0.41, 0), S2=(0, 0, 0), first_child=1),   # a root has no bind
+                 node('Hip', T=(0, 0.41, 0), T2=(0, 0.819, 0), parent=0, first_child=2),
+                 node('Spine', T=(2, 0, 0), T2=(0, 3, 0), parent=1)]
+        objects = [node('concent01', mesh_slot=-1, T=(0, 0.41, 0), first_child=1),
+                   node('CONCENT', mesh_slot=0, T=(0, -0.41, 0), parent=0)]
+        m = Z.parse_model(model(objects, [0], [mesh(0x11A, [dict(pos=(0, 1, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                             dict(pos=(1, 1, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                             dict(pos=(0, 2, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0))],
+                                                     palette=(1,))], bones))
+        self.assertTrue(Z.is_rig_root(m['bones'][0]))
+        self.assertFalse(Z.is_rig_root(m['bones'][1]))
+        rec = Z.parse_motion(motion([('MM_NE_01', 1, 6, 30.0, [
+            track('DDR_AFRO_NEW', Z.KIND_ROTATION, [(0, 0, 0, 1)], flag=2),
+            track('Hip', Z.KIND_ROTATION, [(0, 0, 0, 1)] * 3), track('Hip', Z.KIND_TRANSLATION, [(0, 10, 0, 0)] * 3)])]))[0]
+        self.assertEqual(Z.clip_root_track(m['bones'], rec), 'DDR_AFRO_NEW')
+        W = Z.clip_worlds(m['bones'], rec, 0)
+        np.testing.assert_allclose(W[0][:3, 3], (0, 0, 0), atol=1e-6)      # the root's 0.41 is discarded
+        np.testing.assert_allclose(W[1][:3, 3], (0, 10, 0), atol=1e-6)     # the Hip sits at its track, not 10.41
+        # the SuperNova shape (root `globalSRT` named by its own static track) is unchanged
+        m1 = Z.parse_model(dict(Z.parse_tzm(arm_pack()))['MODEL'])
+        self.assertEqual(Z.clip_root_track(m1['bones'], self.recs[0]), None)
+        np.testing.assert_allclose(Z.clip_worlds(m1['bones'], self.recs[0], 0)[0], np.eye(4), atol=1e-6)
+
 
 class StageTests(unittest.TestCase):
     def test_materiallist_and_truncated_mesh_names(self):
@@ -421,7 +448,7 @@ class MathTests(unittest.TestCase):
         self.assertEqual(len(spec['tracks']), 6)
 
     def test_scale_node_folds_into_the_unit_scale_and_drops_out_of_the_rig(self):
-        bones = [node('globalSRT', first_child=1), node('SCALE', S=(0.6, 0.6, 0.6), S2=(0, 0, 0), parent=0, first_child=2),
+        bones = [node('globalSRT', S2=(0, 0, 0), first_child=1), node('SCALE', S=(0.6, 0.6, 0.6), S2=(0, 0, 0), parent=0, first_child=2),
                  node('Hip', T=(0, 10, 0), T2=(0, 1, 0), parent=1)]
         chunk = model([node('globalSRT', mesh_slot=-1), node('b', mesh_slot=0, parent=0)], [0],
                       [mesh(0x11A, [dict(pos=(0, 0, 0), bones=(0, 0, 0, 0))] * 3, palette=(2,))], bones)
@@ -440,6 +467,160 @@ class MathTests(unittest.TestCase):
         worlds = Z.clip_game_worlds(m, recs[0], order, [binds[n] for n in order])
         np.testing.assert_allclose(worlds[0, 1][3, :3], (0, 10 * Z.GAME_SCALE * 0.6, 0), atol=1e-9)
         np.testing.assert_allclose(worlds[0, 1][:3, :3], np.eye(3), atol=1e-9)
+
+    def test_face_overlay_hangs_the_mask_off_the_head_bind(self):
+        """SuperNova 2's `<skin>_face.TZM`: `faceNN > trans_null (R = Head bind R^-1, T head-local)
+        > faceNN`; a mask vertex sits at Head_bind . W_object . v in the body's bind frame, then takes
+        the body's shift and unit scale. ALICE's world-authored sheet cancels through its object T."""
+        head_r = (0.0, -0.426, 1.569)
+        head_t = (0.0, 6.0, 0.0)
+        body_bones = [node('alice01', S2=(0, 0, 0), first_child=1),
+                      node('Hip', T=(0, 9.7, 0), T2=(0, 0.819, 0), parent=0, first_child=2),
+                      node('Head', T=(5.2, 0, 0), R=head_r, T2=head_t, R2=head_r, parent=1)]
+        body = Z.parse_model(model([node('alice01', mesh_slot=-1), node('alice', mesh_slot=0, parent=0)], [0],
+                                   [mesh(0x11A, [dict(pos=(0, -8.6, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(1, -8.6, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(0, 7.0, 0), bones=(1, 0, 0, 0), weights=(1.0, 0, 0))],
+                                         palette=(1, 2))], body_bones))
+        R_inv = Z.euler_xyz(head_r).T
+        r_inv = (-0.426, 0.001, -1.569)   # XSI stores the inverse as XYZ Euler; check it IS the inverse
+        np.testing.assert_allclose(Z.euler_xyz(r_inv) @ Z.euler_xyz(head_r), np.eye(3), atol=2e-3)
+        tn_t = (0.554, 0.0, 0.375)
+        # the mask centre the game shows: Head_bind . trans_null . 0
+        want_centre = (Z.affine(Z.euler_xyz(head_r), head_t) @ Z.affine(Z.euler_xyz(r_inv), tn_t))[:3, 3]
+        quad = [dict(pos=(-0.5, -0.5, 0), uv=(0, 1), normal=(0, 0, 1)), dict(pos=(0.5, -0.5, 0), uv=(1, 1), normal=(0, 0, 1)),
+                dict(pos=(-0.5, 0.5, 0), uv=(0, 0), normal=(0, 0, 1)), dict(pos=(0.5, 0.5, 0), uv=(1, 0), normal=(0, 0, 1))]
+        # face02 authored in world space (its object T cancels), face01 centred on the origin
+        world_quad = [dict(v, pos=tuple(np.add(v['pos'], want_centre))) for v in quad]
+        objects = [node('face02', mesh_slot=-1, first_child=1), node('trans_null', mesh_slot=-1, T=tn_t, R=r_inv, parent=0, first_child=2),
+                   node('face02', mesh_slot=0, T=tuple(-want_centre), parent=1),
+                   node('face01', mesh_slot=-1, first_child=4), node('trans_null', mesh_slot=-1, T=tn_t, R=r_inv, parent=3, first_child=5),
+                   node('face01', mesh_slot=1, parent=4)]
+        fm = model(objects, [0, 1], [mesh(0x112, world_quad, material='DefaultLib.face02'),
+                                     mesh(0x112, quad, material='DefaultLib.face01')], [])
+        clut = [(i, i, i, 128) for i in range(256)]
+        idx = np.zeros((4, 4), np.uint8)
+        pack = tzm([('IMAGELIST', imagelist(['a_face01_png', 'a_face02_png'])),
+                    ('a_face01_png', texture('a_face01_png', 4, 4, clut, idx)),
+                    ('a_face02_png', texture('a_face02_png', 4, 4, clut, idx + 1)),
+                    ('MATERIALLIST', materiallist([('DefaultLib.face01', ['a_face01_png']), ('DefaultLib.face02', ['a_face02_png'])])),
+                    ('MODEL', fm)])
+        chunks = Z.parse_tzm(pack)
+        s, shift = Z.unit_scale(body), Z.bind_shift(body)
+        for expression in ('face01', 'face02'):
+            pos, nrm, uv, tris, tex = Z.face_overlay(body, chunks, expression)
+            self.assertEqual(len(pos), 4)
+            self.assertEqual(len(tris), 2)
+            np.testing.assert_allclose(pos.mean(0), (want_centre + shift) * s, atol=1e-6)
+            self.assertEqual(tex['name'], 'a_%s_png' % expression)
+            np.testing.assert_allclose(np.linalg.norm(nrm, axis=1), 1.0, atol=1e-9)
+        self.assertIsNone(Z.face_overlay(body, chunks, 'face03'))
+        # the body meshes' sheet, not the stray first texture (gus02): material_for resolves it
+        ml = Z.parse_materiallist(materiallist([('DefaultLib.face02', ['gus_face02_png']), ('DefaultLib.sn2_gus02', ['sn2_gus02_png'])]))
+        self.assertEqual(Z.material_for(ml, 'DefaultLib.sn2_gus02')['textures'], ['sn2_gus02_png'])
+
+    def test_part_overlay_hangs_a_pack_off_any_joint(self):
+        """DDR X's `parts/convent01_body01.tzm` (CONCENT's chest fan): `Spine1 (root) > convent01_body01`
+        authored in Spine1's bind frame, hung off `Spine1` -- the same Bind[bone] . W_object . v rule
+        as the faces with another joint; `root=None` takes every mesh; an unknown joint is None."""
+        s1_r = (0.0, 0.0, 1.571)
+        s1_t = (0.0, 2.71, 0.3)
+        body_bones = [node('jx_concent2', S2=(0, 0, 0), first_child=1),
+                      node('Hip', T=(0, 0.41, 0), T2=(0, 0.819, 0), parent=0, first_child=2),
+                      node('Spine1', T=(1.9, 0, 0), R=s1_r, T2=s1_t, R2=s1_r, parent=1)]
+        body = Z.parse_model(model([node('jx_concent2', mesh_slot=-1), node('concent', mesh_slot=0, parent=0)], [0],
+                                   [mesh(0x11A, [dict(pos=(0, -9.0, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(1, -9.0, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(0, 4.0, 0), bones=(1, 0, 0, 0), weights=(1.0, 0, 0))],
+                                         palette=(1, 2))], body_bones))
+        quad = [dict(pos=(-1.5, -1.5, 0.5), uv=(0, 1), normal=(0, 0, 1)), dict(pos=(1.5, -1.5, 0.5), uv=(1, 1), normal=(0, 0, 1)),
+                dict(pos=(-1.5, 1.5, 0.5), uv=(0, 0), normal=(0, 0, 1)), dict(pos=(1.5, 1.5, 0.5), uv=(1, 0), normal=(0, 0, 1))]
+        objects = [node('Spine1', mesh_slot=-1, first_child=1), node('convent01_body01', mesh_slot=0, parent=0)]
+        fm = model(objects, [0], [mesh(0x112, quad, material='DefaultLib.body01')], [])
+        clut = [(i, i, i, 128) for i in range(256)]
+        pack = tzm([('IMAGELIST', imagelist(['convent01_body01_png'])),
+                    ('convent01_body01_png', texture('convent01_body01_png', 4, 4, clut, np.zeros((4, 4), np.uint8))),
+                    ('MATERIALLIST', materiallist([('DefaultLib.body01', ['convent01_body01_png'])])),
+                    ('MODEL', fm)])
+        chunks = Z.parse_tzm(pack)
+        s, shift = Z.unit_scale(body), Z.bind_shift(body)
+        want_centre = (Z.affine(Z.euler_xyz(s1_r), s1_t) @ np.array([0.0, 0.0, 0.5, 1.0]))[:3]
+        for root in ('Spine1', None):
+            pos, nrm, uv, tris, tex = Z.part_overlay(body, chunks, 'Spine1', root)
+            self.assertEqual((len(pos), len(tris)), (4, 2))
+            np.testing.assert_allclose(pos.mean(0), (want_centre + shift) * s, atol=1e-6)
+            self.assertEqual(tex['name'], 'convent01_body01_png')
+        self.assertIsNone(Z.part_overlay(body, chunks, 'Spine1', 'face01'))
+        self.assertIsNone(Z.part_overlay(body, chunks, 'LeftForeArmRoll'))
+
+    def test_attach_part_bone_and_spin_track_play_the_fan_on_a_dance_clip(self):
+        """SuperNova 2 CONCENT: `body01 > body_trans_null (Ry -0.202) > fan01 (T 0 0 -0.31)` in the face
+        pack, spun by the pack's `ddr_concent_fan` record (kind-2 Q T keys, -720 deg about z over
+        frames 0..240 at 30 fps). The object becomes a joint under Spine1 whose bind is Spine1's bind
+        times the chain (where part_overlay puts the vertices) and whose rotation track on a dance
+        clip is the chain's static tilt times the spin sampled at the clip's key frames."""
+        s1_r = (0.0, 0.2, 1.567)
+        s1_t = (0.0, 2.707, 0.299)
+        body_bones = [node('concent01', T=(0, 0.41, 0), S2=(0, 0, 0), first_child=1),
+                      node('Hip', T=(0, 0.41, 0), T2=(0, 0.819, 0), parent=0, first_child=2),
+                      node('Spine1', T=(1.9, 0, 0), R=s1_r, T2=s1_t, R2=s1_r, parent=1)]
+        body = Z.parse_model(model([node('concent01', mesh_slot=-1), node('CONCENT', mesh_slot=0, parent=0)], [0],
+                                   [mesh(0x11A, [dict(pos=(0, -9.0, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(1, -9.0, 0), bones=(0, 0, 0, 0), weights=(1.0, 0, 0)),
+                                                 dict(pos=(0, 4.0, 0), bones=(1, 0, 0, 0), weights=(1.0, 0, 0))],
+                                         palette=(1, 2))], body_bones))
+        quad = [dict(pos=(-1.5, -1.5, 0), uv=(0, 1), normal=(0, 0, 1)), dict(pos=(1.5, -1.5, 0), uv=(1, 1), normal=(0, 0, 1)),
+                dict(pos=(-1.5, 1.5, 0), uv=(0, 0), normal=(0, 0, 1)), dict(pos=(1.5, 1.5, 0), uv=(1, 0), normal=(0, 0, 1))]
+        tilt = (0.0, -0.202, 0.0)
+        objects = [node('body01', mesh_slot=-1, first_child=1), node('body_trans_null', mesh_slot=-1, R=tilt, parent=0, first_child=2),
+                   node('fan01', mesh_slot=0, T=(0, 0, -0.31), parent=1)]
+        fm = model(objects, [0], [mesh(0x112, quad, material='DefaultLib.body01')], [])
+        # the spin: 121 Q T keys, -6 deg about z per key, frames 0..240 at 30 fps
+        spin = [quat_z(math.radians(-6.0 * j)) + (0.0, 0.0, -0.31) for j in range(121)]
+        rec = ('ddr_concent_fan', 0, 240, 30.0, [track('body_trans_null', Z.KIND_SRT, [(1, 1, 1) + quat_z(0.0) + (0, 0, 0)] * 121),
+                                                  track('fan01', Z.KIND_QT, spin)])
+        clut = [(i, i, i, 128) for i in range(256)]
+        pack = tzm([('IMAGELIST', imagelist(['convent01_body01_png'])),
+                    ('convent01_body01_png', texture('convent01_body01_png', 4, 4, clut, np.zeros((4, 4), np.uint8))),
+                    ('MATERIALLIST', materiallist([('DefaultLib.body01', ['convent01_body01_png'])])),
+                    ('MODEL', fm), ('MOTION', motion([rec]))])
+        chunks = Z.parse_tzm(pack)
+        body2, bone, obj, above = Z.attach_part_bone(body, chunks, 'body01', 'Spine1')
+        self.assertEqual((bone, obj), ('fan01', 'fan01'))
+        self.assertEqual(len(body2['bones']), 4)
+        self.assertEqual(len(body['bones']), 3)                       # the input is untouched
+        fb = body2['bones'][-1]
+        self.assertEqual(body2['bones'][fb['parent']]['name'], 'Spine1')
+        np.testing.assert_allclose(above, Z.euler_xyz(tilt), atol=1e-9)
+        chain = Z.affine(Z.euler_xyz(tilt), (0, 0, 0)) @ Z.affine(np.eye(3), (0, 0, -0.31))
+        np.testing.assert_allclose(Z.node_local(fb), chain, atol=1e-6)                            # pose = the chain
+        np.testing.assert_allclose(Z.bind_matrix(fb), Z.affine(Z.euler_xyz(s1_r), s1_t) @ chain, atol=1e-6)
+        # the overlay vertices sit at the new joint's bind (the quad is centred on fan01's origin)
+        s, shift = Z.unit_scale(body2), Z.bind_shift(body2)
+        pos, _n, _uv, tris, _tex = Z.part_overlay(body2, chunks, 'Spine1', 'body01')
+        np.testing.assert_allclose(pos.mean(0), (Z.bind_matrix(fb)[:3, 3] + shift) * s, atol=1e-6)
+        # a 30 fps dance clip whose keys sit on frames 1, 3, 5, ...: the fan is -3, -9, -15 deg into its loop
+        dance = Z.parse_motion(motion([('MM_HT_01', 1, 6, 30.0, [track('DDR_X', Z.KIND_ROTATION, [(0, 0, 0, 1)], flag=2),
+                                                                 track('Hip', Z.KIND_ROTATION, [(0, 0, 0, 1)] * 3),
+                                                                 track('Hip', Z.KIND_TRANSLATION, [(0, 10, 0, 0)] * 3),
+                                                                 track('Spine1', Z.KIND_ROTATION, [quat_z(math.pi / 2)] * 3)])]))[0]
+        part_rec = Z.parse_motion(dict(chunks)['MOTION'])[0]
+        dance2 = Z.part_spin_track(dance, part_rec, obj, bone, above)
+        self.assertEqual(len(dance2['tracks']), len(dance['tracks']) + 1)
+        fan_track = dance2['tracks'][-1]
+        self.assertEqual((fan_track['name'], fan_track['kind'], fan_track['keys'].shape), ('fan01', Z.KIND_ROTATION, (3, 4)))
+        for i, q in enumerate(fan_track['keys']):
+            want = Z.euler_xyz(tilt) @ Z.quat_mat(quat_z(math.radians(-3.0 - 6.0 * i)))
+            np.testing.assert_allclose(Z.quat_mat(q), want, atol=1e-6)
+        # composed: the fan's world = Spine1's world . [tilt . spin | tilt . (0 0 -0.31)] -- an object's T
+        # precedes its own R, so the spin turns the blades, never their offset
+        W = Z.clip_worlds(Z.unscaled_bones(body2), dance2, 1)
+        s1 = W[2]
+        want = s1 @ Z.affine(Z.euler_xyz(tilt) @ Z.quat_mat(quat_z(math.radians(-9.0))), Z.euler_xyz(tilt) @ np.array([0, 0, -0.31]))
+        np.testing.assert_allclose(W[3], want, atol=1e-6)
+        # a pack without the spin record leaves the clip alone
+        self.assertIs(Z.part_spin_track(dance, dict(part_rec, tracks=[]), obj, bone, above), dance)
+
 
 
 def fkey(time, value, interp=Z.FCURVE_BEZIER, hl=None, hr=None, hl_value=None, hr_value=None):

@@ -1631,3 +1631,39 @@ themselves are packed back to back; `anm_dump._layout_tracks`'s relative alignme
 matches when the first track starts aligned (`write_anm` pads the list for that).
 Anything that reads material copies per frame must not `is_readable`-probe (a
 VirtualQuery per part per frame); the resource header was probed at build.
+
+## A sequel's "same" assets are not byte-identical, and "identical" is not "complete" (2026-10-03)
+
+SuperNova 2's costume-01 skins looked like re-exports of SuperNova's (same sheets, same
+rigs) yet every body had ~25 % more strip vertices and 10 % fewer unique triangles: the
+re-export packed the strips better AND cut the eyes / mouth out of the body, moving them
+to a per-skin `_face.TZM` mask the game hangs off the Head. A port that skipped the
+"optional expression overlay" would have shipped sixteen faceless dancers — the body
+textures still carried a painted face, so a texture-level check said "fine". Verify
+geometry equivalence by the set of unique triangles (positions rounded, sorted triples),
+not by vertex / triangle counts, and when a pack carries meshes you plan to drop,
+render the body WITHOUT them first. Two more traps from the same packs: the rig root is
+named after the pack (`afro01`, not `globalSRT`) while the clips keep the original
+rig's root track, and CONCENT's root carries a pose offset its object chain cancels —
+the game binds the clip root by position and discards that offset (with it the
+character hovers 4 cm; `tzm_dump.clip_worlds` now does the same). And `gus02.TZM`
+lists a stray 128² face sheet FIRST: never take "the pack's texture" by position when a
+MATERIALLIST says which sheet a mesh uses. On the product side, two games' content
+that is byte-identical (the 20 stage packs) belongs in one merged source folder — a
+renamed source changes the option-row id (`background_stage_ddr_suprnva_1_2`), so a
+persisted pick is orphaned once; say so in the hand-back.
+
+## An accessory's own loop rides on every dance clip as an extra joint (2026-10-03)
+
+SuperNova 2 spins CONCENT's chest fan from a 4 s record in the FACE pack (`fan01`, a
+kind-2 Q T track), independent of whichever routine plays. World has one `.anm` per
+routine and no second clip lane, so the port gives the fan a joint of its own under
+`Spine1` (pose = the pack's object chain below its root, bind = the joint's bind × that
+chain — the same place `part_overlay` puts the vertices) and resamples the loop onto
+each clip's key frames, wrapping on the loop's period (`tzm_dump.attach_part_bone` /
+`part_spin_track`). Two things made it exact rather than approximate: an object's T is
+applied before its own R (`local = T · R`), so the composed joint's translation is the
+chain's and only the orientation carries the spin; and a 30 fps dance clip keyed at odd
+scene frames sits half a key off a 30 fps loop keyed at even ones — slerp the fractional
+index, don't snap. The `.anm` evaluator then reproduces the record (3°/frame) with no
+new runtime code.

@@ -1,0 +1,3 @@
+# DDR SuperNova 2 (PS2) system_bg002, ported with its layers as parts and its object animation
+# (tools/blender_ddr_addon/examples/port_stage_supernova.py GAME=sn2)
+snsystembg002, 000000, 000000, bg:-2, add

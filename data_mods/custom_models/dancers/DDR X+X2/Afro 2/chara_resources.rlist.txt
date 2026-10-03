@@ -1,0 +1,3 @@
+# DDR X2 (PS2) "Afro 2" (afro02), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_supernova.py GAME=x2; routines MM_BR_03 MM_HH_01 MM_HH_02 MM_HT_01 MM_HT_02 MM_HT_03 MM_HT_04 MM_JA_01 MM_JA_02 MM_SF_01 MM_SF_02 MM_SF_03)
+x2afro02, pl, M, A, 1.0, 0.75, 0.0

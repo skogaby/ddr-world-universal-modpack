@@ -60,6 +60,14 @@ composed down the hierarchy from the clip's local quaternion + the file's local 
 from its 2004 track). The `SCALE` node under `globalSRT` (BABYLON, the `DDR_cspigs*` stand-ins)
 carries a uniform S in its pose and no bind: it is a whole-character scale.
 
+SuperNova 2 skins name their root node after the pack (`afro01`, `concent01`, ...; SuperNova's
+are all `globalSRT`) while the clips -- byte-identical to SuperNova's -- still carry one static
+root track under the ORIGINAL rig's name (`DDR_AFRO_NEW`, `globalSRT`, ...). The root is matched
+by position, not name: the clip's only track that names no joint drives the rig root
+(`clip_worlds`). That is what the game does -- CONCENT's root carries a 0.41 pose offset that
+its object chain cancels, and only a root reset puts its feet on the floor like everyone
+else's (0.04 units; 0.45 with the file pose).
+
 Usage:
     tzm_dump.py info    <file.tzm>                       # chunks, nodes, meshes, tracks
     tzm_dump.py png     <file.tzm> <out dir>             # every texture as PNG
@@ -97,6 +105,7 @@ ADC = 0x8000
 KIND_ROTATION = 2003
 KIND_TRANSLATION = 2004
 KIND_SRT = 3
+KIND_QT = 2            # node Q T keys (7 floats; CONCENT's fan spin)
 # camera records (`cameraNNN` / `stageNNN_cam`, `stage_chara_camera.TZM`)
 KIND_CAM_SRT = 4
 KIND_CAM_POSITION = 5
@@ -492,15 +501,39 @@ def rest_worlds(bones):
     return world_matrices(bones, [node_local(b) for b in bones])
 
 
+def is_rig_root(node):
+    """The rig / object root: parentless with no bind of its own (`globalSRT` in SuperNova, the
+    pack name -- `afro01`, `concent01` -- in SuperNova 2 and later)."""
+    return node['parent'] < 0 and not np.any(node['S2'])
+
+
+def clip_root_track(bones, record):
+    """The clip's root track name: the one rotation track that names no joint of `bones` (a
+    SuperNova 2 clip still says `globalSRT` / `DDR_AFRO_NEW` while the rig root is `afro01`), or
+    None when every track is a joint's."""
+    rot, _trn = clip_tracks(record)
+    names = {b['name'] for b in bones}
+    orphans = [n for n in rot if n not in names]
+    return orphans[0] if len(orphans) == 1 else None
+
+
 def clip_worlds(bones, record, frame):
     """World matrices of `bones` at key `frame` of a character clip record (tracks matched by
-    bone name; joints without a track keep the file pose)."""
+    bone name; joints without a track keep the file pose). The RIG ROOT is matched by position:
+    when it has no track of its own, the clip's root track drives it and the channels that track
+    lacks are the identity (not the file pose -- CONCENT's root pose carries 0.41 the game
+    discards; see the module doc)."""
     rot, trn = clip_tracks(record)
+    root_track = clip_root_track(bones, record)
     locals_ = []
     for b in bones:
         n = b['name']
-        r = quat_mat(rot[n][frame % len(rot[n])]) if n in rot else None
-        t = trn[n][frame % len(trn[n])][:3] if n in trn else None
+        if is_rig_root(b) and n not in rot and n not in trn and root_track is not None:
+            r = quat_mat(rot[root_track][frame % len(rot[root_track])])
+            t = trn[root_track][frame % len(trn[root_track])][:3] if root_track in trn else np.zeros(3)
+        else:
+            r = quat_mat(rot[n][frame % len(rot[n])]) if n in rot else None
+            t = trn[n][frame % len(trn[n])][:3] if n in trn else None
         locals_.append(node_local(b, r, t))
     return world_matrices(bones, locals_)
 
@@ -707,6 +740,153 @@ def unscaled_bones(model):
             b = dict(b, S=np.ones(3))
         out.append(b)
     return out
+
+
+FACE_BONE = 'Head'
+
+
+def face_overlay(body, face_chunks, expression='face01'):
+    """SuperNova 2's `<skin>_face.TZM` expression mask in the BODY's game space: the pack holds
+    one unskinned mesh tree per expression (`face01` neutral, `face02` smiling, `face03` eyes
+    shut; CONCENT's also `body01` -> its chest fan), each `faceNN (root) > trans_null > faceNN`
+    with `trans_null` R = the Head bind rotation's inverse and T the head-local offset of the
+    mask -- the game hangs the root off the Head joint, so in the bind pose a mask vertex sits at
+    Head_bind . W_object . v (ALICE's world-authored sheet cancels through its own object T;
+    verified on all 24 packs: every mask centre lands inside its head's vertex box, 0.1 units
+    behind the face). Returns (positions, normals, uv, triangles with consistent winding, the
+    mask's texture dict) with the body's unit scale and bind shift applied -- ready to join the
+    body mesh weighted 1.0 to `Head` -- or None when the pack has no such expression."""
+    return part_overlay(body, face_chunks, FACE_BONE, expression)
+
+
+def part_overlay(body, part_chunks, bone, root=None):
+    """An unskinned accessory pack hung off one joint of `body`, in the body's game space: the
+    meshes whose object chain starts at the object named `root` (every mesh when None), each
+    placed at Bind[bone] . W_object . v -- the rule face_overlay states for the SuperNova 2 /
+    X expression masks (`Head`) and what DDR X's `parts/convent01_body01.tzm` (CONCENT's chest
+    fan, root `Spine1`, hung off `Spine1`; the ELF character table names the joint) follows.
+    Returns (positions, normals, uv, triangles, texture dict) like face_overlay, or None when the
+    body lacks the joint or the pack has no such root."""
+    d = dict(part_chunks)
+    fm = parse_model(d['MODEL'])
+    materials = parse_materiallist(d['MATERIALLIST']) if 'MATERIALLIST' in d else {}
+    textures = textures_of(part_chunks)
+    joint = next((b for b in body['bones'] if b['name'] == bone), None)
+    if joint is None:
+        return None
+    H = bind_matrix(joint)
+    s, shift = unit_scale(body), bind_shift(body)
+    worlds = object_worlds(fm)
+    P_, N_, UV_, T_, tex = [], [], [], [], None
+    base = 0
+    for k, m in enumerate(fm['meshes']):
+        oi = fm['mesh_object'].get(k)
+        if oi is None or (root is not None and fm['objects'][object_chain(fm, oi)[0]]['name'] != root):
+            continue
+        W = H @ worlds[oi]
+        pos = (np.c_[m['positions'], np.ones(m['count'])] @ W.T)[:, :3]
+        nrm = m['normals'] @ np.linalg.pinv(W[:3, :3])
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+        tris, _ = consistent_winding(pos, nrm, m['triangles'])
+        P_.append((pos + shift) * s)
+        N_.append(nrm)
+        UV_.append(m['uv'])
+        T_.append(tris + base)
+        base += m['count']
+        mat = material_for(materials, m['material']) or {}
+        for t in mat.get('textures', []):
+            if t in textures and tex is None:
+                tex = textures[t]
+    if not P_:
+        return None
+    if tex is None:
+        tex = next((textures[n] for n in textures if root and root in n), next(iter(textures.values())))
+    return np.concatenate(P_), np.concatenate(N_), np.concatenate(UV_).copy(), np.concatenate(T_), tex
+
+
+def mat_to_euler_xyz(m):
+    """Inverse of euler_xyz: the (x, y, z) radians with M = Rz . Ry . Rx (gimbal pole: x = 0)."""
+    m = np.asarray(m)
+    sy = -float(np.clip(m[2, 0], -1.0, 1.0))
+    y = math.asin(sy)
+    if abs(sy) < 1.0 - 1e-9:
+        return np.array([math.atan2(m[2, 1], m[2, 2]), y, math.atan2(m[1, 0], m[0, 0])])
+    return np.array([0.0, y, math.atan2(-m[0, 1], m[1, 1])])
+
+
+def quat_slerp(q0, q1, t):
+    q0, q1 = np.asarray(q0, dtype=float), np.asarray(q1, dtype=float)
+    d = float(np.dot(q0, q1))
+    if d < 0:
+        q1, d = -q1, -d
+    if d > 1.0 - 1e-9:
+        q = (1 - t) * q0 + t * q1
+    else:
+        th = math.acos(min(1.0, d))
+        q = (math.sin((1 - t) * th) * q0 + math.sin(t * th) * q1) / math.sin(th)
+    return q / np.linalg.norm(q)
+
+
+def attach_part_bone(body, part_chunks, root, joint, bone_name=None):
+    """A copy of `body` with ONE extra joint for an accessory pack's animated object (SuperNova 2
+    CONCENT's chest fan: `body01 > body_trans_null > fan01` in its face pack, hung off `Spine1`):
+    the pack's mesh-owning object under `root` becomes a bone named after it, child of `joint`,
+    pose = the composed chain below the root (S dropped), bind = Bind[joint] . chain -- exactly
+    where part_overlay(body, pack, joint, root) puts the vertices, so they weight 1.0 to the new
+    bone. Returns (body copy, bone name, the object's name, the chain's rotation ABOVE the object
+    as a 3x3) -- the last two feed part_spin_track."""
+    fm = parse_model(dict(part_chunks)['MODEL'])
+    base = next((b for b in body['bones'] if b['name'] == joint), None)
+    if base is None:
+        return body, None, None, None
+    owners = [oi for k, oi in sorted(fm['mesh_object'].items()) if fm['objects'][object_chain(fm, oi)[0]]['name'] == root]
+    if not owners:
+        return body, None, None, None
+    oi = owners[0]
+    chain = object_chain(fm, oi)
+    worlds = object_worlds(fm, unit_scale=True)
+    W_chain = worlds[oi]                                   # root .. object, rigid
+    above = worlds[chain[-2]] if len(chain) > 1 else np.eye(4)
+    name = bone_name or fm['objects'][oi]['name']
+    bind = bind_matrix(base) @ W_chain
+    bone = dict(name=name, T=W_chain[:3, 3].copy(), R=mat_to_euler_xyz(W_chain[:3, :3]), S=np.ones(3),
+                T2=bind[:3, 3].copy(), R2=mat_to_euler_xyz(bind[:3, :3]), S2=np.ones(3), kind='bone', mesh_slot=-1,
+                parent=body['bones'].index(base), first_child=-1, next_sibling=-1, prev_sibling=-1, links=())
+    return dict(body, bones=body['bones'] + [bone]), name, fm['objects'][oi]['name'], above[:3, :3]
+
+
+def part_spin_track(dance_record, part_record, object_name, bone_name, chain_rotation):
+    """A copy of `dance_record` with one extra kind-2003 track for `bone_name`: the accessory
+    object's own SRT loop (`part_record`: CONCENT's `ddr_concent_fan`, 121 keys at 30 fps over
+    frames 0..240 -- a uniform -720 deg about its z) sampled at the dance clip's key frames
+    (`first + 60/fps . i`, wrapping over the loop) and composed behind the static rotation of the
+    chain above the object, so clip_worlds plays the fan on the dance clip's timeline. The dance
+    record is returned unchanged when the part record has no such track."""
+    track = next((t for t in part_record['tracks'] if t['name'] == object_name and t['flag'] != 2
+                  and t['kind'] in (KIND_SRT, KIND_QT)), None)
+    if track is None:
+        return dance_record
+    qs = np.array([srt_key(k)[1] for k in track['keys']], dtype=float)
+    p_first, p_last = part_record['first'], part_record['last']
+    p_step = max(1, int(round(60.0 / part_record['fps']))) if part_record['fps'] > 0 else 2
+    period = p_last - p_first if p_last > p_first else p_step * len(qs)
+    d_step = max(1, int(round(60.0 / dance_record['fps']))) if dance_record['fps'] > 0 else 2
+    n = clip_frames(dance_record)
+    out, prev = [], None
+    for i in range(n):
+        frame = dance_record['first'] + d_step * i
+        phase = (frame - p_first) % period
+        j = phase / p_step
+        j0 = int(math.floor(j))
+        q = quat_slerp(qs[j0 % len(qs)], qs[(j0 + 1) % len(qs)], j - j0)
+        m = np.asarray(chain_rotation) @ quat_mat(q)
+        qv = np.array(rowmat_to_quat(m.T))
+        if prev is not None and float(np.dot(prev, qv)) < 0:
+            qv = -qv
+        prev = qv
+        out.append(qv)
+    keys = np.array(out)
+    return dict(dance_record, tracks=dance_record['tracks'] + [dict(name=bone_name, kind=KIND_ROTATION, n=6, flag=0, keys=keys)])
 
 
 def clip_game_worlds(model, record, bone_names, target_binds):
@@ -1168,8 +1348,12 @@ def survey(paths):
                     bones_at = nb[1] - MODEL_HEADER if nb[0] else m['size']
                     if end != bones_at:
                         problems.append((path, 'mesh data ends at 0x%X, bones at 0x%X' % (end, bones_at)))
-                if m['bones'] and (m['bones'][0]['name'] != ROOT_NODE or m['objects'][0]['name'] != ROOT_NODE):
-                    problems.append((path, 'node lists do not start with globalSRT'))
+                roots = [i for i, b in enumerate(m['bones']) if is_rig_root(b)]
+                if roots and not (roots[0] == 0 and m['objects'] and m['objects'][0]['parent'] < 0
+                                  and m['bones'][0]['name'] == m['objects'][0]['name']):
+                    # the dancer-skin convention; a rootless rig (X2's `dmm/model/` board pieces:
+                    # `Hip` parentless with a bind, under a `globalSRT.AFRO` object) is another layout
+                    problems.append((path, 'node lists do not start with a shared root (globalSRT / the pack name)'))
                 if len(m['mesh_object']) != len(m['meshes']):
                     problems.append((path, '%d of %d meshes owned by an object' % (len(m['mesh_object']), len(m['meshes']))))
                 if m['bones']:

@@ -1,0 +1,3 @@
+# DDR X2 (PS2) "Pix 1" (pix01), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_supernova.py GAME=x2; routines MM_HT_03 MM_HT_04 FF_HH_02 FF_HT_03 FF_SF_01 FF_SF_02)
+x2pix01, pl, F, A, 1.0, 0.35, 0.0

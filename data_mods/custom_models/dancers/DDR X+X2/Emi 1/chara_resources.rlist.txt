@@ -1,0 +1,3 @@
+# DDR X (PS2) "Emi 1" (emi01), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_supernova.py GAME=x; routines FF_BR_01 FF_BR_02 FF_HH_01 FF_HH_02 FF_HH_03 FF_HT_01 FF_HT_02 FF_HT_03 FF_JA_01 FF_JA_02 FF_SF_01 FF_SF_02 FF_SF_03)
+xemi01, pl, F, A, 1.0, 0.6, 0.0

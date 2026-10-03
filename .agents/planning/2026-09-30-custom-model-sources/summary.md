@@ -33,8 +33,9 @@ grouped catalog and the per-element choice / pool logic in `selection.rs`, still
 Step 4 replaces the shim with the real rows, requests, preview wiring, label art and the shipped config
 order — the one cabinet step, validated against the design's §7.3 checklist. Step 5 updates the docs.
 
-## Status (2026-09-30, end of the implementation session)
+## Status (2026-09-30)
 
+DONE — cabinet-validated by the maintainer; content moved into source folders (8 dancer sources).
 Steps 1–5 implemented and documented in one session (task files under
 `.agents/tasks/2026-09-30-custom-model-sources/step0{1..4}/`, per-task records under
 `.agents/scratchpad/2026-09-30-custom-model-sources/`). Gate: `cargo check` clean, `cargo fmt`,
@@ -43,12 +44,10 @@ Nothing committed (maintainer commits).
 
 ## Next steps
 
-1. **Cabinet pass** (maintainer): deploy the DLL + `data_mods/` + the `mod-config.json` change; run the
-   checklist in `progress.md` ("Deploy & test log").
-2. Fix-ups from the pass; a `.agents/learnings/learnings.md` entry only if a trap surfaced; re-run the
-   codebase-summary workflow (`.agents/summary/*`).
-3. The maintainer moves the tracked content into source folders (`git mv`; every moved folder re-packs
-   its cache arc once at the next boot).
+1. Maintainer commits (`git add -A data_mods/custom_models` pairs the moves as renames).
+2. Optional: re-run the codebase-summary workflow (`.agents/summary/interfaces.md` predates the
+   `RegisterSpec` texture aliases and the family ordering rule); clear `data_mods/_cache/custom_models/`
+   once to drop the orphaned pre-move cache arcs.
 
 ## Assumptions and areas to watch
 

@@ -1,3 +1,0 @@
-# Dancing Stage Unleashed 3 (Xbox) "Konsento:03", ported with its own rig and clips
-# (tools/blender_ddr_addon/examples/port_character_ultramix3.py; male clips, groups male, unisex)
-umx3robo00, pl, M, A, 1.0, 0.8, 0.0

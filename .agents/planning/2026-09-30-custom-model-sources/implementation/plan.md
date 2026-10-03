@@ -6,8 +6,8 @@ Design: `design/detailed-design.md` (Approved 2026-09-30). Section numbers below
 - [x] Step 1: Framework — texture aliases + family-aware row ordering
 - [x] Step 2: Discovery — `sources.rs`, three-level walk, planner carries the source
 - [x] Step 3: Pure pick layer — grouped catalog, per-element choices, source pools
-- [x] Step 4: Rows — source + per-source model rows, requests, preview, art, config (cabinet) — code complete; cabinet validation pending (maintainer)
-- [x] Step 5: Documentation and closeout — docs written (research §6.1, README); learnings/closeout after the cabinet pass
+- [x] Step 4: Rows — source + per-source model rows, requests, preview, art, config (cabinet) — cabinet-validated 2026-09-30
+- [x] Step 5: Documentation and closeout
 
 Conventions for every step: readiness gate = `cargo check --target x86_64-pc-windows-msvc` clean →
 `cargo fmt` (whole crate) → `./build.sh` clean → the step's harness green. Pure files stay

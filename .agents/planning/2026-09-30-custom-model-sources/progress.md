@@ -1,12 +1,13 @@
 # Progress — Custom dancer / stage SOURCES
 
 Updated: 2026-09-30
-Status: Steps 1–5 code + docs complete — CABINET VALIDATION of Step 4 PENDING (maintainer)
-NEXT ACTION (maintainer): deploy `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll` + the whole
-`data_mods/` tree (six new `seop_item_background_{dancer,stage}_source.png`) + the `mod-config.json`
-`option_menu_settings` change (or add the two `*_source` ids to the cabinet's own config), then run the
-checklist under "Deploy & test log" below. Optionally create `data_mods/custom_models/dancers/Test Source/`
-holding a copy of one dancer folder with a fresh key to see a second source appear before moving content.
+Status: DONE — Steps 1–5 complete, cabinet-validated 2026-09-30 (maintainer: "everything works perfectly");
+uncommitted — maintainer commits manually.
+NEXT ACTION (maintainer): commit (`git add -A data_mods/custom_models` pairs the content move as renames).
+Optional follow-ups: re-run the codebase-summary workflow (`.agents/summary/interfaces.md` still describes
+`RegisterSpec` without the texture aliases / the family ordering rule); group the two stages into source
+folders when more stages arrive (today they are legacy ⇒ CUSTOM); delete `data_mods/_cache/custom_models/`
+once to drop the orphaned pre-move cache arcs.
 
 Resume protocol: read `implementation/plan.md` (checklist + steps), `design/detailed-design.md`
 (§ references), then this file. Per-task working records live under
@@ -49,14 +50,44 @@ steps until a cabinet test is needed (2026-09-30); no commits — maintainer com
   learnings entry yet (none surfaced before the cabinet pass). `.agents/summary/*` is generated — re-run
   the codebase-summary workflow after the pass (components / hook-ownership / data-models mention the rows).
 
+- Content move (maintainer + agent, 2026-09-30): the 115 dancer folders now live under
+  `dancers/{Custom, DDR 3rdMIX, DDR 4thMIX, DDR 5thMIX, DDR Strike, DDR Ultramix 1, DDR Ultramix 2,
+  DDR Ultramix 3}/`; the 110 DDR folders lost their series prefix (`3rdMIX Afro` → `Afro`), no collisions,
+  every source label ≤ 14 bytes. Stages untouched (legacy ⇒ CUSTOM).
+
 ## In flight
 
-- Cabinet validation of Step 4 (maintainer) — checklist below. Fix-ups from the pass, a learnings entry
-  if the pass surfaces a trap, then the maintainer's content move into source folders.
+- Nothing. No learnings entry: the pass surfaced no trap beyond what the module docs and
+  `docs/background_dancers_research.md` §6.1 already record.
+
+- 2026-10-03 — NEW SOURCE `DDR X + X2` (dancers + stages), content-only, uncommitted, NOT yet cabinet-tested:
+  `data_mods/custom_models/dancers/DDR X + X2/` (33 folders: X's costume 01 of all twelve as `<Name> 1`,
+  `Baby-Lon 2`, `Bonnie 1`, `Zero 1`; X2's recolours as `<Name> 2` / `Baby-Lon 3`, `Bonnie 2`, `Zero 2`,
+  `Pix 1..4`; keys `x<skin>` / `x2<skin>`; X's costumes 02 / 03 = SuperNova 2's and are not duplicated) and
+  `stages/DDR X + X2/Stage 01..06` (keys `xstage001..006`, no foot panel). Produced by
+  `port_character_supernova.py GAME=x|x2` / `port_stage_supernova.py GAME=x` (RE: `docs/ps2_ddr_filedata_research.md`
+  §7.6; playbook: `tools/blender_ddr_addon/README.md`). Three things to watch on the cabinet:
+  1. **Stage 02's five TV surfaces are `offscreen1` screens** — expect `stages with screens: … xstage002`
+     at enable and, on a movie song with Background Movies = STAGE SCREENS, the log line
+     `… 5 screen material(s) sample 'offscreen1' … bound texture 1280x1280 hash 0x3420C1B9` and the movie on the
+     big TV + the three stacked sub-TVs + the top band (v band remapped to 0.21875–0.78125, u unmirrored —
+     check the movie is not flipped). The pin takes a stage key as well (`DDR_DANCERS_PIN=xstage002,xafro01`).
+  2. **Concent's chest fan** (`x<skin>_body01` material slot, `Spine1`-weighted) — visible through the chest
+     window on the SuperNova-2-style costumes (`Concent 2`), inside the jacket on `Concent 1`. The same
+     `part_overlay` path now adds the fan to SuperNova 2's `Concent 1/2` on a re-run
+     (`GAME=sn2 DANCERS=concent01,concent02`) — the shipped `DDR SUPRNVA 1+2` Concents predate it.
+  3. **Shadow scales come from the X table** (Baby-Lon / Pix 0.35 … Concent 0.85) rather than the SN
+     0.75 / 0.8 convention — check the pigs' and Baby-Lon's shadows are not comically small.
+  Pin dancers with `DDR_DANCERS_PIN=xafro01,xconcent01,x2pix01,xbabylon01`. Host validation done:
+  `test_tzm_dump.py` (36), `validate_ps2_ddr_tools.sh` on both extractions (0 problems),
+  `validate_background_dancers.sh` (222), SN / SN2 regeneration byte-identical to the shipped files.
 
 ## Deploy & test log
 
-Checklist for the Step 4 pass (design §7.3) — record outcomes here:
+2026-09-30 — Step 4 build deployed with the moved content (8 dancer sources); maintainer reports every item
+below behaves as specified ("everything works perfectly as far as I can tell in-game"). No fix-ups needed.
+
+Checklist for the Step 4 pass (design §7.3):
 1. Boot: `custom content -- N dancer(s) + M stage(s) … in K source(s): CUSTOM 115[, TEST SOURCE 1]`;
    `tables ready … custom in K source(s)`; `option rows live -- DANCER: source row + K model rows (…);
    STAGE: stock row only (…)` (stages have no custom source until stages move too — Grove Street /
