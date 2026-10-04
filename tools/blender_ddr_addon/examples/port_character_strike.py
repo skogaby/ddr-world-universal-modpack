@@ -39,7 +39,7 @@ Output: OUT_BASE/<source>/<label>/ -- the source folder of the Background Dancer
 Inputs (environment):
   GAME        strike (default) | festival | pc (Party Collection)
   PS2_DIR     the extraction (scripts/extract_ps2_ddr_data.py extract strike_jp | festival_jp |
-              party_collection_jp ... --unpack), default ~/Desktop/PS2 DDR ISOs/<disc>/extracted_full
+              party_collection_jp ... --unpack), default ~/Desktop/DDR PS2 ISOs/<disc>/extracted_full
               (STRIKE_DIR is still read for GAME=strike)
   DANCERS     comma list of game names (default the first), or 'all'
   ROOT_MODE   / OUT_BASE / PREVIEW / PREVIEW_DIR   as port_character_sys573.py (OUT_BASE is the
@@ -62,7 +62,7 @@ import port_character_sys573 as PS  # noqa: E402  (registers the add-on)
 import sys573_dancer_dump as S  # noqa: E402
 from extract_ps2_ddr_data import decode_tcb, elf_segments, va_to_offset  # noqa: E402
 
-DISCS = '~/Desktop/PS2 DDR ISOs'
+DISCS = '~/Desktop/DDR PS2 ISOs'
 
 # The ELF character tables, in record order: (game name, label, key stem, sex, model scale, objects).
 # Labels are the shipped friendly-folder names (<= 15 bytes, the options row's SSO budget).
@@ -172,17 +172,17 @@ def _ids(first, last):
 # k-th id) and of the 8 motion sets, the menu source folder, the key prefix (key = prefix + stem + '00').
 GAMES = {
     'strike': dict(
-        title='DDR STRIKE', disc='Dance Dance Revolution Strike (Japan)', elf='SLPM_662.42',
+        title='DDR STRIKE', disc='Strike', elf='SLPM_662.42',
         table_va=0x2B0410, female_groups=None, characters=STRIKE, dancer_ids=_ids(0xCB2, 0xCE4),
         motion_sets=[0xCA9, 0xCAA, 0xCAB, 0xCAC, 0xCAD, 0xCAE, 0xCAF, 0xCB1],
         source='DDR Strike', key_prefix='strk'),
     'festival': dict(
-        title='DDR FESTIVAL', disc='DDR Festival - Dance Dance Revolution (Japan)', elf='SLPM_657.75',
+        title='DDR FESTIVAL', disc='Festival', elf='SLPM_657.75',
         table_va=0x29ED80, female_groups=(0x2A4580, 0x2A4584), characters=FESTIVAL,
         dancer_ids=_ids(0x3DF, 0x3FC), motion_sets=[0x3D6, 0x3D7, 0x3D9, 0x3DA, 0x3DB, 0x3DC, 0x3DD, 0x3DE],
         source='DDR FESTIVAL', key_prefix='fest'),
     'pc': dict(
-        title='DDR PARTY COLLECTION', disc='Dance Dance Revolution - Party Collection (Japan)', elf='SLPM_624.27',
+        title='DDR PARTY COLLECTION', disc='Party Collection', elf='SLPM_624.27',
         table_va=0x29E270, female_groups=(0x2A2634, 0x2A2638, 0x2A263C), characters=PARTY_COLLECTION,
         dancer_ids=_ids(0x134, 0x177), motion_sets=[0x12B, 0x12C, 0x12D, 0x12E, 0x12F, 0x131, 0x132, 0x133],
         source='DDR PARTY COLLN', key_prefix='pc'),

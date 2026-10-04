@@ -1740,3 +1740,23 @@ Two traps from the Hottest Party (Wii) port, both silent:
 - **A white-textured stage is not broken.** Its colour comes from the vertex colours
   (vtxMode 5), which the `_vc` shader multiplies in. Workbench's TEXTURE mode ignores them, so
   render the preview with a texture × COLOR0 emission material before you judge it.
+
+## Blender's `color` accessor re-encodes vertex colours; a PSX flat colour is not 0x80-scaled (2026-10-04)
+
+Two colour traps, both silent, both found on shipped content:
+- **Write COLOR0 with `color_srgb`, never `color`.** A BYTE_COLOR attribute stores sRGB-encoded
+  bytes and the add-on exporter writes those stored bytes (`color_srgb`) as the D3DCOLOR.
+  `foreach_set('color', …)` takes LINEAR values and encodes them: a source 0.5 ships as 188,
+  0.2 as 124. Every stage port and the SuperNova/X dancer port did this, so 726k stage vertices
+  shipped too bright and desaturated. White and black are fixed points, so an all-white
+  dancer looks fine and hides the bug. Alpha is stored linearly (probe-verified, Blender 5.2.1).
+  Check a port by comparing the exported bytes with the source bytes, not by eye. Every affected
+  source was re-ported. `scripts/fix_vertex_colour_srgb.py` undoes the encoding in place (±1 byte)
+  for a model from an older checkout, and refuses to write without `--legacy-port`: running it on
+  a correct port darkens it a second time.
+- **The 573 dancers' untextured polygons are drawn at face value.** They are libgs TMD lit
+  primitives: the GTE lights the RGB and the GPU draws it as is (`0xFF` = 1.0). Only a TEXTURED
+  primitive modulates with `0x80` = 1.0. The ports doubled the flat colours and clamped at 255,
+  which is how FESTIVAL's Rage 1 got salmon hair beside a brown-haired face texture.
+  The tell: ~40 % of the doubled swatch channels sat at 255. When a "0x80 = 1.0" rule clamps
+  that often, the rule is wrong.

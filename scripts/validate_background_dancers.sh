@@ -147,4 +147,8 @@ note "running pure module tests (${MODULE_NAMES[*]})"
 # Python (scripts/pack_custom_models.py): pin it to the same cases.
 note "running scripts/test_pack_custom_models.py (release packer parity)"
 (cd "$REPO_ROOT/scripts" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q test_pack_custom_models)
+
+# The in-place COLOR0 sRGB undo for shipped models whose source is not at hand.
+note "running scripts/test_fix_vertex_colour_srgb.py (COLOR0 patch tool)"
+(cd "$REPO_ROOT/scripts" && PYTHONDONTWRITEBYTECODE=1 python3 -W ignore::ResourceWarning -m unittest -q test_fix_vertex_colour_srgb)
 note "OK"

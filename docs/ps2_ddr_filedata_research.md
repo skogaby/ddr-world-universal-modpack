@@ -702,7 +702,9 @@ recoloured textures (`stage011` even keeps the motion name `stage001`). The
 **Stage port** (`port_stage_supernova.py`, staged 2026-09-30 to a folder per stage): one World
 part per layer with the stock flags (`dec` 0x0001, `ble` 0x02C1, `add` 0x06C1/4, `sub`
 0x06C1/8, `glo` = opaque `_t` copy + additive `_g` copy; `bg` = the skydome subtree, `:-2`),
-everything two-sided, vertex colours kept; a flat rig (root + one bone per animated object,
+everything two-sided, vertex colours kept (TZM's GS 0..128 → `round(255 v)`, written via
+`color_srgb`; the stages shipped before 2026-10-04 were sRGB-encoded by Blender's `color` accessor
+and were re-ported on 2026-10-04 -- X Stage 05: 632 of 632 shipped RGB triples are the TZM's); a flat rig (root + one bone per animated object,
 static sub-chains baked) with a looping `_play_loop.anm` re-evaluating within 3e-4 of the TZM
 worlds; the SuperNova foot panel as `footpanel`. **Material animation**: each part with animated
 materials gets a `gm_<key>_<part>_play_loop.sanm` (World's own material-clip shape, doc

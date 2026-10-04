@@ -78,7 +78,7 @@ from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 GAME = os.environ.get('GAME', 'hp2').lower()
 assert GAME in ('hp2', 'hp3'), GAME
-DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit (Japan)'}
+DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit'}
 DISC = os.path.expanduser(os.environ.get('%s_GAME' % GAME.upper(), DISCS[GAME]))
 OTHER_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
 SOURCE = {'hp2': 'HOTTEST PARTY 2', 'hp3': 'HOTTEST PARTY 3'}[GAME]
@@ -576,7 +576,9 @@ def build_part(key, part, chunk):
             rgba = col[loops_v].astype(np.float32)
             if rs[0]['kind'] == 'add':
                 rgba[:, 3] = 1.0
-            c_attr.data.foreach_set('color', rgba.ravel())
+            # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+            # them: a file 0.5 would ship as 0.74)
+            c_attr.data.foreach_set('color_srgb', rgba.ravel())
             b = rs[0]['bitmap']
             if screen:
                 # the image NAME is what matters (the exporter writes the 8x8 `offscreen1.dds` marker,

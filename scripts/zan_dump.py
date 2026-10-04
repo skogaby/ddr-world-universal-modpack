@@ -24,8 +24,9 @@ disc is a `WII\\0` archive:
     material  version 1.0 = 0x38 bytes, 3.0 = 0x50: u32 color0, color1, color2 (RGBA8), f32,
               u8 flags[4] (`material_mode`), +0x14 u32 ntex (low u16), +0x18 u32 tex_list (u32
               TPL image indices; more than one = a texture FLIP-BOOK), +0x1C .. +0x24 (v3: +0x20 /
-              +0x24 f32 a constant UV scroll per frame), +0x28 u32 (low u16 nlayers; the high u16
-              is a per-model material serial, NOT an animation interval), +0x2C u32 layers (more
+              +0x24 f32 a constant UV scroll per frame), +0x28 u32 (low u16 nlayers; the high u16 is the
+              COLOUR GROUP the game tints at run time: 2 = a dancer's skin, 3 = a Mii's favourite
+              colour, others on stages -- `skin_material`, `skin_tone_table`), +0x2C u32 layers (more
               material-shaped records: environment / eye / mouth passes), +0x30 u32 nframes, +0x34
               u32 frames (the flip-book's END frame per tex_list entry, 60 Hz; the last = the
               cycle: `flip_book`); v3 only: +0x38 u32 nkeys, +0x3C u32 keys (UV-offset keys
@@ -603,6 +604,83 @@ def material_layer(model, material_index):
 
 
 BLEND_OPAQUE, BLEND_ADD, BLEND_DARKEN, BLEND_ALPHA = 0, 1, 2, 3
+
+
+# ---------------------------------------------------------------------------
+# dancer skin tones
+# ---------------------------------------------------------------------------
+# A material's +0x28 high u16 is its COLOUR GROUP (0 = none). The dancer object looks up the
+# first material of group 2 (main.dol FUN_800edca0(model, 1)) and, every frame, sets its
+# colour register to the material colour x the dancer's SKIN TONE (FUN_8003ac98 ->
+# FUN_800ed73c). Group 3 is a Mii's favourite colour (Mii bodies only). So the body's skin
+# texture is a neutral pale sheet and the tone comes from a table in main.dol, while the head's
+# skin is baked into its texture: a port that ignores the tone gives every dark-skinned
+# dancer a pale body under a dark face.
+SKIN_GROUP = 2
+COSTUME_GROUP_BASE = (0, 20, 40, 80)  # costume ids (CHR<id+1>) of the 4 dancer groups (FUN_80021e94)
+
+
+def skin_material(model):
+    """Index of the material the game tints with the skin tone (colour group 2), or None."""
+    for i, mt in enumerate(model['materials']):
+        if mt['words'][10] >> 16 == SKIN_GROUP:
+            return i
+    return None
+
+
+def skin_tone_table(dol_blob):
+    """{costume number nn: [(r, g, b) per colour-variant slot]} from a zan main.dol.
+
+    The tables live in .data as a pointer block, one row of `slots` pointers per dancer group
+    (the leads + back-ups CHR01.., the HOTTEST PARTY 1 outfits CHR21.., the MUSIC FIT outfits
+    CHR41.., the Mii bodies): each pointer is a packed RGB8 array indexed by costume - group
+    base, NULL = slot unused. MUSIC FIT: 4 groups x 6 slots (FUN_8004a7a8 copies the 6 RGBs into
+    the dancer); FuruFuru Party: 4 x 4 (FUN_800403d0). Found structurally: the first block whose
+    rows are [a, a, b, b, 0, ..] (variants 1/2 share a tone, 3/4 another -- a back-up costume
+    holds two people) for three groups and all-NULL for the Mii group, every pointer into the DOL;
+    a row ends at the next row or at its first black entry. Variant k uses slot k - 1."""
+    from extract_wii_ddr_data import Dol
+    dol = Dol(dol_blob)
+    data = [(a, o, s) for a, o, s in dol.sections]
+
+    def is_ptr(v):
+        return v and dol.offset(v, 3) is not None and v % 4 == 0
+
+    best = None
+    for addr, off, size in data:
+        words = struct.unpack_from('>%dI' % (size // 4), dol_blob, off)
+        for slots in (6, 4):
+            n = 4 * slots
+            for i in range(0, len(words) - n + 1):
+                rows = [words[i + g * slots:i + (g + 1) * slots] for g in range(4)]
+                if not (any(rows[0]) and any(rows[1]) and any(rows[2]) and not any(rows[3])):
+                    continue
+                if not all(r[0] == r[1] and r[2] == r[3] and r[0] and r[2]
+                           and not any(r[4:]) and is_ptr(r[0]) and is_ptr(r[2]) for r in rows[:3]):
+                    continue
+                best = (addr + 4 * i, slots, rows)
+                break
+            if best:
+                break
+        if best:
+            break
+    if best is None:
+        raise ValueError('no skin-tone pointer block in this main.dol')
+    _va, slots, rows = best
+    ptrs = sorted({p for r in rows for p in r if p})
+    cap = min(b - a for a, b in zip(ptrs, ptrs[1:])) // 3 if len(ptrs) > 1 else 16
+    out = {}
+    for g, row in enumerate(rows[:3]):
+        for i in range(cap):                     # a row ends at the next row or its first black entry
+            tones = []
+            for p in row:
+                o = dol.offset(p + 3 * i, 3) if p else None
+                if o is not None:
+                    tones.append(tuple(dol_blob[o:o + 3]))
+            if not tones or tones[0] == (0, 0, 0):
+                break
+            out[COSTUME_GROUP_BASE[g] + i + 1] = tones
+    return out
 
 
 def material_mode(material):

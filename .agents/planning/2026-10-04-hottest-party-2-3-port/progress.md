@@ -43,6 +43,20 @@ the docstrings of `scripts/zan_dump.py`, `tools/blender_ddr_addon/examples/port_
 - Docs: `docs/wii_ddr_hottest_party_2_3_research.md`; add-on README sections; root README source mention; HP1
   scripts' stale `DDR HOTTST PRTY` defaults fixed (HP1 dancer port marked retired).
 
+- 2026-10-04 (after the first cabinet look): dark-skinned dancers had pale bodies. Cause: the body's skin material
+  (colour group 2 = material +0x28 u16) is a neutral sheet the game tints per costume / variant from a main.dol
+  table (Ghidra: FUN_8003ac98 / FUN_800ed73c, MUSIC FIT FUN_8004a7a8). `zan_dump.skin_tone_table` reads it from
+  `sys/*.dol`; the port multiplies the tone into the skin material's vertex colours (and now writes the exact
+  bytes via `color_srgb`). All 137 re-ported; every model carries its tone. Tests 23/23, survey checks tones.
+- 2026-10-04 (later): **stage COLOR0 fix.** `port_stage_hottest2.py` wrote vertex colours through Blender's linear
+  `color` accessor, so the shipped bytes were sRGB-encoded (too bright, washed out; research §7.2 has the evidence).
+  It now writes `color_srgb`. All 59 HP2 + 17 HP3 stages re-ported (only the `.model` files changed: 226 + 73). Measured:
+  shipped triples = disc bytes. The same fix went into `port_stage_hottest.py`, `port_stage_supernova.py` and
+  `port_character_supernova.py`. HP1 / SN / X stages and the SN / X GUS glasses were re-ported too, once the
+  maintainer re-downloaded the discs (see `.agents/planning/2026-09-30-custom-model-sources/progress.md`). Every
+  shipped COLOR0 byte is now the disc's. `scripts/fix_vertex_colour_srgb.py` (the in-place undo) is kept only for
+  older-checkout output and refuses to write without `--legacy-port`.
+
 ## In flight
 - Nothing. Last runs: all 59 HP2 / 17 HP3 stages (then the HP2 flip-book stages + all HP3 again with `ATLAS_MAX = 4096`
   and grid-folded atlases; STG105/111 last). Sizes: stages HP2 115 MB, HP3 198 MB (uncompressed atlases), dancers 521 MB.
@@ -58,6 +72,9 @@ the docstrings of `scripts/zan_dump.py`, `tools/blender_ddr_addon/examples/port_
 4. Parts / instance budget: HP3 STG108 has 9 parts, STG110 8.
 5. SHEAR stages (HP2 STG030/049, HP3 STG103): light cones slightly mis-shaped at their tips.
 6. Dancer naming / sex / choreography (HP2-only songs h2s* clips) and the HP1-outfit remakes.
+7. Skin tones: body matches face on U.G., Harmony, Danca, Chordia, Root, Sharp, Gliss, Ceja.
+8. Stage vertex colours: HP1 / HP2 / HP3 stages look deeper and more saturated than before (correct: the disc bytes),
+   not murky. Edited models re-pack on their own (the cache fingerprint folds the file mtimes).
 
 ## Key facts for a cold resume
 - Scale: Hips 8.593 units → 0.97 m (`GAME_SCALE`); file frame = World's (Y up, +Z forward, left +X).

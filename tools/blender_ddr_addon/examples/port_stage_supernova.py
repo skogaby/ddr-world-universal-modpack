@@ -54,7 +54,7 @@ so `STAGES=all` there means just that one, keyed `snsystembg002` beside SuperNov
 Inputs (environment):
   GAME           sn (default: SuperNova) | sn2 (SuperNova 2) -- the extraction, stage list, staging folder
   SN_DIR         the extraction (scripts/extract_ps2_ddr_data.py extract supernova_jp | supernova2_jp ...),
-                 default ~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova[ 2] (Japan)/extracted_full
+                 default ~/Desktop/DDR PS2 ISOs/SuperNova[ 2]/extracted_full
   STAGES         comma list (sn: stage001 .. stage020, system_bg001; sn2: system_bg002; default the
                  first), or 'all'
   OUT_BASE       default ~/Desktop/SuperNova Stages | ~/Desktop/SuperNova 2 Stages (one folder per
@@ -88,11 +88,11 @@ from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 GAMES = {
     'sn': dict(title='DDR SuperNova (PS2)', prefix='sn',
-               dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova (Japan)/extracted_full',
+               dir='~/Desktop/DDR PS2 ISOs/SuperNova/extracted_full',
                out='~/Desktop/SuperNova Stages',
                stages=['stage%03d' % i for i in range(1, 21)] + ['system_bg001']),
     'sn2': dict(title='DDR SuperNova 2 (PS2)', prefix='sn',
-                dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova 2 (Japan)/extracted_full',
+                dir='~/Desktop/DDR PS2 ISOs/SuperNova 2/extracted_full',
                 out='~/Desktop/SuperNova 2 Stages',
                 stages=['system_bg002']),   # stage001..020 + system_bg001 are SuperNova's packs byte for byte
     # DDR X: six stages; `stage001` ships its eighteen beat-pulsing speakers in a separate
@@ -102,7 +102,7 @@ GAMES = {
     # ships these six packs again (stage006 minus the logo) and SuperNova 2's `system_bg002` byte
     # for byte -- nothing of its own, so there is no GAME=x2 here.
     'x': dict(title='DDR X (PS2)', prefix='x',
-              dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution X (Japan)/extracted_full',
+              dir='~/Desktop/DDR PS2 ISOs/X/extracted_full',
               out='~/Desktop/DDR X Stages',
               stages=['stage001', 'stage002', 'stage003', 'stage004', 'stage005', 'stage006'],
               packs={'stage001': 'stage001_2play'},
@@ -376,7 +376,9 @@ def build_part(src, key, part, mesh_ids, worlds_rest, unit_rest, animated, scale
                 rgba = me_src['colours'][loops_v].astype(np.float32)
                 if tag == 'glow':
                     rgba[:, 3] = 1.0  # the glow copy adds at full strength
-                col.data.foreach_set('color', rgba.ravel())
+                # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+                # them: a file 0.5 would ship as 0.74)
+                col.data.foreach_set('color_srgb', rgba.ravel())
             if screen:
                 # the image NAME is what matters (the exporter writes the 8x8 `offscreen1.dds` marker and
                 # the game binds its movie render target); the pixels only dress the Blender preview

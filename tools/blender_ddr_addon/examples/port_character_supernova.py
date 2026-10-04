@@ -54,7 +54,7 @@ Inputs (environment):
               extraction, the character table, the key prefix (`sn` / `sn2` / `x` / `x2`) and
               the staging folder
   SN_DIR      the extraction (scripts/extract_ps2_ddr_data.py extract supernova_jp | supernova2_jp |
-              x_jp | x2_us ...), default ~/Desktop/PS2 DDR ISOs/<disc>/extracted_full
+              x_jp | x2_us ...), default ~/Desktop/DDR PS2 ISOs/<disc>/extracted_full
   DANCERS     comma list of skin names (sn: afro babylon emi gus jenny rage robozukin ruby;
               sn2 / x / x2: afro01 .. zukin03, pix01 ..), default the first, or 'all'
   OUT_BASE    default ~/Desktop/<Game> Dancers (one folder per character, named after it; NOT
@@ -191,22 +191,22 @@ def x_table(prefix, new, face_packs, costumes):
 
 GAMES = {
     'sn': dict(title='DDR SuperNova (PS2)', faces=False,
-               dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova (Japan)/extracted_full',
+               dir='~/Desktop/DDR PS2 ISOs/SuperNova/extracted_full',
                out='~/Desktop/SuperNova Dancers', characters=SN_CHARACTERS, default=list(SN_CHARACTERS)),
     'sn2': dict(title='DDR SuperNova 2 (PS2)', faces=True,
-                dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution SuperNova 2 (Japan)/extracted_full',
+                dir='~/Desktop/DDR PS2 ISOs/SuperNova 2/extracted_full',
                 out='~/Desktop/SuperNova 2 Dancers',
                 characters={'%s%02d' % (stem, c): ('%s %d' % (label, c), 'sn2%s%02d' % (stem, c), routines)
                             for stem, label, routines in SN2_CHARACTERS for c in (1, 2)},
                 default=['%s%02d' % (stem, c) for stem, _l, _r in SN2_CHARACTERS for c in (1, 2)
                          if not (c == 1 and stem in SN2_RETURNING)]),
     'x': dict(title='DDR X (PS2)', faces=True,
-              dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution X (Japan)/extracted_full',
+              dir='~/Desktop/DDR PS2 ISOs/X/extracted_full',
               out='~/Desktop/DDR X Dancers',
               characters={k: v for k, v in x_table('x', X_NEW, {}, (1, 2, 3)).items() if not k.startswith('pix')},
               default=sorted(X_NEW)),
     'x2': dict(title='DDR X2 (PS2)', faces=True,
-               dir='~/Desktop/PS2 DDR ISOs/Dance Dance Revolution X2 (USA)/extracted_full',
+               dir='~/Desktop/DDR PS2 ISOs/X2/extracted_full',
                out='~/Desktop/DDR X2 Dancers',
                characters=x_table('x2', X2_NEW, X2_FACE_PACKS, (1, 2, 3)),
                default=sorted(X2_NEW)),
@@ -383,7 +383,9 @@ def build_mesh(key, model, tex, arm, overlays=()):
     translucent = set()
     if col is not None:
         rgba = col[loops_v].astype(np.float32)
-        colour.data.foreach_set('color', rgba.ravel())
+        # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+        # them: a file 0.5 would ship as 0.74)
+        colour.data.foreach_set('color_srgb', rgba.ravel())
         translucent = {int(k) for k in np.unique(src_mesh) if k >= 0 and model['meshes'][k]['colours'] is not None
                        and float(model['meshes'][k]['colours'][:, 3].min()) < 0.999}
     if translucent:

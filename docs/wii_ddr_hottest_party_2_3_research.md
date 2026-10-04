@@ -18,6 +18,9 @@ Background Dancers custom content? HOTTEST PARTY 1 (Hudson engine) is covered by
   the only costume source; the choreography library is MUSIC FIT's songs plus FuruFuru Party's
   pieces MUSIC FIT lacks (1022 clips, 73 of them HP2-only). The HP1 port's own 40 dancers and the
   per-game `HOTTEST PARTY 2|3` dancer folders were retired (maintainer, 2026-10-04).
+- **Body skin colour comes from a main.dol table, not the textures** (§5.0): the game tints each
+  costume's skin material per colour variant. The port applies it (fixed 2026-10-04 after the
+  first cabinet test showed pale bodies under dark faces).
 - **Names are the games' own** (§6): MUSIC FIT's select-screen name plates matched to costumes
   through the portraits. A back-up costume file holds two people (variants 1/2 and 3/4).
 - **Stages: `stages/HOTTEST PARTY 2/` (FuruFuru Party, 59) and `stages/HOTTEST PARTY 3/`
@@ -63,7 +66,7 @@ materials, nodes; 0 = absent), each `{u32 count, f32 version, u32 offset, u32 0}
   | +0x14 / +0x18 | `u32 ntex` (low u16) / `u32` list of TPL indices — more than one = a **flip-book** |
   | +0x1F | (runtime) set when the material has a texture matrix |
   | +0x20 / +0x24 | v3: `f32` constant UV scroll per 60 Hz frame (used when there are no keys) |
-  | +0x28 | low u16 = number of layer passes; the high u16 is a per-model serial (nonzero on 147 non-animated HP2 stage materials, zero on 18 flip-books) — **not** an animation interval |
+  | +0x28 | u16 **colour group** (the game re-colours the group's material at run time: 2 = a dancer's skin, 3 = a Mii's favourite colour, 11–43 the Mii body parts; also on 147 HP2 stage materials) — **not** an animation interval; +0x2A u16 = number of layer passes |
   | +0x2C | `u32` layers: more material-shaped records (environment, eye, mouth passes) |
   | +0x30 / +0x34 | `u32 nframes` / `u32` list: the flip-book's **end frame** per texture-list entry (60 Hz); the last is the cycle |
   | +0x38 / +0x3C | v3: `u32 nkeys` / UV-offset keys `{f32 time (s), u, v, u8 flags[4]}` (§2.1) |
@@ -153,6 +156,27 @@ head identical) with two extra (`Acc`) nodes; the texture files are re-encoded (
 `HP2A_01_body.tga`), not byte-identical. Only the Mii bodies are HP2-only. MUSIC FIT adds two back-up bodies
 (CHR14/15: Bossa / Nova, Hip / Hop) with their HP1-outfit remakes (CHR31/32), its own outfits
 (CHR41–55) and the new CHR42/47/48.
+
+### 5.0 Skin tones (`zan_dump.skin_tone_table`)
+
+The body's skin is NOT in its texture. Every costume's body has one material of colour group 2
+(§2) over a neutral pale skin sheet; the head's skin is baked into the head texture. At creation
+(`FUN_8004a7a8` in MUSIC FIT, `FUN_800403d0` in FuruFuru Party) the dancer copies its tones from
+a main.dol table into the object (MUSIC FIT: 6 RGB slots, one per colour variant; FuruFuru Party:
+4); on every draw `FUN_8003ac98` finds the group-2 material (`FUN_800edca0(model, 1)`) and sets
+its colour to the material colour × the variant's tone (`FUN_800ed73c`). For a Mii the tone is
+the Mii's skin colour instead, and group 3 gets its favourite colour.
+
+The table is a block of RGB8 arrays, one pointer per (dancer group, variant slot): groups CHR01–15,
+CHR21–32, CHR41–55 (and the Mii bodies, no table), index = costume − group base (`FUN_80021e94`).
+Variants 1/2 share one array and 3/4 another, which is what tells a back-up costume's two people
+apart: Pia `#ffe1c3` / Gliss `#f4b161`, Forte `#ffd8c3` / Sharp `#dd9058`. The rest: Rena `#ffd29b`,
+Domi `#ffe6d6`, U.G. `#8c3602`, Root `#ffc18c`, Chordia `#ecc58f`, Harmony `#a2593f`, Gaku `#f4c7a6`,
+Danca `#966437`, NAOKI `#ffe0dc`, U1 `#ffbb90`, jun `#ffe0ce`, Bossa / Nova `#ffdcb3`, Hip / Hop
+`#fecd9e`, Dyna `#ffd3b6`, Bridget `#ffeacd`, Ceja `#eaa25d` — the same tone in every outfit of a
+person. The first port ignored the table, so every dark-skinned dancer had a pale body under a
+dark face; the port now multiplies the tone into the skin material's vertex colours (World's
+`_vc` shaders multiply COLOR0, as the Wii's colour register does).
 
 Choreography is NOT a subset: 229 of FuruFuru Party's 1853 distinct dance pieces are not on
 MUSIC FIT (songs 032, 036, 041, 046, 035, …), so the library takes them from the HP2 disc.
@@ -247,6 +271,19 @@ group, blend group) with ≤ 63 animated anchors and ≤ 48 animated material fl
   the port logs a `SHEAR` line with the worst vertex offset (STG049's swinging light cones:
   ≤ 0.55 m at their tips, down from 2.0 m with the plain bind; STG030 ≤ 0.31 m; MUSIC FIT STG103
   ≤ 0.84 m; no other stage).
+- **Vertex colours are the disc's bytes** (fixed 2026-10-04). The GX vertex colour is RGBA8 and
+  World's `mdl_bg_*_vc` multiplies COLOR0 bytes as is, so the faithful byte is `round(255 v)`.
+  The first port wrote them through Blender's linear `color` accessor, which sRGB-encodes, so
+  the exporter (which writes the stored `color_srgb` bytes) shipped `round(255 · srgb(v))`. Measured
+  on the shipped STG047 (32 distinct RGB triples in the source submeshes' `col`): 32 of 32 shipped
+  triples matched `srgb_encode(source)` exactly and only 2 matched the source (the white and black
+  ones). STG001: 18 of 19 (19 within ±1, Blender's curve is off by one on 4 of 256 bytes) against 2 of 19.
+  E.g. `(63,63,127)` shipped as `(136,136,187)`, `(7,7,7)` as `(46,46,46)`. Re-ported with
+  `color_srgb`: 32 / 19 / 58 / 16 of 32 / 19 / 58 / 16 triples exact on STG047 / 001 / 030 / 012 and
+  203 of 203 on MUSIC FIT STG101. The buggy HP2 + HP3 output also served as the test corpus for
+  `scripts/fix_vertex_colour_srgb.py` (an in-place undo; every other affected source was re-ported in the end). Its
+  `round(255 · srgb_decode(b/255))` matched the re-port on 278,464 of 456,665 vertices exactly
+  and was ±1 on the rest, with no other byte different.
 
 ### 7.3 Movie screens
 
@@ -289,6 +326,9 @@ A8R8G8B8 DDS; STG111's three 1024 × 2048 atlases are 10.7 MB each), dancers 521
   (about a dozen parts) the shorter loops restart once per 6 minutes.
 - Shear (§7.2) is approximated; the worst cases are additive light cones.
 - Dyna / Bridget / Ceja's mutual order (§6).
+- Stage materials also carry colour groups (§2); what the stage code puts in them
+  (`FUN_80036d20`: per-stage colours on up to 10 materials × 8 groups) is not ported — the
+  stages keep their file colours.
 - Not ported: the Mii bodies, `_S` split-screen stages, COL hulls, EFF effect nodes, the eye /
   mouth flip-book animation on the dancers (first frame baked), additive dancer passes, the stage
   lights (`LIGPOS_` / `LIGTAR_`).

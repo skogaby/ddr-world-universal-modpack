@@ -363,6 +363,43 @@ class TestChoreography(unittest.TestCase):
         self.assertEqual(hands, Z.deal_rotating(range(10), 4, 3, seed=1))
 
 
+def dol(data, addr=0x80001000):
+    """A minimal DOL: one data section `data` at `addr`."""
+    h = [0] * 64
+    h[7], h[18 + 7], h[36 + 7] = 0x100, addr, len(data)       # data section 0 (slot 7)
+    return struct.pack('>64I', *h) + data
+
+
+class TestSkinTones(unittest.TestCase):
+    def test_skin_material(self):
+        mats = [dict(flags=(1, 0, 0, 0), tex=[0]), dict(flags=(1, 0, 0, 0), tex=[0])]
+        blob = bytearray(zmb([dict(name='root', parent=-1)], mats))
+        m = Z.parse_zmb(bytes(blob))
+        self.assertIsNone(Z.skin_material(m))
+        struct.pack_into('>I', blob, m['materials'][1]['offset'] + 0x28, 0x00020000)   # colour group 2
+        self.assertEqual(Z.skin_material(Z.parse_zmb(bytes(blob))), 1)
+
+    def test_table(self):
+        base = 0x80001000
+        arrays = b''
+        ptr = []
+        for r in range(6):                         # six 16-entry RGB rows of 0x30 bytes
+            ptr.append(base + len(arrays))
+            row = b''.join(bytes([0x10 * (r + 1), i + 1, 0x20]) for i in range(15)) + b'\0\0\0'
+            arrays += row
+        # groups CHR01.. / CHR21.. / CHR41..: variants 1/2 -> row a, 3/4 -> row b; Mii group empty
+        block = [ptr[0], ptr[0], ptr[1], ptr[1], 0, 0, ptr[2], ptr[2], ptr[3], ptr[3], 0, 0,
+                 ptr[4], ptr[4], ptr[5], ptr[5], 0, 0] + [0] * 6
+        data = arrays + struct.pack('>24I', *block)
+        t = Z.skin_tone_table(dol(data, base))
+        self.assertEqual(sorted(t), list(range(1, 16)) + list(range(21, 36)) + list(range(41, 56)))
+        self.assertEqual(t[1], [(0x10, 1, 0x20)] * 2 + [(0x20, 1, 0x20)] * 2)
+        self.assertEqual(t[23][0], (0x30, 3, 0x20))
+        self.assertEqual(t[55][2], (0x60, 15, 0x20))
+        with self.assertRaises(ValueError):
+            Z.skin_tone_table(dol(arrays))
+
+
 class TestStage(unittest.TestCase):
     def test_instances(self):
         prop = dict(stem='OBJA_Z_STG27_board01_NC', kind='obj')

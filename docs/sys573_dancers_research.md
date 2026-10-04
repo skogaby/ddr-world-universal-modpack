@@ -157,8 +157,23 @@ here as `pages.bin`, the same hash. This tool names more entries than that dumpe
 | 3/4, 6–8 | normal / vertex counts (repeated) |
 | 5 | normal offset (int16 xyz + pad, 4096 = 1.0) |
 | 9 | index offset: per triangle 3 × `(u16 vertex, u16 normal)` |
-| 10 | textured: per triangle 3 × `(u8 u, u8 v, u16)`, the u16s being CBA, TSB, pad; flat: one RGB, `0x80` = 1.0 |
+| 10 | textured: per triangle 3 × `(u8 u, u8 v, u16)`, the u16s being CBA, TSB, pad; flat: one RGB, drawn as is (`0xFF` = 1.0, see below) |
 | 11 | triangle count |
+
+- **Flat colours are not `0x80`-scaled** (corrected 2026-10-04; the ports used to double them and
+  clamp at 255). The mesh is Sony libgs TMD data (`GsMapModelingData`, `GsLinkObject5`,
+  `GsPresetObject` in 3rdMIX PLUS `FUN_8003e1c0` / `FUN_8003e3f0`); kinds `0x34` / `0x30` are
+  TMD's lit Gouraud triangle with / without a texture. A lit primitive's colour goes through the
+  GTE (`colour × light`) and the GPU draws an untextured result as is; only a TEXTURED primitive
+  modulates its texel by that colour with `0x80` = 1.0 (TMD gives it the `0x808080` code). So a
+  flat colour and the texture page share one scale at face value. The data agree: FESTIVAL's
+  RAGE1 (= Party Collection's Rage) draws its hair flat at `(139,76,55)` beside the face page's
+  hair `(136,72,48)`, its arms at `(221,128,82)` beside the page's shaded skin `(224,144,96)`, and
+  30 of FESTIVAL's 69 flat-colour channels are above `0x80` (pure `255` reds included), which a
+  `0x80` = 1.0 scale would make 2× overbright. Doubled, the hair shipped salmon and the arms pale
+  yellow. Re-ported 2026-10-04 (only the atlas `.dds` changed, and only in the swatch half): 3rdMIX PLUS
+  14, 4thMIX PLUS 17, STRIKE 16, PARTY COLLECTION 40, FESTIVAL 7 dancers; 5thMIX none. Kage (4th and
+  5th) has one flat colour, and it is black, so doubling never changed it.
 
 - The loader re-patches every primitive's tpage/clut (`FUN_8003f228`), so the in-file CBA/TSB
   values are placeholders.
@@ -297,7 +312,7 @@ here as `pages.bin`, the same hash. This tool names more entries than that dumpe
   1 mm.
 - Materials:
   - one texture material with nearest filtering and an alpha mask;
-  - one unlit-style PBR material per PSX flat colour, sRGB→linear.
+  - one unlit-style PBR material per PSX flat colour (as is, `0xFF` = 1.0), sRGB→linear.
 - Verified:
   - host tests;
   - the `survey` of all three mixes (49 models: 16 + 18 + 15; 223 clips per mix, every clip
@@ -360,7 +375,7 @@ y = 0. The afro is 1.84 m to the top of the hair.
 - The head's base object stays on `head`. Every other alternate rides its helper, which the
   clip scales between 1 and 1e-3. This reproduces §2's draw rule, face blinks included.
 - The flat-colour sub-meshes become swatches in a 512×256 atlas (texture × white COLOR0 =
-  `mdl_ch_constant_vc`).
+  `mdl_ch_constant_vc`), at face value (§2: not doubled).
 - `.b2it` role aliases:
 
 | World role | 573 joint |

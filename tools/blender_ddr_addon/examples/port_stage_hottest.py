@@ -398,7 +398,9 @@ def build_part(key, part, chunk):
             rgba = col[loops_v].astype(np.float32)
             if rs[0]['kind'] == 'add':
                 rgba[:, 3] = 1.0
-            c_attr.data.foreach_set('color', rgba.ravel())
+            # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+            # them: a file 0.5 would ship as 0.74)
+            c_attr.data.foreach_set('color_srgb', rgba.ravel())
             b = rs[0]['bitmap']
             image = texture_image(key, model, b) if b is not None else P.palette_texture(
                 '%s_white' % key.replace('hpstage', 'hp'), [(1.0, 1.0, 1.0)], size=8)

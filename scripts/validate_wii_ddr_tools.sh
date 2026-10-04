@@ -20,13 +20,14 @@
 # material modes, the UV-key and flip-book semantics, the choreography helpers). A zan-disc-dir
 # argument (a dumped FuruFuru Party / MUSIC FIT disc: `extract_wii_ddr_data.py disc ...`, detected by
 # its stage/ + sound/stream/ dirs) adds a zan survey instead: every `WII\0` archive parses
-# (zan_dump.survey), every costume CHR<nn>0 with a head builds a rig of <= 64 joints, every stage's
+# (zan_dump.survey), every costume CHR<nn>0 with a head builds a rig of <= 64 joints and has a skin
+# material and a main.dol skin tone (sys/*.dol), every stage's
 # OBJSET_ layout node finds its prop, every multi-texture material is a well-formed flip-book and
 # every UV-key set samples.
 #
 # Requires: python3 + numpy. Writes nothing into the repo. e.g.
-#   ./scripts/validate_wii_ddr_tools.sh ~/"Desktop/DDR Wii ISOs/Furu Furu Party (Japan)" \
-#       ~/"Desktop/DDR Wii ISOs/Music Fit (Japan)"
+#   ./scripts/validate_wii_ddr_tools.sh ~/"Desktop/DDR Wii ISOs/Furu Furu Party" \
+#       ~/"Desktop/DDR Wii ISOs/Music Fit"
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -52,18 +53,31 @@ print("  archives: %s" % ", ".join("%d %s" % (n, k) for k, n in sorted(counts.it
 mots = sorted(glob.glob(os.path.join(root, "motion", "MOT010_SSQ*.bin")))
 keep = Z.parse_zab(Z.members(open(mots[0], "rb").read(), "zab")[0][2])["order"] if mots else []
 rigs = 0
+dols = sorted(glob.glob(os.path.join(root, "sys", "*.dol")))
+try:
+    tones = Z.skin_tone_table(open(dols[0], "rb").read()) if dols else None
+except ValueError as e:
+    tones = None
+    problems.append((dols[0], repr(e)))
 for path in sorted(glob.glob(os.path.join(root, "sound", "stream", "character", "CHR??0.bin"))):
     zm = Z.members(open(path, "rb").read(), "zmb")
     if len(zm) < 2:
         continue                                  # a Mii body: no head, not ported
     try:
-        n = len(Z.rig_joints(Z.parse_zmb(zm[0][2]), keep=keep))
+        body = Z.parse_zmb(zm[0][2])
+        n = len(Z.rig_joints(body, keep=keep))
         rigs += 1
         if n > 64:
             problems.append((path, "%d rig joints (> 64)" % n))
+        nn = int(os.path.basename(path)[3:5])
+        if tones is not None and nn not in tones:
+            problems.append((path, "no skin tone in main.dol"))
+        if Z.skin_material(body) is None:
+            problems.append((path, "no skin material (colour group 2)"))
     except (ValueError, IndexError, KeyError) as e:
         problems.append((path, repr(e)))
-print("  costumes: %d rigs <= 64 joints" % rigs)
+print("  costumes: %d rigs <= 64 joints, %s skin tones from main.dol" % (
+    rigs, len(tones) if tones is not None else "no"))
 # the stages: layout nodes, flip-books, UV keys
 stages = sorted(p for p in glob.glob(os.path.join(root, "stage", "STG*.bin")) if "_S" not in os.path.basename(p))
 placed = flips = uvsets = orphans = 0

@@ -1,6 +1,6 @@
 # Progress — Custom dancer / stage SOURCES
 
-Updated: 2026-10-03
+Updated: 2026-10-04
 Status: DONE — Steps 1–5 complete, cabinet-validated 2026-09-30 (maintainer: "everything works perfectly");
 uncommitted — maintainer commits manually.
 NEXT ACTION (maintainer): commit (`git add -A data_mods/custom_models` pairs the content move as renames).
@@ -145,6 +145,24 @@ steps until a cabinet test is needed (2026-09-30); no commits — maintainer com
   `offscreen1`; flip-books ship as atlases on stepped `.sanm` offsets. Feature state, cabinet watch-list and
   resume point: `.agents/planning/2026-10-04-hottest-party-2-3-port/progress.md`; RE:
   `docs/wii_ddr_hottest_party_2_3_research.md`.
+
+- 2026-10-04 — COLOUR CORRECTIONS to already-accepted content (uncommitted; RE-CHECK ON THE CABINET). Every
+  affected source was RE-PORTED from its disc (the maintainer re-downloaded them all:
+  `~/Desktop/DDR PS2 ISOs/<game>/extracted_full`, `~/Desktop/ddr_573_extracted/<mix>`,
+  `~/Desktop/DDR Wii ISOs/hottest_party_extracted`). Each re-port went to a temp folder and was compared with the
+  shipped content by model folder. Only the expected file type was copied in, and every other difference was
+  checked: comment lines in the sidecars, plus the SN stages' hand-added `footpanel` sidecar rows, which were KEPT.
+  - **Stage vertex colours (COLOR0).** Every stage port wrote them through Blender's linear `color` accessor, so they
+    shipped sRGB-encoded (too bright / washed out). The ports now write `color_srgb`. Re-ported `.model` files:
+    HOTTEST PARTY 1 142 / 2 226 / 3 73, SUPERNOVA 1 & 2 63, X & X2 19, plus the GUS glasses (SN Gus 1/2, X Gus 1/2).
+    Only COLOR0 bytes differ from the earlier output. The SN / X stages were accepted earlier as "loads and looks
+    sane". They now look darker and more saturated, which is the faithful look. Check that nothing reads as too dark.
+  - **573-engine flat colours.** `sys573_dancer_dump.world_atlas` doubled the untextured polygons' colours
+    (wrong `0x80` = 1.0 rule; `docs/sys573_dancers_research.md` §2). Re-ported atlases (`.dds`, swatch half only):
+    3rd MIX 14, 4th MIX 17, STRIKE 16, PARTY COLLECTION 40, FESTIVAL 7 (Rage 1's hair is now the face
+    texture's brown). 5th MIX is unchanged: its only flat colour is Kage's black.
+  - Unaffected: ULTRAMIX 1-3 (white COLOR0, textures byte-exact), the custom stages / dancers (authored in Blender).
+  - The port scripts' default disc paths now follow the new layout (`DDR PS2 ISOs/<game>`, `DDR Wii ISOs/<game>`).
 
 ## Deploy & test log
 

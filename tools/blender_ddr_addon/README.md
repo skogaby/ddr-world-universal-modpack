@@ -65,6 +65,15 @@ explicit `_vc` shader meets one; the proven stock combination for a flat-texture
 is a colour attribute filled with opaque white + `mdl_*_constant_vc` (that is what the
 two ports below do).
 
+**COLOR0 bytes (2026-10-04):** the exporter writes a BYTE_COLOR attribute's STORED bytes
+(`color_srgb`) as the D3DCOLOR, and the game multiplies those bytes as is. So a port writes
+the source's colour bytes with `attr.data.foreach_set('color_srgb', rgba)`. The `color`
+accessor is linear: Blender sRGB-encodes what it gets, and a source 0.5 ships as 188 (0.74),
+0.2 as 124. Alpha is stored linearly either way; white (1.0) and black are unaffected.
+Every affected source (the HOTTEST PARTY 1–3 and SuperNova / X stages, the SN / X GUS glasses) was
+re-ported with the fix, so all shipped COLOR0 bytes are the discs'. `scripts/fix_vertex_colour_srgb.py`
+undoes the encoding in place for a model ported by an older checkout; never run it on current output.
+
 ## Authoring a new asset
 
 * **Character:** `File > Import > DDR Character` on any stock body (e.g.
@@ -331,8 +340,8 @@ with `scripts/extract_sys573_data.py`.
   kind-10 scale tracks (key pairs one frame apart at each change). Helpers are leaves, so no
   segment-scale compensation reaches anything else.
 * **Mesh.** One rigid-skinned mesh; every PSX object rides one bone. The texture is a 512×256
-  atlas: the PSX 256×256 page on the left, and the untextured polygons' flat colours (PSX `0x80` =
-  1.0, so doubled) as 16 px swatches on the right. It is upscaled 2× nearest-neighbour. PSX
+  atlas: the PSX 256×256 page on the left, and the untextured polygons' flat colours (as is: an
+  untextured lit PSX primitive draws its RGB unscaled) as 16 px swatches on the right. It is upscaled 2× nearest-neighbour. PSX
   triangles are clockwise from outside; the triangle order is reversed.
 * **Clips.** One `.anm` per routine, not per 573 clip: a 573 clip is ONE measure and only
   flows into its successor when chained. 120 frames per measure (World's dance clock runs at

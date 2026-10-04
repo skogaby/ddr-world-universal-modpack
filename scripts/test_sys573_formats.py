@@ -212,7 +212,7 @@ class WorldConversionTests(unittest.TestCase):
         img, uv = D.world_atlas(self.ch)
         self.assertEqual(img.shape, (D.ATLAS_H, D.ATLAS_W, 4))
         u, v = uv[(0x40, 0x80, 0xC0)]
-        self.assertEqual(tuple(img[int(v), int(u)]), (0x80, 0xFF, 0xFF, 255))  # doubled, clamped
+        self.assertEqual(tuple(img[int(v), int(u)]), (0x40, 0x80, 0xC0, 255))  # as is, not doubled
 
     def test_mesh_winding_is_reversed_and_rigid(self):
         pos, _nrm, uv, bone, tris = D.world_mesh(self.ch)

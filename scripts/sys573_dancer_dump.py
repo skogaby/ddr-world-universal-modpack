@@ -171,7 +171,8 @@ def parse_cmd(data):
                 for t in range(ntri):
                     e = struct.unpack_from('<BBHBBHBBH', data, o + uv_off + 12 * t)
                     sub['uvs'].append(((e[0], e[1]), (e[3], e[4]), (e[6], e[7])))
-            else:  # 0x30: flat colour sub-mesh, one RGB (0x80 = 1.0)
+            else:  # 0x30: untextured lit sub-mesh, one RGB drawn as is (0xFF = 1.0; only a TEXTURED
+                # primitive's colour modulates with 0x80 = 1.0): docs/sys573_dancers_research.md §2
                 sub['color'] = tuple(data[o + uv_off:o + uv_off + 3])
             subs.append(sub)
         objects.append(subs)
@@ -401,7 +402,7 @@ def write_obj(ch, tris, out_path):
     with open(stem + '.mtl', 'w') as f:
         f.write('newmtl tex\nKd 1 1 1\nmap_Kd %s.png\nmap_d %s.png\n' % (name, name))
         for c in colors:
-            f.write('newmtl c%02x%02x%02x\nKd %.3f %.3f %.3f\n' % (c + tuple(min(1, x / 128) for x in c)))
+            f.write('newmtl c%02x%02x%02x\nKd %.3f %.3f %.3f\n' % (c + tuple(x / 255 for x in c)))
     with open(out_path, 'w') as f:
         f.write('mtllib %s.mtl\n' % name)
         cur = None
@@ -463,7 +464,7 @@ def render(tris, texture, size=384, yaw=0.0, frame_to=None):
             rgba = texture[v, u]
         else:
             rgba = np.empty(gx.shape + (4,), np.uint8)
-            rgba[..., :3] = np.minimum(255, np.array(col) * 2)
+            rgba[..., :3] = col
             rgba[..., 3] = 255
         fn = np.cross(p[1] - p[0], p[2] - p[0])
         shade = 0.55 + 0.45 * abs(fn[2]) / (np.linalg.norm(fn) + 1e-9)
@@ -592,8 +593,8 @@ def export_glb(ch, motions, out_path, bpm=130.0, fps=30.0):
                     attrs['TEXCOORD_0'] = g.accessor(np.array(UV, np.float32), 'VEC2', 34962)
                     mat = 0
                 else:
-                    if key not in flat_mats:  # PSX colour 0x80 = 1.0 (sRGB) -> linear factor
-                        lin = [((min(1.0, x / 128)) ** 2.2) for x in key] + [1.0]
+                    if key not in flat_mats:  # the PSX flat colour as is (sRGB bytes) -> linear factor
+                        lin = [((x / 255) ** 2.2) for x in key] + [1.0]
                         g.j['materials'].append(dict(name='flat_%02x%02x%02x' % key, pbrMetallicRoughness=dict(
                             baseColorFactor=lin, metallicFactor=0.0, roughnessFactor=1.0)))
                         flat_mats[key] = len(g.j['materials']) - 1
@@ -713,8 +714,8 @@ def object_bone(ch, oi):
 
 def world_atlas(ch):
     """(RGBA ATLAS_H x ATLAS_W, {flat colour: swatch uv centre in texels}). The PSX page on the
-    left; each flat colour (PSX 0x80 = 1.0, so doubled and clamped) as a SWATCH-square cell on
-    the right, since World's character shader is texture x COLOR0 (white)."""
+    left; each flat colour, as is (an untextured lit PSX primitive draws its RGB unscaled: 0xFF = 1.0),
+    as a SWATCH-square cell on the right, since World's character shader is texture x COLOR0 (white)."""
     img = np.zeros((ATLAS_H, ATLAS_W, 4), np.uint8)
     img[:, :256] = ch['texture']
     colors = sorted({sub['color'] for objs in ch['objects'] for sub in objs if sub['uvs'] is None})
@@ -725,7 +726,7 @@ def world_atlas(ch):
     for i, c in enumerate(colors):
         r, k = divmod(i, per_row)
         x0, y0 = 256 + k * SWATCH, r * SWATCH
-        img[y0:y0 + SWATCH, x0:x0 + SWATCH, :3] = np.minimum(255, np.array(c) * 2)
+        img[y0:y0 + SWATCH, x0:x0 + SWATCH, :3] = c
         img[y0:y0 + SWATCH, x0:x0 + SWATCH, 3] = 255
         uv[c] = (x0 + SWATCH / 2 - 0.5, y0 + SWATCH / 2 - 0.5)
     return img, uv

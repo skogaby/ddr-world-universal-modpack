@@ -17,7 +17,11 @@ Per dancer:
   2. build ONE skinned mesh: the body's skinned submeshes (joint weights by name), its rigid ones
      (on their nearest joint), and the head (rigid on `mii_head` -- the game swaps it for a Mii
      head); the file's normals via `ddr_normal`; winding made consistent with the normals; the
-     vertex colours as COLOR0; one material slot per (texture, two-sided, blended). The eyes /
+     vertex colours as COLOR0; one material slot per (texture, two-sided, blended). The body's
+     SKIN material (colour group 2) carries a neutral pale texture that the game tints per
+     costume / colour variant from a main.dol table (zan_dump.skin_tone_table): the tone is
+     multiplied into that material's vertex colours (the head's skin is baked into its texture).
+     The eyes /
      mouth are overlay passes through UV set 1 (the game animates their frames): their first frame
      is baked over the face texture into one picture in UV-1 space (zan_dump.bake_overlay); the
      costume's accessories (accessory/<Joint>_<code>*.bin: rings, jun's fan) ride their joint;
@@ -34,7 +38,7 @@ Per dancer:
 
 Inputs (environment):
   HP3_GAME / HP2_GAME  the dumped disc trees (scripts/extract_wii_ddr_data.py disc ...), default
-              ~/Desktop/DDR Wii ISOs/Music Fit (Japan) / Furu Furu Party (Japan) (HP2 only feeds
+              ~/Desktop/DDR Wii ISOs/Music Fit / Furu Furu Party (HP2 only feeds
               the choreography library)
   DANCERS     comma list of keys (hprena01 ..) or person stems (rena, pia, ...: every costume),
               default the first dancer, or 'all'
@@ -67,7 +71,7 @@ from blender_ddr_addon import convert, export_character, import_anm, import_char
 from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
-DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit (Japan)'}
+DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit'}
 DISC = os.path.expanduser(os.environ.get('HP3_GAME', DISCS['hp3']))
 HP2_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
 SOURCE = 'HOTTSTPARTY 1-3'
@@ -254,6 +258,22 @@ def clip_worlds(body, clip, joints, frames):
 # ---------------------------------------------------------------------------------------------
 # model
 # ---------------------------------------------------------------------------------------------
+_TONES = None
+
+
+def skin_tone(entry):
+    """The (r, g, b) skin tone the game gives this costume / colour variant: MUSIC FIT's
+    main.dol table (zan_dump.skin_tone_table, slot = variant - 1)."""
+    global _TONES
+    if _TONES is None:
+        dol = W.main_dol(DISC)
+        assert dol, 'no main.dol under %s/sys: the skin tones come from it' % Z._tilde(DISC)
+        _TONES = Z.skin_tone_table(open(dol, 'rb').read())
+    tones = _TONES.get(entry['nn'])
+    assert tones, 'CHR%02d has no skin tone in main.dol' % entry['nn']
+    return tones[min(entry['variant'], len(tones)) - 1]
+
+
 def load_costume(entry):
     zm = Z.members(open(chr_path(entry['nn'], 0), 'rb').read(), 'zmb')
     body = Z.parse_zmb(zm[0][2])
@@ -333,14 +353,17 @@ def texture_png(stem, rgba):
     return out
 
 
-def costume_pieces(body, head, body_tex, head_tex, names, acc=()):
-    """[(piece, picture RGBA, uv set, two_sided, blended, tag)] of a costume: every submesh with a
-    texture; an overlay pass (eyes / mouth) gets its baked UV-1 picture; accessories ride their
-    joint. Additive passes (an accessory headlamp's glow) are left out: World's dancer shaders
-    have no additive mode."""
+def costume_pieces(body, head, body_tex, head_tex, names, acc=(), tone=None):
+    """[(piece, picture RGBA, uv set, two_sided, blended, tag, tint)] of a costume: every submesh
+    with a texture; an overlay pass (eyes / mouth) gets its baked UV-1 picture; accessories ride
+    their joint. Additive passes (an accessory headlamp's glow) are left out: World's dancer
+    shaders have no additive mode. `tint` is the skin tone (RGB 0..1) on the body's skin
+    material (zan_dump.skin_material), else None: the game multiplies it into that material's
+    colour register, the port into the vertex colours."""
     rest = Z.rest_worlds(body)
     mii = rest[body['by_name'][Z.ATTACH_NODE]]
     out = []
+    skin = Z.skin_material(body) if tone is not None else None
     sources = [(body, body_tex, Z.model_pieces(body, names), 'b')]
     if head is not None:
         sources.append((head, head_tex, Z.model_pieces(head, names, frame=mii, default_joint=Z.ATTACH_NODE), 'h'))
@@ -360,13 +383,15 @@ def costume_pieces(body, head, body_tex, head_tex, names, acc=()):
                     pc['node'], pc['sub'], pc['material'], mt['textures'], len(tex)))
                 continue
             blend, soft, two, _lit = Z.material_mode(mt)
+            tint = tuple(c / 255.0 for c in tone) if model is body and pc['material'] == skin else None
             base = tex[mt['textures'][0]]
             lay = Z.material_layer(model, pc['material'])
             if lay is not None and pc['flags'] & 0x10000 and lay['textures'][0] < len(tex):
                 pic = Z.bake_overlay(base, tex[lay['textures'][0]], pc)
-                out.append((pc, pic, 1, two, False, '%sov%d' % (prefix, lay['textures'][0])))
+                out.append((pc, pic, 1, two, False, '%sov%d' % (prefix, lay['textures'][0]), tint))
             else:
-                out.append((pc, base, 0, two, blend == Z.BLEND_ALPHA and soft, '%s%d' % (prefix, mt['textures'][0])))
+                out.append((pc, base, 0, two, blend == Z.BLEND_ALPHA and soft, '%s%d' % (prefix, mt['textures'][0]),
+                            tint))
     return out
 
 
@@ -374,10 +399,13 @@ def build_mesh(key, pieces, arm):
     """ONE skinned mesh; one material slot per distinct (picture, two-sided, blended)."""
     P_, N_, UV_, C_, W_, T_, M_ = [], [], [], [], [], [], []
     slot_key, slots = {}, []
-    for pc, pic, uv_set, two, blended, tag in pieces:
+    for pc, pic, uv_set, two, blended, tag, tint in pieces:
         pos, nrm, uv, col, wts, tris = Z.weld(pc, uv_set)
         if not len(tris):
             continue
+        if tint is not None:
+            col = col.copy()
+            col[:, :3] *= np.asarray(tint)
         tris, _f = H.consistent_winding(pos, nrm, tris)
         digest = hashlib.md5(np.ascontiguousarray(pic).tobytes()).hexdigest()[:8]
         sk = (digest, two, blended)
@@ -416,7 +444,9 @@ def build_mesh(key, pieces, arm):
     mod = ob.modifiers.new('Armature', 'ARMATURE')
     mod.object = arm
     c_attr = P.white_color_attribute(ob)
-    c_attr.data.foreach_set('color', np.array(C_, dtype=np.float32)[loops_v].ravel())
+    # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+    # them: a file 0.5 would ship as 0.74)
+    c_attr.data.foreach_set('color_srgb', np.array(C_, dtype=np.float32)[loops_v].ravel())
     for i, (pic, two, blended, tag) in enumerate(slots):
         stem = '%s_%s' % (key, tag)
         image = P.load_texture(stem, texture_png(stem, pic))
@@ -474,11 +504,13 @@ def port(key):
     binds = Z.game_bind_matrices(body, joints)
     arm = build_armature(key, joints, binds)
     acc = accessories(body, head, entry['variant'])
-    pieces = costume_pieces(body, head, body_tex, head_tex, set(jnames), acc)
+    tone = skin_tone(entry)
+    pieces = costume_pieces(body, head, body_tex, head_tex, set(jnames), acc, tone)
     _ob, nslots = build_mesh(key, pieces, arm)
     bpy.context.view_layer.update()
-    print('MODEL %s (CHR%02d%d): %d joints, %d pieces, %d material slots, accessories %s' % (
-        key, entry['nn'], entry['variant'], len(joints), len(pieces), nslots, [a[3] for a in acc]))
+    print('MODEL %s (CHR%02d%d): %d joints, %d pieces, %d material slots, skin %s, accessories %s' % (
+        key, entry['nn'], entry['variant'], len(joints), len(pieces), nslots, '#%02x%02x%02x' % tone,
+        [a[3] for a in acc]))
 
     out_dir = os.path.join(OUT_BASE, label)
     bname = 'pl_' + key

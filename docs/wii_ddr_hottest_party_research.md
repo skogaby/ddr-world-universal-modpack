@@ -242,6 +242,10 @@ file → name map, so the labels are `Stage NN` (keys `hpstageNN`).
   the **vertex colours** (`vtxMode` 5 on 95 % of the materials), which is exactly World's
   `_vc` shader (texture × COLOR0). A Workbench preview shows them white, so
   `port_stage_hottest.preview` rewires the materials to emit texture × vertex colour.
+- The COLOR0 bytes must be the GX bytes as is. The port first wrote them through Blender's
+  linear `color` accessor, which sRGB-encodes (a 0.5 shipped as 188). The port now writes
+  `color_srgb`, and all 42 stages were re-ported with it on 2026-10-04 (only the `.model` files changed:
+  142 of 174; the other 32 carry white / black only). See `docs/wii_ddr_hottest_party_2_3_research.md` §7.2.
 - `litColor` is the GX channel's ambient register (`GXSetChanAmbColor`). It is left out of the
   static colour; the 30 material tracks that animate it go onto `vConstantColor`.
 
