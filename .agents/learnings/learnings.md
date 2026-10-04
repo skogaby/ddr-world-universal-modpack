@@ -1681,3 +1681,22 @@ space, `-`, `.` mid-name), ≤ 15 bytes, and check the whole tree before handing
 `find data_mods/custom_models -name '*[. ]' -o -name '*[:<>|?*"\\]*'` must print nothing. The
 slug (`sources::slug`) ignores punctuation, so renaming the folder for Windows keeps the same
 option-row id.
+
+## Hudson HSF key arrays are not sorted, and "codec 1" is not "stored" (2026-10-03)
+
+Two traps from the Hottest Party (Wii) port, both silent:
+- **HSF curve keys are unsorted.** MayaConverter writes pre-roll keys at NEGATIVE times right
+  after key 0. One stg23 UV track has key times `0, -84, 12, 112, …`. The game scans: the first
+  key with `t < time` for step / linear, and the first segment `k[i-1] <= t < k[i]` for Hermite.
+  A `searchsorted` evaluator returns plausible but wrong values, with no error. Use
+  `hsf_dump.sample_curve`, which mirrors `hsfmotion.c`. The dance clips happen to be sorted,
+  so a clip-only check does not catch this.
+- **HuData codec 1 is Hudson LZ.** It is not raw bytes, even though the header looks like a
+  stored entry (`{size, 1}` + data). Check it: the entry's span is smaller than `size`
+  (0x2476 bytes for 0x8080).
+- **Read a pack whole before you sanity-check its offsets.** `is_pack` on the first 64 KiB
+  rejected every pack whose last offset lies beyond that, and 185 of 197 packs were skipped
+  without a word.
+- **A white-textured stage is not broken.** Its colour comes from the vertex colours
+  (vtxMode 5), which the `_vc` shader multiplies in. Workbench's TEXTURE mode ignores them, so
+  render the preview with a texture × COLOR0 emission material before you judge it.

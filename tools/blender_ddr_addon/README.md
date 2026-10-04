@@ -575,6 +575,82 @@ GAME=x STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b 
   --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~1 min for the 6 DDR X stages
 ```
 
+### The Dancing Stage / DDR HOTTEST PARTY (Wii) dancers (`examples/port_character_hottest.py`)
+
+Hottest Party runs on Hudson's Mario Party engine, so its models are **HSFV037** (decoder and
+World-space math: `scripts/hsf_dump.py`; formats and RE: `docs/wii_ddr_hottest_party_research.md`).
+Extract the disc first with `scripts/extract_wii_ddr_data.py extract <unpacked disc> <out> --png`
+(`HP_DIR`). Ported 2026-10-03 and round-trip previewed; not yet cabinet-tested. All 40 ship as
+`data_mods/custom_models/dancers/DDR HOTTST PRTY/<Label> <costume>`, keys `hp<stem><costume>`:
+- Emi / Jenny / Afro / Rage;
+- `Dancer A..D` (the four new characters, models `hispanic`, `black_f`, `korea_m`, `jamaika`;
+  neutral labels because nothing on the disc maps the EU names to them);
+- `Backup F / M`.
+
+Each comes in costumes 1..4.
+
+* **Rig.** All 40 models share one 26-joint Maya skeleton (Hips .. `Head*end`, `*Wrist*end`,
+  `*Toe*end`; `*` becomes `_` in bone names).
+  - MayaConverter's `<J>*root` / `<J>*leaf` helper objects are identity and are dropped
+    (`hsf_dump.rig_joints`, parents first: the file lists children first).
+  - The file frame is World's. One scale (`hsf_dump.GAME_SCALE`) puts the Hips at 0.97 m.
+  - Role alias `Spine2` -> `Spine1`.
+* **Mesh.** One vertex per distinct (position, normal, colour, st) corner, since HSF indexes them
+  separately.
+  - Envelope weights (single / dual / multi, up to 5 influences; the exporter keeps 4).
+  - Two-sided (the materials carry NOCULL). Winding is made consistent with the normals, because
+    GX's (0, 2, 1) corner order is mirrored.
+  - A 512^2 body sheet plus the 128 x 64 open-eyes sheet (the game swaps in blink sprites).
+* **Clips.** Every character dances ONE library: `data/c_000.bin`'s 256 clips.
+  - Pieces whose end pose is the next one's start are joined into takes (`hsf_dump.chain_clips`).
+    The 34 takes of >= 3 bars are kept; "Lesson by DJ"'s step demonstrations are left out.
+  - Each piece's length in bars comes from the dance viewer's table (`dll/danceviewDll.rel`,
+    `extract_wii_ddr_data.danceview_clip_bars`). The library mixes 120 / 145 / 177 / 70 BPM
+    takes, and each is retimed so a bar is 120 frames (World's `bpm_sync` clock).
+  - Keys every 2nd frame; Hips x/z re-centred (`ROOT_MODE`); < 0.1 mm per joint.
+  - The takes are **dealt** across a character's four costumes (~154 bars, ~1.7 MB each), and
+    the four together dance all 617.5 bars. Giving every dancer the full library would take
+    ~6.9 MB each.
+
+```bash
+DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_hottest.py   # ~14 min for 40
+DANCERS=emi PREVIEW=1 ...                                                # one character's 4 costumes
+```
+
+### The Dancing Stage / DDR HOTTEST PARTY (Wii) stages (`examples/port_stage_hottest.py`)
+
+42 stages (`data/stgNN.bin`, minus the `stg05` test stub and its three copies) ship as
+`data_mods/custom_models/stages/DDR HOTTST PRTY/Stage NN` (keys `hpstageNN`). Ported
+2026-10-03 and previewed through their own cameras; not yet cabinet-tested.
+
+* **Input.** A pack is a list of (model, motion) pairs: the BG backdrop, the floor pieces and
+  the props, each with its own loop of 180..6000 frames. Then come the dancers' `chr*` / `look*`
+  formation markers (not ported) and six camera motions.
+* **Colour is COLOR0.** Most stage textures are white alpha masks; the vertex colours carry the
+  colour (vtxMode 5). The `_vc` shader multiplies them in. A Workbench render shows them white,
+  so `preview` rewires the materials to emit texture x vertex colour (EEVEE).
+* **Blend groups.** ADDCOL -> `add` (0x06C1/4), INVCOL -> `sub` (0x06C1/8), a translucent pass
+  with real partial alpha -> `ble:-1` (0x02C1), else `dec` alpha-tested. The backdrop model's
+  opaque meshes -> `bg:-2`. All meshes are two-sided.
+* **Parts.** Models sharing a loop length, or one dividing it (sampled at `t mod L`), share a
+  part per blend group. A part is split at 63 animated anchors (frame board: 64 bones per
+  instance). That keeps stages at 2..9 parts.
+* **Rig and loops.** One flat bone per animated anchor (the SuperNova stage scheme).
+  - The geometry is baked at the frame-0 pose: a constant HSF track re-poses its object.
+  - `_play_loop.anm` keys every 2nd frame plus a wrap key.
+  - `_play_loop.sanm`: UV scroll = -(attribute T), unwrapped across the repeats of a shorter
+    loop, on params 2 / 3; litColor tracks on 4..6 (`mdl_ch_constant_c_vc`).
+  - **The curve evaluator must scan, not bisect.** MayaConverter writes pre-roll keys at negative
+    times after key 0 (`hsf_dump.sample_curve`).
+* **Cameras.** The pack's shots -> `_st01..06`; `data/ddrcam.bin`'s 59 dance cameras ->
+  `_non01..59`. Position / aim / roll; the FOV is vertical, its extent kept on 16:9.
+
+```bash
+STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_hottest.py   # ~40 min for 42
+```
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

@@ -107,6 +107,34 @@ steps until a cabinet test is needed (2026-09-30); no commits — maintainer com
   `validate_background_dancers.sh` (222), re-run byte-identical (one dancer per game), all 86 previews re-import
   and render.
 
+- 2026-10-03 — NEW SOURCE `DDR HOTTST PRTY` (Wii, dancers + stages), content-only, uncommitted, NOT yet
+  cabinet-tested. Shipped as:
+  - `data_mods/custom_models/dancers/DDR HOTTST PRTY/`: 40 folders, `Emi|Jenny|Afro|Rage|Dancer A..D|Backup F|M 1..4`,
+    keys `hp<stem><costume>`, 26-joint own rig + own clips;
+  - `stages/DDR HOTTST PRTY/Stage NN`: 42 stages, keys `hpstageNN`, 2..9 parts, 5–6 `_st` + 59 `_non` cameras.
+
+  Produced by `scripts/extract_wii_ddr_data.py` (new, whole-disc extractor) + `scripts/hsf_dump.py` (new HSFV037
+  decoder) + `port_character_hottest.py` / `port_stage_hottest.py`. RE: `docs/wii_ddr_hottest_party_research.md`.
+  Host validation: `validate_wii_ddr_tools.sh` (32 tests + extraction survey, 0 problems),
+  `validate_background_dancers.sh` (222), every dancer clip < 0.12 mm, every stage loop / camera checked, all 40
+  dancer and 42 stage previews rendered. Things to watch on the cabinet:
+  1. **Tempo.** One bar = 120 frames after the retime (`dol/dance_clip_bars.csv`). Under `bpm_sync` the
+     dancers should hit the beat on 120 / 145 / 177 BPM takes alike. If a take dances at double or half
+     speed, check its row in the table: the 205-frame "70 BPM" takes (hp172..186) are the suspects.
+  2. **Stage part / instance budget.** Stage 03 has 9 parts and Stage 07 has 8, the most of any stage:
+     check 3 dancers + shadows + outlines still all draw (32 slots), and the options preview (16 slots).
+  3. **Blend groups.** Most HP stage meshes are on the translucent pass, so `ble:-1`. Look for z-sorting
+     artefacts on stage floors, and for additive (`add`) layers that look too bright or too dim against
+     World's lighting styles. Colours live in COLOR0 (white mask textures): a "Lighting Style" restyle that
+     drops vertex colours would show white stages.
+  4. **Cameras.** The vertical FOV is kept on 16:9. Check the `_st` shots frame the dancer, and the
+     `_non` close-ups (`ddrcam.bin`, authored around a dancer at the origin).
+  5. **Eyes.** The eye sheet is its own material slot (the open-eyes texture); no blink.
+
+  Pin with `DDR_DANCERS_PIN=hpstage03,hpemi01,hpafro02,hpbackupm01`.
+  Open question for the maintainer: the EU names Harmony / Root / Gaku / Rena / Domi / Danca / Chordia / U.G.
+  are not mapped to models (RE §5), so the folders use placeholders.
+
 ## Deploy & test log
 
 2026-09-30 — Step 4 build deployed with the moved content (8 dancer sources); maintainer reports every item

@@ -1,0 +1,3 @@
+# Dancing Stage HOTTEST PARTY (Wii) stg29.bin, ported with its models as parts and their loops
+# (tools/blender_ddr_addon/examples/port_stage_hottest.py)
+hpstage29, 000000, 000000, dec, add
