@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Chordia 6" (CHR250 + CHR254), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp3; clips h3s003_048 h3s004_003 h3s005_041 h3s008j_023 h3s013j_033 h3s015_045 h3s022j_038 h3s024j_087 h3s043_030 h3s048_008 h3s054_030 h3s059_078)
+hp3chordia06, pl, F, A, 1.0, 0.75, 0.0

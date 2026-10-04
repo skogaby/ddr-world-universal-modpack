@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Root 7" (CHR440 + CHR441), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp3; clips h3s009_032 h3s009_048 h3s009_056 h3s010j_005 h3s011j_064 h3s012j_032 h3s017j_078 h3s021j_040 h3s026_032 h3s026j_028 h3s061_042 h3s068_038)
+hp3root07, pl, M, A, 1.0, 0.8, 0.0
