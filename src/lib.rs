@@ -228,6 +228,16 @@ fn init() {
     }
     profiling::tick("early_apply");
 
+    // 2d. Background Dancers custom-content prefetch. Strictly AFTER every
+    // boot race (LayeredFS at 0b, early_apply above): listing
+    // `data_mods/custom_models` is linear in its directory count (~0.4 ms per
+    // directory under CrossOver) and competes for wineserver time, so it must
+    // never sit on — or slow — the race path. Started here it overlaps the
+    // remaining ~2 s of service init + mod enables on its own thread; the
+    // mod's enable joins it. No-op unless the mod + `custom_content` are on.
+    mods::background_dancers::prefetch_custom_content(&mod_config);
+    profiling::tick("custom_content_prefetch");
+
     // 3. Derived addresses
     log_info!("Resolving derived addresses...");
     signatures.resolve_derived();

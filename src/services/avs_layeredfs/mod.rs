@@ -53,7 +53,10 @@
 //!
 //! - `avs_resolver` — libavs export resolution across AVS versions.
 //! - `file_hooks` — the detours and request routing above.
-//! - `mod_paths` — mod folder scan, path normalization, lookup.
+//! - `mod_paths` — mod folder scan, path normalization, lookup. Every
+//!   top-level folder except `mod_paths::PRIVATE_FOLDERS` (`_cache`,
+//!   `custom_models`) is an overlay; the private ones are never indexed, so
+//!   the step-0b scan cost stays independent of installed custom content.
 //! - `arc_handler` — `.arc` overlay and repack.
 //! - `shader_synthesis` / `shader_layout` — runtime shader-container synthesis and
 //!   its pure layout rules.

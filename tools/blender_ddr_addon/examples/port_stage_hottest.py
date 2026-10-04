@@ -36,7 +36,7 @@ Inputs (environment):
   HP_DIR      the extraction (scripts/extract_wii_ddr_data.py extract ...), default
               ~/Desktop/DDR Wii ISOs/hottest_party_extracted
   STAGES      comma list (stg00 .. stg50), default stg01, or 'all'
-  OUT_BASE    default data_mods/custom_models/stages/DDR HOTTST PRTY (one folder per stage,
+  OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 1 (one folder per stage,
               `Stage 01` ..; keys hpstage01 ..)
   PREVIEW     1 = render Workbench previews of the RE-IMPORTED parts into PREVIEW_DIR, plus a
               ported Hottest Party dancer through two of the written .camanm clips
@@ -67,11 +67,11 @@ from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 HP_DIR = os.path.expanduser(os.environ.get('HP_DIR', '~/Desktop/DDR Wii ISOs/hottest_party_extracted'))
 OUT_BASE = os.path.expanduser(os.environ.get(
-    'OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'stages', 'DDR HOTTST PRTY')))
+    'OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'stages', 'HOTTEST PARTY 1')))
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_stage_previews')
 PREVIEW_DANCER = os.path.expanduser(os.environ.get('PREVIEW_DANCER', os.path.join(
-    REPO, 'data_mods', 'custom_models', 'dancers', 'DDR HOTTST PRTY', 'Emi 1', 'pl_hpemi01', 'pl_hpemi01.model')))
+    REPO, 'data_mods', 'custom_models', 'dancers', 'HOTTSTPARTY 1-3', 'Rena 1', 'pl_hprena01', 'pl_hprena01.model')))
 
 SKIPPED = {'stg05', 'stg10', 'stg15', 'stg20'}   # the test stub and its three copies
 STAGES = sorted(d for d in (os.listdir(os.path.join(HP_DIR, 'data')) if os.path.isdir(os.path.join(HP_DIR, 'data')) else [])

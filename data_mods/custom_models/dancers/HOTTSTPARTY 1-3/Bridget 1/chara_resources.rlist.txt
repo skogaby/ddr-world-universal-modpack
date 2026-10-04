@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Bridget 1" (CHR470 + CHR471), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_033 h3s002_008 h3s002_072 h3s002j_070 h3s008j_035 h3s015j_042 h3s028j_054 h3s036_000 h3s044_093 h3s049_013 h3s050_016 h3s055_028)
+hpbridget01, pl, F, A, 1.0, 0.75, 0.0

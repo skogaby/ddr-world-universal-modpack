@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "U.G. 8" (CHR430 + CHR432), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s006_002 h3s012_000 h3s012j_053 h3s016j_062 h3s019_049 h3s022j_053 h3s029_056 h3s031_068 h3s038_008 h3s041_009 h3s062_033 h2s031_048)
+hpug08, pl, M, A, 1.0, 0.8, 0.0

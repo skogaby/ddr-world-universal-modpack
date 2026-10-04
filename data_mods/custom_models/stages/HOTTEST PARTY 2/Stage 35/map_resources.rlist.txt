@@ -1,0 +1,3 @@
+# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 STG035.bin, ported with its models as parts and their loops
+# (tools/blender_ddr_addon/examples/port_stage_hottest2.py GAME=hp2)
+hp2stage035, 000000, 000000, bg:-2, dec, add, ble:-1

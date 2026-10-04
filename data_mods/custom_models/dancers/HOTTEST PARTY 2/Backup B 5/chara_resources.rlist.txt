@@ -1,3 +1,0 @@
-# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 "Backup B 5" (CHR300 + CHR301), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp2; clips h2s004_056 h2s005_016 h2s014_057 h2s014_066 h2s024_040 h2s025_038 h2s034_008 h2s034_048 h2s041_012 h2s043_008 h2s046_008 h2s056_000)
-hp2backupb05, pl, M, A, 1.0, 0.8, 0.0

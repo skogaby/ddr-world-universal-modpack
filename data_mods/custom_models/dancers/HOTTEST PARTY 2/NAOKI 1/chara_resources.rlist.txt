@@ -1,3 +1,0 @@
-# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 "NAOKI 1" (CHR410 + CHR411), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp2; clips h2s011_007 h2s014_017 h2s020_066 h2s028_008 h2s030_032 h2s039_045 h2s047_017 h2s057_032 h2s059_038 h2s061_028 h2s065_030 h2s065_089)
-hp2naoki01, pl, M, A, 1.0, 0.8, 0.0

@@ -40,7 +40,9 @@ Inputs (environment):
               beside it) supplies dll/danceviewDll.rel when the extraction has no dol/ tables
   DANCERS     comma list of keys (hpemi01 .. hpbackupm04) or character stems (emi, jenny, ...:
               all four costumes), default hpemi01, or 'all'
-  OUT_BASE    default data_mods/custom_models/dancers/DDR HOTTST PRTY (one folder per dancer)
+  OUT_BASE    default data_mods/custom_models/dancers/HOTTEST PARTY 1 (one folder per dancer). RETIRED
+              2026-10-04: the shipped HOTTEST PARTY 1 cast is MUSIC FIT's remakes on the zan rig
+              (port_character_hottest2.py, dancers/HOTTSTPARTY 1-3); this port stays as the HSF reference
   ROOT_MODE   recentre (default: the take's Hips x/z box centre on the mark) | travel
   PREVIEW     1 = also render Workbench previews of the RE-IMPORTED export into PREVIEW_DIR
               (default the system temp dir -- never into the repo)
@@ -71,7 +73,7 @@ SHADER = 'mdl_ch_constant_vc'
 HP_DIR = os.path.expanduser(os.environ.get('HP_DIR', '~/Desktop/DDR Wii ISOs/hottest_party_extracted'))
 HP_GAME = os.path.expanduser(os.environ.get('HP_GAME', '~/Desktop/DDR Wii ISOs/Dancing Stage - Hottest Party (Europe)'))
 OUT_BASE = os.path.expanduser(os.environ.get(
-    'OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', 'DDR HOTTST PRTY')))
+    'OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', 'HOTTEST PARTY 1')))
 ROOT_MODE = os.environ.get('ROOT_MODE', 'recentre')
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_port_previews')

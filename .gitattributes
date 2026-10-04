@@ -1,0 +1,4 @@
+# cmd.exe misparses labels / goto in LF batch files: keep this one CRLF on
+# every checkout, whatever core.autocrlf says. (Other .bat files are left
+# alone -- build_release_archive.sh converts the shipped importer itself.)
+/scripts/build_release_distribution.bat text eol=crlf

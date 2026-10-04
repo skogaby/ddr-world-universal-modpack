@@ -85,6 +85,11 @@ static CACHE_INDEX: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashS
 /// init. Recurses one level per cached IFS subfolder (the cache layout is
 /// `_cache/<ifs_mod_path>/<file>`, with some nested arc/ifs subtrees), indexing
 /// every regular file by its full relative path.
+///
+/// `_cache/custom_models/` is skipped: it holds the Background Dancers cache
+/// arcs (opened by the FileManager through the CRT, never through this
+/// texture path) and grows with the installed content — keeping it out keeps
+/// this race-critical walk independent of how many models are installed.
 pub fn build_cache_index() {
     let mut index = CACHE_INDEX.lock().unwrap();
     index.clear();
@@ -97,15 +102,31 @@ pub fn build_cache_index() {
     );
 }
 
+/// `_cache` subfolders [`build_cache_index`] never descends into.
+const CACHE_INDEX_SKIP: &[&str] = &["custom_models"];
+
 fn index_dir_recursive(dir: &std::path::Path, index: &mut HashSet<String>, count: &mut usize) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return, // missing _cache dir (cold start) is fine — built lazily on write
     };
+    let at_root = dir == std::path::Path::new(CACHE_FOLDER);
     for entry in entries.flatten() {
         let path = entry.path();
         match entry.file_type() {
-            Ok(ft) if ft.is_dir() => index_dir_recursive(&path, index, count),
+            Ok(ft) if ft.is_dir() => {
+                if at_root {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if CACHE_INDEX_SKIP
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&name))
+                    {
+                        continue;
+                    }
+                }
+                index_dir_recursive(&path, index, count)
+            }
             Ok(ft) if ft.is_file() => {
                 if let Some(s) = normalize_cache_path(&path) {
                     index.insert(s);

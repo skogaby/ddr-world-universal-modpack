@@ -941,6 +941,46 @@ Rules:
   each costs a full 19 MB scan; if boot-time races reappear, the scan cost
   is the lever (batch scanning / early-out on build fingerprint).
 
+### Nothing on the boot path may scale with installed CONTENT — and under CrossOver every file syscall is ~0.4 ms (2026-10-04)
+
+**Symptom:** with ~540 custom dancers/stages (2.2 GB, 20k files, 2.2k dirs
+under `data_mods/custom_models/`) Custom Resolution logged `display init
+already ran (screen_w != 0) -- nothing applied this boot` and the splash
+appeared ~12 s after launch. Neither feature had changed.
+
+**Measured on the maintainer's CrossOver bottle** (a throwaway Windows bench
+exe run with `wine --bottle bemani`, CWD = the game's `contents/`):
+
+| operation | cost |
+|---|---|
+| `fs::read_dir` of one directory (enumerate + close) | ~0.43 ms |
+| `DirEntry::metadata()` / `file_type()` during that enumeration | ~free (FindNextFile already returned size + mtime) |
+| `fs::metadata(path)` (open + query + close) | ~0.40 ms |
+| `Path::is_file()` | ~0.39 ms |
+| small `fs::read` (16-byte sidecar) | ~0.36 ms |
+| 64 KiB prefix read of an arc | ~0.49 ms |
+
+Two linear costs had crept in: LayeredFS's step-0b mod-path index walked
+`custom_models/` (~1 s, ON the race path that ends at `early_apply` — Custom
+Resolution's display-init check lost), and the Background Dancers enable
+stat'ed all 20k inputs to fingerprint its cache arcs (8.1 s) plus one
+`.hashed` read + one `is_file` per model, on the init thread ahead of every
+later mod and the splash.
+
+Rules:
+- Folders that are not LayeredFS overlays go in `mod_paths::PRIVATE_FOLDERS`
+  (never indexed). Anything that walks user content runs after
+  `early_apply` (`custom_scan::prefetch`), never before.
+- Budget per DIRECTORY, not per file: take mtimes/sizes from the listing you
+  already did (`CacheHasher::add_stamped`), never `fs::metadata` per file;
+  keep one index file instead of N sidecar reads (`scan_index.rs`); confirm
+  cache-file existence from one listing of the cache dir, not N `is_file`.
+- `DirEntry::metadata` mtimes == `fs::metadata` mtimes under Wine (verified
+  0 mismatches over 19,993 files), so switching is fingerprint-compatible.
+- Benchmark filesystem patterns under CrossOver before assuming a walk is
+  cheap — host-side timings of the same code say nothing about wineserver
+  round trips.
+
 ## 2026-09-03 — `musicdb.merged.xml` fragments do NOT reach the game's music DB
 
 While setting up the Split SSQ Auto-Discovery cabinet test (a cloned song

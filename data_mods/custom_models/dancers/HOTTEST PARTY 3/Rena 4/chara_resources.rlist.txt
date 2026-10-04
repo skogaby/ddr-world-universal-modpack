@@ -1,3 +1,0 @@
-# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Rena 4" (CHR210 + CHR212), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp3; clips h3s004j_039 h3s011j_000 h3s013j_000 h3s020_084 h3s020j_026 h3s033_065 h3s035_036 h3s038_008 h3s054_049 h3s054_101 h3s057_000 h3s059_046)
-hp3rena04, pl, F, A, 1.0, 0.75, 0.0

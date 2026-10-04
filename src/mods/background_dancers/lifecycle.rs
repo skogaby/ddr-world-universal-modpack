@@ -224,6 +224,8 @@ pub fn init_tables() -> bool {
         }
     );
     let screen_stages = scan_screen_stages(&stages);
+    // The discovery's member lists have served their last consumer.
+    super::custom_scan::release_known_members();
     if let Ok(mut t) = TABLES.lock() {
         *t = Some(Tables {
             stages,
@@ -244,16 +246,22 @@ pub fn tables_ready() -> bool {
 
 /// Which distinct stages have video screens (design R5): the stage arc — as
 /// the engine will load it (mounts / LayeredFS / stock, `arc_set`) — lists
-/// an `offscreen1.dds` member. One header read per distinct key at enable
-/// (a 64 KiB prefix). An unreadable arc counts as "no screens" and is named
-/// in the INFO.
+/// an `offscreen1.dds` member. A custom (mounted) stage answers from the
+/// member list discovery already holds (`custom_scan::known_members` — no
+/// stat, no read); any other stage costs one header read (a 64 KiB prefix).
+/// An unreadable arc counts as "no screens" and is named in the INFO.
 fn scan_screen_stages(stages: &[StageCandidate]) -> HashSet<String> {
     let keys = super::selection::distinct_stage_keys(stages);
     let mut with = HashSet::new();
     let mut unreadable: Vec<&str> = Vec::new();
     for key in &keys {
-        let members = arc_set::resolve_path(&format!("data/arc/mapset_{key}.arc"))
-            .and_then(|path| super::custom_scan::read_arc_members(&path));
+        let rel = format!("data/arc/mapset_{key}.arc");
+        let members = arc_set::mounted_path(&rel)
+            .and_then(|path| super::custom_scan::known_members(&path))
+            .or_else(|| {
+                arc_set::resolve_path(&rel)
+                    .and_then(|path| super::custom_scan::read_arc_members(&path))
+            });
         match members {
             Some(m) => {
                 if movie_mode::arc_members_have_screen(&m) {

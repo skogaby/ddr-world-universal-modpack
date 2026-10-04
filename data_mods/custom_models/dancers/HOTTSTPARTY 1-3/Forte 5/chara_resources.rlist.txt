@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Forte 5" (CHR500 + CHR501), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_006 h3s005_000 h3s007_039 h3s009_000 h3s009_024 h3s011j_048 h3s012_050 h3s020_100 h3s022_033 h3s028_024 h3s048_008 h3s063_037)
+hpforte05, pl, M, A, 1.0, 0.8, 0.0

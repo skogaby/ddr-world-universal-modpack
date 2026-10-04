@@ -1,3 +1,0 @@
-# Dancing Stage HOTTEST PARTY (Wii) "Dancer D 1" (c_008.bin), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest.py; takes hp076_078 hp097_097 hp105_111 hp112_130 hp159_160 hp165_171 hp172_174 hp193_197)
-hpdancerd01, pl, M, A, 1.0, 0.8, 0.0

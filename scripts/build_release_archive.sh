@@ -160,6 +160,16 @@ rsync -a \
     --exclude '.DS_Store' \
     data_mods "$STAGE/"
 
+# Background Dancers custom content ships PRE-PACKED: every model folder of the
+# staged copy becomes the ready arc the DLL would otherwise pack on each
+# cabinet's first boot (a second full copy under data_mods/_cache/), and each
+# model is one directory entry to scan and one file for the updater instead of
+# its whole folder tree. The checkout keeps the authoring folders.
+if [[ -d "$STAGE/data_mods/custom_models" ]]; then
+    echo "==> Pre-packing custom models"
+    python3 scripts/pack_custom_models.py --in-place --force "$STAGE/data_mods/custom_models"
+fi
+
 # DDR SELECTION's A3 importer (operators run it once against their own A3
 # install — the repo never ships A3 data). Lands in <game>/ddr_selection_import/
 # so the scripts' default World path (the folder above them) is the game folder.

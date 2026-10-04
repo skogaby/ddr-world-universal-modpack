@@ -1,3 +1,0 @@
-# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 STG048.bin, ported with its models as parts and their loops
-# (tools/blender_ddr_addon/examples/port_stage_hottest2.py GAME=hp3)
-hp3stage048, 000000, 000000, bg:-2, dec, ble:-1

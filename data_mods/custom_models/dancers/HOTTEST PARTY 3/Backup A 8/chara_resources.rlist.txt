@@ -1,3 +1,0 @@
-# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Backup A 8" (CHR290 + CHR294), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp3; clips h3s004j_004 h3s007_012 h3s018j_070 h3s022j_049 h3s025j_050 h3s027_032 h3s031_036 h3s033_033 h3s037_024 h3s053_008 h3s057_083 h3s059_082)
-hp3backupa08, pl, F, A, 1.0, 0.75, 0.0

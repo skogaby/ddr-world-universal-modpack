@@ -1,3 +1,0 @@
-# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 "Domi 3" (CHR220 + CHR221), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp2; clips h2s008_039 h2s019_041 h2s019_058 h2s026_000 h2s027_048 h2s027_105 h2s028_000 h2s030_008 h2s033_024 h2s036_008 h2s044_032 h2s059_026)
-hp2domi03, pl, F, A, 1.0, 0.75, 0.0

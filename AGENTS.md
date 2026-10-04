@@ -51,6 +51,7 @@ cargo check --target x86_64-pc-windows-msvc      # fast type check (works on any
 ./build_win7.sh                                  # Windows 7 build (-Z build-std)
 ./scripts/deploy.sh                              # build + scp to cabinet (/tmp/ssh{host,user,pass})
 ./scripts/build_release_archive.sh               # release/: zip + bare updater exe + tester install .bat
+scripts\build_release_distribution.bat           # Windows host: release\ = unzipped image (custom models pre-packed)
 cargo test --manifest-path updater/Cargo.toml    # updater tests (separate crate, runs natively)
 ./scripts/validate_<area>.sh                     # host tests for pure modules (see below)
 ./scripts/validate_signatures.sh ~/Desktop/ddr_modules   # offline sweep over every supported gamemdx build

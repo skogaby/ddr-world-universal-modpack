@@ -44,7 +44,7 @@ def archive(members, name_words=0, stride=None):
     out += b''.join(struct.pack('>II', o, s) for o, s in offs)
     if name_words:
         for name, _b in members:
-            out += name.encode().ljust(stride, b'\0')
+            out += (name or '').encode().ljust(stride, b'\0')
     return out.ljust(head, b'\0') + body
 
 
@@ -374,15 +374,40 @@ class TestStage(unittest.TestCase):
         self.assertEqual(out['OBJB_N_STG27_board01x'], [])
 
     def test_uv_keys(self):
+        # flags byte 0 / 1 = the u / v axis: 0xFF ends the axis' keys, 1 = hold, else linear
         mat = dict(flags=(1, 0, 0x83, 0), tex=[0],
-                   uv=[(0.0, 0.0, 0.0, (0xFF, 1, 0, 1)), (1.0, 0.5, -1.0, (0xFF, 1, 0, 1)), (2.0, 1.0, -2.0, (0xFF, 1, 0, 1))])
+                   uv=[(0.0, 0.0, 0.0, (0xFF, 1, 0xFF, 1)), (1.0, 0.5, -1.0, (0xFF, 1, 0xFF, 1)),
+                       (2.0, 1.0, -2.0, (0xFF, 1, 0xFF, 1))])
         blob = zmb([dict(name='root', parent=-1)], [mat], material_version=3.0)
         m = Z.parse_zmb(blob)
         n, ptr = Z.material_uv_keys(m, m['materials'][0])
         keys, flags = Z.uv_keys(blob, n, ptr)
-        v = Z.sample_uv(keys, flags, [0.5, 1.5])
-        np.testing.assert_allclose(v[:, 0], [0.0, 0.5])      # u holds (step)
-        np.testing.assert_allclose(v[:, 1], [-0.5, -1.5])    # v slides (linear)
+        self.assertEqual(Z.uv_axis_counts(flags), (0, 3))
+        v = Z.sample_uv(keys, flags, [0.5, 1.5, 2.5])
+        np.testing.assert_allclose(v[:, 0], [0.0, 0.0, 0.0])        # no u keys: key 0's value
+        np.testing.assert_allclose(v[:, 1], [0.0, -1.0, 0.0])       # v holds, wraps at 2 s
+
+    def test_uv_linear_sign_and_phase(self):
+        keys = np.array([[0.0, 0.0, 0.0], [2.0, 1.0, -1.0]])
+        flags = np.array([[0, 2, 0, 2], [0, 2, 0, 2]], dtype=np.uint8)
+        np.testing.assert_allclose(Z.sample_uv(keys, flags, [0.5, 2.5]), [[0.25, -0.25], [0.25, -0.25]])
+        # the game draws s' = s - u, t' = t + v (FUN_800e9490)
+        np.testing.assert_allclose(Z.texmtx_offset(keys, flags, [0.5]), [[-0.25, -0.25]])
+        np.testing.assert_allclose(Z.scroll_offset(0.01, 0.02, [10]), [[-0.1, 0.2]])
+        # a key set starting late runs from T = P (FUN_800e921c): keys 1..3 s, P = 2 -> at t = 0
+        # the clock reads 2 s
+        late = np.array([[1.0, 0.0, 0.0], [3.0, 2.0, 0.0]])
+        np.testing.assert_allclose(Z.sample_uv(late, flags, [0.0])[0, 0], 1.0)
+
+    def test_flip_book(self):
+        mt = dict(textures=[6, 7, 8, 7, 6], frames=[34, 36, 136, 138, 200])
+        tex, ends, period = Z.flip_book(mt)
+        self.assertEqual((tex, period), ([6, 7, 8, 7, 6], 200))
+        # entry i shows until ends[i]
+        idx = Z.flip_index(ends, [0, 33, 34, 35, 36, 135, 136, 138, 199, 200, 234])
+        np.testing.assert_array_equal(idx, [0, 0, 1, 1, 2, 2, 3, 4, 4, 0, 1])
+        self.assertIsNone(Z.flip_book(dict(textures=[1], frames=[])))
+        self.assertIsNone(Z.flip_book(dict(textures=[1, 2], frames=[5])))
 
     def test_camera(self):
         blob = cam(3.0, [(0, 10, 30), (0, 10, 60)], [(0, 8, 0), (0, 8, 0)], fov=54.0)

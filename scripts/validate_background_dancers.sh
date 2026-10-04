@@ -38,6 +38,9 @@
 #                                                    reaches selection + catalog via `super::`)
 #   2026-09-30 mods/background_dancers/sources.rs (custom-content SOURCES: slug / label / implicit CUSTOM,
 #                                                    directory roles, option-row ids; reaches custom_content via `super::`)
+#   2026-10-04 mods/background_dancers/scan_index.rs (the custom-models scan index codec: packed-folder
+#                                                    fingerprints, ready-arc members, sidecar rows keyed by
+#                                                    listing stamps; escaping, malformed-record isolation — std only)
 #   2026-09-30 mods/background_dancers/options_logic.rs (the source / model rows' pure decisions: row table,
 #                                                    Request mapping, preview key, bounds, labels; reaches catalog + sources)
 #   2026-09-22 mods/background_dancers/movie_mode.rs (Background Movies: OFF / THUMBNAIL / STAGE SCREENS / FULLSCREEN — movie-size
@@ -65,7 +68,7 @@ note() { echo "[*] $*"; }
 # module name -> repo-relative source path. Names must be unique. Only
 # dependency-free modules can mount here (engine-facing files stay
 # cabinet-validated).
-declare -a MODULE_NAMES=(scene3d_pure scene3d_render_item_layout scene3d_node_layout scene3d_frame_board scene3d_camera_math scene3d_viewport_pass_layout anm selection schedule director_math clock tempo outline catalog pick instance_plan preview_layout preview_state custom_content sources options_logic movie_mode movie_camera)
+declare -a MODULE_NAMES=(scene3d_pure scene3d_render_item_layout scene3d_node_layout scene3d_frame_board scene3d_camera_math scene3d_viewport_pass_layout anm selection schedule director_math clock tempo outline catalog pick instance_plan preview_layout preview_state custom_content sources scan_index options_logic movie_mode movie_camera)
 declare -a MODULE_PATHS=(
   "src/services/scene3d/pure.rs"
   "src/services/scene3d/render_item_layout.rs"
@@ -87,6 +90,7 @@ declare -a MODULE_PATHS=(
   "src/mods/background_dancers/preview/state.rs"
   "src/mods/background_dancers/custom_content.rs"
   "src/mods/background_dancers/sources.rs"
+  "src/mods/background_dancers/scan_index.rs"
   "src/mods/background_dancers/options_logic.rs"
   "src/mods/background_dancers/movie_mode.rs"
   "src/mods/background_dancers/movie_camera.rs"
@@ -138,4 +142,9 @@ fi
 
 note "running pure module tests (${MODULE_NAMES[*]})"
 (cd "$TMP" && cargo test --quiet)
+
+# The release-time model packer mirrors custom_content's folder rules in
+# Python (scripts/pack_custom_models.py): pin it to the same cases.
+note "running scripts/test_pack_custom_models.py (release packer parity)"
+(cd "$REPO_ROOT/scripts" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q test_pack_custom_models)
 note "OK"

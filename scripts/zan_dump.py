@@ -22,13 +22,19 @@ disc is a `WII\\0` archive:
               material texture index is the TPL image index (the TPL may hold more images than
               the name list).
     material  version 1.0 = 0x38 bytes, 3.0 = 0x50: u32 color0, color1, color2 (RGBA8), f32,
-              u8 flags[4], u32 ntex (low u16), u32 tex_list (u32 TPL image indices), ...
-              +0x28 u32 nlayers, +0x2C u32 layers (more material-shaped records: environment /
-              eye / mouth passes), +0x30 u32 nframes, +0x34 u32 frames (texture animation: TPL
-              indices, e.g. the seven eye frames).
+              u8 flags[4] (`material_mode`), +0x14 u32 ntex (low u16), +0x18 u32 tex_list (u32
+              TPL image indices; more than one = a texture FLIP-BOOK), +0x1C .. +0x24 (v3: +0x20 /
+              +0x24 f32 a constant UV scroll per frame), +0x28 u32 (low u16 nlayers; the high u16
+              is a per-model material serial, NOT an animation interval), +0x2C u32 layers (more
+              material-shaped records: environment / eye / mouth passes), +0x30 u32 nframes, +0x34
+              u32 frames (the flip-book's END frame per tex_list entry, 60 Hz; the last = the
+              cycle: `flip_book`); v3 only: +0x38 u32 nkeys, +0x3C u32 keys (UV-offset keys
+              {f32 time (s), u, v, u8 flags[4]}: `sample_uv`, `texmtx_offset` -- the game shows
+              -u, +v).
     node      0xA0: char name[0x30] (Shift-JIS), f32 local[16] (ROW-vector: v' = v . M,
               translation in row 3), f32 bbmin[4], bbmax[4], f32 bone length, s32 parent,
-              u32 nsub, u32 mesh (offset; 0 = none). world = local . parent world.
+              u16 flags (1 = sprite), u16 nsub, u32 mesh (offset; 0 = none). world = local .
+              parent world.
     submesh   nsub x 0x40 at `mesh`: u32 material, u32 flags (bit 0 skinned, bit 16 a second UV
               set), u32 npackets, npos, nskin, nnrm, nuv, ncol, u32 packets, pos (f32 xyz),
               skin, nrm (f32 xyz), uv (f32 st, v down), col (RGBA8), u32 0, 0.
@@ -842,10 +848,9 @@ def stage_instances(src):
 
 
 def material_uv_keys(model, material):
-    """(n, 3) [seconds, u, v] UV-offset keys of a version-3 material (+0x38 count, +0x3C
-    offset; 16-byte keys {f32 time, u, v, u8 flags[4]}) and the step flags (n, 2) (flag pair
-    byte 0 == 0xFF: hold until the next key), or None. +0x20 / +0x24 hold the mean per-frame
-    speed of the same motion."""
+    """(count, offset) of a version-3 material's UV-offset keys (+0x38 count, +0x3C offset;
+    16-byte keys {f32 time (s), u, v, u8 flags[4]}), or None. See `sample_uv` for how the game
+    reads them; +0x20 / +0x24 are a constant per-frame scroll used when there are no keys."""
     if model['material_version'] != 3.0:
         return None
     w = material['words']
@@ -856,23 +861,88 @@ def material_uv_keys(model, material):
 
 
 def uv_keys(blob, n, ptr):
+    """((n, 3) [seconds, u, v], (n, 4) u8 flags) of a material's UV keys."""
     raw = np.frombuffer(blob, '>f4', n * 4, ptr).reshape(n, 4).astype(np.float64)
     flags = np.frombuffer(blob, np.uint8, n * 16, ptr).reshape(n, 16)[:, 12:16]
     return raw[:, :3], flags
 
 
+def uv_axis_counts(flags):
+    """(n_u, n_v): an axis uses the keys BEFORE the first one whose flag byte (flags[k][axis]) is
+    0xFF (main.dol FUN_800e921c; all of them when there is none)."""
+    out = []
+    for ax in range(2):
+        col = np.asarray(flags)[:, ax]
+        hit = np.nonzero(col == 0xFF)[0]
+        out.append(int(hit[0]) if len(hit) else len(col))
+    return tuple(out)
+
+
 def sample_uv(keys, flags, t):
-    """(F, 2) UV offset at times `t` (seconds), linear or step per axis (flags)."""
+    """(F, 2) UV-key values (u, v) at times `t` (seconds) the way main.dol's texture-matrix
+    update (FUN_800e9490, set up by FUN_800e921c) reads them: one clock T over the whole key set
+    (period P = last - first key time, starting at T = P), then per axis its own key count
+    (`uv_axis_counts`) and period Pa = key[n_axis - 1] - key[0] (t_axis = key0 + (T - key0) mod Pa),
+    the segment's start key's flag byte flags[k][axis] == 1 = hold, else linear. An axis with
+    fewer than two keys (or a one-key set) keeps key 0's value. NOT yet the texture offset: see
+    `texmtx_offset` for the sign."""
+    keys = np.asarray(keys, dtype=np.float64)
+    flags = np.asarray(flags)
     t = np.asarray(t, dtype=np.float64)
     out = np.empty((len(t), 2))
-    kt = keys[:, 0]
-    for ax in range(2):
+    n = len(keys)
+    k0 = keys[0, 0]
+    P = keys[-1, 0] - k0 if n > 1 else 0.0
+    T = k0 + np.mod(P - k0 + t, P) if P > 0 else np.full(len(t), k0)
+    for ax, na in enumerate(uv_axis_counts(flags)):
         v = keys[:, 1 + ax]
-        step = flags[:, 2 * ax] == 0xFF
-        i = np.clip(np.searchsorted(kt, t, side='right') - 1, 0, len(kt) - 1)
-        lin = np.interp(t, kt, v)
-        out[:, ax] = np.where(step[i], v[i], lin)
+        if n < 2 or na < 2:
+            out[:, ax] = v[0]
+            continue
+        kt = keys[:na, 0]
+        Pa = kt[-1] - k0
+        ta = k0 + np.mod(T - k0, Pa) if Pa > 0 else np.full(len(t), k0)
+        i = np.clip(np.searchsorted(kt, ta, side='right') - 1, 0, na - 2)
+        span = np.where(kt[i + 1] > kt[i], kt[i + 1] - kt[i], 1.0)
+        lin = v[i] + (ta - kt[i]) / span * (v[i + 1] - v[i])
+        out[:, ax] = np.where(flags[i, ax] == 1, v[i], lin)
     return out
+
+
+def texmtx_offset(keys, flags, t):
+    """(F, 2) the texture-matrix translation (m03, m13) the UV keys put on screen at times `t`
+    (seconds): GX samples s' = s + m03, t' = t + m13 with m03 = -u, m13 = +v (FUN_800e9490's
+    per-axis factors -1 / +1). The same convention as DDR World's `m_vTexAnime` offset (uv' = uv +
+    (offU, offV), both v-down), so these ARE the .sanm params 2 / 3."""
+    v = sample_uv(keys, flags, t)
+    return np.stack([-v[:, 0], v[:, 1]], 1)
+
+
+def scroll_offset(speed_u, speed_v, frames):
+    """(F, 2) the texture-matrix translation of a constant scroll (+0x20 / +0x24 per 60 Hz frame,
+    no keys): m03 -= speed_u, m13 += speed_v each frame (FUN_800e9490; the game wraps it into
+    (-1, 1), immaterial with a repeating texture)."""
+    f = np.asarray(frames, dtype=np.float64)
+    return np.stack([-speed_u * f, speed_v * f], 1)
+
+
+def flip_book(material):
+    """(texture list, end frames, period) of a texture flip-book -- a material with more than one
+    texture (+0x14 count, +0x18 list of TPL indices) and as many frame numbers (+0x30 count, +0x34
+    list): entry i shows until frame ends[i] (60 Hz), the cycle is ends[-1] frames -- or None.
+    (The ends are END times: with them the signboard of FuruFuru Party's STG042 scrolls its
+    chevron sheet the way the chevrons point; see the research note.)"""
+    tex, ends = material['textures'], material['frames']
+    if len(tex) < 2 or len(ends) != len(tex) or ends[-1] <= 0 or list(ends) != sorted(ends):
+        return None
+    return list(tex), [int(e) for e in ends], int(ends[-1])
+
+
+def flip_index(ends, frames):
+    """Index into a flip-book's texture list at 60 Hz `frames`: the first entry whose end frame
+    is past (frame mod period)."""
+    f = np.mod(np.asarray(frames, dtype=np.float64), ends[-1])
+    return np.minimum(np.searchsorted(np.asarray(ends, dtype=np.float64), f, side='right'), len(ends) - 1)
 
 
 # ---------------------------------------------------------------------------

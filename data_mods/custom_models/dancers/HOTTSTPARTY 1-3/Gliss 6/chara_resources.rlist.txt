@@ -1,0 +1,3 @@
+# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Gliss 6" (CHR490 + CHR494), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_042 h3s002_148 h3s004_038 h3s004j_033 h3s009j_049 h3s026j_075 h3s033_057 h3s035_028 h3s037_016 h3s045_073 h3s053_049 h2s033_032)
+hpgliss06, pl, F, A, 1.0, 0.75, 0.0

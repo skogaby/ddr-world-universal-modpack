@@ -580,8 +580,10 @@ GAME=x STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b 
 Hottest Party runs on Hudson's Mario Party engine, so its models are **HSFV037** (decoder and
 World-space math: `scripts/hsf_dump.py`; formats and RE: `docs/wii_ddr_hottest_party_research.md`).
 Extract the disc first with `scripts/extract_wii_ddr_data.py extract <unpacked disc> <out> --png`
-(`HP_DIR`). Ported 2026-10-03 and round-trip previewed; not yet cabinet-tested. All 40 ship as
-`data_mods/custom_models/dancers/DDR HOTTST PRTY/<Label> <costume>`, keys `hp<stem><costume>`:
+(`HP_DIR`). Ported 2026-10-03 and round-trip previewed; not yet cabinet-tested. **Retired
+2026-10-04**: MUSIC FIT remakes this cast on its own rig, and the shipped HOTTEST PARTY dancers are
+that port (`HOTTSTPARTY 1-3`, next section; this one stays as the HSF reference). The 40 were
+`<Label> <costume>`, keys `hp<stem><costume>` (who they are: the research note §6):
 - Emi / Jenny / Afro / Rage;
 - `Dancer A..D` (the four new characters, models `hispanic`, `black_f`, `korea_m`, `jamaika`;
   neutral labels because nothing on the disc maps the EU names to them);
@@ -621,7 +623,7 @@ DANCERS=emi PREVIEW=1 ...                                                # one c
 ### The Dancing Stage / DDR HOTTEST PARTY (Wii) stages (`examples/port_stage_hottest.py`)
 
 42 stages (`data/stgNN.bin`, minus the `stg05` test stub and its three copies) ship as
-`data_mods/custom_models/stages/DDR HOTTST PRTY/Stage NN` (keys `hpstageNN`). Ported
+`data_mods/custom_models/stages/HOTTEST PARTY 1/Stage NN` (keys `hpstageNN`). Ported
 2026-10-03 and previewed through their own cameras; not yet cabinet-tested.
 
 * **Input.** A pack is a list of (model, motion) pairs: the BG backdrop, the floor pieces and
@@ -649,6 +651,54 @@ DANCERS=emi PREVIEW=1 ...                                                # one c
 ```bash
 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
   --python tools/blender_ddr_addon/examples/port_stage_hottest.py   # ~40 min for 42
+```
+
+### The DDR FuruFuru Party / MUSIC FIT (Wii JP = HOTTEST PARTY 2 / 3) dancers (`examples/port_character_hottest2.py`)
+
+Both games run on Konami's `zan` library (decoder `scripts/zan_dump.py`; formats, Ghidra findings
+and the naming evidence: `docs/wii_ddr_hottest_party_2_3_research.md`). Dump the discs with
+`scripts/extract_wii_ddr_data.py disc` (`HP3_GAME` / `HP2_GAME`). MUSIC FIT re-ships FuruFuru
+Party's whole cast and remakes HOTTEST PARTY 1's in their HP1 outfits, so ONE source folder
+`data_mods/custom_models/dancers/HOTTSTPARTY 1-3/<Name> <n>` (keys `hp<person><nn>`) holds all
+137 from MUSIC FIT's costume files: the eight leads, NAOKI / U1 / jun, Dyna / Bridget / Ceja and
+the eight back-ups Pia, Gliss, Forte, Sharp, Bossa, Nova, Hip, Hop (a back-up costume file holds
+two of them: variants 1/2 and 3/4). A person's variants run HP1 outfit → HP2 → HP3.
+
+* **Rig / mesh** as the HP1 port: one 37-bone rig rebuilt from the rest worlds, the head rigid on
+  `mii_head`, skin weights by joint name, the eye / mouth overlay layers baked into the face
+  texture (`zan_dump.bake_overlay`), accessories on their joints, role alias `Spine2` -> `Spine1`.
+* **Clips.** One library: MUSIC FIT's song motions plus the FuruFuru Party pieces it lacks (1022
+  ~8-bar clips), retimed to 120 frames a bar, dealt 12 per dancer.
+
+```bash
+DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_hottest2.py   # ~10 min for 137
+DANCERS=pia PREVIEW=1 ...                                                 # one person's costumes
+```
+
+### The DDR FuruFuru Party / MUSIC FIT stages (`examples/port_stage_hottest2.py`)
+
+`stages/HOTTEST PARTY 2/Stage NN` (FuruFuru Party, 59, keys `hp2stageNNN`) and `stages/HOTTEST
+PARTY 3/` (MUSIC FIT's 17 own stages; its STG000 / 041–055 are FuruFuru Party's again and ship
+once). The part / flat-rig / camera scheme is the HP1 port's; what is new:
+
+* **Movie screens.** The `root` quad of a `*_MOV*` prop is where the Wii plays a stage movie or
+  the song's PV: textured `offscreen1` ("Stage screens" above), v remapped onto the 16:9 band.
+* **Texture flip-books -> atlases.** World's `.sanm` animates shader parameters, never the
+  texture, so a material cycling TPL images gets its frames side by side along the axis that does
+  not scroll (wrap gutters, triangles clipped at that axis' tile lines into one cell) and the UV
+  offset steps from cell to cell. Steps are two keys on one frame (the sampler takes the later),
+  so nothing blends.
+* **UV scrolls** are the texture matrix's translation `(-u, +v)` of the zan keys (per-axis key
+  counts and holds: `zan_dump.sample_uv`). Every part with animated materials gets a `.sanm`
+  with its own clip length, static parts too; parts split at 48 animated material floats.
+* **Binds** are the nearest rotation of the anchor's rest world and the keys `bind · rest⁻¹ ·
+  world(t)`; a node rotating under a non-uniformly scaled parent shears, which TRS bones cannot
+  carry (logged `SHEAR`, ≤ 0.55 m at the tips of STG049's light cones).
+
+```bash
+GAME=hp2 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_hottest2.py   # 59 stages; GAME=hp3 for 17
 ```
 
 ### A room / stage from a .blend (`examples/port_room_stage.py`)

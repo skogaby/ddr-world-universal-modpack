@@ -1,3 +1,0 @@
-# DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Domi 5" (CHR220 + CHR223), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp3; clips h3s001j_000 h3s001j_037 h3s003j_047 h3s011j_082 h3s018_000 h3s019j_037 h3s021j_072 h3s027_056 h3s027j_046 h3s030_048 h3s035_000 h3s052_026)
-hp3domi05, pl, F, A, 1.0, 0.75, 0.0

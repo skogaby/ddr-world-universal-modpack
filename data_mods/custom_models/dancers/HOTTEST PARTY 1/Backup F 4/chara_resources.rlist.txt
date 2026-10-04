@@ -1,3 +1,0 @@
-# Dancing Stage HOTTEST PARTY (Wii) "Backup F 4" (c_131.bin), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest.py; takes hp044_049 hp050_059 hp075_075 hp082_092 hp093_096 hp144_151 hp152_153 hp176_179 hp182_183 hp184_186)
-hpbackupf04, pl, F, A, 1.0, 0.75, 0.0

@@ -134,6 +134,17 @@ steps until a cabinet test is needed (2026-09-30); no commits — maintainer com
   Pin with `DDR_DANCERS_PIN=hpstage03,hpemi01,hpafro02,hpbackupm01`.
   Open question for the maintainer: the EU names Harmony / Root / Gaku / Rena / Domi / Danca / Chordia / U.G.
   are not mapped to models (RE §5), so the folders use placeholders.
+  2026-10-04 update: the folders are now `HOTTEST PARTY 1` (maintainer rename). The HP1 DANCERS were retired
+  (deleted) in favour of MUSIC FIT's remakes on the zan rig (next entry), which also resolves the names
+  (Emi = Rena, Jenny = Domi, Afro = U.G., Rage = Root, Dancer A–D = Chordia / Harmony / Gaku / Danca,
+  Backup F = Pia / Gliss, Backup M = Forte / Sharp). The 42 HP1 stages stay.
+
+- 2026-10-04 — NEW SOURCES from DDR FuruFuru Party / MUSIC FIT (Wii JP = HOTTEST PARTY 2 / 3), content-only,
+  uncommitted, NOT yet cabinet-tested: dancer source `HOTTSTPARTY 1-3` (137, keys `hp<person><nn>`) and stage
+  sources `HOTTEST PARTY 2` (59, `hp2stageNNN`) / `HOTTEST PARTY 3` (17, `hp3stageNNN`). Movie screens map to
+  `offscreen1`; flip-books ship as atlases on stepped `.sanm` offsets. Feature state, cabinet watch-list and
+  resume point: `.agents/planning/2026-10-04-hottest-party-2-3-port/progress.md`; RE:
+  `docs/wii_ddr_hottest_party_2_3_research.md`.
 
 ## Deploy & test log
 

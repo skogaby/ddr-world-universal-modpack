@@ -10,7 +10,10 @@
 //! Layout (ONE base, `data_mods/custom_models/` — maintainer: every custom
 //! dancer and stage goes there, no per-character mod folders; models are
 //! FOLDERS holding the arc's contents — nobody has to pack an arc, the
-//! scanner packs a cache arc for the engine — a ready `.arc` is accepted too).
+//! scanner packs a cache arc for the engine — a ready `.arc` is accepted too,
+//! and is the cheaper shipping form: `scripts/pack_custom_models.py` turns a
+//! folder into exactly the arc the scanner would pack, and the release build
+//! ships every model that way).
 //! One optional SOURCE level (design 2026-09-30) groups the content into the
 //! DANCER SOURCE / STAGE SOURCE rows:
 //! ```text

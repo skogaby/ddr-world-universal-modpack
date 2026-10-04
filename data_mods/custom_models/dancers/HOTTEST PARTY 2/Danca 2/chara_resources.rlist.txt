@@ -1,3 +1,0 @@
-# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 "Danca 2" (CHR080 + CHR082), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp2; clips h2s005_024 h2s008_007 h2s012_017 h2s014_001 h2s021_036 h2s023_002 h2s026_135 h2s030_056 h2s036_016 h2s039_029 h2s043_012 h2s045_024)
-hp2danca02, pl, M, A, 1.0, 0.8, 0.0

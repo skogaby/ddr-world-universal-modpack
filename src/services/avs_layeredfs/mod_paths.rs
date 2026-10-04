@@ -13,6 +13,32 @@ use crate::log_warn;
 
 use super::config;
 
+// ── Private folders ──────────────────────────────────────────────────
+
+/// Folders directly under the mod root that are NOT LayeredFS overlays and are
+/// never indexed or matched against game paths:
+///
+/// - `_cache` — LayeredFS's own build output (indexed separately, for textures
+///   only, by `ifs_textures::build_cache_index`).
+/// - `custom_models` — the Background Dancers custom-content base
+///   (`dancers/` + `stages/`). Its owner walks it with `std::fs` and hands
+///   the engine filesystem paths (`scene3d::arc_set` mounts, opened by the
+///   FileManager through the CRT), so no game path can ever resolve into it.
+///
+/// Why it matters: `init_mod_paths` runs at `lib.rs` step 0b, on the boot
+/// path that races `Application::onBoot` (shader.arc, the Custom Resolution
+/// display-init check). Under CrossOver a directory enumeration costs
+/// ~0.4 ms, and the custom-models tree is thousands of directories (2,217
+/// dirs / 20k files measured 2026-10-04 = ~1 s) — indexing it pushed
+/// `early_apply` past the game's display init. The content base must be free
+/// to grow without moving any boot race.
+pub const PRIVATE_FOLDERS: &[&str] = &["_cache", "custom_models"];
+
+/// Whether a top-level mod-root folder name is one of [`PRIVATE_FOLDERS`].
+pub fn is_private_folder(name: &str) -> bool {
+    PRIVATE_FOLDERS.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 struct ModContents {
@@ -218,8 +244,8 @@ fn scan_mod_folders(mod_folder: &str, allowlist: &[String], blocklist: &[String]
 
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip cache directory
-        if name.eq_ignore_ascii_case("_cache") {
+        // Skip the cache and the service-owned content bases (never overlays).
+        if is_private_folder(&name) {
             continue;
         }
 

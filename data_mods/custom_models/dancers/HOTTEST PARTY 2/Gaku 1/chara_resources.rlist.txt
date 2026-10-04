@@ -1,3 +1,0 @@
-# DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2 "Gaku 1" (CHR070 + CHR071), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py GAME=hp2; clips h2s016_040 h2s023_038 h2s027_121 h2s029_064 h2s035_008 h2s035_048 h2s042_024 h2s043_088 h2s045_032 h2s045_040 h2s055_013 h2s064_023)
-hp2gaku01, pl, M, A, 1.0, 0.8, 0.0

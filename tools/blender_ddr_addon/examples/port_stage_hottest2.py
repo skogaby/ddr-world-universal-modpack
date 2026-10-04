@@ -14,29 +14,42 @@ nodes are effect and light spots), plus its camera shots. Per stage:
      World blend group (zan_dump.material_mode: additive -> `add`, ZERO+INVSRCALPHA -> `sub`, a
      soft alpha blend with real partial alpha -> `ble`, else `dec`, alpha-tested; every mesh
      two-sided like HOTTEST PARTY 1's port); COLOR0 = the vertex colours;
-  2. parts: the backdrop's opaque meshes -> `bg` (priority -2); everything else one part per
+  2. MOVIE SCREENS: the `root` quad of a `*_MOV*` prop (where the game plays its stage movie / the
+     song's PV) is textured `offscreen1` (README "Stage screens": World's STAGE SCREENS mode plays
+     the song's movie there), its v range remapped onto the 16:9 band, opaque white, no animation;
+  3. FLIP-BOOKS (a material cycling TPL images, zan_dump.flip_book) become ATLASES: World's .sanm
+     only animates shader parameters, so the frames go side by side along the axis that does not
+     scroll, the triangles are clipped at that axis' tile lines into one cell, and the UV offset
+     steps from cell to cell (apply_atlases; each atlas is sampling-checked against the source);
+  4. parts: the backdrop's opaque meshes -> `bg` (priority -2); everything else one part per
      (blend group, loop group). Entries whose loop length divides a longer one share its part; a
-     part holds at most 63 animated anchors (overflow opens `dec2`, ...);
-  3. rig per part: `root` + one FLAT bone per animated anchor (a mesh's deepest animated
-     ancestor, or the instance itself when only COL moves it), every vertex rigidly on it;
-  4. `gm_<key>_<part>_play_loop.anm` (loop bit): per bone q / t / scale relative to rest, keys every
-     2nd frame + a wrap key, checked against the zan worlds;
-  5. `gm_<key>_<part>_play_loop.sanm`: the materials' UV-offset keys (version-3 materials, +0x38)
-     on params 2 / 3, unwrapped across loop repeats; texture flip-books keep their first frame;
-  6. cameras: the stage's shots -> `camera/<key>_st01..`, the generic dance cameras of
+     part holds at most 63 animated anchors and 48 animated material floats (overflow opens
+     `dec2`, ...);
+  5. rig per part: `root` + one FLAT bone per animated anchor (a mesh's deepest animated
+     ancestor, or the instance itself when only COL moves it), every vertex rigidly on it; the
+     bind = the nearest rotation of the anchor's rest world (a shearing anchor's: its motion's
+     principal axes), the keys = bind . rest^-1 . world(t) against the bind the exporter wrote;
+  6. `gm_<key>_<part>_play_loop.anm` (loop bit): per bone q / t / scale, keys every 2nd frame +
+     a wrap key, checked against the zan worlds (a node rotating under a non-uniformly scaled
+     parent shears, which TRS bones cannot carry: logged as SHEAR with its worst vertex offset);
+  7. `gm_<key>_<part>_play_loop.sanm` (every part with animated materials, static ones too): the
+     UV keys / constant scrolls (the texture-matrix translation (-u, +v), zan_dump.texmtx_offset)
+     and the atlas steps on params 2 / 3, its own clip (the lcm of the periods, <= 6 min), steps
+     as two keys on one frame; checked frame by frame against the analytic offsets;
+  8. cameras: the stage's shots -> `camera/<key>_st01..`, the generic dance cameras of
      game/GAME_DEF_CAM.bin /#0 -> `_non01..` (position + aim, no roll; the FOV is MTXPerspective's
      vertical angle, kept on World's 16:9 frame);
-  7. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, ..., ble:-1`.
-STG<nnn>_S.bin (the split-screen copies) and MUSIC FIT's STG000 (byte-identical to FuruFuru
-Party's) are not ported.
+  9. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, ..., ble:-1`.
+STG<nnn>_S.bin (the split-screen copies) are not ported, nor MUSIC FIT's STG000 / STG041..055
+(FuruFuru Party's again, shipped once from there with their screens: is_hp2_reexport).
 
 Inputs (environment):
   GAME        hp2 | hp3 (default hp2); HP2_GAME / HP3_GAME the dumped disc trees
   STAGES      comma list (STG027, 27, ...), default the first stage, or 'all'
   OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 2|3 (one folder per stage,
               `Stage 27` ..; keys hp2stage027 ..)
-  PREVIEW     1 = render Workbench / EEVEE previews of the RE-IMPORTED parts into PREVIEW_DIR, plus
-              a ported dancer through two of the written .camanm clips
+  PREVIEW     1 = render Workbench / EEVEE previews of the RE-IMPORTED parts into PREVIEW_DIR (a
+              test card on the screens), plus a ported dancer through two of the written .camanm
 Run: GAME=hp2 STAGES=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
        --python tools/blender_ddr_addon/examples/port_stage_hottest2.py
 """
@@ -75,7 +88,7 @@ OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'dat
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_%s_stage_previews' % GAME)
 PREVIEW_DANCER = os.path.expanduser(os.environ.get('PREVIEW_DANCER', os.path.join(
-    REPO, 'data_mods', 'custom_models', 'dancers', 'HOTTEST PARTY 2', 'Rena 1', 'pl_hp2rena01', 'pl_hp2rena01.model')))
+    REPO, 'data_mods', 'custom_models', 'dancers', 'HOTTSTPARTY 1-3', 'Rena 5', 'pl_hprena05', 'pl_hprena05.model')))
 STAGE_DIR = os.path.join(DISC, 'stage')
 
 S = Z.GAME_SCALE
@@ -94,12 +107,27 @@ def stage_list():
     for f in sorted(os.listdir(STAGE_DIR)):
         if not (f.startswith('STG') and f.endswith('.bin')) or '_S' in f or '_EFF' in f:
             continue
-        if GAME == 'hp3':
-            other = os.path.join(OTHER_DISC, 'stage', f)
-            if os.path.exists(other) and open(other, 'rb').read() == open(os.path.join(STAGE_DIR, f), 'rb').read():
-                continue   # byte-identical to FuruFuru Party's: shipped once, in HOTTEST PARTY 2
+        if GAME == 'hp3' and is_hp2_reexport(f):
+            continue       # FuruFuru Party's stage again: shipped once, in HOTTEST PARTY 2
         out.append(f[:-4])
     return out
+
+
+def is_hp2_reexport(f):
+    """MUSIC FIT's STG000 is FuruFuru Party's byte for byte and its STG041..055 are re-exports of
+    FuruFuru Party's (same members, the textures largely byte-identical, the movie-screen props
+    replaced by plain geometry); its STG101..103 reuse the numbers for new stages (no member
+    shared). A stage counts as FuruFuru Party's when the same-named file there shares at least one
+    byte-identical named member."""
+    other = os.path.join(OTHER_DISC, 'stage', f)
+    if not os.path.exists(other):
+        return False
+    mine, theirs = open(os.path.join(STAGE_DIR, f), 'rb').read(), open(other, 'rb').read()
+    if mine == theirs:
+        return True
+    a = {n: hashlib.md5(b).hexdigest() for _p, n, b in Z.members(mine) if n}
+    b = {n: hashlib.md5(b).hexdigest() for _p, n, b in Z.members(theirs) if n}
+    return any(b.get(n) == h for n, h in a.items())
 
 
 STAGES = stage_list()
@@ -225,6 +253,17 @@ def world_kind(e, mi, has_vertex_alpha):
     return 'dec'
 
 
+SCREEN_TEXTURE = export_model.SCREEN_TEXTURE_KEY
+SCREEN_BAND = (0.21875, 0.78125)
+
+
+def is_screen(e, nd):
+    """A movie screen: the `root` node's mesh of a `*_MOV*` prop -- the game (main.dol FUN_800386bc
+    flags `_MOV` props 0x20000000) shows its stage movie / the song's PV there; the rest of the prop
+    is bezel, letterbox bars and a glass overlay. The quad comes white with vertex alpha 0."""
+    return '_MOV' in e['stem'].upper() and nd['name'] == 'root'
+
+
 def mesh_records(e):
     """Every (mesh node, material) piece of one entry, baked into game space at its frame-0
     world: dict(kind, anchor, material, bitmap, pos, nrm, uv, col, tris, obj)."""
@@ -273,7 +312,11 @@ def mesh_records(e):
             if not tri_out:
                 continue
             col = np.array(C_)
-            out.append(dict(kind=world_kind(e, mi, bool((col[:, 3] < 0.999).any())), anchor=anchor, material=mi,
+            screen = is_screen(e, nd)
+            kind = 'dec' if screen else world_kind(e, mi, bool((col[:, 3] < 0.999).any()))
+            if screen:
+                col = np.ones_like(col)                  # the movie at full strength
+            out.append(dict(kind=kind, anchor=anchor, material=mi, screen=screen,
                             bitmap=mt['textures'][0] if mt['textures'] and mt['textures'][0] < len(e['textures']) else None,
                             pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_), col=col, tris=np.array(tri_out),
                             obj=nd['index'], two_sided=Z.material_mode(mt)[2]))
@@ -283,7 +326,7 @@ def mesh_records(e):
 def plan_parts(entries):
     """[(part name, kind, loop length, [(entry, records)])]: entries grouped by loop length (an
     entry joins a group whose length its own divides), then by blend group, then split at
-    MAX_ANCHORS animated anchors."""
+    MAX_ANCHORS animated anchors / MAX_MAT_PARAMS animated material floats."""
     groups = []
     for e in sorted(entries, key=lambda e: -e['length']):
         for g in groups:
@@ -301,14 +344,19 @@ def plan_parts(entries):
                     if r['kind'] != kind:
                         continue
                     a = None if r['anchor'] is None else (e['index'], r['anchor'])
+                    pl = None if r['screen'] else e.get('plans', {}).get(r['material'])
+                    mk, need = (e['index'], r['material']), (pl['params'] if pl else 0)
                     for ch in chunks:
-                        if a is None or a in ch[1] or len(ch[1]) < MAX_ANCHORS:
+                        if (a is None or a in ch[1] or len(ch[1]) < MAX_ANCHORS) and \
+                                (not need or mk in ch[2] or sum(ch[2].values()) + need <= MAX_MAT_PARAMS):
                             break
                     else:
-                        ch = [{}, set()]
+                        ch = [{}, set(), {}]
                         chunks.append(ch)
                     if a is not None:
                         ch[1].add(a)
+                    if need:
+                        ch[2][mk] = need
                     ch[0].setdefault(e['index'], (e, []))[1].append(r)
             for ci, ch in enumerate(chunks):
                 parts.append([kind, gi, ci, length, list(ch[0].values())])
@@ -358,6 +406,18 @@ def texture_image(key, e, b):
     return P.load_texture(stem, path)
 
 
+def atlas_image(key, at):
+    rgba = np.ascontiguousarray(at['rgba'])
+    stem = '%s_a%s' % (key.replace('stage', 's'), hashlib.md5(rgba.tobytes()).hexdigest()[:7])
+    img = bpy.data.images.get(stem)
+    if img is not None:
+        return img
+    path = os.path.join(tempfile.gettempdir(), 'hottest_party_%s_stage_textures' % GAME, stem + '.png')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    W.write_png(path, rgba.shape[1], rgba.shape[0], rgba.tobytes())
+    return P.load_texture(stem, path, max_size=ATLAS_MAX)
+
+
 def rigid_row(m, m_unit):
     """(rotation + translation, per-axis scale) of a ROW-vector world, M = diag(scale) . R with
     det R = +1 (a mirrored node keeps its reflection as a negative x scale); a flattened prop
@@ -379,6 +439,69 @@ def rigid_row(m, m_unit):
     return out, scale
 
 
+def polar_rows(m3):
+    """(Q, s): the nearest proper rotation Q (row-vector) of a 3x3 and the per-row scales with
+    m3 ~ diag(s) . Q (a mirrored m3 keeps its reflection as a negative s[0]); shear is what
+    Q / s cannot carry."""
+    u, _sv, vt = np.linalg.svd(m3)
+    q = u @ vt
+    if np.linalg.det(q) < 0:
+        q[0] *= -1.0
+    return q, np.einsum('ij,ij->i', m3, q)
+
+
+def degenerate(m):
+    return float(np.linalg.norm(m[:3, :3], axis=1).min()) <= 1e-6
+
+
+def anchor_bind(e, oi, length):
+    """A flat bone's bind (game units) at the anchor's rest origin. Its rotation: the nearest
+    proper rotation of the rest world -- unless the anchor SHEARS over the loop (a rotating node
+    under a non-uniformly scaled parent: world = R(t) . diag(s) . R_parent, which World's TRS
+    bones cannot carry). Then the bind is turned onto the motion's mean principal (stretch) axes,
+    which keeps the TRS fit of bind . rest^-1 . world(t) closest. A flattened prop takes the
+    unit-scale chain's rotation."""
+    rest, unit_rest = e['rest'][oi], e['unit_rest'][oi]
+    out = np.eye(4)
+    out[3, :3] = rest[3, :3] * S
+    if degenerate(rest):
+        out[:3, :3] = polar_rows(unit_rest[:3, :3])[0]
+        return out
+    q0 = polar_rows(rest[:3, :3])[0]
+    out[:3, :3] = q0
+    if not length:
+        return out
+    t = np.linspace(0.0, float(length), 61)[:-1]
+    inv0 = np.linalg.inv(rest[:3, :3])
+    ds = [inv0 @ w[oi][:3, :3] for w in e['worlds'](t)]
+    us, worst, ref = [], 0.0, None
+    for d in ds:
+        u, sv, _vt = np.linalg.svd(d)
+        aniso = float(sv.max() - sv.min())
+        us.append((u, aniso))
+        if aniso > worst:
+            worst, ref = aniso, u
+    if worst < 1e-3:
+        return out
+    acc = np.zeros((3, 3))
+    for u, aniso in us:
+        if aniso < 1e-3:
+            continue
+        # align u's columns to the reference by a signed permutation
+        m = ref.T @ u
+        perm = np.zeros((3, 3))
+        for c in range(3):
+            r = int(np.argmax(np.abs(m[:, c])))
+            perm[c, r] = np.sign(m[r, c]) or 1.0
+        acc += u @ perm
+    um = polar_rows(acc.T)[0].T                       # mean principal axes (columns)
+    b3 = um.T                                          # bind rows = the principal axes
+    if np.linalg.det(b3) < 0:
+        b3[0] *= -1.0
+    out[:3, :3] = b3
+    return out
+
+
 def game_rowm(m):
     out = np.array(m, copy=True)
     out[3, :3] *= S
@@ -391,8 +514,7 @@ def build_part(key, part, chunk):
     anchors = sorted({(e['index'], r['anchor']) for e, recs in chunk for r in recs if r['anchor'] is not None})
     entry_of = {e['index']: e for e, _r in chunk}
     bone_names = ['root'] + ['m%d.%d' % a for a in anchors]
-    binds = [np.eye(4)] + [game_rowm(rigid_row(entry_of[ei]['rest'][oi], entry_of[ei]['unit_rest'][oi])[0])
-                           for ei, oi in anchors]
+    binds = [np.eye(4)] + [anchor_bind(entry_of[ei], oi, entry_of[ei]['length']) for ei, oi in anchors]
     arm_data = bpy.data.armatures.new('%s_%s_rig' % (key, part))
     arm = bpy.data.objects.new('gm_%s_%s_arm' % (key, part), arm_data)
     bpy.context.scene.collection.objects.link(arm)
@@ -414,8 +536,8 @@ def build_part(key, part, chunk):
     for e, recs in chunk:
         by_mat = {}
         for r in recs:
-            by_mat.setdefault(r['material'], []).append(r)
-        for mi, rs in sorted(by_mat.items()):
+            by_mat.setdefault((r['material'], bool(r.get('screen'))), []).append(r)
+        for (mi, screen), rs in sorted(by_mat.items()):
             pos = np.concatenate([r['pos'] for r in rs])
             nrm = np.concatenate([r['nrm'] for r in rs])
             uv = np.concatenate([r['uv'] for r in rs])
@@ -425,7 +547,12 @@ def build_part(key, part, chunk):
             bones = np.concatenate([np.full(len(r['pos']), 0 if r['anchor'] is None else 1 + anchors.index((e['index'], r['anchor'])))
                                     for r in rs])
             tris, _f = H.consistent_winding(pos, nrm, tris)
-            name = 'gm_%s_%s_m%02d_%03d' % (key, part, e['index'], mi)
+            name = 'gm_%s_%s_m%02d_%03d%s' % (key, part, e['index'], mi, 's' if screen else '')
+            if screen:
+                # the screen's authored v band (the whole picture) -> World's 16:9 movie band
+                uv = uv.copy()
+                v_lo, v_hi = float(uv[:, 1].min()), float(uv[:, 1].max())
+                uv[:, 1] = SCREEN_BAND[0] + (uv[:, 1] - v_lo) / max(v_hi - v_lo, 1e-6) * (SCREEN_BAND[1] - SCREEN_BAND[0])
             me = bpy.data.meshes.new(name)
             me.from_pydata([tuple(convert.vec_to_blender(p)) for p in pos], [], tris.tolist())
             me.update()
@@ -451,12 +578,21 @@ def build_part(key, part, chunk):
                 rgba[:, 3] = 1.0
             c_attr.data.foreach_set('color', rgba.ravel())
             b = rs[0]['bitmap']
-            image = texture_image(key, e, b) if b is not None else P.palette_texture(
-                '%s_white' % key.replace('stage', 's'), [(1.0, 1.0, 1.0)], size=8)
+            if screen:
+                # the image NAME is what matters (the exporter writes the 8x8 `offscreen1.dds` marker,
+                # the game binds its movie render target); a black square dresses the preview
+                image = bpy.data.images.get(SCREEN_TEXTURE) or P.palette_texture(SCREEN_TEXTURE, [(0.0, 0.0, 0.0)], size=8)
+            elif rs[0].get('atlas'):
+                image = atlas_image(key, rs[0]['atlas'])
+            elif b is not None:
+                image = texture_image(key, e, b)
+            else:
+                image = P.palette_texture('%s_white' % key.replace('stage', 's'), [(1.0, 1.0, 1.0)], size=8)
             mat = P.make_material(name, image, two_sided=True)
             if rs[0]['kind'] in ('ble', 'add', 'sub'):
                 mat.surface_render_method = 'BLENDED'
-            mat['ddr_zan_material'] = '%d.%d' % (e['index'], mi)
+            if not screen:
+                mat['ddr_zan_material'] = '%d.%d' % (e['index'], mi)
             me.materials.append(mat)
             f1, f2 = FLAGS[rs[0]['kind']]
             ob['ddr_flags'] = f1
@@ -486,6 +622,7 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
     tracks = [dict(kind=0x1C, target=0, keys=[(0.0, 0.0, 0.0, 1.0)]), dict(kind=0x1D, target=0, keys=[(0.0, 0.0, 0.0)])]
     expected = np.zeros((len(times), 1 + len(anchors), 4, 4))
     expected[:, 0] = np.eye(4)
+    shear = {}
     cache = {}
     for b, (ei, oi) in enumerate(anchors, start=1):
         e = entry_of[ei]
@@ -494,32 +631,65 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
         wf, uf = cache[ei]
         s_rest = rigid_row(e['rest'][oi], e['unit_rest'][oi])[1]
         fb, mb = np.asarray(file_binds[b]), np.asarray(my_binds[b])
-        assert np.abs(fb[:3, :3] - mb[:3, :3]).max() < 1e-3 and \
-            np.abs(fb[3, :3] - mb[3, :3]).max() < 1e-4 * max(1.0, float(np.abs(mb[3, :3]).max())), \
-            'bone %d: the exporter re-framed the bind\n%s\n%s' % (b, fb, mb)
+        # the exporter's bind comes back through Blender's bone roll, a few 1e-4 off ours at
+        # some 180-degree turns: key the bone so the WRITTEN bind skins the vertices where ours
+        # would (skin = v . bind^-1 . world, so world_file = bind_file . bind_ours^-1 . world_ours)
+        corr = fb @ np.linalg.inv(mb)
+        dev = float(np.abs(corr[:3, :3] - np.eye(3)).max())
+        assert dev < 2e-2, 'bone %d: the exporter re-framed the bind by %.4f\n%s\n%s' % (b, dev, fb, mb)
+        if dev > 1e-3:
+            print('    WARN bone %d: exporter bind %.1e off ours -- keyed against the written one' % (b, dev))
+        M0 = game_rowm(e['rest'][oi])
+        flat = degenerate(e['rest'][oi])
+        inv0 = None if flat else np.linalg.inv(M0)
         quats, trans, scales, prev = [], [], [], None
         for f in range(len(times)):
-            rig, sc = rigid_row(wf[f, oi], uf[f, oi])
-            rel = np.where(s_rest > 1e-9, sc / np.where(s_rest > 1e-9, s_rest, 1.0), 1.0)
-            r_row = rig[:3, :3]
-            world = np.eye(4)
-            world[:3, :3] = np.diag(rel) @ r_row
-            world[3, :3] = rig[3, :3] * S
-            expected[f, b] = world
+            if flat:
+                # a flattened prop (a ~0 rest scale, vertices baked flat): rotation from the
+                # unit-scale chain, the scale relative to the rest's
+                rig, sc = rigid_row(wf[f, oi], uf[f, oi])
+                rel = np.where(np.abs(s_rest) > 1e-9, sc / np.where(np.abs(s_rest) > 1e-9, s_rest, 1.0), 1.0)
+                mine = np.eye(4)
+                mine[:3, :3] = np.diag(rel) @ rig[:3, :3]
+                mine[3, :3] = rig[3, :3] * S
+            else:
+                # skin = v . bind^-1 . world must equal v . M0^-1 . M(t) (the vertices are baked
+                # through the rest world M0), so world = bind . M0^-1 . M(t)
+                mine = mb @ inv0 @ game_rowm(wf[f, oi])
+            world = corr @ mine
+            r_row, sc_f = polar_rows(world[:3, :3])
+            fit = np.eye(4)
+            fit[:3, :3] = np.diag(sc_f) @ r_row
+            fit[3, :3] = world[3, :3]
+            shear[b] = max(shear.get(b, 0.0), float(np.abs(fit[:3, :3] - world[:3, :3]).max()))
+            expected[f, b] = fit
             qv = T.rowmat_to_quat(r_row)
             if prev is not None and sum(a * c for a, c in zip(prev, qv)) < 0:
                 qv = tuple(-c for c in qv)
             prev = qv
             quats.append(qv)
-            trans.append(tuple(float(x) for x in rig[3, :3] * S))
-            scales.append(tuple(float(x) for x in rel))
+            trans.append(tuple(float(x) for x in world[3, :3]))
+            scales.append(tuple(float(x) for x in sc_f))
         for lst in (quats, trans, scales):
             lst.append(lst[0])
         tracks.append(dict(kind=0x1C, target=b, times=key_times, keys=quats))
         tracks.append(dict(kind=0x1D, target=b, times=key_times, keys=trans))
         if any(abs(c - 1.0) > 1e-4 for s_ in scales for c in s_):
             tracks.append(dict(kind=10, target=b, times=key_times, keys=scales))
-    return dict(frame_count=total, flag=1, hierarchy=[-1] + [0] * len(anchors), tracks=tracks), expected
+    return dict(frame_count=total, flag=1, hierarchy=[-1] + [0] * len(anchors), tracks=tracks), expected, shear
+
+
+def anchor_extents(chunk, anchors, binds):
+    """{bone: max distance (m) of its vertices from the bone's rest origin}."""
+    out = {}
+    for e, recs in chunk:
+        for r in recs:
+            if r['anchor'] is None:
+                continue
+            b = 1 + anchors.index((e['index'], r['anchor']))
+            d = float(np.linalg.norm(r['pos'] - binds[b][3, :3], axis=1).max()) if len(r['pos']) else 0.0
+            out[b] = max(out.get(b, 0.0), d)
+    return out
 
 
 def check_loop(anm_bytes, expected, times_of):
@@ -538,64 +708,389 @@ def check_loop(anm_bytes, expected, times_of):
     return worst_r, worst_t
 
 
-_UV_BLOBS = {}
+# ---------------------------------------------------------------------------------------------
+# material animation: UV scrolls (keys / constant speed) and texture flip-books -> one .sanm per
+# part on params 2 / 3 (m_vTexAnime offU / offV). World's .sanm animates shader parameters only
+# (its .tanm texture tracks have no evaluator: docs/3d_model_format_research.md §1 / §8), so a
+# flip-book becomes an ATLAS (its frames side by side along one axis) driven by STEPPED offsets.
+# ---------------------------------------------------------------------------------------------
+SANM_CAP = 21600             # a part's material clip: lcm of its periods, at most 6 min of 60 Hz frames
+ATLAS_GUTTER = 4             # px of wrap padding around each atlas cell (the DDS keeps 3 mip levels)
+ATLAS_MAX = 4096             # atlas length cap (cells are resampled down to fit beyond it)
 
 
-def material_channels(e, mi, times, total, blob_of):
-    """{param: [values per key + wrap]}: params 2 / 3 = the UV offset (u, v) of a version-3
-    material, unwrapped across repeats of its own period; a constant scroll (+0x20 / +0x24 per
-    frame, no keys) as a ramp."""
+def _lcm(a, b):
+    return a * b // math.gcd(a, b)
+
+
+def _pow2ceil(n):
+    return 1 << max(0, int(math.ceil(math.log2(max(1, n)))))
+
+
+def uv_period_frames(keys, flags):
+    """Frames after which a UV-key motion repeats (the set's clock and each animated axis')."""
+    k0 = keys[0, 0]
+    out = [int(round((keys[-1, 0] - k0) * 60.0))] if len(keys) > 1 else []
+    for ax, na in enumerate(Z.uv_axis_counts(flags)):
+        if na >= 2:
+            out.append(int(round((keys[na - 1, 0] - k0) * 60.0)))
+    out = [p for p in out if p > 0]
+    r = 1
+    for p in out:
+        r = _lcm(r, p)
+    return r if out else 0
+
+
+def material_plan(e, mi, blob_of):
+    """How a material animates, or None: dict(uv = frames -> (F, 2) texture-matrix offset or None,
+    periods [frames], axes {animated uv axes}, flip (tex list, ends, period) or None)."""
     model = e['model']
     mt = model['materials'][mi]
-    out = {}
-    if model['material_version'] != 3.0:
-        return out
-    w = mt['words']
-    key_times = np.r_[times, total].astype(np.float64)
-    if w[14] and w[15]:
-        keys, flags = Z.uv_keys(blob_of(model), w[14], w[15])
-        period = float(keys[-1, 0])
-        if period <= 0:
-            return out
-        t = key_times / 60.0
-        v0 = Z.sample_uv(keys, flags, [0.0])[0]
-        vP = Z.sample_uv(keys, flags, [period])[0]
-        vals = Z.sample_uv(keys, flags, t % period) + np.floor(t / period)[:, None] * (vP - v0)
-        vals[-1] = v0 + (total / 60.0 / period) * (vP - v0) if abs((total / 60.0) % period) < 1e-6 else vals[-1]
-    elif w[7] and (w[8] or w[9]):
-        su, sv = Z._f32(blob_of(model), mt['offset'] + 0x20), Z._f32(blob_of(model), mt['offset'] + 0x24)
-        vals = np.stack([key_times * su, key_times * sv], 1)
-    else:
-        return out
-    for ax, sub in ((0, 2), (1, 3)):
-        if np.abs(vals[:, ax] - vals[0, ax]).max() > 1e-6:
-            out[sub] = list(vals[:, ax])
+    uv, periods = None, []
+    if model['material_version'] == 3.0:
+        w = mt['words']
+        if w[14] and w[15] and w[14] < 4096:
+            keys, flags = Z.uv_keys(blob_of(model), w[14], w[15])
+            if len(keys) >= 2:
+                uv = (lambda f, k=keys, fl=flags: Z.texmtx_offset(k, fl, np.asarray(f, dtype=np.float64) / 60.0))
+                periods.append(uv_period_frames(keys, flags))
+        elif w[7] and (w[8] or w[9]):
+            su, sv = Z._f32(blob_of(model), mt['offset'] + 0x20), Z._f32(blob_of(model), mt['offset'] + 0x24)
+            if su or sv:
+                uv = (lambda f, a=su, b=sv: Z.scroll_offset(a, b, f))
+    flip = Z.flip_book(mt)
+    if flip and not all(t < len(e['textures']) for t in flip[0]):
+        print('  WARN %s material %d: flip-book textures %s beyond the TPL (%d)' % (e['stem'], mi, flip[0], len(e['textures'])))
+        flip = None
+    if flip and len(set(flip[0])) < 2:
+        flip = None
+    axes = set()
+    if uv is not None:
+        probe = uv(np.arange(0, max([p for p in periods if p] + [600]) + 1, 1.0))
+        axes = {ax for ax in (0, 1) if np.abs(probe[:, ax] - probe[0, ax]).max() > 1e-6}
+        if not axes:
+            uv = None
+    if flip:
+        periods.append(flip[2])
+    if uv is None and not flip:
+        return None
+    return dict(uv=uv, periods=[p for p in periods if p > 0], axes=axes, flip=flip)
+
+
+def _resample(rgba, h, w):
+    H_, W_ = rgba.shape[:2]
+    ys = (np.arange(h) * H_ // h).clip(0, H_ - 1)
+    xs = (np.arange(w) * W_ // w).clip(0, W_ - 1)
+    return rgba[ys][:, xs]
+
+
+def build_atlas(e, plan, axis, grid_ok=False):
+    """Lay the flip-book's distinct frames out along `axis` (0 = u / columns, 1 = v / rows), each in
+    a slot of [gutter | frame (twice when that axis also scrolls) | gutter] with wrap padding. The
+    strip spans the whole texture across the axis (that axis keeps the texture's repeat), unless
+    it would pass ATLAS_MAX: then, when the material never wraps across the axis (`grid_ok`), the
+    strip folds into rows (gutters across too), else the cells shrink along the axis.
+    dict(rgba, axis, double, grid, cell (uv length of one frame copy along), cell_c (across),
+    origin {tex index: (uv start along, uv start across)})."""
+    tex = []
+    for t in plan['flip'][0]:
+        if t not in tex:
+            tex.append(t)
+    pics = [e['textures'][t] for t in tex]
+    n = len(pics)
+    double = axis in plan['axes']
+    S = max(p.shape[1 - axis] for p in pics)        # along the axis: width for u, height for v
+    O = _pow2ceil(max(p.shape[axis] for p in pics))  # across it
+    g = ATLAS_GUTTER
+    grid = grid_ok and n * (S * (2 if double else 1) + 2 * g) > ATLAS_MAX
+    if not grid:
+        while n * (S * (2 if double else 1) + 2 * g) > ATLAS_MAX and S > 8:
+            S //= 2
+            print('    ATLAS %s: %d frames, cells halved to %d px to stay within %d' % (e['stem'], n, S, ATLAS_MAX))
+    slot = S * (2 if double else 1) + 2 * g
+    slot_c = O + 2 * g if grid else O
+    per_row = n
+    if grid:                                         # the fold with the smallest power-of-two area
+        best = None
+        for k in range(1, max(1, ATLAS_MAX // slot) + 1):
+            a, c = _pow2ceil(k * slot), _pow2ceil(-(-n // k) * slot_c)
+            if c <= ATLAS_MAX and (best is None or (a * c, abs(a - c)) < best[0]):
+                best = ((a * c, abs(a - c)), k)
+        per_row = best[1]
+    rows = -(-n // per_row)
+    total = _pow2ceil(min(n, per_row) * slot)
+    total_c = _pow2ceil(rows * slot_c) if grid else O
+    work = np.zeros((total_c, total, 4), dtype=np.uint8)   # (across, along)
+    origin = {}
+    for j, (t, pic) in enumerate(zip(tex, pics)):
+        cell = _resample(pic, O, S) if axis == 0 else _resample(pic, S, O).transpose(1, 0, 2)
+        body = np.concatenate([cell, cell], 1) if double else cell
+        strip = np.concatenate([body[:, -g:], body, body[:, :g]], 1)
+        if grid:
+            strip = np.concatenate([strip[-g:], strip, strip[:g]], 0)
+        r, c = divmod(j, per_row)
+        x0, y0 = c * slot, r * slot_c
+        work[y0:y0 + strip.shape[0], x0:x0 + slot] = strip
+        origin[t] = ((x0 + g) / float(total), ((y0 + g) / float(total_c)) if grid else 0.0)
+    atlas = work if axis == 0 else work.transpose(1, 0, 2)
+    return dict(rgba=np.ascontiguousarray(atlas), axis=axis, double=double, grid=grid, cell=S / float(total),
+                cell_c=(O / float(total_c)) if grid else 1.0, origin=origin, total=total, total_c=total_c,
+                S=S, O=O)
+
+
+def clip_records_on_axis(r, axis):
+    """Split a record's triangles at the integer lines of uv[axis] so every piece lies in one tile;
+    returns the record with uv[axis] made tile-local (0..1) and the tile shift recorded."""
+    pos, nrm, uv, col = r['pos'], r['nrm'], r['uv'], r['col']
+    P_, N_, U_, C_, T_ = [], [], [], [], []
+    index = {}
+
+    def vert(p, n, u, c, key=None):
+        if key is not None and key in index:
+            return index[key]
+        P_.append(p)
+        N_.append(n / (np.linalg.norm(n) or 1.0))
+        U_.append(u)
+        C_.append(c)
+        if key is not None:
+            index[key] = len(P_) - 1
+        return len(P_) - 1
+
+    eps = 1e-5
+    for tri in r['tris']:
+        ua = uv[list(tri), axis]
+        k0, k1 = int(math.floor(ua.min() + eps)), int(math.ceil(ua.max() - eps))
+        if k1 <= k0 + 1:
+            k = k0
+            ids = [vert(pos[i], nrm[i], uv[i] - (np.eye(2)[axis] * k), col[i], (int(i), k)) for i in tri]
+            T_.append(ids)
+            continue
+        poly = [(pos[i], nrm[i], uv[i], col[i]) for i in tri]
+        for k in range(k0, k1):
+            piece = poly
+            for lo, keep_ge in ((k, True), (k + 1, False)):
+                out = []
+                for idx in range(len(piece)):
+                    a, b = piece[idx], piece[(idx + 1) % len(piece)]
+                    da, db = a[2][axis] - lo, b[2][axis] - lo
+                    ina, inb = (da >= -eps) if keep_ge else (da <= eps), (db >= -eps) if keep_ge else (db <= eps)
+                    if ina:
+                        out.append(a)
+                    if ina != inb:
+                        f = da / (da - db)
+                        out.append(tuple(x + f * (y - x) for x, y in zip(a, b)))
+                piece = out
+                if len(piece) < 3:
+                    break
+            if len(piece) < 3:
+                continue
+            ids = [vert(p, n, u - np.eye(2)[axis] * k, c) for p, n, u, c in piece]
+            for q in range(1, len(ids) - 1):
+                T_.append([ids[0], ids[q], ids[q + 1]])
+    out = dict(r)
+    out.update(pos=np.array(P_), nrm=np.array(N_), uv=np.array(U_), col=np.array(C_), tris=np.array(T_, dtype=np.int64))
     return out
 
 
-def material_anim(objects, entry_of, length, blob_of):
-    times, total = part_times(length)
-    key_times = list(times) + [total]
-    targets, tracks = [], []
-    n_params = 0
+def tile_crossings(records, axis):
+    n = 0
+    for r in records:
+        ua = r['uv'][r['tris'], axis]
+        n += int(np.sum(np.ceil(ua.max(1) - 1e-5) - np.floor(ua.min(1) + 1e-5) > 1))
+    return n
+
+
+def apply_atlases(e, plans):
+    """Give every flip-book material of an entry its atlas: pick the strip axis (the one that does
+    not scroll; else u, with doubled cells), clip the records' triangles at that axis' tile lines,
+    map them into one cell; check the mapping by sampling (the UV-offset sign check)."""
+    for mi, plan in plans.items():
+        if not plan or not plan['flip']:
+            continue
+        recs = [r for r in e['records'] if r['material'] == mi and not r.get('screen')]
+        if not recs:
+            continue
+        if plan['axes'] == {0}:
+            axis = 1
+        elif plan['axes'] == {1}:
+            axis = 0
+        elif plan['axes']:
+            axis = 0
+        else:
+            axis = 0 if tile_crossings(recs, 0) <= tile_crossings(recs, 1) else 1
+        cross = 1 - axis
+        at = build_atlas(e, plan, axis, grid_ok=cross not in plan['axes'] and tile_crossings(recs, cross) == 0)
+        plan['atlas'] = at
+        for r in recs:
+            c = clip_records_on_axis(r, axis)
+            if at['grid']:
+                c = clip_records_on_axis(c, cross)      # one tile across already: only the shift
+            uvn = c['uv'].copy()
+            uvn[:, axis] *= at['cell']
+            if at['grid']:
+                uvn[:, cross] *= at['cell_c']
+            r.update(pos=c['pos'], nrm=c['nrm'], uv=uvn, col=c['col'], tris=c['tris'], atlas=at)
+            r['orig_uv_tile'] = c['uv']
+        check_atlas(e, plan, recs)
+
+
+def atlas_axes(at):
+    return {0, 1} if at['grid'] else {at['axis']}
+
+
+def material_offsets(plan, frames):
+    """(F, 2) World offsets (offU, offV) of a planned material at 60 Hz `frames`."""
+    f = np.asarray(frames, dtype=np.float64)
+    out = np.zeros((len(f), 2))
+    if plan['uv'] is not None:
+        out[:] = plan['uv'](f)
+    at = plan.get('atlas')
+    if at:
+        ax = at['axis']
+        tex, ends, _period = plan['flip']
+        org = np.array([at['origin'][tex[i]] for i in Z.flip_index(ends, f)]).reshape(-1, 2)
+        if ax in plan['axes']:
+            out[:, ax] = org[:, 0] + np.mod(out[:, ax], 1.0) * at['cell']
+        else:
+            out[:, ax] = org[:, 0]
+        if at['grid']:
+            out[:, 1 - ax] = org[:, 1]
+    return out
+
+
+def check_atlas(e, plan, recs, n_points=400, seed=7):
+    """The UV-offset sign check: sample the atlas where World will (mesh uv + offset, nearest
+    texel) and the source flip-book frame where the Wii would (tile uv + texture-matrix offset)
+    at interior points of the triangles over a cycle; they must agree."""
+    at = plan['atlas']
+    rng = np.random.default_rng(seed)
+    tex, ends, period = plan['flip']
+    frames = np.linspace(0, max(plan['periods'] + [period]) - 1, 13).round()
+    A_ = at['rgba']
+    hits = total = 0
+    for r in recs:
+        if not len(r['tris']):
+            continue
+        sel = rng.integers(0, len(r['tris']), min(n_points, len(r['tris']) * 4))
+        bc = rng.uniform(0.2, 0.6, (len(sel), 3))
+        bc /= bc.sum(1, keepdims=True)
+        tri = r['tris'][sel]
+        uv_w = np.einsum('nk,nkc->nc', bc, r['uv'][tri])
+        uv_t = np.einsum('nk,nkc->nc', bc, r['orig_uv_tile'][tri])
+        for fr in frames:
+            off = material_offsets(plan, [fr])[0]
+            raw = plan['uv']([fr])[0] if plan['uv'] is not None else np.zeros(2)
+            src = e['textures'][tex[int(Z.flip_index(ends, [fr])[0])]]
+            sw = uv_w + off
+            # the World sample may only leave the cell's slot by the gutter
+            ys = np.mod(np.floor(np.mod(sw[:, 1], 1.0) * A_.shape[0]), A_.shape[0]).astype(int)
+            xs = np.mod(np.floor(np.mod(sw[:, 0], 1.0) * A_.shape[1]), A_.shape[1]).astype(int)
+            got = A_[ys, xs].astype(int)
+            ss = uv_t + raw
+            across = at['O'] if at['grid'] else at['total_c']
+            pic = _resample(src, across, at['S']) if at['axis'] == 0 else _resample(src, at['S'], across)
+            py = np.floor(np.mod(ss[:, 1], 1.0) * pic.shape[0]).astype(int) % pic.shape[0]
+            px = np.floor(np.mod(ss[:, 0], 1.0) * pic.shape[1]).astype(int) % pic.shape[1]
+            want = pic[py, px].astype(int)
+            hits += int(np.sum(np.abs(got - want).max(1) <= 8))
+            total += len(sel)
+    rate = hits / max(total, 1)
+    assert rate > 0.97, '%s: atlas sampling agrees on %.1f%% only' % (e['stem'], 100 * rate)
+    plan['check'] = rate
+
+
+def sanm_length(plans):
+    periods = sorted({p for pl in plans for p in pl['periods'] if p > 0})
+    L = 1
+    for p in periods:
+        L = _lcm(L, p)
+    if not periods:
+        return 600                                   # a constant scroll alone: 10 s ramps
+    if L > SANM_CAP:
+        big = periods[-1]
+        L = big * max(1, SANM_CAP // big) if big <= SANM_CAP else SANM_CAP
+        print('    SANM lcm of periods %s > %d: clip %d frames (the shorter loops restart early)' % (periods, SANM_CAP, L))
+    return L
+
+
+def offset_keys(plan, ax, L, tol=1e-6):
+    """(times, values) of one offset axis over 0..L: a key where the slope changes and a PAIR of
+    keys on one frame where the value jumps (flip-book steps, held keys, wraps) -- the DLL's
+    sampler (core/anm/sample.rs) takes the later of two equal-time keys, so the step is exact."""
+    f = np.arange(L + 1, dtype=np.float64)
+    v = material_offsets(plan, f)[:, ax]                  # the value AT frame i (right limit)
+    vl = material_offsets(plan, f - 1e-4)[:, ax]          # just before it (left limit)
+    vl[0] = v[0]
+    jump = np.abs(vl - v) > 1e-5
+    slope = np.r_[0.0, vl[1:] - v[:-1]]                   # slope of the segment ending at frame i
+    times, vals = [0], [float(v[0])]
+    for i in range(1, L + 1):
+        if jump[i]:
+            times += [i, i]
+            vals += [float(vl[i]), float(v[i])]
+        elif i == L or abs(slope[i + 1] - slope[i]) > tol:
+            times.append(i)
+            vals.append(float(v[i]))
+    # drop a key that lies on the line between its neighbours
+    out_t, out_v = [times[0]], [vals[0]]
+    for t_, v_ in zip(times[1:], vals[1:]):
+        out_t.append(t_)
+        out_v.append(v_)
+        while len(out_t) >= 3 and out_t[-3] < out_t[-2] < out_t[-1]:
+            t0, t1, t2 = out_t[-3:]
+            v0, v1, v2 = out_v[-3:]
+            if abs(v0 + (v2 - v0) * (t1 - t0) / (t2 - t0) - v1) > tol:
+                break
+            del out_t[-2]
+            del out_v[-2]
+    return out_t, out_v
+
+
+def material_clip(objects, plans_of):
+    """The part's .sanm spec + (L, checks), or None."""
+    used = []
     for ob in objects:
         for mat in ob.data.materials:
-            ei, mi = (int(x) for x in mat['ddr_zan_material'].split('.'))
-            chans = material_channels(entry_of[ei], mi, times, total, blob_of)
-            if not chans:
-                continue
-            if n_params + len(chans) > MAX_MAT_PARAMS:
-                print('    DROPPED material animation of %s (> %d animated params in the part)' % (mat.name, MAX_MAT_PARAMS))
-                continue
-            n_params += len(chans)
-            slot = len(targets)
-            shader = mat.get('ddr_shader') or 'mdl_ch_constant_vc'
-            targets.append(dict(identity=K.pack_identity(mat.name), identity2=0, hash=K.fnv1(shader), flags=0x2000))
-            for sub, vals in sorted(chans.items()):
-                tracks.append(dict(kind=8, target=slot, sub=sub, times=key_times, keys=[(float(v),) for v in vals]))
+            ek = mat.get('ddr_zan_material')
+            pl = plans_of.get(ek) if ek else None
+            if pl:
+                used.append((mat, pl))
+    if not used:
+        return None
+    L = sanm_length([pl for _m, pl in used])
+    targets, tracks, n_params = [], [], 0
+    for mat, pl in used:
+        axes = set(pl['axes']) | (atlas_axes(pl['atlas']) if pl.get('atlas') else set())
+        if not axes:
+            continue
+        n_params += len(axes)
+        assert n_params <= MAX_MAT_PARAMS, 'more animated material params than the frame board holds'
+        slot = len(targets)
+        shader = mat.get('ddr_shader') or 'mdl_ch_constant_vc'
+        targets.append(dict(identity=K.pack_identity(mat.name), identity2=0, hash=K.fnv1(shader), flags=0x2000))
+        for ax in sorted(axes):
+            times, vals = offset_keys(pl, ax, L)
+            assert times[-1] <= 0xFFFF and len(times) < 0xFFFF
+            tracks.append(dict(kind=8, target=slot, sub=2 + ax, times=times, keys=[(float(x),) for x in vals],
+                               plan=pl, axis=ax))
     if not tracks:
         return None
-    return dict(frame_count=total, flag=1, fps=60, material_tracks=tracks, material_targets=targets)
+    return dict(frame_count=L, flag=1, fps=60, material_tracks=tracks, material_targets=targets)
+
+
+def check_sanm(data, spec):
+    """Sample the written clip like the DLL (anm_dump.evaluate_materials) on every frame and at
+    half frames away from steps; compare to the analytic offsets."""
+    parsed = A.parse_anm(data)
+    L = spec['frame_count']
+    f = np.arange(0, L + 1, max(1, L // 2000))
+    worst = 0.0
+    for t in spec['material_tracks']:
+        want = material_offsets(t['plan'], f)[:, t['axis']]
+        for fr, w in zip(f, want):
+            got = A.evaluate_materials(parsed, float(fr))[t['target']][t['sub']]
+            worst = max(worst, abs(got - w))
+    return worst
 
 
 # ---------------------------------------------------------------------------------------------
@@ -699,14 +1194,25 @@ def port(stage):
     def blob_of(model):
         return zmb_blob[id(model)]
 
+    plans_of = {}
     for e in entries:
         e['records'] = mesh_records(e)
+        used = sorted({r['material'] for r in e['records'] if not r['screen']})
+        plans = {mi: material_plan(e, mi, blob_of) for mi in used}
+        apply_atlases(e, plans)
+        for mi, pl in plans.items():
+            if pl:
+                pl['params'] = len(set(pl['axes']) | (atlas_axes(pl['atlas']) if pl.get('atlas') else set()))
+                plans_of['%d.%d' % (e['index'], mi)] = pl
+        e['plans'] = plans
     split_backdrop(entries)
-    flip = sum(1 for e in entries for mt in e['model']['materials'] if (mt['ntex_word'] & 0xFFFF) > 1)
     parts = plan_parts(entries)
-    print('STAGE %s: %d entries (%d props placed), loops %s, %d cameras, %d flip-book materials (first frame), parts %s' % (
-        stage, len(entries), sum(1 for e in entries if e['inst']), sorted({e['length'] for e in entries}), len(cams), flip,
-        ['%s@%d' % (n, L) for n, _k, L, _c in parts]))
+    flips = [pl for pl in plans_of.values() if pl.get('atlas')]
+    print('STAGE %s: %d entries (%d props placed), loops %s, %d cameras, %d screens, %d UV-animated materials, '
+          '%d flip-books (atlases, sampling check worst %.3f), parts %s' % (
+              stage, len(entries), sum(1 for e in entries if e['inst']), sorted({e['length'] for e in entries}), len(cams),
+              sum(1 for e in entries for r in e['records'] if r['screen']), sum(1 for pl in plans_of.values() if pl['uv']),
+              len(flips), min([pl['check'] for pl in flips] + [1.0]), ['%s@%d' % (n, L) for n, _k, L, _c in parts]))
 
     out_dir = os.path.join(OUT_BASE, label)
     set_dir = os.path.join(out_dir, 'mapset_' + key)
@@ -724,7 +1230,7 @@ def port(stage):
         if not objects:
             continue
         entry_of = {e['index']: e for e, _r in chunk}
-        sspec = material_anim(objects, entry_of, length, blob_of) if length else None
+        sspec = material_clip(objects, plans_of)
         bpy.context.view_layer.update()
         model_name = 'gm_%s_%s' % (key, part)
         pdir = os.path.join(set_dir, model_name)
@@ -738,7 +1244,12 @@ def port(stage):
             sorted({(hex(me['flags']), me.get('flags2', 0)) for me in m['meshes']}))
         file_binds = [np.array(b['bind'], dtype=float).reshape(4, 4) for b in m['bones']]
         if anchors and length:
-            lspec, expected = loop_spec(anchors, entry_of, binds, file_binds, length)
+            lspec, expected, shear = loop_spec(anchors, entry_of, binds, file_binds, length)
+            ext = anchor_extents(chunk, anchors, binds)
+            sheared = {b: v * ext.get(b, 0.0) for b, v in shear.items() if v * ext.get(b, 0.0) > 0.005}
+            if sheared:
+                print('    SHEAR %s: %d anchor(s) shear under a non-uniformly scaled parent; TRS fit off by up to '
+                      '%.3f m at their vertices' % (part, len(sheared), max(sheared.values())))
             data = A.write_anm(lspec)
             er, et = check_loop(data, expected, part_times(length)[0])
             assert er < 2e-3 and et < 2e-4, '%s %s: loop error rot %.5f trans %.5f' % (stage, part, er, et)
@@ -749,14 +1260,12 @@ def port(stage):
             missing = [t for t in sspec['material_targets'] if t['identity'] not in idents]
             assert not missing, missing
             sdata = A.write_anm(sspec)
-            parsed = A.parse_anm(sdata)
-            worst = 0.0
-            for t in sspec['material_tracks']:
-                for tm, kv in list(zip(t['times'], t['keys']))[::max(1, len(t['times']) // 8)]:
-                    worst = max(worst, abs(A.evaluate_materials(parsed, float(tm))[t['target']][t['sub']] - kv[0]))
+            worst = check_sanm(sdata, sspec)
             assert worst < 1e-4, '%s %s: sanm error %.2e' % (stage, part, worst)
             open(os.path.join(pdir, model_name + '_play_loop.sanm'), 'wb').write(sdata)
-            info += ', sanm %d materials / %d tracks' % (len(sspec['material_targets']), len(sspec['material_tracks']))
+            info += ', sanm %d frames, %d materials / %d tracks / %d keys (err %.1e)' % (
+                sspec['frame_count'], len(sspec['material_targets']), len(sspec['material_tracks']),
+                sum(len(t['times']) for t in sspec['material_tracks']), worst)
         print(info)
         written.append((part, kind))
 
@@ -792,12 +1301,35 @@ def render_persp(path, pos, target, lens=24.0, res=(960, 540)):
     bpy.ops.render.render(write_still=True)
 
 
+def screen_test_card():
+    """A 1280-square stand-in for World's movie target in the previews: a 16:9 card (red left,
+    blue right, a yellow top stripe) in the 16:9 band, black around it -- shows which surfaces
+    are screens and that the picture is upright and unmirrored."""
+    img = bpy.data.images.get('preview_screen_card')
+    if img:
+        return img
+    n = 128
+    px = np.zeros((n, n, 4), dtype=np.float32)
+    px[..., 3] = 1.0
+    v0, v1 = int(SCREEN_BAND[0] * n), int(SCREEN_BAND[1] * n)
+    px[v0:v1, : n // 2, 0] = 1.0                       # red left
+    px[v0:v1, n // 2:, 2] = 1.0                        # blue right
+    px[v0:v0 + 6, :, :3] = (1.0, 1.0, 0.0)            # yellow top (D3D rows top-down)
+    img = bpy.data.images.new('preview_screen_card', n, n, alpha=True)
+    img.pixels.foreach_set(px[::-1].ravel())           # Blender stores rows bottom-up
+    return img
+
+
 def unlit_preview_materials():
     for ob in bpy.data.objects:
         if ob.type != 'MESH':
             continue
         for mat in ob.data.materials:
             if mat is not None and mat.use_nodes and not mat.get('ddr_preview_unlit'):
+                tex = next((n for n in mat.node_tree.nodes if n.type == 'TEX_IMAGE'), None)
+                if tex is not None and tex.image is not None and \
+                        tex.image.name.lower().replace('_', '').startswith(SCREEN_TEXTURE):
+                    tex.image = screen_test_card()
                 _unlit(mat, int(ob.get('ddr_flags', 1) or 1), int(ob.get('ddr_flags2', 0) or 0))
 
 

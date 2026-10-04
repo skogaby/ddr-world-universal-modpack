@@ -63,7 +63,12 @@
 //! fingerprinted cache arc under `data_mods/_cache/custom_models/` — a ready
 //! `.arc` is still accepted — and mounted in `scene3d::arc_set`; entries are
 //! labelled by folder name, keys colliding with stock are refused, and the
-//! custom block follows the stock block of the catalog.
+//! custom block follows the stock block of the catalog. The scan is built to
+//! scale with the content (`custom_scan` module docs): nothing per FILE on a
+//! warm boot (`scan_index`), the walk prefetched on its own thread from
+//! `lib.rs` right after `early_apply` ([`prefetch_custom_content`]), and
+//! LayeredFS never indexes `custom_models/` (`mod_paths::PRIVATE_FOLDERS`),
+//! so no boot race moves however many models are installed.
 //!
 //! **Threads:** engine calls happen on the game thread only (scene
 //! callbacks, the mod's `input_manager::on_frame` callback,
@@ -100,7 +105,8 @@
 //!
 //! - Tables + choice: [`lifecycle`] (tables, song window, gameplay wrapper),
 //!   [`selection`]†, [`pick`]†, [`catalog`]†, [`options`], [`custom_content`]†
-//!   (pure planner), [`custom_scan`] (folder walk, packing, mounts).
+//!   (pure planner), [`custom_scan`] (folder walk, packing, mounts, the
+//!   boot-time prefetch), [`scan_index`]† (its warm-boot index codec).
 //! - Scene: [`session`] (parse + instance build), [`instance_plan`]†,
 //!   [`scene_window`] (load / build / teardown, shared with previews),
 //!   [`director`] + [`director_math`]†, [`schedule`]†, [`clock`]†,
@@ -130,6 +136,7 @@ pub mod options_logic;
 pub mod outline;
 pub mod pick;
 pub mod preview;
+pub mod scan_index;
 pub mod scene_window;
 pub mod schedule;
 pub mod screen_route;
@@ -151,6 +158,25 @@ use crate::{log_info, log_warn};
 
 /// Mod enabled (registry toggle); read by the callbacks.
 static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Boot hook (`lib.rs`, right after `early_apply`): when this mod and its
+/// `custom_content` toggle are on in the config, start listing
+/// `data_mods/custom_models` on its own thread so the enable only joins it
+/// (`custom_scan::prefetch`). No-op otherwise — a live enable from the menu
+/// scans inline, as before.
+pub fn prefetch_custom_content(mods: &std::collections::HashMap<String, bool>) {
+    if !crate::mods::mod_trait::mod_enabled_in_config(mods, "background-dancers") {
+        return;
+    }
+    // Same resolution as `lifecycle::init_tables` (absent section ⇒ defaults).
+    let custom_content = crate::mods::config::get()
+        .and_then(|c| c.background_dancers.clone())
+        .unwrap_or_default()
+        .custom_content;
+    if custom_content {
+        custom_scan::prefetch();
+    }
+}
 
 pub struct BackgroundDancersMod {
     scene_cb: Option<usize>,
