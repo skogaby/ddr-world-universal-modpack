@@ -14,23 +14,35 @@
 //!
 //! and the call-out returns `rbx' = round(E) − S` (the stub adds `J` after).
 //! Every frame the session compares `E` with the stock `T − A`; it goes
-//! ACTIVE once they agree within the sanity window, and it drops back to
-//! passthrough (re-gating) whenever they disagree by more than it — which is
-//! exactly what happens when the game re-anchors (seek/loop/adjust) before
-//! `song_reset`'s content-origin publication for the new voice reaches us.
+//! ACTIVE once they agree within the sanity window (`|E − (T − A)| ≤ 50 ms`).
+//! While ACTIVE it follows the DRIFT RESIDUAL `(E − (T − A)) − Δ_arm`
+//! instead: the residual may change by at most the sanity window between
+//! measured frames and grow at most `max_drift_ppm` beyond it over the song
+//! ([`GatePolicy::stays_active`]). A breach drops back to passthrough
+//! (re-gating) — which is exactly what happens when the game re-anchors
+//! (seek/loop/adjust) before `song_reset`'s content-origin publication for the
+//! new voice reaches us — while a slow game-tick-vs-DAC rate error (native
+//! Win7 boots measured up to −785 ppm, ~94 ms over a 2-minute song) is
+//! followed for the whole song rather than capped at 50 ms.
 //! A voice that never agrees within `max_wait_frames` is Refused for good.
 //!
 //! **Anchor mode** ([`GatePolicy::hold_anchor`]): the arm is identical, but
 //! the cursor is consulted only to LATCH this play's onset error
 //! `Δ = E − (T − A)` at the arm frame; thereafter the count is the stock
 //! `T − A + Δ` — elapsed time drives the song, the DirectSound cursor never
-//! steers the in-song clock. Consequences: no exposure to slow wander of an
-//! emulated play cursor, and a missing/stale line mid-song is NOT a
-//! passthrough (the correction needs no line once latched), so the fit
-//! losing its history cannot step the clock back to stock. `Δ` is re-latched
+//! steers the in-song clock. Consequence: no exposure to slow wander of an
+//! emulated play cursor. `Δ` is re-latched
 //! whenever the content origin is republished for the same voice (the game
 //! re-anchored `A`); a new voice re-gates like any other mode. What anchor
 //! mode gives up is the in-song game-tick-vs-DAC rate correction.
+//!
+//! **Line loss while ACTIVE** (fit reset, render-thread stall, no `C`): BOTH
+//! modes hold the last correction instead of passing through — anchor mode
+//! `T − A + Δ`, fit mode `T − A + Δ + last drift residual` (the drift it was
+//! following, frozen until the line returns and passes the step gate). A
+//! passthrough would step the playhead back by the whole accumulated
+//! correction. Only an origin change with no line to re-latch against passes
+//! through (the old Δ belongs to the old `A`).
 
 use super::fit::Line;
 
@@ -69,8 +81,17 @@ impl Onset {
 /// Gate parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GatePolicy {
-    /// `|E − (T − A)|` must be within this to arm / stay active (ms).
+    /// `|E − (T − A)|` must be within this to arm or to re-latch on an
+    /// origin republication (ms). While ACTIVE it is the per-frame STEP
+    /// bound on the drift residual instead (see [`Self::stays_active`]).
     pub sanity_ms: f64,
+    /// Largest game-tick-vs-DAC rate error an ACTIVE session follows (ppm):
+    /// the drift residual may grow by this rate on top of `sanity_ms`.
+    /// Native Win7 boots measured −14 and −785 ppm (per-boot TSC/QPC
+    /// calibration); 2000 ppm leaves headroom without admitting a runaway.
+    pub max_drift_ppm: f64,
+    /// QPC ticks per second (converts the drift span to ms).
+    pub frequency: i64,
     /// Consecutive disagreeing frames before the voice is refused.
     pub max_wait_frames: u32,
     /// A line older than this (QPC ticks behind `t_frame`) is stale: the
@@ -86,6 +107,8 @@ impl GatePolicy {
     pub fn new(frequency: i64) -> Self {
         Self {
             sanity_ms: 50.0,
+            max_drift_ppm: 2000.0,
+            frequency,
             // Covers song_reset's 5 s cue-prepare timeout: a seek/replay's new
             // voice is identified BEFORE the anchor rewrite + origin
             // publication that make the two clocks agree again.
@@ -102,6 +125,26 @@ impl GatePolicy {
             hold_anchor: true,
             ..Self::new(frequency)
         }
+    }
+
+    /// The ACTIVE gate (no origin change): the drift residual
+    /// `(E − (T − A)) − Δ` may move at most `sanity_ms` from the previous
+    /// measured frame (a game re-anchor is a discontinuity — this keeps the
+    /// detector's 50 ms sensitivity for the whole song), and its magnitude may
+    /// grow at most `max_drift_ppm` beyond `sanity_ms` over the span since the
+    /// arm/re-latch (a slow clock-rate error is followed, a runaway is not).
+    /// An absolute `|E − (T − A)| ≤ sanity_ms` here would cap the in-song
+    /// correction at 50 ms — on a 785 ppm boot the session then flapped
+    /// Diverged/re-arm at the edge ~64 s in and fell back to stock.
+    fn stays_active(&self, track: &DriftTrack, t_frame: i64, residual_ms: f64) -> bool {
+        let span_ms = if self.frequency > 0 {
+            (t_frame - track.start_t).max(0) as f64 * 1000.0 / self.frequency as f64
+        } else {
+            0.0
+        };
+        let envelope_ms = self.sanity_ms + self.max_drift_ppm * 1e-6 * span_ms;
+        (residual_ms - track.last_residual_ms).abs() <= self.sanity_ms
+            && residual_ms.abs() <= envelope_ms
     }
 }
 
@@ -194,7 +237,8 @@ pub enum Reason {
     NoOnset,
     /// A newer voice generation superseded the armed one.
     Superseded,
-    /// `|E − (T − A)|` exceeded the sanity window while ACTIVE.
+    /// The drift residual stepped by more than the sanity window in one
+    /// frame, or outgrew the rate envelope, while ACTIVE.
     Diverged,
     /// Explicit disarm from the glue.
     Explicit,
@@ -417,11 +461,21 @@ impl Session {
                 // (the drift bookkeeping restarts with it).
                 let origin_changed = origin_generation != input.origin_generation;
                 let Some((line, c_ms)) = usable else {
-                    if self.policy.hold_anchor && !origin_changed {
-                        // Anchor mode needs no line once latched: keep the
-                        // song on `T − A + Δ` through a fit reset / stall
-                        // instead of stepping back to stock.
-                        let elapsed = stock + anchor_delta_ms;
+                    if !origin_changed {
+                        // Hold the last correction through a fit reset /
+                        // render stall instead of stepping back to stock:
+                        // anchor mode needs no line once Δ is latched; fit
+                        // mode freezes the drift residual it was following
+                        // (a passthrough would step the playhead by the whole
+                        // accumulated drift — up to ~100 ms on a 785 ppm
+                        // boot). The step gate re-checks continuity when the
+                        // line returns.
+                        let held = if self.policy.hold_anchor {
+                            anchor_delta_ms
+                        } else {
+                            anchor_delta_ms + track.last_residual_ms
+                        };
+                        let elapsed = stock + held;
                         return (
                             Decision::Corrected {
                                 rbx: corrected_rbx(elapsed, input.sound_offset_ms),
@@ -439,7 +493,15 @@ impl Session {
                 };
                 let line_elapsed = elapsed_ms(line, input.t_frame, &onset, c_ms, offset_ms);
                 let delta = line_elapsed - stock;
-                if delta.abs() <= self.policy.sanity_ms {
+                // A re-latch is a fresh agreement against the new anchor `A`
+                // (the arm's absolute gate); otherwise follow the drift.
+                let agrees = if origin_changed {
+                    delta.abs() <= self.policy.sanity_ms
+                } else {
+                    self.policy
+                        .stays_active(&track, input.t_frame, delta - anchor_delta_ms)
+                };
+                if agrees {
                     let (anchor_delta_ms, track) = if origin_changed {
                         (delta, DriftTrack::start(input.t_frame))
                     } else {
@@ -764,32 +826,92 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_stale_line_passes_through_without_losing_the_arm() {
+    fn missing_or_stale_line_holds_the_last_correction_without_losing_the_arm() {
+        // Fit mode: a lineless ACTIVE frame holds `stock + Δ + last residual`
+        // (here Δ = 0, residual 0) instead of stepping back to stock.
         let mut s = Session::new(policy());
         let f0 = 500_000;
         let l = line(0, f0 as f64);
         s.frame(input(Some(onset(1, f0)), Some(&l), 0, 55, (0, 1)));
-        // No line (fit reset) ⇒ passthrough, still armed.
+        // No line (fit reset) ⇒ held, still armed.
         let (d, e) = s.frame(input(Some(onset(1, f0)), None, 100, 65, (0, 1)));
-        assert_eq!((d, e), (Decision::Passthrough, None));
+        assert_eq!(e, None);
+        assert_corrected(d, 65 - 20, 65.0);
         assert!(s.is_active());
-        // Stale line (render thread stalled > 150 ms) ⇒ passthrough.
+        // Stale line (render thread stalled > 150 ms) ⇒ held.
         let stale_t = FREQ / 5; // 200 ms after the line's newest sample
         let (d, e) = s.frame(input(Some(onset(1, f0)), Some(&l), stale_t, 255, (0, 1)));
-        assert_eq!((d, e), (Decision::Passthrough, None));
+        assert_eq!(e, None);
+        assert_corrected(d, 255 - 20, 255.0);
         assert!(s.is_active());
-        // Not-ready line ⇒ passthrough.
+        // Not-ready line ⇒ held.
         let nr = Line { ready: false, ..l };
         let (d, _) = s.frame(input(Some(onset(1, f0)), Some(&nr), 0, 55, (0, 1)));
-        assert_eq!(d, Decision::Passthrough);
-        // No C ⇒ passthrough.
+        assert_corrected(d, 55 - 20, 55.0);
+        // No C ⇒ held.
         let mut i = input(Some(onset(1, f0)), Some(&l), 0, 55, (0, 1));
         i.c_ms = None;
-        assert_eq!(s.frame(i).0, Decision::Passthrough);
-        // Passes resume with the same F0: corrected again, no new Armed event.
+        assert_corrected(s.frame(i).0, 55 - 20, 55.0);
+        // Passes resume with the same F0: corrected from the line, no new Armed event.
         let (d, e) = s.frame(input(Some(onset(1, f0)), Some(&l), 0, 55, (0, 1)));
         assert!(matches!(d, Decision::Corrected { .. }));
         assert!(e.is_none());
+    }
+
+    #[test]
+    fn fit_holds_the_accumulated_drift_through_a_line_loss_and_rejoins_smoothly() {
+        // 100 s at 785 ppm from Δ = +3 (residual +78.5 ms), then a 2.5 s fit
+        // reset. The old passthrough stepped the playhead back ~81.5 ms to
+        // stock; the hold keeps stock + 81.5 and the returning line (now
+        // +80.5 residual) passes the step gate.
+        let mut s = Session::new(policy());
+        let f0 = 500_000;
+        let at = |frame: i64| {
+            let t = frame * FREQ / 60;
+            let stock = 55 + i32::try_from(frame * 1000 / 60).unwrap();
+            let wall_ms = (t as f64) * 1000.0 / FREQ as f64;
+            (t, stock, 3.0 + 785e-6 * wall_ms)
+        };
+        let last = 100 * 60;
+        for frame in 0..=last {
+            let (t, stock, delta) = at(frame);
+            let l = drifted_line(f0, t, stock, delta);
+            s.frame(input(Some(onset(1, f0)), Some(&l), t, stock, (0, 1)));
+        }
+        let held = at(last).2;
+        assert!((held - 81.5).abs() < 0.01, "{held}");
+        for frame in last + 1..last + 150 {
+            let (t, stock, _) = at(frame);
+            let (d, e) = s.frame(input(Some(onset(1, f0)), None, t, stock, (0, 1)));
+            assert_eq!(e, None, "frame {frame}");
+            match d {
+                Decision::Corrected { elapsed_ms, .. } => {
+                    let want = f64::from(stock) + held;
+                    assert!((elapsed_ms - want).abs() < 1e-6, "{elapsed_ms} vs {want}");
+                }
+                other => panic!("frame {frame}: {other:?}"),
+            }
+        }
+        let (t, stock, delta) = at(last + 150);
+        let l = drifted_line(f0, t, stock, delta);
+        let (d, e) = s.frame(input(Some(onset(1, f0)), Some(&l), t, stock, (0, 1)));
+        assert_eq!(e, None);
+        assert_corrected(
+            d,
+            (f64::from(stock) + delta).round() as i32 - 20,
+            f64::from(stock) + delta,
+        );
+        // An origin change with no line still cannot re-latch: passthrough.
+        let (t, stock, _) = at(last + 151);
+        let (d, e) = s.frame(input(
+            Some(onset(1, f0)),
+            None,
+            t,
+            stock + 12_000,
+            (12_000, 2),
+        ));
+        assert_eq!((d, e), (Decision::Passthrough, None));
+        assert!(s.is_active());
     }
 
     #[test]
@@ -967,13 +1089,14 @@ mod tests {
         i.c_ms = None;
         assert_corrected(s.frame(i).0, 88 - 20, 88.0);
         assert!(s.is_active());
-        // The fit-mode session passes through in every one of those cases.
+        // Fit mode holds the same way (Δ + its last residual, here 0).
         let mut fit = Session::new(policy());
         fit.frame(input(Some(onset(1, f0)), Some(&l), 0, 55, (0, 1)));
-        assert_eq!(
+        assert_corrected(
             fit.frame(input(Some(onset(1, f0)), None, 100, 65, (0, 1)))
                 .0,
-            Decision::Passthrough
+            68 - 20,
+            68.0,
         );
     }
 
@@ -1121,6 +1244,136 @@ mod tests {
             assert_eq!(drift.span_ticks, t2);
             let ppm = drift.ppm(FREQ).unwrap();
             assert!((ppm + 50.0).abs() < 1e-6, "{ppm}");
+        }
+    }
+
+    // ----- drift-aware ACTIVE gate (2026-10-04 Win7 capture) --------------
+
+    /// Run one voice at 60 fps for `seconds`, the line pulling away from the
+    /// stock tick at `ppm` from an arm Δ of `delta0` ms. Returns every
+    /// frame's decision and event.
+    fn run_drifting(
+        policy: GatePolicy,
+        delta0: f64,
+        ppm: f64,
+        seconds: i64,
+    ) -> Vec<(i64, i32, Decision, Option<Event>)> {
+        let mut s = Session::new(policy);
+        let f0 = 500_000;
+        let mut out = Vec::new();
+        for frame in 0..=seconds * 60 {
+            let t = frame * FREQ / 60;
+            let stock = 55 + i32::try_from(frame * 1000 / 60).unwrap();
+            let wall_ms = (t as f64) * 1000.0 / FREQ as f64;
+            let l = drifted_line(f0, t, stock, delta0 + ppm * 1e-6 * wall_ms);
+            let (d, e) = s.frame(input(Some(onset(1, f0)), Some(&l), t, stock, (0, 1)));
+            out.push((t, stock, d, e));
+        }
+        out
+    }
+
+    #[test]
+    fn a_785_ppm_tick_error_stays_corrected_for_a_whole_song_in_both_modes() {
+        // The 2026-10-03 Win7 boot whose QPC calibration was ~785 ppm off the
+        // DAC: the old absolute 50 ms gate let `fit` correct for ~64 s, then
+        // flapped Diverged/re-arm at the 50 ms edge and fell back to stock (a
+        // visible 50 ms playhead jump, judgements −41 ms afterwards). A slow,
+        // continuous drift must keep the session ACTIVE for the whole song.
+        for (policy, follows_line) in [(policy(), true), (anchor_policy(), false)] {
+            let frames = run_drifting(policy, 3.0, 785.0, 150);
+            let events: Vec<_> = frames.iter().filter_map(|f| f.3).collect();
+            assert_eq!(events.len(), 1, "only the arm: {events:?}");
+            assert!(matches!(events[0], Event::Armed { .. }));
+            let (t, stock, d, _) = *frames.last().unwrap();
+            let drift = 785.0 * 1e-6 * (t as f64 * 1000.0 / FREQ as f64);
+            assert!(drift > 117.0, "{drift}");
+            let expected = if follows_line {
+                f64::from(stock) + 3.0 + drift
+            } else {
+                f64::from(stock) + 3.0
+            };
+            match d {
+                Decision::Corrected { elapsed_ms, .. } => {
+                    assert!(
+                        (elapsed_ms - expected).abs() < 1e-6,
+                        "{elapsed_ms} vs {expected}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_runaway_drift_beyond_the_rate_envelope_still_diverges() {
+        // 5000 ppm is not a clock-calibration error any more (the envelope
+        // admits 2000 ppm): |residual| crosses 50 + 2 ms/s at ~16.7 s.
+        let frames = run_drifting(policy(), 0.0, 5000.0, 30);
+        let diverged = frames.iter().find_map(|(t, _, d, e)| match e {
+            Some(Event::Disarmed {
+                reason: Reason::Diverged,
+                drift,
+                ..
+            }) => Some((*t, *d, *drift)),
+            _ => None,
+        });
+        let (t, d, drift) = diverged.expect("must diverge");
+        assert_eq!(d, Decision::Passthrough);
+        let secs = t as f64 / FREQ as f64;
+        assert!((16.0..17.5).contains(&secs), "diverged at {secs} s");
+        // The reported drift is the last frame INSIDE the envelope.
+        let drift = drift.unwrap();
+        assert!(
+            drift.residual_ms > 80.0 && drift.residual_ms < 84.0,
+            "{drift:?}"
+        );
+    }
+
+    #[test]
+    fn a_small_stock_discontinuity_late_in_a_drifted_song_still_diverges() {
+        // The re-anchor detector must keep its 50 ms per-frame sensitivity
+        // however much slow drift the envelope has admitted: 100 s at 785 ppm
+        // (residual +78.5) and then stock jumps +80 ms without an origin
+        // publication. The absolute gate would have ACCEPTED this frame
+        // (|Δ| ≈ 1.5 ms) as an ordinary corrected one.
+        for policy in [policy(), anchor_policy()] {
+            let mut s = Session::new(policy);
+            let f0 = 500_000;
+            let mut last = None;
+            for frame in 0..=100 * 60 {
+                let t = frame * FREQ / 60;
+                let stock = 55 + i32::try_from(frame * 1000 / 60).unwrap();
+                let wall_ms = (t as f64) * 1000.0 / FREQ as f64;
+                let l = drifted_line(f0, t, stock, 785e-6 * wall_ms);
+                let (d, e) = s.frame(input(Some(onset(1, f0)), Some(&l), t, stock, (0, 1)));
+                assert!(matches!(d, Decision::Corrected { .. }));
+                assert!(frame == 0 || e.is_none(), "frame {frame}: {e:?}");
+                last = Some((t, stock));
+            }
+            let (t, stock) = last.unwrap();
+            let t1 = t + FREQ / 60;
+            let wall_ms = (t1 as f64) * 1000.0 / FREQ as f64;
+            // The line keeps its course; stock re-anchors 80 ms ahead.
+            let line_stock = stock + 17;
+            let l = drifted_line(f0, t1, line_stock, 785e-6 * wall_ms);
+            let (d, e) = s.frame(input(
+                Some(onset(1, f0)),
+                Some(&l),
+                t1,
+                line_stock + 80,
+                (0, 1),
+            ));
+            assert_eq!(d, Decision::Passthrough);
+            assert!(
+                matches!(
+                    e,
+                    Some(Event::Disarmed {
+                        reason: Reason::Diverged,
+                        ..
+                    })
+                ),
+                "{e:?}"
+            );
         }
     }
 

@@ -1102,11 +1102,57 @@ def _tilde(path):
 
 
 def game_root(game_dir):
-    """The directory holding data/ and sys/ (a Dolphin `DATA/files` dump nests it)."""
+    """The directory holding data/ (HOTTEST PARTY 1) or stage/ + sound/ (the zan games:
+    FuruFuru Party, MUSIC FIT) and sys/ (a Dolphin `DATA/files` dump nests it)."""
     for cand in (game_dir, os.path.join(game_dir, 'files'), os.path.join(game_dir, 'DATA', 'files')):
-        if os.path.isdir(os.path.join(cand, 'data')):
+        if os.path.isdir(os.path.join(cand, 'data')) or is_zan_game(cand):
             return cand
-    raise SystemExit('no data/ directory under %s' % _tilde(game_dir))
+    raise SystemExit('no data/ (or stage/ + sound/) directory under %s' % _tilde(game_dir))
+
+
+def is_zan_game(root):
+    """FuruFuru Party / MUSIC FIT: Konami's zan engine, `WII\\0` archives instead of HuData packs."""
+    return os.path.isdir(os.path.join(root, 'stage')) and os.path.isdir(os.path.join(root, 'sound', 'stream'))
+
+
+# ---------------------------------------------------------------------------
+# zan archives (FuruFuru Party = HOTTEST PARTY 2, MUSIC FIT = HOTTEST PARTY 3)
+# ---------------------------------------------------------------------------
+ZAN_EXT = {'zmb': 'zmb', 'zab': 'zab', 'tpl': 'tpl', 'cam': 'cam', 'zms': 'zms', 'teb': 'teb', 'bin': 'bin',
+           'empty': 'bin'}
+
+
+def extract_zan_archive(blob, dest, rel, opts, rows, stats, out_root=None):
+    """Unpack a `WII\\0` archive (scripts/zan_dump.py) under `dest`: every member as
+    <name or #index>.<kind>, a nested archive as a directory, TPLs to PNG with --png, plus
+    archive.json (member order, names, offsets, sizes, kinds) so the container can be rebuilt."""
+    import zan_dump as ZD   # noqa: E402  (pure: struct + numpy)
+    os.makedirs(dest, exist_ok=True)
+    index = []
+    for i, (name, o, size) in enumerate(ZD.archive_members(blob)):
+        kind = ZD.kind_of(blob, o) if size else 'empty'
+        base = safe_name(name) if name else '#%03d' % i
+        if kind == 'archive':
+            sub = os.path.join(dest, base)
+            extract_zan_archive(blob[o:o + size], sub, rel, opts, rows, stats, out_root)
+            index.append(dict(index=i, name=name, offset=o, size=size, kind=kind, path=base + '/'))
+            continue
+        ext = ZAN_EXT.get(kind, 'bin')
+        fname = base if base.lower().endswith('.' + ext) else '%s.%s' % (base, ext)
+        out = os.path.join(dest, fname)
+        raw = blob[o:o + size]
+        with open(out, 'wb') as f:
+            f.write(raw)
+        if opts.png and kind == 'tpl':
+            try:
+                write_pictures('tpl', raw, os.path.splitext(out)[0], stats)
+            except (ValueError, struct.error, IndexError, KeyError) as e:
+                stats.setdefault('problems', []).append((out, 'png: %r' % e))
+        rows.append([rel, i, '', '', size, kind, os.path.relpath(out, out_root or dest).replace(os.sep, '/')])
+        stats['zan_' + kind] = stats.get('zan_' + kind, 0) + 1
+        index.append(dict(index=i, name=name, offset=o, size=size, kind=kind, path=fname))
+    with open(os.path.join(dest, 'archive.json'), 'w') as f:
+        json.dump(dict(magic='WII', members=index), f, indent=1)
 
 
 def main_dol(root):
@@ -1332,7 +1378,8 @@ def cmd_extract(args):
     rows, stats = [], {}
     dol_path = main_dol(root)
     dir_of = {}
-    if dol_path and (only is None or 'dol' in only):
+    zan = is_zan_game(root)
+    if dol_path and not zan and (only is None or 'dol' in only):
         dirs, songs = write_dol_tables(dol_path, out)
         dir_of = {os.path.basename(p): i for i, p in dirs}
         print('main.dol: %d data directories, %d songs; danceviewDll.rel: %d clip lengths' % (
@@ -1350,7 +1397,14 @@ def cmd_extract(args):
             if globs and not any(fnmatch.fnmatch(fn, g) for g in globs):
                 continue
             try:
-                if top == 'data' and fn.endswith('.bin') and is_pack(open(path, 'rb').read()):
+                head = open(path, 'rb').read(4)
+                if zan and head == b'WII\0':
+                    extract_zan_archive(open(path, 'rb').read(), os.path.join(out, rel + '_unpacked'), rel.replace(os.sep, '/'),
+                                        args, rows, stats, out)
+                    stats['zan_archive'] = stats.get('zan_archive', 0) + 1
+                elif zan and fn.lower().endswith(('.zab', '.zms')):
+                    extract_other(path, rel, out, args, rows, stats)
+                elif top == 'data' and fn.endswith('.bin') and is_pack(open(path, 'rb').read()):
                     extract_pack(path, os.path.join(out, 'data'), args, rows, stats, dir_of.get('data/' + fn))
                     print('  %s' % rel)
                 elif fn.endswith('.brsar'):
@@ -1390,6 +1444,13 @@ def cmd_png(args):
         print(_tilde(p))
 
 
+def cmd_archive(args):
+    rows, stats = [], {}
+    extract_zan_archive(open(args.file, 'rb').read(), args.out_dir, os.path.basename(args.file), args, rows, stats,
+                        args.out_dir)
+    print(', '.join('%s %d' % kv for kv in sorted(stats.items()) if kv[0] != 'problems'))
+
+
 def cmd_wav(args):
     s = parse_brstm(open(args.file, 'rb').read())
     wave_to_wav(args.out, dict(format=s['codec'], rate=s['rate'], samples=s['samples'], adpcm=s['adpcm'],
@@ -1418,6 +1479,11 @@ def main(argv=None):
     p.add_argument('out_dir')
     p.add_argument('--png', action='store_true')
     p.set_defaults(fn=cmd_pack)
+    p = sub.add_parser('archive', help='unpack one zan `WII\\0` archive (FuruFuru Party / MUSIC FIT)')
+    p.add_argument('file')
+    p.add_argument('out_dir')
+    p.add_argument('--png', action='store_true')
+    p.set_defaults(fn=cmd_archive)
     p = sub.add_parser('png', help='pictures of one .hsf / .spr / .tpl')
     p.add_argument('file')
     p.add_argument('out_dir')

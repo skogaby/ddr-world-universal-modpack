@@ -50,9 +50,9 @@ pub enum Mode {
     /// `E − (T − A)` is latched and thereafter the count is the stock
     /// `T − A` plus that constant. Fixes the 0–10 ms onset error, never lets
     /// the cursor steer the in-song clock (the conservative mode: no
-    /// exposure to DirectSound-emulation cursor wander, no stock-reversion
-    /// step when the fit loses its history mid-song). Gives up the in-song
-    /// tick-vs-DAC drift correction.
+    /// exposure to DirectSound-emulation cursor wander). Gives up the in-song
+    /// tick-vs-DAC drift correction — which a native Win7 boot measured at
+    /// up to −785 ppm (`docs/audio_clock_research.md` §7.4).
     Anchor,
 }
 
