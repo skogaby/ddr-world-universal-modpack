@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Chordia 1" (CHR6600 + CHR6601), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s003_040 h4s007_056 h4s010_040 h4s011_000 h4s011_032 h4s016_000 h4s016_048 h4s039_000 h4s041_064 h4s047_032 h4s051_056 h4s063_048)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s003_040 h4s004_016 h4s004_024 h4s007_056 h4s010l_008 h4s010l_032 h4s034_016 h4s042_016 h4s043_064 h4s051_048 h4s064_000 h4s064_056)
+# flight stages: motion/flight/ takeoff fly_h4s053_008 fly_h4s054_006 fly_h4s054_015 fly_h4s055_008
 hp4chordia01, pl, F, A, 1.0, 0.75, 0.0

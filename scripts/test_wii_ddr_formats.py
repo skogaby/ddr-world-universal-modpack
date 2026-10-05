@@ -486,6 +486,23 @@ class TestHsf(unittest.TestCase):
         g = np.cross(pos[t[0, 1]] - pos[t[0, 0]], pos[t[0, 2]] - pos[t[0, 0]])
         self.assertGreater(float(g @ nrm[t[0, 0]]), 0)
 
+    def test_cull_winding(self):
+        # a back-to-back pair (HP2 STG021's fan blades): front quad normal +y, back quad -y, the
+        # same positions, both in GX order (geometric normal OPPOSITE the vertex normal)
+        pos = np.array([[0, 0, 0], [0, 0, -1], [1, 0, 0]] * 2, dtype=float)
+        nrm = np.array([[0, 1, 0]] * 3 + [[0, -1, 0]] * 3, dtype=float)
+        tris = np.array([[0, 1, 2], [3, 5, 4]])
+        out = H.cull_winding(pos, nrm, tris, False)
+        g = np.cross(pos[out[:, 1]] - pos[out[:, 0]], pos[out[:, 2]] - pos[out[:, 0]])
+        # culled: the GX order reversed -- each face's World front is its own side, never both
+        np.testing.assert_array_equal(np.sign(g[:, 1]), [1, -1])
+        # ... whatever the normals say (a stray inverted normal keeps the Wii's visible side)
+        flipped_n = nrm.copy()
+        flipped_n[:3] *= -1
+        np.testing.assert_array_equal(H.cull_winding(pos, flipped_n, tris, False), out)
+        # two-sided: the shading normal's side (consistent_winding)
+        np.testing.assert_array_equal(H.cull_winding(pos, flipped_n, tris, True)[0], [0, 1, 2])
+        self.assertEqual(len(H.cull_winding(pos, nrm, np.zeros((0, 3), int), False)), 0)
     def test_curves(self):
         lin = dict(curve=H.CURVE_LINEAR, keys=np.array([[0, 0], [10, 10.0]]))
         np.testing.assert_allclose(H.sample_curve(lin, [0, 2.5, 10, 20]), [0, 2.5, 10, 10])

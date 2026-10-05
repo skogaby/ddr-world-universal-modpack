@@ -21,6 +21,9 @@
 //!   <Source>/                          source folder: any name; id = its slug, label ≤ 15 bytes
 //!     <Friendly>/pl_<key>/…            dancer labelled <FRIENDLY>, in source <Source>
 //!         pl_<key>.model, pl_<key>.b2it, *.dds …   (the add-on's export layout — flat)
+//!         motion/*.anm                     optional own choreography (the dance playlist)
+//!         motion/flight/takeoff*.anm, motion/flight/*.anm   optional take-off + flight loops:
+//!                                          what a FLIGHT stage plays (never a dance clip)
 //!         — or —  data/chara/pl_<key>/…             (a literally unpacked arc)
 //!     <Friendly>/pl_<key>_<part>/…     optional accessory parts (same folder as the body)
 //!     <Friendly>/chara_resources.rlist optional sidecar (or .rlist.txt) for that folder
@@ -36,6 +39,9 @@
 //!                                          (`core::anm::sanm`; optional)
 //!   …/mapset_<key>/camera/<shot>.camanm …  (any `*.camanm` anywhere in the folder = the stage's
 //!                                           own camera set; names containing `_non` are the cut-aways)
+//!   …/mapset_<key>/flight.txt             optional: a FLIGHT stage — the dancers take off and fly
+//!                                           (only flight-capable dancers; parts `pre_*` show until
+//!                                           the take-off ends, `fly_*` after it)
 //!   …/map_resources.rlist              optional sidecar (parts[:prio]);  …/stage_camera_resources.rlist
 //! ```
 //! A directory directly under `dancers/` / `stages/` is a SOURCE when it holds
@@ -61,8 +67,9 @@
 
 use super::catalog::{label_for, split_key, MAX_LABEL_BYTES};
 use super::selection::{
-    dancer_candidates, own_motion_from_members, stage_candidates, DancerCandidate, StageCandidate,
-    OWN_MOTION_DIR, PART_NAMES,
+    dancer_candidates, own_flight_from_members, own_motion_from_members, stage_candidates,
+    stage_flight_from_members, DancerCandidate, StageCandidate, FLIGHT_MOTION_DIR, OWN_MOTION_DIR,
+    PART_NAMES,
 };
 use super::sources::{resolve_source, CustomEntry, SourceRef};
 
@@ -610,6 +617,8 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             let row = stock.next_dancer_row + out.dancers.len();
             // Own choreography (D1): `motion/*.anm` inside the body folder/arc.
             let motion = own_motion_from_members(&key, members);
+            // Flight clips (`motion/flight/*.anm`): what a flight stage plays.
+            let flight = own_flight_from_members(&key, members);
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
@@ -620,7 +629,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             out.mounts
                 .push((format!("data/arc/{}", arc.name), arc.path.clone()));
             out.notes.push(format!(
-                "custom dancer {} ({}) in source {} from {} -- sex {} class {} scale {}/{}{}, motion: {}",
+                "custom dancer {} ({}) in source {} from {} -- sex {} class {} scale {}/{}{}, motion: {}{}",
                 label.as_deref().unwrap_or("<key rule>"),
                 key,
                 source.label,
@@ -641,6 +650,14 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                     "the stock pool of its sex".to_string()
                 } else {
                     format!("{} own clip(s) in {OWN_MOTION_DIR}/", motion.len())
+                },
+                if flight.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", flight: {} clip(s) in {OWN_MOTION_DIR}/{FLIGHT_MOTION_DIR}/",
+                        flight.len()
+                    )
                 }
             ));
             if let Some(l) = label {
@@ -653,6 +670,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             out.dancers.push(DancerCandidate {
                 row,
                 motion,
+                flight,
                 ..cand
             });
             dancer_keys.push(key.clone());
@@ -786,6 +804,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 }
             };
             let row = stock.next_stage_row + out.stages.len();
+            let flight = stage_flight_from_members(members);
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
@@ -796,7 +815,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             out.mounts
                 .push((format!("data/arc/{}", arc.name), arc.path.clone()));
             out.notes.push(format!(
-                "custom stage {} ({}) in source {} from {} -- {} part(s) [{}] ({}), camera set: {} name(s) ({})",
+                "custom stage {} ({}) in source {} from {} -- {} part(s) [{}] ({}), camera set: {} name(s) ({}){}",
                 label.as_deref().unwrap_or("<key rule>"),
                 key,
                 source.label,
@@ -812,7 +831,8 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                     .join(", "),
                 parts_src,
                 camera.len(),
-                camera_src
+                camera_src,
+                if flight { ", FLIGHT stage" } else { "" }
             ));
             if let Some(l) = label {
                 out.entries.push(CustomEntry {
@@ -826,6 +846,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 key: key.clone(),
                 row,
                 parts,
+                flight,
             });
             stage_keys.push(key);
         }
@@ -1237,6 +1258,87 @@ mod tests {
             p.notes[1]
         );
     }
+
+    #[test]
+    fn flight_clips_and_the_flight_stage_marker() {
+        // A HOTTEST PARTY dancer: motion/*.anm dances, motion/flight/*.anm
+        // the take-off + flight loops (never in the dance pool).
+        let role = classify_folder_name("pl_hprena05");
+        let mut members: Vec<String> = body_members("hprena05")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for rel in [
+            "motion/h3s020_040.anm",
+            "motion/flight/takeoff.anm",
+            "motion/flight/fly_h3s049_000.anm",
+            "motion\\flight\\fly_h3s051_006.anm",
+            "motion/flight/deeper/no.anm",
+        ] {
+            members.push(folder_member_path(&role, "pl_hprena05", rel));
+        }
+        let dancers = PackDir {
+            dir: "./data_mods/custom_models/dancers/HOTTSTPARTY 1-3/Rena 5".into(),
+            folder: Some("Rena 5".into()),
+            arcs: vec![ArcFile {
+                name: "pl_hprena05.arc".into(),
+                path: "./data_mods/_cache/custom_models/pl_hprena05-0.arc".into(),
+                source: "Rena 5/pl_hprena05".into(),
+                members: Some(members),
+            }],
+            chara_rows: parse_text_rlist("hprena05, pl, F, A, 1.0, 0.75, 0.0"),
+            ..Default::default()
+        };
+        let stage = ArcRole::Stage {
+            key: "hp3stage201".into(),
+        };
+        let stage_members: Vec<String> = [
+            "gm_hp3stage201_pre_dec/gm_hp3stage201_pre_dec.model",
+            "gm_hp3stage201_fly_dec/gm_hp3stage201_fly_dec.model",
+            "flight.txt",
+        ]
+        .iter()
+        .map(|r| folder_member_path(&stage, "mapset_hp3stage201", r))
+        .collect();
+        let mut plain_members = stage_members.clone();
+        plain_members.retain(|m| m != STAGE_FLIGHT_MARKER_FOR_TEST);
+        let stages = PackDir {
+            dir: "./data_mods/custom_models/stages/HOTTEST PARTY 3/Stage 201".into(),
+            folder: Some("Stage 201".into()),
+            arcs: vec![ArcFile {
+                name: "mapset_hp3stage201.arc".into(),
+                path: "./c/mapset_hp3stage201-0.arc".into(),
+                source: "Stage 201/mapset_hp3stage201".into(),
+                members: Some(stage_members),
+            }],
+            ..Default::default()
+        };
+        let p = plan(&[dancers], &[stages], &stock());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        let d = &p.dancers[0];
+        assert_eq!(d.motion, vec!["h3s020_040".to_string()]);
+        assert_eq!(
+            d.flight,
+            vec![
+                "flight/fly_h3s049_000".to_string(),
+                "flight/fly_h3s051_006".to_string(),
+                "flight/takeoff".to_string()
+            ]
+        );
+        assert!(d.can_fly());
+        assert!(
+            p.notes[0].contains("flight: 3 clip(s) in motion/flight/"),
+            "{}",
+            p.notes[0]
+        );
+        assert!(p.stages[0].flight);
+        assert!(p.notes[1].contains("FLIGHT stage"), "{}", p.notes[1]);
+        assert!(!super::super::selection::stage_flight_from_members(
+            &plain_members
+        ));
+    }
+
+    const STAGE_FLIGHT_MARKER_FOR_TEST: &str = super::super::selection::STAGE_FLIGHT_MARKER;
 
     #[test]
     fn proof_of_concept_content_plans_as_expected() {

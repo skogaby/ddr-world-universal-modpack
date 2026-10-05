@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Bridget 3" (CHR470 + CHR473), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s010j_018 h3s012_034 h3s013j_043 h3s023_006 h3s023_024 h3s023j_021 h3s026_127 h3s026j_052 h3s026j_063 h3s041_037 h3s056_072 h3s056_080)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_027 h3s002j_081 h3s006j_020 h3s018j_000 h3s023j_011 h3s026j_008 h3s028_008 h3s030_000 h3s030_016 h3s031_076 h3s068_014 h2s002_030)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s049_013
 hpbridget03, pl, F, A, 1.0, 0.75, 0.0

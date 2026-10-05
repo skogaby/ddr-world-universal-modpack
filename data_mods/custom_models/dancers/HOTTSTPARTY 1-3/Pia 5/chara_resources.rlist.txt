@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Pia 5" (CHR490 + CHR491), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_044 h3s003_018 h3s007_015 h3s014_062 h3s018_000 h3s026_024 h3s026j_056 h3s027_081 h3s027_089 h3s030_024 h3s043_016 h2s034_040)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_068 h3s007j_016 h3s012_017 h3s012_024 h3s015j_006 h3s021_006 h3s023j_035 h3s024j_067 h3s027j_046 h3s032_079 h3s039_080 h2s035_008)
+# flight stages: motion/flight/ takeoff fly_h3s046_000 fly_h3s049_000 fly_h3s049_021 fly_h2s049_000
 hppia05, pl, F, A, 1.0, 0.75, 0.0

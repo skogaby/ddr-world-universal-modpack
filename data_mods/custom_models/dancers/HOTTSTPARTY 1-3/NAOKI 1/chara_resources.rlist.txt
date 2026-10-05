@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "NAOKI 1" (CHR110 + CHR111), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_016 h3s003_003 h3s011j_068 h3s015_000 h3s015_016 h3s017_036 h3s025j_044 h3s026j_004 h3s028j_030 h3s035_000 h3s044_052 h3s049_000)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001_028 h3s002_016 h3s010j_069 h3s020j_038 h3s021j_004 h3s023j_028 h3s025_049 h3s031_052 h3s043_078 h3s055_044 h3s057_008 h3s057_115)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s048_008
 hpnaoki01, pl, M, A, 1.0, 0.8, 0.0

@@ -35,6 +35,20 @@
 //! will play on screens, screen-less stages otherwise); a chosen stage is
 //! never filtered. Missing dependencies degrade to THUMBNAIL with one WARN.
 //!
+//! **Flight stages** (custom content: `mapset_<key>/flight.txt`; the ported
+//! HOTTEST PARTY tunnels): only dancers with `motion/flight/` clips appear
+//! (`pick::fly_pick` replaces any other pick with a random capable one and
+//! keeps a capable one); each plays its take-off once, whole, then flight
+//! loops (`DanceSchedule::with_intro`); at the take-off's end the stage's
+//! `pre_*` parts (launch platform, which replay MUSIC FIT's intro script on
+//! the way — `director_math::intro_look`) give way to its `fly_*` parts
+//! (tunnel, clock from there) and the shadows go. Nobody capable ⇒ the platform
+//! stays. Flight clips never join a dance playlist, so they never show on a
+//! normal stage or in the BACKGROUND DANCER preview. The flyers carry the
+//! games' own effects (`flight_fx.rs`: zan's `CzanEff` particle runtime run
+//! from the stage's `flight_fx/flight_fx.teb`, drawn through per-player
+//! sprite / ribbon POOL models — instances `InstanceKind::Fx`).
+//!
 //! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
 //! Outlines** (one black inverted-hull twin per mesh; CEL + outline are
 //! Dancing Stage Unleashed's toon shading and ink since 2026-09-28): applied
@@ -125,6 +139,7 @@ pub mod custom_content;
 pub mod custom_scan;
 pub mod director;
 pub mod director_math;
+pub mod flight_fx;
 pub mod instance_plan;
 pub mod lifecycle;
 pub mod movie_backdrop;

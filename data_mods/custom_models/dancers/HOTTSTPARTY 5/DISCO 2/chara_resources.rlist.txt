@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "DISCO 2" (CHR20200 + CHR20202), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u026l02_000 h5s2u028l01_016 h5s2u029l04_000 h5s2u037l01_000 h5s2u038l01_008 h5s3u020l02_008 h5s3u031l05_008 h5s3u043s01_008 h5s3u054l03_008 h5s3u055l02_000 h5s3u056l03_064 h5s5u031l03_032)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u026l02_000 h5s2u029s01_000 h5s2u031e01_000 h5s2u047s01_001 h5s3u025e01_000 h5s3u039l01_008 h5s3u040l02_000 h5s3u040l03_016 h5s3u042l01_008 h5s3u056s01_000 h5s4u001ll02_016 h5s5u031l04_000)
+# flight stages: motion/flight/ takeoff fly_h5s4u053l03_008 fly_h5s4u054l01_001 fly_h5s4u055e01_000 fly_h5s4u055l01_000
 hp5disco02, pl, M, A, 1.0, 0.8, 0.0

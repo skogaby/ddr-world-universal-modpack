@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "NAOKI 2" (CHR20700 + CHR20702), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u031l01_008 h5s2u035l01_000 h5s2u036l04_008 h5s2u036s01_000 h5s2u046l03_000 h5s3u021l01_000 h5s3u038l01_000 h5s3u039e01_000 h5s3u041l03_000 h5s3u044s01_000 h5s3u056e01_000 h5s4u054e01_008)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u027l01_000 h5s2u030e01_000 h5s2u032l04_000 h5s2u036l02_000 h5s2u047l01_008 h5s3j006e01_000 h5s3u021l01_008 h5s3u035s01_000 h5s3u038e01_000 h5s3u039s01_001 h5s3u042l03_000 h5s3u058e01_008)
+# flight stages: motion/flight/ takeoff fly_h5s4u054e01_012 fly_h5s4u054l02_000 fly_h5s4u054l03_000 fly_h5s4u055l02_008
 hp5naoki02, pl, M, A, 1.0, 0.8, 0.0

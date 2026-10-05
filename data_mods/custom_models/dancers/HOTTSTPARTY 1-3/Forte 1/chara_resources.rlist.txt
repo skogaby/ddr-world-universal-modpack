@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Forte 1" (CHR300 + CHR301), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_011 h3s002_060 h3s003j_022 h3s009j_038 h3s010j_000 h3s011j_032 h3s014j_005 h3s015_024 h3s031_060 h3s034_019 h3s043_070 h3s054_040)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_000 h3s003j_032 h3s003j_047 h3s009j_030 h3s010j_026 h3s011_007 h3s013j_000 h3s017j_078 h3s020_040 h3s022_014 h3s043_070 h3s054_077)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s049_013
 hpforte01, pl, M, A, 1.0, 0.8, 0.0

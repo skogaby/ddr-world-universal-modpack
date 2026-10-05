@@ -46,6 +46,123 @@ pub fn clip_frame(local_t: f32, duration_s: f32, fps: f32, loops: bool) -> f32 {
     ct * fps
 }
 
+/// Name prefix of a FLIGHT stage's launch-platform parts (shown until the
+/// take-off ends).
+pub const PRE_PART_PREFIX: &str = "pre_";
+/// Name prefix of a FLIGHT stage's tunnel parts (shown from the end of the
+/// take-off, their clock starting there).
+pub const FLY_PART_PREFIX: &str = "fly_";
+/// The take-off length assumed when a flight stage has no dancer to time it
+/// (the BACKGROUND STAGE preview): the ported take-off, 600 frames @ 60.
+pub const DEFAULT_TAKEOFF_S: f32 = 10.0;
+
+/// A flight stage part's phase (by its `map_resources` part name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartPhase {
+    /// Shown throughout, on the scene clock.
+    Always,
+    /// `pre_*`: the launch platform.
+    Pre,
+    /// `fly_*`: the tunnel.
+    Fly,
+}
+
+pub fn part_phase(part: &str) -> PartPhase {
+    if part.starts_with(PRE_PART_PREFIX) {
+        PartPhase::Pre
+    } else if part.starts_with(FLY_PART_PREFIX) {
+        PartPhase::Fly
+    } else {
+        PartPhase::Always
+    }
+}
+
+/// `(shown, clock)` of a part of `phase` at scene time `t` when the flight
+/// starts at `switch` (the take-off's end; `None` = it never starts — a
+/// flight stage nobody can fly keeps its platform): `Pre` until the switch,
+/// `Fly` from it on its own clock `t − switch` (a one-shot opening then
+/// starts at the take-off instead of the song start).
+pub fn phase_clock(phase: PartPhase, switch: Option<f32>, t: f32) -> (bool, f32) {
+    match (phase, switch) {
+        (PartPhase::Always, _) => (true, t),
+        (PartPhase::Pre, None) => (true, t),
+        (PartPhase::Pre, Some(s)) => (t < s, t),
+        (PartPhase::Fly, None) => (false, 0.0),
+        (PartPhase::Fly, Some(s)) => (t >= s, (t - s).max(0.0)),
+    }
+}
+
+/// The launch-platform roles of a FLIGHT stage's `pre_*` parts, named by the
+/// port (`port_stage_hottest2.FLIGHT_PHASES`) after the zan stage objects the
+/// flight intro drives: `pre_plat` (STG109's stage, object 5), `pre_sky`
+/// (STG109's sky + sea, object 3), `pre_hole` (the tunnel mouth, object 6);
+/// `pre_space` (object 4) and any other `pre_*` part just show until the
+/// switch.
+pub const INTRO_PLATFORM: &str = "pre_plat";
+pub const INTRO_SKY: &str = "pre_sky";
+pub const INTRO_HOLE: &str = "pre_hole";
+
+/// How a `pre_*` part looks at intro time `t` (seconds of the take-off).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntroLook {
+    /// The instance tint (rgb dim, alpha fade).
+    pub tint: [f32; 4],
+    /// Drawn at all (the game hides a faded-out object: alpha ≤ 1e-5).
+    pub shown: bool,
+    /// The part's own clip clock (the tunnel mouth's opening starts late).
+    pub clock: f32,
+}
+
+/// MUSIC FIT's flight intro, ported from main.dol: a song whose play setup
+/// carries flag 0x200 arms it at the song start (`FUN_8003729c`: tunnel +
+/// space hidden, platform / sky / intro space shown, the mouth hidden) and
+/// `FUN_80037354` runs it per 60 fps frame `f` of the intro clock:
+/// the platform's colour `0.85·(210 − f)/150 + 0.15` over f 60..210 (dims to
+/// 0.15), the mouth fades in over f 300..360 and starts its (one-shot)
+/// motion at 300, the sky fades out over f 360..420; the switch to the
+/// tunnel is the end of the intro camera (STG201_CAM00_01..03, 3 + 4 + 3 s =
+/// the 600-frame take-off). Here `f = 60·t` on the take-off's own clock, so
+/// the script stays in step with the dancer at any tempo.
+pub fn intro_look(part: &str, t: f32) -> IntroLook {
+    let is = |role: &str| {
+        part.strip_prefix(role).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.starts_with('_')
+                || rest.starts_with(|c: char| c.is_ascii_digit())
+        })
+    };
+    let mut look = IntroLook {
+        tint: WHITE,
+        shown: true,
+        clock: t,
+    };
+    if is(INTRO_PLATFORM) {
+        let v = ramp(t, 1.0, 1.0, 3.5, 0.15);
+        look.tint = [v, v, v, 1.0];
+    } else if is(INTRO_SKY) {
+        let a = ramp(t, 6.0, 1.0, 7.0, 0.0);
+        look.tint[3] = a;
+        look.shown = a > 1e-5;
+    } else if is(INTRO_HOLE) {
+        let a = ramp(t, 5.0, 0.0, 6.0, 1.0);
+        look.tint[3] = a;
+        look.shown = a > 1e-5;
+        look.clock = (t - 5.0).max(0.0);
+    }
+    look
+}
+
+/// `v0` before `t0`, `v1` after `t1`, linear between.
+fn ramp(t: f32, t0: f32, v0: f32, t1: f32, v1: f32) -> f32 {
+    if t <= t0 {
+        v0
+    } else if t >= t1 {
+        v1
+    } else {
+        v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+    }
+}
+
 /// `core::anm::sample::clip_time`, repeated here so this file stays
 /// harness-mountable (identical arithmetic; pinned by a test in the
 /// director's engine-side module against the real one).
@@ -249,6 +366,48 @@ pub fn scale_subtree_about_root(bones: &mut [Mat4], subtree: &[usize], k: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flight_phases_switch_at_the_takeoff_end() {
+        use super::{part_phase, phase_clock, PartPhase};
+        assert_eq!(part_phase("pre_dec"), PartPhase::Pre);
+        assert_eq!(part_phase("fly_add2"), PartPhase::Fly);
+        assert_eq!(part_phase("dec"), PartPhase::Always);
+        assert_eq!(part_phase("bg"), PartPhase::Always);
+        let s = Some(10.0);
+        assert_eq!(phase_clock(PartPhase::Pre, s, 9.9), (true, 9.9));
+        assert_eq!(phase_clock(PartPhase::Pre, s, 10.0), (false, 10.0));
+        assert_eq!(phase_clock(PartPhase::Fly, s, 9.9), (false, 0.0));
+        assert_eq!(phase_clock(PartPhase::Fly, s, 12.5), (true, 2.5));
+        assert_eq!(phase_clock(PartPhase::Always, s, 3.0), (true, 3.0));
+        // no flight: the platform stays, the tunnel never shows
+        assert_eq!(phase_clock(PartPhase::Pre, None, 99.0), (true, 99.0));
+        assert!(!phase_clock(PartPhase::Fly, None, 99.0).0);
+    }
+
+    #[test]
+    fn intro_script_dims_fades_and_opens() {
+        use super::{intro_look, WHITE};
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // the platform: full colour to 1 s (frame 60), 0.15 from 3.5 s (210)
+        assert_eq!(intro_look("pre_plat_dec", 0.5).tint, WHITE);
+        let mid = intro_look("pre_plat_add2", 2.25).tint;
+        assert!(near(mid[0], 0.575) && near(mid[3], 1.0));
+        assert!(near(intro_look("pre_plat_ble", 9.0).tint[1], 0.15));
+        // the sky: gone over 6..7 s (360..420), hidden once faded out
+        assert!(intro_look("pre_sky_dec", 5.9).shown);
+        assert!(near(intro_look("pre_sky_dec", 6.5).tint[3], 0.5));
+        assert!(!intro_look("pre_sky_dec", 7.0).shown);
+        // the mouth: hidden to 5 s, in by 6 s, its opening clocked from 5 s
+        let h = intro_look("pre_hole_add", 4.0);
+        assert!(!h.shown && h.clock == 0.0);
+        let h = intro_look("pre_hole_ble2", 5.5);
+        assert!(h.shown && near(h.tint[3], 0.5) && near(h.clock, 0.5));
+        // other parts (the intro space) and look-alike names are untouched
+        let s = intro_look("pre_space_dec", 8.0);
+        assert!(s.shown && s.tint == WHITE && s.clock == 8.0);
+        assert_eq!(intro_look("pre_skylight_dec", 9.0).tint, WHITE);
+    }
+
     use super::*;
 
     fn approx(a: &Mat4, b: &Mat4, eps: f32) -> bool {

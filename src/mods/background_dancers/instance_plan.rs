@@ -4,7 +4,8 @@
 //! what order, with which pass mask, sort key and frame-board slot.
 //!
 //! Build order (design §4.3.5): stage parts, dancers, each dancer's parts,
-//! each dancer's shadow, then — when the outline plan is non-empty — one
+//! each dancer's shadow, each flying dancer's flight-effect pools (`Fx`,
+//! `flight_fx.rs`), then — when the outline plan is non-empty — one
 //! inverted-hull twin per restyle-eligible body PER LAYER, sharing the
 //! body's slot. Slots are `slot_base + owner_index` (design §5.3: gameplay
 //! 0, P1 previews 0, P2 previews 16); owners beyond the budget are skipped
@@ -39,6 +40,10 @@ pub enum InstanceKind {
     /// never published itself (RE §4.6). `layer` indexes the session's
     /// `HullPlan` (DSU's ink: one black layer — `outline.rs`).
     Hull { of: usize, layer: usize },
+    /// A flight-effect pool model of dancer `dancer` (`pool` indexes its
+    /// `flight_fx::DancerFx::pools` / `frames`): sprites or ribbons placed
+    /// by bone matrices, coloured per draw record (`flight_fx.rs`).
+    Fx { dancer: usize, pool: usize },
 }
 
 impl InstanceKind {
@@ -50,6 +55,7 @@ impl InstanceKind {
             InstanceKind::Part { .. } => "part",
             InstanceKind::Shadow(_) => "shadow",
             InstanceKind::Hull { .. } => "hull",
+            InstanceKind::Fx { .. } => "fx",
         }
     }
 
@@ -67,7 +73,9 @@ impl InstanceKind {
 /// exclusions are applied on top by `render_item::restyle_materials`.
 pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
     match kind {
-        InstanceKind::Shadow(_) => false,
+        // The effect pools keep their unlit additive materials (no style,
+        // no outline).
+        InstanceKind::Shadow(_) | InstanceKind::Fx { .. } => false,
         InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
         InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
         // The twin's model_name is the body's; a Hull of a Hull never exists.
@@ -182,6 +190,15 @@ pub struct DancerSpec {
     /// Ground-contact bones resolved ⇒ a shadow quad is planned (when the
     /// shadow skeleton parsed).
     pub has_ground: bool,
+    /// Flight-effect pool models of this dancer (empty off a flight).
+    pub fx_pools: Vec<FxSpec>,
+}
+
+/// One flight-effect pool model (`fx_<stage>_<s|r><player><k>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FxSpec {
+    pub model_name: String,
+    pub bone_count: usize,
 }
 
 /// Everything `plan_instances` needs from a `Parsed` bundle.
@@ -289,6 +306,21 @@ pub fn plan_instances(
             ));
         }
     }
+    for (i, d) in input.dancers.iter().enumerate() {
+        for (k, f) in d.fx_pools.iter().enumerate() {
+            max_bones = max_bones.max(f.bone_count);
+            children[i].push(instances.len());
+            instances.push(Instance::pending(
+                InstanceKind::Fx { dancer: i, pool: k },
+                f.model_name.clone(),
+                mask_of(masks.dancer),
+                0,
+                slot_for(instances.len()),
+                false,
+                f.bone_count,
+            ));
+        }
+    }
     // Slot budget: every instance so far OWNS a board slot.
     let slot_owners = instances.len();
     let truncated = slot_owners.saturating_sub(slot_budget);
@@ -387,6 +419,7 @@ mod tests {
                         },
                     ],
                     has_ground: true,
+                    fx_pools: Vec::new(),
                 },
                 DancerSpec {
                     model_name: "pl_rage00".into(),
@@ -397,11 +430,53 @@ mod tests {
                         bone_count: 1,
                     }],
                     has_ground: true,
+                    fx_pools: Vec::new(),
                 },
             ],
             shadow_bone_count: Some(1),
             shadow_model: SHADOW_MODEL.to_string(),
         }
+    }
+
+    #[test]
+    fn flight_fx_pools_follow_the_shadows_and_take_no_hulls() {
+        let mut input = fixture();
+        input.dancers[1].fx_pools = vec![
+            FxSpec {
+                model_name: "fx_s_s1a".into(),
+                bone_count: 101,
+            },
+            FxSpec {
+                model_name: "fx_s_r1a".into(),
+                bone_count: 244,
+            },
+        ];
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, None);
+        let fx: Vec<usize> = (0..plan.instances.len())
+            .filter(|&k| matches!(plan.instances[k].kind, InstanceKind::Fx { .. }))
+            .collect();
+        assert_eq!(fx.len(), 2);
+        let last_shadow = (0..plan.instances.len())
+            .filter(|&k| matches!(plan.instances[k].kind, InstanceKind::Shadow(_)))
+            .max()
+            .unwrap();
+        assert!(fx.iter().all(|&k| k > last_shadow));
+        assert_eq!(
+            plan.instances[fx[1]].kind,
+            InstanceKind::Fx { dancer: 1, pool: 1 }
+        );
+        assert_eq!(plan.instances[fx[1]].bone_count, 244);
+        assert!(plan.children[1].ends_with(&fx));
+        assert_eq!(plan.max_bones, 244);
+        assert!(plan
+            .instances
+            .iter()
+            .all(|i| !matches!(i.kind, InstanceKind::Hull { of, .. } if fx.contains(&of))));
+        assert!(!restyle_allowed(
+            &InstanceKind::Fx { dancer: 0, pool: 0 },
+            "fx_s_s0a"
+        ));
+        assert_eq!(InstanceKind::Fx { dancer: 0, pool: 0 }.tag(), "fx");
     }
 
     fn kinds(plan: &Plan) -> Vec<InstanceKind> {

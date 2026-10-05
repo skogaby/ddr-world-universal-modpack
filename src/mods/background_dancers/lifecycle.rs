@@ -50,6 +50,7 @@ use super::movie_mode::{
 };
 use super::movie_size;
 use super::options::Request;
+use super::pick::FlightOutcome;
 use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::screen_route;
 use super::selection::{
@@ -759,6 +760,35 @@ fn window_entry(scene_id: i32) {
     };
     let mut pick = pick;
     pick.seed = seed;
+    // FLIGHT stages fly only flight-capable dancers (a non-capable pick is
+    // replaced, a capable one kept) and play take-off + flight playlists.
+    let all: Vec<DancerCandidate> = if pick.stage.as_ref().is_some_and(|s| s.flight) {
+        TABLES
+            .lock()
+            .ok()
+            .and_then(|t| t.as_ref().map(|t| t.dancers.clone()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let (flown, outcome) = super::pick::fly_pick(&mut rng, pick, &all, &arc_exists);
+    pick = flown;
+    match outcome {
+        FlightOutcome::NotFlight => {}
+        FlightOutcome::Flight { replaced } => {
+            for (i, old, new) in &replaced {
+                log_info!(
+                    "BackgroundDancers: flight stage -- dancer {} ({}) cannot fly: {} flies instead",
+                    i + 1,
+                    old,
+                    new
+                );
+            }
+        }
+        FlightOutcome::NoCapableDancer => log_warn!(
+            "BackgroundDancers: flight stage, but no installed dancer has flight clips (motion/flight/) -- they dance on the platform"
+        ),
+    }
     let has_screens = pick
         .stage
         .as_ref()
@@ -1250,10 +1280,12 @@ fn drive_live(w: &mut Window) {
     } else {
         true
     };
-    if publish {
-        w.scene.publish(t, visible, mask);
-    }
+    // The camera first: the flight effects' billboards face THIS frame's
+    // camera (`Session::fx_camera`, read by the publish).
     camera_tick(w, t, mask);
+    if publish {
+        w.scene.publish(t, mc_ms as f32 / 1000.0, visible, mask);
+    }
 
     w.scene.retry_textures();
     w.scene.attached_diagnostics();
@@ -1323,6 +1355,7 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
     let changed = w.camera_source != Some(source);
     match source {
         CamSource::Fixed => {
+            sess.fx_camera = Some(fixed_camera());
             if changed {
                 if scene_graph::write_camera0(&fixed_camera()) {
                     log_info!(
@@ -1337,6 +1370,7 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
         }
         CamSource::Set(set) => match director::camera_frame(sess, t, set) {
             Some(cam) => {
+                sess.fx_camera = Some(cam);
                 let ok = scene_graph::write_camera0(&cam);
                 if changed {
                     if ok {

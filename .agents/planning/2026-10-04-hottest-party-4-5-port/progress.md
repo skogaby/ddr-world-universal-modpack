@@ -51,6 +51,19 @@ Resume protocol: this file → `docs/wii_ddr_hottest_party_4_5_research.md` → 
   - 201 = 301 at half resolution, so 201 is dropped;
   - 008 / 200 are minimal on the disc.
   All HP1–HP5 stages re-ported; HP3 also gets its group-92 TV screens (maintainer decision).
+- 2026-10-05 cabinet report (fans flicker on HP1 stg04 / HP2 STG021; stretched stage videos on HP4
+  403/404, HP5 426; HP5 012 = 003; broken looping "flying tunnel" stages). Fixed, NOT yet
+  cabinet-tested:
+  - culling honoured (research 2/3 §7.2, HP1 §6, `hsf_dump.cull_winding`);
+  - HP5 STG012 dropped (`NEAR_DUPLICATES`), the folder deleted (delete it on the cabinet too);
+  - `quarter` stages play `upt_quarter01` (the 4:3 `quarter01` is never opened; the panel stretch
+    itself is authored — research 4/5 §3.2d).
+  All 158 HP1–HP5 stages re-ported (format check 0 problems). Flight stages: separate feature,
+  `.agents/planning/2026-10-05-hottest-party-flight-stages/progress.md`.
+- 2026-10-05 (later): the six flight stages (HP2 102 / 103, HP3 201 / 205 / 206, HP4 301) and all
+  HP2–HP5 dancers (137 + 32 + 18) re-ported for the flight feature (role-named `pre_*` / `fly_*`
+  stage parts; `motion/flight/` take-off + flight loops, flight songs out of the dance library, so
+  every dancer's normal 12 clips are re-dealt). Format check 0 problems. NOT cabinet-tested.
 
 ## Cabinet watch-list
 1. STAGE SCREENS on HP5 STG016 (100-box wall, each box a window of the movie), STG028–030 (PV monitors),

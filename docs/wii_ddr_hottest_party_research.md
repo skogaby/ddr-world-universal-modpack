@@ -258,7 +258,19 @@ file → name map, so the labels are `Stage NN` (keys `hpstageNN`).
 | translucent pass (`pass & 0xF` or `invAlpha`) with real partial alpha (texture or vertex) | `ble` (prio −1) | 0x02C1 |
 | everything else | `dec`, alpha-tested; the first model's opaque meshes become `bg` (prio −2, World's `_bg` backdrop rules) | 0x0001 |
 
-Every mesh is exported two-sided.
+The table's flags are the two-sided ones; a culled mesh ships them without 0x0001.
+
+**Culling** (fixed 2026-10-05; until then every mesh was exported two-sided). The HSF draw
+(`FUN_8006a3a8`) takes `object flags | material flags`: bit 1 (NOCULL) → `GXSetCullMode(0)`
+(`FUN_8009709c`), else back-face culling (the model attribute 0x800000 and a global mirror flag
+swap front / back). NOCULL is the exception, not the default: 23,478 of 251,341 stage
+triangles, all from material flags (no object sets it; stg04, 07, 13, 21, 24 … have none). The
+visible side is the reverse of the GX corner order, which agrees with the normals on 99.5 % of
+the culled triangles. stg04's fans (`obj04*A*01*Sensu*`) are 361 pairs of single-sided
+triangles on the same three positions facing opposite ways; drawn two-sided, World z-fought
+them (the fan "flicker"). The port now exports a NOCULL mesh two-sided and every other one
+single-sided in the reversed GX order (`hsf_dump.cull_winding`); a mesh under a mirroring world
+stays two-sided.
 
 **Parts.** World allows 32 frame-board instances (16 for a P2 preview) and 64 bones per
 instance, so parts must stay few and small:

@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "NAOKI 2" (CHR6900 + CHR6902), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s003_000 h4s005_064 h4s009l_040 h4s011l_000 h4s034_040 h4s036_016 h4s037_016 h4s040_008 h4s042_024 h4s052_015 h4s057_000 h4s059_048)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s003_000 h4s005_064 h4s007_000 h4s009l_008 h4s009l_032 h4s009l_040 h4s010_032 h4s034_040 h4s036_032 h4s041_024 h4s041_064 h4s057_048)
+# flight stages: motion/flight/ takeoff fly_h4s053_000 fly_h4s053_014 fly_h4s054_000 fly_h4s055_017
 hp4naoki02, pl, M, A, 1.0, 0.8, 0.0

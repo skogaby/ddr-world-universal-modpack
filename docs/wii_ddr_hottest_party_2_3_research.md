@@ -258,6 +258,20 @@ group, blend group) with ≤ 63 animated anchors and ≤ 48 animated material fl
 (`frame_board::MAX_MAT_PARAMS`); a flat rig of one bone per animated anchor;
 `_play_loop.anm` + `_play_loop.sanm`; cameras `_st` (own) + `_non` (GAME_DEF_CAM).
 
+- **Culling** (fixed 2026-10-05). zan sets `GX_CULL_BACK` unless the material's flags[1] asks for
+  no culling (`FUN_8010dec8`: flags[1] → NONE, its second argument → FRONT, else BACK; the draw
+  is `GX_TRIANGLESTRIP` 0x98, `FUN_800e50b0`). GX's visible side is the reverse of the strip
+  order: on 99 % of the single-sided stage triangles of all four zan discs that reverse agrees
+  with the vertex normals. The port used to ship every mesh two-sided (flags 0x0001), so faces
+  modelled back to back drew both: FuruFuru Party STG021's fan blades are a front quad
+  (`sensu_02`, normal +y) and a back quad (`sensu_01a`, −y) on the same four positions, both
+  single-sided, and World z-fought them (the "flicker" on the opening / closing fans; the back
+  face won most of the time, so the stage showed the wrong side of every fan). Now
+  `hsf_dump.cull_winding`: a no-cull material stays two-sided (`consistent_winding`), a culled
+  one is exported single-sided (flags without 0x0001) in the reversed strip order whatever its
+  normals say. A mesh under a mirroring world (det < 0: HP2 / HP3 STG043 / 045 backdrops, 0.6 %
+  of the single-sided submeshes) stays two-sided, since whether the engine flips its cull mode
+  there is not settled.
 - **Binds.** A bone's bind is the nearest proper rotation of its anchor's rest world, and its keys
   are `bind · rest⁻¹ · world(t)` — so whatever the rest world holds (non-uniform scale, a
   mirror) the vertices baked through it land where the zan engine puts them. The first port
@@ -318,6 +332,86 @@ interior points over a cycle, and every `.sanm` against the analytic offsets fra
 Sizes: `HOTTEST PARTY 2` 115 MB, `HOTTEST PARTY 3` 198 MB (the add-on writes uncompressed
 A8R8G8B8 DDS; STG111's three 1024 × 2048 atlases are 10.7 MB each), dancers 521 MB.
 
+### 7.5 The flight stages (investigated and ported 2026-10-05; effects not ported)
+
+Cabinet report: on the "flying tunnel" stages the dancer dances on the launch platform while the
+tunnel animation loops. In the games the dancer takes off and flies through the tunnel for the
+whole song. What the data shows:
+
+- **Which stages.** MUSIC FIT `STG201 / 205 / 206` (= `hp3stage201/205/206`; three colourways of
+  one set: `DRAW_STG201_0n` spiral tunnel, `OBJA_Z_hole0n` tube, `OBJA_Z_BG201` space backdrop,
+  plus STG109's stage and sea as `OBJA_Z_DRAW109` / `OBJA_Z_BG109` = the launch platform), HP4
+  `STG301` (the same layout, new models) and FuruFuru Party `STG102 / 103` (a ring tunnel, no
+  platform). MUSIC FIT STG202 / 204, FuruFuru Party STG101 and HP4 STG200 are bare floor + sky
+  stubs (64 + 38–50 vertices), not tunnels. MUSIC FIT's main.dol loads `stage/STG201_EFF.bin`
+  when a play-setup flag 0x200 is set (`FUN_800b44d8`, next to the stage file).
+- **The flight is the song's choreography, not the stage's.** Flight pieces are authored with
+  the Hips at the model ORIGIN (height ≈ 0, a dancer normally stands at 8.6), the torso level
+  (Hips → Head ≈ +z) for the whole piece. A scan of every `MOT010_SSQ*.bin` / `DANCE_*_MOT_010.bin`
+  finds them only in a few whole songs: MUSIC FIT 046, 047, 048, 049, 051 (13–24 one-bar flight
+  pieces each), HOTTEST PARTY 4 053, 054, 055 (17–27; HP5 re-ships them as `DANCE_HP4U_05x_*`),
+  FuruFuru Party 049 (two long flight loops, 400 / 300 frames). Each has one TAKE-OFF piece, the
+  same 600-frame (10 s) one in all eight MUSIC FIT / HP4 songs (#12 or #13): about 7 s idling at
+  the back of the platform (z −21.6), a run to its front edge and a leap (Hips to y 60, z +38);
+  FuruFuru Party 049's #1 (260 frames) stands, jumps and turns into the flight pose.
+- **The stage.** The spiral tunnel (`DRAW_STG201_0n`: two spirals at the far ends, z ±2055..3205,
+  and the grid tube `DRAW_B03_grid01` the flyer is inside, r 101..259, z ±2991) is centred on the
+  origin, where the flight pieces put the dancer; the platform is at the origin too.
+- **The switch is an intro script in main.dol, armed by the SONG.** A song whose play setup carries
+  flag 0x200 (MUSIC FIT `FUN_800b44d8` / `FUN_800b4b70` then also load `stage/STG201_EFF.bin` and
+  `game/GAME_CHR_EFF.bin`) arms it at the song start (`FUN_80035634` → `FUN_8003729c`) and
+  `FUN_80037354` runs it per 60 fps frame f (constants at SDA2 r2 = 0x8032d840 − 0x7cd0..0x7c68).
+  It drives the stage objects, which are the stage file's ZMBs in file order (`FUN_80043508`: 0
+  `DRAW_STG201_0n` tunnel, 1 `BG_STG201` space with planets, 2 COL, 3 `OBJA_Z_BG109` sky + sea,
+  4 `OBJA_Z_BG201` plain space, 5 `OBJA_Z_DRAW109` platform, 6 `OBJA_Z_hole0n` tunnel mouth; MUSIC
+  FIT STG205 / 206 and HP4 STG301 keep the order):
+  - at f 0: 0, 1, 6 hidden; 3, 4, 5 shown;
+  - f 60..210: object 5's colour `0.85·(210 − f)/150 + 0.15` (the platform dims to 0.15);
+  - f 180: stage effect (category 5 = STG201_EFF, `FUN_800431a4`, at a COL node) + sound 0xf6 / 0xf7;
+  - f 300..360: object 6 fades in (alpha `(f − 300)/60`) and starts its motion at 300 — the
+    one-shot opening (`Dummy_scale` 0.3 → 1 and the `Dummy_tube_*` nodes extending over its frames
+    0–134, then held to 2000);
+  - f 360..420: object 3 fades out (`(420 − f)/60`; hidden at alpha ≤ 1e-5), revealing object 4;
+  - f 544: the character effects, mode 2 (`FUN_8004b5a8(.., 2)`) — the leap of the take-off;
+  - a stage-controller value (`+0xea0`, by its shape a light level: 1 → 0.5 over f 60..210, → 0.15
+    over 360..420, a flash back to 0.5 at 422..423) — not ported;
+  - the switch: when the intro camera ends (`FUN_80048290`; the cameras `STG201_CAM00_01..03`,
+    3 + 4 + 3 s = 600 frames, the take-off's length) objects 0, 1 show, 3..6 hide and the character
+    effects switch to mode 0 (1 when the play mode `+0xe4` is 4).
+  - from the switch the WHOLE scene (camera, stage, dancers) is translated by a world offset that
+    starts at (0, 0, −50000) and moves +3 units per frame (play object +0x3ac, `FUN_800377e0`):
+    invisible except to world-space effect state, which streams behind the flyer — the rainbow
+    trail (`docs/wii_ddr_zan_effects_research.md` §3.4).
+  The first port looped every model's ZAB and showed them all, so the tube re-opened every 33 s —
+  the "broken looping tunnel".
+- **The effects** (not ported; full RE in `docs/wii_ddr_zan_effects_research.md`). zan `CzanEff` banks by category: 1 `GAME_STG_EFF`,
+  3 `GAME_APL_EFF`, 5 `STG201_EFF` (`stage_effects01.teb`, 1 effect), 6 `GAME_CHR_EFF`
+  (`boss_ddr3.TEB`, 24 effects + 17 textures: star sprites per player colour — gold, blue, pink,
+  green — a rainbow gradient strip, rings, flares). `FUN_8004b5a8` plays, for player p in mode m,
+  effects `8m + 2p`, `8m + 2p + 1`, `8m + 2p + 1` (table `0x80218ad8`) at the dancer's attach
+  joints (`0x80218b68`: modes 0 / 1 joints [0, 1, 2], mode 2 [5, 3, 4]; joint 5 position-only) and
+  `FUN_8004b360` re-sets their matrices each frame. A TEB holds effects → node trees (per node
+  `{u8 child, u8 next, u8 type, u8, u32 data}`: type 0 root, 1 `CzanEffPart` emitter, 2
+  `CzanEffMdl` model); a part's data is a flag word selecting sub-blocks (emitter: life, spawn
+  interval, max / per-spawn counts, position / rotation spread; draw: texture, size, key lists;
+  child-chain trails; ribbons; velocity / gravity; key tables). The runtime is a full particle
+  system (`FUN_8012b5b8` part update + spawn, `FUN_8012ce18` particle step: velocity, gravity,
+  camera-facing billboards from the camera matrix, size / alpha / colour keys over the normalised
+  life, flip-book UVs; `FUN_8012ddf4` draw; `FUN_80131d08` / `FUN_80131764` ribbon strips; play /
+  matrix / stop API `FUN_8012aca8` / `FUN_8012af28` / `FUN_8012ae74`). Nothing in it is geometry
+  that could be ported as a model: porting it means re-implementing the particle runtime and giving
+  World a way to draw per-frame camera-facing sprites and ribbons.
+- **The port** (2026-10-05). Characters: flight / take-off pieces (`zan_dump.piece_class`) leave
+  the dance library; every zan dancer gets `motion/flight/takeoff.anm` + 4 flight loops
+  (`port_character_hottest2` FLIGHT). Stages: `mapset_<key>/flight.txt` marks the six stages; parts
+  are named by role — `pre_plat_*` (object 5), `pre_sky_*` (3, a `_bg` part), `pre_space_*` (4,
+  `_bg`), `pre_hole_*` (6, a one-shot clip), `fly_*` (0 and 1: `fly_bg` is the planets' space) —
+  and Background Dancers replays the intro script on them on the take-off's clock
+  (`director_math::intro_look`, through the instance tint) and switches at the take-off's end. The
+  FuruFuru Party ring tunnels (STG102 / 103, no platform) carry the marker alone; how FuruFuru
+  Party switches them (its flight song 049 has its own 260-frame take-off) was not looked at.
+  HP4 STG301 is assumed to run MUSIC FIT's script (HP4's main.dol is not imported).
+
 ## 8. Not done / open
 
 - Cabinet test (screens in STAGE SCREENS mode, flip-books, the `.sanm` budget).
@@ -331,7 +425,8 @@ A8R8G8B8 DDS; STG111's three 1024 × 2048 atlases are 10.7 MB each), dancers 521
   stages keep their file colours.
 - Not ported: the Mii bodies, `_S` split-screen stages, COL hulls, EFF effect nodes, the eye /
   mouth flip-book animation on the dancers (first frame baked), additive dancer passes, the stage
-  lights (`LIGPOS_` / `LIGTAR_`).
+  lights (`LIGPOS_` / `LIGTAR_`), the flight stages' `CzanEff` particle effects (§7.5: the flyer's
+  orb, rainbow trail and stars; the intro's stage effect) and their light-level ramp.
 
 ## 9. Reproduce
 

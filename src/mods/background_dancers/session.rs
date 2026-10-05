@@ -38,8 +38,9 @@ use super::director_math::{
     body_world, part_world, shadow_target, shadow_world, subtree_of, transform_point, BLACK,
     SHADOW_FLOOR_Y, WHITE,
 };
+use super::flight_fx::{self, DancerFx, FxLayout, Teb};
 use super::instance_plan::{
-    plan_instances, DancerSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
+    plan_instances, DancerSpec, FxSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
 };
 use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
@@ -136,7 +137,23 @@ pub struct ParsedDancer {
     /// scales (`director_math::scale_subtree_about_root`); empty without a
     /// `.b2it` / a `Head` entry, which leaves the dancer at normal size.
     pub head_subtree: Vec<usize>,
+    /// The flight effects' attach joints (`flight_fx::JOINT_NAMES`: Hips,
+    /// hands, feet); `None` when the `.b2it` lacks one — no effects then.
+    pub fx_joints: Option<[usize; 5]>,
 }
+
+/// A flight stage's effect bank + pool layout (`data/map/flight_fx/`,
+/// `port_flight_fx.py`): what the flying dancers' effects run from.
+pub struct FlightFxAssets {
+    pub teb: Teb,
+    pub layout: FxLayout,
+    /// Per layout pool: its model's bone count (from the `.model` file).
+    pub pool_bones: Vec<Option<usize>>,
+}
+
+/// The effect bank / layout members inside a flight stage's arc.
+pub const FLIGHT_FX_TEB: &str = "data/map/flight_fx/flight_fx.teb";
+pub const FLIGHT_FX_LAYOUT: &str = "data/map/flight_fx/flight_fx.txt";
 
 /// The stage's camera sets that parsed (in the pick's shuffled order).
 pub struct ParsedCameras {
@@ -154,6 +171,8 @@ pub struct Parsed {
     /// The MOVIE camera set (loose `.camanm` files, `movie_camera.rs`) —
     /// `None` unless the pick carried one and a main clip parsed.
     pub movie_cameras: Option<ParsedCameras>,
+    /// The flight effects (a flight pick whose stage ships them).
+    pub flight_fx: Option<Arc<FlightFxAssets>>,
     /// One line per skipped member/instance — logged once by the lifecycle.
     pub warnings: Vec<String>,
     pub elapsed_ms: u64,
@@ -348,6 +367,10 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             }
         }
     }
+    let flight_fx = match (pick.flight, stage_reader.as_ref()) {
+        (true, Some(reader)) => parse_flight_fx(reader, &mut warnings),
+        _ => None,
+    };
 
     // Dancers: body skeleton + playlist clips — from the motion arc of each
     // dancer's sex, or its OWN clips inside its body arc (design 2026-09-28
@@ -498,6 +521,23 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             ));
         }
 
+        let fx_joints = {
+            let mut j = [0usize; 5];
+            let mut ok = names.is_some();
+            for (k, name) in flight_fx::JOINT_NAMES.iter().enumerate() {
+                match bone_index(name) {
+                    Some(b) => j[k] = b,
+                    None => ok = false,
+                }
+            }
+            if pick.flight && flight_fx.is_some() && !ok {
+                warnings.push(format!(
+                    "{model_name}.b2it lacks one of {:?} -- no flight effects for this dancer",
+                    flight_fx::JOINT_NAMES
+                ));
+            }
+            ok.then_some(j)
+        };
         dancers.push(ParsedDancer {
             key: d.key.clone(),
             sex: d.sex,
@@ -511,6 +551,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             ground,
             hips,
             head_subtree,
+            fx_joints,
         });
     }
 
@@ -652,9 +693,65 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         shadow,
         cameras,
         movie_cameras,
+        flight_fx,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
     }
+}
+
+/// The stage arc's flight effects: the TEB bank, the pool layout and every
+/// pool model's bone count. `None` (with a warning when the stage ships
+/// half of it) otherwise — the dancers then fly without effects.
+fn parse_flight_fx(reader: &ArcReader, warnings: &mut Vec<String>) -> Option<Arc<FlightFxAssets>> {
+    let (teb, text) = match (reader.get(FLIGHT_FX_TEB), reader.get(FLIGHT_FX_LAYOUT)) {
+        (None, None) => {
+            warnings.push(format!(
+                "flight stage without {FLIGHT_FX_TEB} -- the dancers fly without effects (re-run port_flight_fx.py)"
+            ));
+            return None;
+        }
+        (Some(t), Some(l)) => (t, l),
+        _ => {
+            warnings.push(format!(
+                "{FLIGHT_FX_TEB} / {FLIGHT_FX_LAYOUT}: only one present -- no flight effects"
+            ));
+            return None;
+        }
+    };
+    let Some(teb) = flight_fx::parse_teb(&teb) else {
+        warnings.push(format!(
+            "{FLIGHT_FX_TEB}: not a readable TEB -- no flight effects"
+        ));
+        return None;
+    };
+    let layout = match FxLayout::parse(&String::from_utf8_lossy(&text)) {
+        Ok(l) => l,
+        Err(e) => {
+            warnings.push(format!("{FLIGHT_FX_LAYOUT}: {e} -- no flight effects"));
+            return None;
+        }
+    };
+    let pool_bones = layout
+        .pools
+        .iter()
+        .map(|p| {
+            let member = format!("data/map/{0}/{0}.model", p.model);
+            let n = parse_skeleton(reader, &member, warnings)?.bone_count();
+            if n != p.bones() {
+                warnings.push(format!(
+                    "{member}: {n} bones but the layout says {} -- pool skipped",
+                    p.bones()
+                ));
+                return None;
+            }
+            Some(n)
+        })
+        .collect();
+    Some(Arc::new(FlightFxAssets {
+        teb,
+        layout,
+        pool_bones,
+    }))
 }
 
 /// Which camera set a frame is filmed with.
@@ -704,7 +801,7 @@ fn schedule_over(c: &ParsedCameras, seed: u64) -> Option<CameraSchedule> {
 /// parsed, in order). `None` without a dancer. In BPM-sync mode the
 /// segment lengths snap to whole beats of dance time so every cut lands on
 /// a chart beat.
-pub fn dance_schedule(parsed: &Parsed, opts: TempoOptions) -> Option<DanceSchedule> {
+pub fn dance_schedule(parsed: &Parsed, opts: TempoOptions, flight: bool) -> Option<DanceSchedule> {
     let d = DanceSchedule::new(
         parsed
             .dancers
@@ -712,11 +809,35 @@ pub fn dance_schedule(parsed: &Parsed, opts: TempoOptions) -> Option<DanceSchedu
             .map(|d| d.clips.iter().map(Clip::clip_ref).collect())
             .collect(),
     )?;
-    Some(if opts.bpm_sync {
+    let d = if opts.bpm_sync {
         d.with_quantum(BEAT_TAU)
     } else {
         d
+    };
+    // FLIGHT: every dancer's first clip is its take-off (a missing take-off
+    // member drops it from the parsed playlist — then no intro, the
+    // platform stays and the flight clips cycle on it).
+    let takeoffs = parsed.dancers.iter().all(|d| {
+        d.clips
+            .first()
+            .is_some_and(|c| super::selection::is_takeoff_clip(&c.name))
+    });
+    Some(if flight && takeoffs {
+        d.with_intro()
+    } else {
+        d
     })
+}
+
+/// The switch time of a flight stage (see [`Session::flight_switch`]).
+pub fn flight_switch(pick: &Pick, schedule: Option<&DanceSchedule>) -> Option<f32> {
+    if !pick.flight {
+        return None;
+    }
+    if pick.dancers.is_empty() {
+        return Some(super::director_math::DEFAULT_TAKEOFF_S);
+    }
+    schedule.and_then(DanceSchedule::intro_end)
 }
 
 // ---------------------------------------------------------------------------
@@ -745,10 +866,26 @@ pub struct Session {
     /// song.
     pub hulls: HullPlan,
     pub schedule: Option<DanceSchedule>,
+    /// The stage is a FLIGHT stage (`StageCandidate::flight`): its `pre_` /
+    /// `fly_` parts follow [`flight_switch`](Self::flight_switch).
+    pub flight_stage: bool,
+    /// When the flight starts (the take-off segment's end; the stage-only
+    /// preview: `DEFAULT_TAKEOFF_S`). `None` on a flight stage = no flight
+    /// (nobody can fly, or a take-off failed to parse): the platform stays.
+    pub flight_switch: Option<f32>,
     pub instances: Vec<Instance>,
-    /// Per dancer: the instance indices of its parts and shadow (the
-    /// director derives them from the dancer's bones without re-scanning).
+    /// Per dancer: the instance indices of its parts, shadow and effect
+    /// pools (the director derives them from the dancer's bones without
+    /// re-scanning).
     pub children: Vec<Vec<usize>>,
+    /// Per dancer: its flight effects (`None` off a flight / without the
+    /// stage's effect assets / the attach joints).
+    pub fx: Vec<Option<DancerFx>>,
+    /// Per dancer: the leap's dance time (take-off frame 544 of 600).
+    pub fx_leap: Vec<f32>,
+    /// The camera this frame is filmed with (set by the camera director
+    /// before the publish): what the effects' billboards face.
+    pub fx_camera: Option<scene_graph::CamSample>,
     /// Per dancer: the shadow's low-passed size (A3 `prev += 0.1·(target −
     /// prev)`), reset at every song (re)start.
     pub shadow_size: Vec<f32>,
@@ -792,7 +929,50 @@ impl Session {
         slot_base: u32,
         item_pass_mask: Option<u32>,
     ) -> Session {
-        let schedule = dance_schedule(&parsed, tempo_opts);
+        let schedule = dance_schedule(&parsed, tempo_opts, pick.flight);
+        let flight_stage = pick.stage.as_ref().is_some_and(|s| s.flight);
+        let flight_switch = flight_switch(&pick, schedule.as_ref());
+        // Flight effects: every flying dancer with its joints gets player
+        // (index mod 4)'s pools — only when the take-off really leads into
+        // a flight.
+        let fx_assets = parsed
+            .flight_fx
+            .clone()
+            .filter(|_| flight_switch.is_some() && !parsed.dancers.is_empty());
+        let fx_pool_specs = |i: usize| -> Vec<(usize, FxSpec)> {
+            let Some(a) = fx_assets.as_ref() else {
+                return Vec::new();
+            };
+            if parsed.dancers.get(i).and_then(|d| d.fx_joints).is_none() {
+                return Vec::new();
+            }
+            a.layout
+                .pools_of(i % flight_fx::PLAYERS)
+                .into_iter()
+                .take(flight_fx::MAX_POOLS)
+                .filter_map(|k| {
+                    let bones = (*a.pool_bones.get(k)?)?;
+                    Some((
+                        k,
+                        FxSpec {
+                            model_name: a.layout.pools.get(k)?.model.clone(),
+                            bone_count: bones,
+                        },
+                    ))
+                })
+                .collect()
+        };
+        if flight_stage {
+            match flight_switch {
+                Some(s) => log_info!(
+                    "BackgroundDancers: flight stage -- take-off for {:.1} s, then the tunnel (pre_/fly_ parts switch there)",
+                    s
+                ),
+                None => log_warn!(
+                    "BackgroundDancers: flight stage without a flight (no flight-capable dancer, or a take-off clip missing) -- the platform stays"
+                ),
+            }
+        }
         let camera = camera_schedule(&parsed, pick.seed);
         let movie_camera = movie_camera_schedule(&parsed, pick.seed);
         let input = PlanInput {
@@ -821,11 +1001,60 @@ impl Session {
                         })
                         .collect(),
                     has_ground: !d.ground.is_empty(),
+                    fx_pools: Vec::new(),
                 })
                 .collect(),
             shadow_bone_count: parsed.shadow.as_ref().map(|s| s.bone_count()),
             shadow_model: SHADOW_MODEL.to_string(),
         };
+        let mut input = input;
+        let mut fx: Vec<Option<DancerFx>> = Vec::new();
+        for (i, d) in input.dancers.iter_mut().enumerate() {
+            let specs = fx_pool_specs(i);
+            let built = match (fx_assets.as_ref(), specs.is_empty()) {
+                (Some(a), false) => {
+                    let mut dfx = DancerFx::new(&a.teb, &a.layout, i, pick.seed as u32);
+                    // keep only the pools whose model parsed, in plan order
+                    let keep: Vec<usize> = specs.iter().map(|(k, _)| *k).collect();
+                    let frames = std::mem::take(&mut dfx.frames);
+                    let (pools, frames): (Vec<usize>, Vec<_>) = dfx
+                        .pools
+                        .iter()
+                        .copied()
+                        .zip(frames)
+                        .filter(|(k, _)| keep.contains(k))
+                        .unzip();
+                    dfx.pools = pools;
+                    dfx.frames = frames;
+                    d.fx_pools = specs.into_iter().map(|(_, s)| s).collect();
+                    Some(dfx)
+                }
+                _ => None,
+            };
+            fx.push(built);
+        }
+        let fx_leap: Vec<f32> = parsed
+            .dancers
+            .iter()
+            .map(|d| {
+                let takeoff = d
+                    .clips
+                    .first()
+                    .filter(|c| super::selection::is_takeoff_clip(&c.name))
+                    .map_or(director_math_takeoff_s(), |c| c.anm.duration_s());
+                takeoff * flight_fx::LEAP_FRAME / flight_fx::TAKEOFF_FRAMES
+            })
+            .collect();
+        if fx.iter().any(Option::is_some) {
+            log_info!(
+                "BackgroundDancers: flight effects -- {} of {} dancer(s), {} pool instance(s), leap at {:.2} s (boss_ddr3.TEB, {} effects)",
+                fx.iter().filter(|f| f.is_some()).count(),
+                fx.len(),
+                input.dancers.iter().map(|d| d.fx_pools.len()).sum::<usize>(),
+                fx_leap.first().copied().unwrap_or(0.0),
+                fx_assets.as_ref().map_or(0, |a| a.teb.effects.len())
+            );
+        }
         let slot_budget = frame_board::MAX_INSTANCES.saturating_sub(slot_base as usize);
         let plan = plan_instances(
             &input,
@@ -853,8 +1082,13 @@ impl Session {
             style,
             hulls,
             schedule,
+            flight_stage,
+            flight_switch,
             instances: plan.instances,
             children: plan.children,
+            fx,
+            fx_leap,
+            fx_camera: None,
             shadow_size,
             camera,
             camera_state: None,
@@ -914,9 +1148,9 @@ impl Session {
     }
 
     /// Instance counts by kind (built ones) for the `built` INFO:
-    /// `(stage parts, dancers, parts, shadows, hulls)`.
-    pub fn built_counts(&self) -> (usize, usize, usize, usize, usize) {
-        let mut c = (0, 0, 0, 0, 0);
+    /// `(stage parts, dancers, parts, shadows, hulls, effect pools)`.
+    pub fn built_counts(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let mut c = (0, 0, 0, 0, 0, 0);
         for i in self.built() {
             match i.kind {
                 InstanceKind::StagePart(_) => c.0 += 1,
@@ -924,6 +1158,7 @@ impl Session {
                 InstanceKind::Part { .. } => c.2 += 1,
                 InstanceKind::Shadow(_) => c.3 += 1,
                 InstanceKind::Hull { .. } => c.4 += 1,
+                InstanceKind::Fx { .. } => c.5 += 1,
             }
         }
         c
@@ -958,7 +1193,8 @@ impl Session {
                 }
                 _ => IDENTITY,
             },
-            InstanceKind::StagePart(_) => IDENTITY,
+            // Effect pools: bones carry world positions (identity bind).
+            InstanceKind::StagePart(_) | InstanceKind::Fx { .. } => IDENTITY,
             InstanceKind::Dancer(i) => self.dancer_body_world(i),
             InstanceKind::Part { dancer, part } => {
                 // Rest pose: the part on its bind bone.
@@ -1205,6 +1441,23 @@ fn build_one(
             hidden.max(marked)
         );
     }
+    if matches!(inst.kind, InstanceKind::Fx { .. }) {
+        // The effect pools address draw record i as quad / strip mesh i
+        // (`flight_fx.txt`): confirm the record → material order the item
+        // carries (a sprite pool must read 0, 1, 2, …).
+        // SAFETY: our own fresh block, not yet attached.
+        let map = unsafe { item.record_materials() };
+        let identity = map.iter().enumerate().all(|(i, &m)| i == m);
+        let head: Vec<String> = map.iter().take(12).map(|m| m.to_string()).collect();
+        log_info!(
+            "BackgroundDancers: {} [fx] {} record(s) -> materials [{}{}]{}",
+            inst.model_name,
+            map.len(),
+            head.join(","),
+            if map.len() > 12 { ",..." } else { "" },
+            if identity { " (identity)" } else { "" }
+        );
+    }
     log_info!(
         "BackgroundDancers: {} [{}{}] item built at 0x{:X} {} ms after request (mode=0x{:X} bones={} records={} mats={} pals={} skinned={} bone_tex=0x{:X}/0x{:X} textures total={} load={} re={} default={} slot={} pass=0x{:X} sort={})",
         inst.model_name,
@@ -1272,6 +1525,12 @@ fn build_one(
     inst.attached_at = Some(Instant::now());
     inst.status = InstanceStatus::Built;
     true
+}
+
+/// The take-off's length when its clip did not parse (the leap then lands
+/// at the same fraction of the default).
+fn director_math_takeoff_s() -> f32 {
+    super::director_math::DEFAULT_TAKEOFF_S
 }
 
 /// Used by `initial_world` callers that only have the scale (tests, Step 8).

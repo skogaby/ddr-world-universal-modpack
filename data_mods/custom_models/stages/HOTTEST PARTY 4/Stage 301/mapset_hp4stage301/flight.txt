@@ -1,0 +1,3 @@
+# Background Dancers FLIGHT stage (DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) STG301): the dancers play motion/flight/takeoff, then fly;
+# parts pre_* show until the take-off ends (pre_plat / pre_sky / pre_hole follow the
+# game's intro script), fly_* after it (port_stage_hottest2.FLIGHT_PHASES)

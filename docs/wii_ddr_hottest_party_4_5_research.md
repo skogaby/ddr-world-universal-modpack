@@ -13,7 +13,7 @@ how do they port to DDR World?
   archive on both discs with 0 problems.
 - **Neither cast contains the other, and neither is part of HOTTSTPARTY 1-3** (§2), so each game is
   its own source: `dancers/HOTTSTPARTY 4/` (32 dancers) and `dancers/HOTTSTPARTY 5/` (18).
-- **Stages: `stages/HOTTEST PARTY 4/` (26) and `stages/HOTTEST PARTY 5/` (15)**, chosen by
+- **Stages: `stages/HOTTEST PARTY 4/` (26) and `stages/HOTTEST PARTY 5/` (14)**, chosen by
   `zan_dump.plan_stage_ports`. That skips what HP2 / HP3 / HP4 already ship, the in-disc
   duplicates and the COL-only `STG4xx` (§3).
 - **Movie screens are colour-group-92 materials** (§3.2), and the port maps them to `offscreen1`.
@@ -101,10 +101,14 @@ of HP2 STG011's sixteen props on a new set, plus new prop models.
 | STG000, 401, 407–434 (but 426, 431, 432) | no models |
 
 HP4 STG201 is STG301 at half the texture resolution (128² vs 256²), with its camera rig nudged. It
-is the same set on screen, so it is dropped by hand (`NEAR_DUPLICATES`) and 301 ships.
+is the same set on screen, so it is dropped by hand (`NEAR_DUPLICATES`) and 301 ships. Likewise
+HP5 STG012 (dropped 2026-10-05, cabinet report "looks like Stage 03"): STG003's `DRAW_STG102_01`
+set again at about half the polygons (6245 vs 11284 vertices, same node layout and bounds), its
+two stacked monitor-wall layers swapped (monitor01 is the stage video and monitor02 the song's PV,
+the other way round in 003) and six `EFF_` spots added to its COL.
 
 Result: HP4 ships STG001–008, 042–044, 101–106, 200, 301, 402–406, 431, 432 (26); HP5 ships
-STG001–003, 012–016, 018–020, 028–030, 426 (15). The planner reads all four discs. When the older
+STG001–003, 013–016, 018–020, 028–030, 426 (14). The planner reads all four discs. When the older
 dumps are missing, the port falls back to `RECORDED_PLAN`, which was checked equal to the live plan
 on 2026-10-04.
 
@@ -145,13 +149,14 @@ HP5's `STG<nnn>_Prm.bin` /#0 (a `ZAR` record; `zan_dump.stage_params`) selects t
 |---|---|---|
 | 0 | plain 3D stage | — |
 | 1 | full-screen background video only (the COL-only STG4xx) | `bgv<nn>` |
-| 2 | stage video on the group-91 surfaces | `quarter` — `quarter01.thp` etc. are 2×2 mosaics, each surface's UVs pick a quadrant |
+| 2 | stage video on the group-91 surfaces | `quarter` — main.dol opens `movie/stage/<genre>_%s%02d.thp`, i.e. `upt / pop / mvo / fvo _quarter01..03` (512² 2×2 mosaics, the song's genre); each surface's UVs pick a quadrant. The bare `quarter01.thp` is never opened (HP4's is a 640×480 4:3 cut of the same four loops) |
 | 3 | likewise, one named video | `single02` … `single07` |
 | 4 | the song's PV on the group-92 monitors | — (HP5 STG028–030) |
 
 MUSIC FIT and the plain HP4 stages leave the pick to the song (`ani / fvo / mvo / pop / upt`
-01–04). The port decodes 16 frames (ffmpeg, 240 px, one every 0.75 s) of the named video, or of
-`upt01` when the stage names none. It turns them into a flip-book on the group-91 material, which
+01–04). The port decodes 16 frames (ffmpeg, 240 px, one every 0.75 s) of the named video
+(`quarter` → `upt_quarter01`; until 2026-10-05 the unused `quarter01`), or of `upt01` when the
+stage names none. It turns them into a flip-book on the group-91 material, which
 the atlas machinery animates. Without this, these stages showed blank white cards: HP5 STG013 /
 018 are a single movie room, and STG426 is an empty box.
 
@@ -167,6 +172,22 @@ the atlas machinery animates. Without this, these stages showed blank white card
   (253), HP4 STG002 / 043 / 102 (78–97) and HP5 STG426 (77) lost their flip-books, and four STG426
   materials drew untextured. The cap is now `MAX_FLIP` = 1024.
 - MUSIC FIT's group-92 TV sets are screens now too (§3.2).
+- **Culling** (2026-10-05, all zan ports and HP1). Every mesh shipped two-sided; the Wii culls
+  back faces unless the material says otherwise, so back-to-back single-sided faces z-fought
+  (HP2 STG021's and HP1 stg04's fans). Now single-sided in the Wii's winding
+  (`hsf_dump.cull_winding`; research 2/3 §7.2, HP1 §6). All HP1–HP5 stages re-ported.
+
+### 3.2d The stage-video surfaces' aspect (cabinet report "stretched", 2026-10-05)
+
+The group-91 UVs are authored non-square, so a quadrant is stretched on the Wii as well (UV keys
+scroll u by one tile per 3.33 s on STG403 / 404; no texture-matrix scale in the `_Prm` or the
+material). Per quadrant (0.5 × 0.5 of the mosaic):
+- STG404's `DRAW_e01` strip: 282 × 20 units over u −1..3, v 0..0.5 → 35 × 20 per quadrant (1.76:1);
+- STG426's box walls: half a quadrant per wall, ~155 × 134 → one quadrant spans two walls (2.3:1);
+- STG403's corridor band `DRAW_c02`: u 0..4.35 over eight panels of uneven u density
+  (0.15–1.5 tiles per ~60 units), from ~1:1 near the dancer to 0.44:1 at the far end.
+The 512² genre mosaics hold 4:3 loops squeezed into squares; the stretch on screen is the Wii's
+own. The port's share was the wrong movie (the 4:3 `quarter01`) and the flip-book's 1.3 fps.
 
 ### 3.3 Cameras
 
@@ -202,6 +223,6 @@ scripts/extract_wii_ddr_data.py disc "$W/Hottest Party 4.wbfs" "$W/Hottest Party
 B=/Applications/Blender.app/Contents/MacOS/Blender; E=tools/blender_ddr_addon/examples
 GAME=hp4 DANCERS=all $B -b --factory-startup --python $E/port_character_hottest2.py   # ~6 min, 32 dancers
 GAME=hp5 DANCERS=all $B -b --factory-startup --python $E/port_character_hottest2.py   # 18 dancers
-GAME=hp4 STAGES=all  $B -b --factory-startup --python $E/port_stage_hottest2.py       # 27 stages (reads HP2 / HP3 dumps too)
-GAME=hp5 STAGES=all  $B -b --factory-startup --python $E/port_stage_hottest2.py       # 15 stages
+GAME=hp4 STAGES=all  $B -b --factory-startup --python $E/port_stage_hottest2.py       # 26 stages (reads HP2 / HP3 dumps too)
+GAME=hp5 STAGES=all  $B -b --factory-startup --python $E/port_stage_hottest2.py       # 14 stages
 ```

@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Bossa 2" (CHR310 + CHR312), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_004 h3s002j_027 h3s007j_040 h3s009j_053 h3s012j_057 h3s013j_009 h3s018_011 h3s020j_014 h3s022_021 h3s043_038 h3s057_008 h2s047_034)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002j_019 h3s010_022 h3s011j_008 h3s011j_024 h3s017j_096 h3s024j_011 h3s025_041 h3s033_049 h3s043_030 h3s044_060 h3s054_030 h3s058_032)
+# flight stages: motion/flight/ takeoff fly_h3s046_000 fly_h3s046_008 fly_h3s048_000 fly_h3s048_008
 hpbossa02, pl, F, A, 1.0, 0.75, 0.0

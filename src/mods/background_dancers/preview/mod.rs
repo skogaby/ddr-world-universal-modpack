@@ -364,7 +364,7 @@ fn drive_live_window(slot: &mut PreviewSlot, menu_open: bool) {
         }
         w.scene.park_engine_destroyed();
         let t = w.t();
-        w.scene.publish(t, true, SceneMask::ALL);
+        w.scene.publish(t, t, true, SceneMask::ALL);
         if let Some(passes) = slot.passes.as_mut() {
             let f = camera::frustum_for(w, t, slot.aspect);
             camera::apply(&f, passes);

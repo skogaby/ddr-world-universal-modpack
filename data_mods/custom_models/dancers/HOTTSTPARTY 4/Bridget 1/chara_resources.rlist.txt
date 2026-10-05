@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Bridget 1" (CHR6300 + CHR6301), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s004_008 h4s012_056 h4s014_008 h4s016_024 h4s017_024 h4s018_008 h4s020_008 h4s037_048 h4s043_008 h4s053_004 h4s063_024 h4s064_016)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001l_016 h4s005_008 h4s007_016 h4s009_016 h4s010l_000 h4s012_056 h4s019_016 h4s035_024 h4s036_048 h4s041_000 h4s049_040 h4s059_016)
+# flight stages: motion/flight/ takeoff fly_h4s053_008 fly_h4s054_006 fly_h4s054_015 fly_h4s055_008
 hp4bridget01, pl, F, A, 1.0, 0.75, 0.0

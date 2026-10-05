@@ -13,8 +13,11 @@ nodes are effect and light spots), plus its camera shots. Per stage:
      through its frame-0 world (node world under its motion x the instance world under COL's
      motion) into game metres (zan_dump.GAME_SCALE, the dancers' scale); the material picks the
      World blend group (zan_dump.material_mode: additive -> `add`, ZERO+INVSRCALPHA -> `sub`, a
-     soft alpha blend with real partial alpha -> `ble`, else `dec`, alpha-tested; every mesh
-     two-sided like HOTTEST PARTY 1's port); COLOR0 = the vertex colours;
+     soft alpha blend with real partial alpha -> `ble`, else `dec`, alpha-tested); CULLING as on the
+     Wii: a material's no-cull flag (material_mode) -> two-sided, else single-sided in the Wii's
+     own winding (hsf_dump.cull_winding; a mesh under a mirroring world stays two-sided) -- until
+     2026-10-05 every mesh shipped two-sided and back-to-back faces z-fought; COLOR0 = the vertex
+     colours;
   2. MOVIE SCREENS: the `root` quad of a `*_MOV*` prop (where the game plays its stage movie / the
      song's PV) is textured `offscreen1` (README "Stage screens": World's STAGE SCREENS mode plays
      the song's movie there), its v range remapped onto the 16:9 band, opaque white, no animation;
@@ -46,7 +49,7 @@ nodes are effect and light spots), plus its camera shots. Per stage:
   9. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, ..., ble:-1`.
 STG<nnn>_S.bin (the split-screen copies) are not ported, nor MUSIC FIT's STG000 / STG041..055
 (FuruFuru Party's again, shipped once from there with their screens: is_hp2_reexport). HP4 / HP5
-port what zan_dump.plan_stage_ports leaves (planned_stages): HP4 27 stages, HP5 15 -- not their
+port what zan_dump.plan_stage_ports leaves (planned_stages) less NEAR_DUPLICATES: HP4 26 stages, HP5 14 -- not their
 re-shipped HP2 / HP3 / HP4 stages, their in-disc duplicates, the COL-only STG4xx, STG<nnn>_P (HP4's
 copies of HP2's STG042 / 046) or HP4 / HP5's props no OBJSET node places (unused, at the origin).
 
@@ -65,6 +68,7 @@ Run: GAME=hp2 STAGES=all /Applications/Blender.app/Contents/MacOS/Blender -b --f
 import hashlib
 import math
 import os
+import re
 import sys
 import tempfile
 
@@ -151,8 +155,50 @@ RECORDED_PLAN = {
 
 
 # stages the content signature cannot fold: HP4 STG201 is STG301 (shipped) with half-size textures
-# and its camera rig nudged -- the same set on screen
-NEAR_DUPLICATES = {'hp4': {'STG201': 'STG301 at half the texture resolution (the same set)'}}
+# and its camera rig nudged; HP5 STG012 is STG003's DRAW_STG102_01 set at about half the polygons,
+# its two stacked monitor-wall layers swapped (the song's PV in front of the stage video) -- the
+# same set on screen
+NEAR_DUPLICATES = {'hp4': {'STG201': 'STG301 at half the texture resolution (the same set)'},
+                   'hp5': {'STG012': 'STG003 at half the polygons, PV / stage-video wall layers swapped (the same set)'}}
+
+
+# FLIGHT stages (research 2/3 §7.5): the dancers take off from a launch platform and fly through a
+# tunnel. Background Dancers plays the take-off + flight clips there (`mapset_<key>/flight.txt` marks
+# the stage) and switches the stage at the end of the take-off. MUSIC FIT's main.dol runs the switch
+# as an intro script over the stage objects (`FUN_8003729c` arms it, `FUN_80037354` runs it; the
+# objects are the stage file's models in file order): until the switch the platform (STG109's stage,
+# object 5, dims to 0.15), its sky + sea (object 3, fades out at 6-7 s), a plain space (object 4) and
+# the tunnel mouth (object 6, fades in at 5-6 s and plays its one-shot opening -- Dummy_scale 0.3 -> 1
+# over frames 0..134, then held) show; at the switch the tunnel (DRAW_*, object 0) and its space with
+# the planets (BG_*, object 1) replace them all. The parts are named by role -- `pre_plat_*`,
+# `pre_sky_*`, `pre_space_*`, `pre_hole_*`, `fly_*` -- and the DLL replays the script on them
+# (`director_math::intro_look`). A model whose motion does not return to its first pose is a
+# one-shot clip there (no loop bit, its last key the end pose) instead of re-opening every 33 s.
+# Only a stage with the launch platform has phases: FuruFuru Party's ring tunnels (STG102 / 103) are
+# the marker alone.
+FLIGHT_PHASES = [('pre_plat', re.compile(r'^OBJA_Z_DRAW109', re.I)),
+                 ('pre_sky', re.compile(r'^OBJA_Z_BG109', re.I)),
+                 ('pre_space', re.compile(r'^OBJA_Z_BG201', re.I)),
+                 ('pre_hole', re.compile(r'^OBJA_Z_hole\d+', re.I)),
+                 ('fly', re.compile(r'^(DRAW|BG)_STG\d+(_0\d)?$', re.I))]
+FLIGHT_PLATFORM = re.compile(r'^OBJA_Z_DRAW109', re.I)
+FLIGHT_STAGES = {'hp2': {'STG102', 'STG103'}, 'hp3': {'STG201', 'STG205', 'STG206'}, 'hp4': {'STG301'}}
+FLIGHT_MARKER = 'flight.txt'
+
+
+def is_flight_stage(stage):
+    return stage in FLIGHT_STAGES.get(GAME, set())
+
+
+def entry_phase(stage, stem, stems=()):
+    """The flight role ('pre_plat' / 'pre_sky' / 'pre_space' / 'pre_hole' / 'fly') of model `stem`
+    on a flight stage with a launch platform among `stems`, else None (always shown)."""
+    if not is_flight_stage(stage) or not any(FLIGHT_PLATFORM.match(s) for s in stems):
+        return None
+    for phase, rx in FLIGHT_PHASES:
+        if rx.match(stem):
+            return phase
+    return None
 
 
 def planned_stages(game):
@@ -270,10 +316,21 @@ def load_stage(stage):
                          motion=e['motion'], inst=fr, inst_index=fi, L_own=L_own, L_inst=L_inst, length=L,
                          animated=set(own) | ({0} if inst_anim else set()))
             entries.append(entry)
+    stems = [e['stem'] for e in entries]
     for e in entries:
         e['worlds'] = make_worlds(e, col_model, col_motion)
         e['rest'] = e['worlds']([0.0])[0]
         e['unit_rest'] = e['worlds']([0.0], True)[0]
+        e['phase'] = entry_phase(stage, e['stem'], stems)
+        e['once'] = False
+        if e['phase'] and e['L_own'] and not e['L_inst']:
+            end = e['worlds']([e['L_own'] - 1e-3])[0]
+            e['once'] = bool(np.abs(end[:, 3, :3] - e['rest'][:, 3, :3]).max() > 1.0 or
+                             np.abs(end[:, :3, :3] - e['rest'][:, :3, :3]).max() > 1e-2)
+            if e['once']:
+                print('  FLIGHT %s: one-shot motion (%d frames, not a loop)' % (e['stem'], e['L_own']))
+        if e['phase']:
+            print('  FLIGHT %s: phase %s' % (e['stem'], e['phase']))
     return entries, src['cams']
 
 
@@ -389,10 +446,16 @@ _VIDEO = {}
 
 
 def stage_video_name(stage):
+    """The movie/stage/*.thp a stage's group-91 surfaces play. `_Prm` type 3 names it (`single02`:
+    main.dol's `movie/stage/%s.thp`); type 2 `quarter` is a per-genre 2x2 mosaic, main.dol's
+    `movie/stage/<genre>_%s%02d.thp` = upt / pop / mvo / fvo `_quarter01..03` (512 px squares;
+    the disc's bare `quarter01.thp` -- HP4's a 640 x 480 4:3 cut -- is never opened, and the port
+    used it until 2026-10-05); no name (MUSIC FIT, plain HP4 stages): the song's genre loop.
+    The genre is the song's: fixed here to DEFAULT_STAGE_VIDEO's."""
     prm = Z.stage_params(open(os.path.join(STAGE_DIR, stage + '.bin'), 'rb').read())
     name = prm['movie'] if prm and prm['type'] in (2, 3) and prm['movie'] else DEFAULT_STAGE_VIDEO
-    if name == 'quarter':
-        name = 'quarter01'
+    if prm and prm['type'] == 2:
+        name = '%s_%s01' % (DEFAULT_STAGE_VIDEO[:3], name)
     return name
 
 
@@ -463,6 +526,10 @@ def mesh_records(e):
                 break
             i = nodes[i]['parent']
         Wm = e['rest'][nd['index']]
+        # a mirroring world reverses the screen winding; whether the engine re-flips its cull mode
+        # there (FUN_8010dec8's cull-front argument) is not settled, so those few meshes (HP2 / HP3
+        # STG043 / 045 backdrops, ~0.6 % of the single-sided ones) stay two-sided
+        mirrored = bool(np.linalg.det(Wm[:3, :3]) < 0)
         for sm in nd['submeshes']:
             if not len(sm['pos']) or not sm['packets']:
                 continue
@@ -510,24 +577,26 @@ def mesh_records(e):
             out.append(dict(kind=kind, anchor=anchor, material=mi, screen=screen, group_screen=group_screen,
                             bitmap=mt['textures'][0] if mt['textures'] and mt['textures'][0] < len(e['textures']) else None,
                             pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_), col=col, tris=np.array(tri_out),
-                            obj=nd['index'], two_sided=Z.material_mode(mt)[2]))
+                            obj=nd['index'], two_sided=Z.material_mode(mt)[2] or mirrored, mirrored=mirrored))
     return out
 
 
 def plan_parts(entries):
-    """[(part name, kind, loop length, [(entry, records)])]: entries grouped by loop length (an
-    entry joins a group whose length its own divides), then by blend group, then split at
-    MAX_ANCHORS animated anchors / MAX_MAT_PARAMS animated material floats."""
+    """[(part name, kind, loop length, once, [(entry, records)])]: entries grouped by flight role
+    (`pre_plat_` / `pre_sky_` / `pre_space_` / `pre_hole_` / `fly_` name prefix; one-shot motions apart), then by loop length (an entry joins a
+    group whose length its own divides), then by blend group, then split at MAX_ANCHORS animated
+    anchors / MAX_MAT_PARAMS animated material floats."""
     groups = []
     for e in sorted(entries, key=lambda e: -e['length']):
+        tag = (e.get('phase'), e.get('once', False))
         for g in groups:
-            if e['length'] == 0 or (g[0] and g[0] % e['length'] == 0):
+            if g[2] == tag and (e['length'] == 0 or (g[0] and g[0] % e['length'] == 0)) and not (tag[1] and g[0] != e['length']):
                 g[1].append(e)
                 break
         else:
-            groups.append([e['length'], [e]])
+            groups.append([e['length'], [e], tag])
     parts = []
-    for gi, (length, members) in enumerate(groups):
+    for gi, (length, members, tag) in enumerate(groups):
         for kind in KIND_ORDER:
             chunks = []
             for e in members:
@@ -550,18 +619,21 @@ def plan_parts(entries):
                         ch[2][mk] = need
                     ch[0].setdefault(e['index'], (e, []))[1].append(r)
             for ci, ch in enumerate(chunks):
-                parts.append([kind, gi, ci, length, list(ch[0].values())])
+                parts.append([kind, gi, ci, length, tag, list(ch[0].values())])
     out, counts = [], {}
-    for kind, gi, ci, length, ch in parts:
-        counts[kind] = counts.get(kind, 0) + 1
-        name = kind if counts[kind] == 1 else '%s%d' % (kind, counts[kind])
-        out.append((name, kind, length, ch))
+    for kind, gi, ci, length, (phase, once), ch in parts:
+        base = '%s_%s' % (phase, kind) if phase else kind
+        counts[base] = counts.get(base, 0) + 1
+        name = base if counts[base] == 1 else '%s%d' % (base, counts[base])
+        out.append((name, kind, length, once, ch))
     return out
 
 
 def split_backdrop(entries):
+    # a flight stage's intro sky + sea and its plain space are skydomes too (OBJA_Z_BG109 /
+    # OBJA_Z_BG201: `_bg` parts, so the scene style leaves them unlit like every backdrop)
     for e in entries:
-        if e['kind'] == 'bg':
+        if e['kind'] == 'bg' or e.get('phase') in ('pre_sky', 'pre_space'):
             for r in e['records']:
                 if r['kind'] == 'dec':
                     r['kind'] = 'bg'
@@ -727,8 +799,8 @@ def build_part(key, part, chunk):
     for e, recs in chunk:
         by_mat = {}
         for r in recs:
-            by_mat.setdefault((r['material'], bool(r.get('screen'))), []).append(r)
-        for (mi, screen), rs in sorted(by_mat.items()):
+            by_mat.setdefault((r['material'], bool(r.get('screen')), r['mirrored']), []).append(r)
+        for (mi, screen, mirrored), rs in sorted(by_mat.items()):
             pos = np.concatenate([r['pos'] for r in rs])
             nrm = np.concatenate([r['nrm'] for r in rs])
             uv = np.concatenate([r['uv'] for r in rs])
@@ -737,8 +809,9 @@ def build_part(key, part, chunk):
             tris = np.concatenate([r['tris'] + o for r, o in zip(rs, offs)])
             bones = np.concatenate([np.full(len(r['pos']), 0 if r['anchor'] is None else 1 + anchors.index((e['index'], r['anchor'])))
                                     for r in rs])
-            tris, _f = H.consistent_winding(pos, nrm, tris)
-            name = 'gm_%s_%s_m%02d_%03d%s' % (key, part, e['index'], mi, 's' if screen else '')
+            two = bool(rs[0]['two_sided'])
+            tris = H.cull_winding(pos, nrm, tris, two)
+            name = 'gm_%s_%s_m%02d_%03d%s%s' % (key, part, e['index'], mi, 's' if screen else '', 'r' if mirrored else '')
             if screen:
                 # the screen's authored v band (the whole picture) -> World's 16:9 movie band; a
                 # group-92 surface samples the movie through its own UVs (0..1 = the whole picture;
@@ -783,14 +856,14 @@ def build_part(key, part, chunk):
                 image = texture_image(key, e, b)
             else:
                 image = P.palette_texture('%s_white' % key.replace('stage', 's'), [(1.0, 1.0, 1.0)], size=8)
-            mat = P.make_material(name, image, two_sided=True)
+            mat = P.make_material(name, image, two_sided=two)
             if rs[0]['kind'] in ('ble', 'add', 'sub'):
                 mat.surface_render_method = 'BLENDED'
             if not screen:
                 mat['ddr_zan_material'] = '%d.%d' % (e['index'], mi)
             me.materials.append(mat)
             f1, f2 = FLAGS[rs[0]['kind']]
-            ob['ddr_flags'] = f1
+            ob['ddr_flags'] = f1 if two else f1 & ~K.MESH_FLAG_TWO_SIDED
             ob['ddr_flags2'] = f2
             objects.append(ob)
     return arm, objects, anchors, binds
@@ -809,11 +882,13 @@ def part_times(length):
     return np.arange(n) * step, n * step
 
 
-def loop_spec(anchors, entry_of, my_binds, file_binds, length):
+def loop_spec(anchors, entry_of, my_binds, file_binds, length, once=False):
     """write_anm spec for the flat rig: bone b's world per key = the anchor's game rotation, its
-    translation, scale relative to rest, + a wrap key."""
+    translation, scale relative to rest, + a wrap key (`once`: the end pose instead, no loop bit --
+    a flight stage's tube opening, held by the DLL after its last frame)."""
     times, total = part_times(length)
     key_times = list(times) + [total]
+    eval_times = np.append(times, total - 1e-3) if once else times
     tracks = [dict(kind=0x1C, target=0, keys=[(0.0, 0.0, 0.0, 1.0)]), dict(kind=0x1D, target=0, keys=[(0.0, 0.0, 0.0)])]
     expected = np.zeros((len(times), 1 + len(anchors), 4, 4))
     expected[:, 0] = np.eye(4)
@@ -822,7 +897,7 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
     for b, (ei, oi) in enumerate(anchors, start=1):
         e = entry_of[ei]
         if ei not in cache:
-            cache[ei] = (e['worlds'](times.astype(np.float64)), e['worlds'](times.astype(np.float64), True))
+            cache[ei] = (e['worlds'](eval_times.astype(np.float64)), e['worlds'](eval_times.astype(np.float64), True))
         wf, uf = cache[ei]
         s_rest = rigid_row(e['rest'][oi], e['unit_rest'][oi])[1]
         fb, mb = np.asarray(file_binds[b]), np.asarray(my_binds[b])
@@ -838,7 +913,7 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
         flat = degenerate(e['rest'][oi])
         inv0 = None if flat else np.linalg.inv(M0)
         quats, trans, scales, prev = [], [], [], None
-        for f in range(len(times)):
+        for f in range(len(eval_times)):
             if flat:
                 # a flattened prop (a ~0 rest scale, vertices baked flat): rotation from the
                 # unit-scale chain, the scale relative to the rest's
@@ -857,7 +932,8 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
             fit[:3, :3] = np.diag(sc_f) @ r_row
             fit[3, :3] = world[3, :3]
             shear[b] = max(shear.get(b, 0.0), float(np.abs(fit[:3, :3] - world[:3, :3]).max()))
-            expected[f, b] = fit
+            if f < len(times):
+                expected[f, b] = fit
             qv = T.rowmat_to_quat(r_row)
             if prev is not None and sum(a * c for a, c in zip(prev, qv)) < 0:
                 qv = tuple(-c for c in qv)
@@ -865,13 +941,14 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length):
             quats.append(qv)
             trans.append(tuple(float(x) for x in world[3, :3]))
             scales.append(tuple(float(x) for x in sc_f))
-        for lst in (quats, trans, scales):
-            lst.append(lst[0])
+        if not once:
+            for lst in (quats, trans, scales):
+                lst.append(lst[0])
         tracks.append(dict(kind=0x1C, target=b, times=key_times, keys=quats))
         tracks.append(dict(kind=0x1D, target=b, times=key_times, keys=trans))
         if any(abs(c - 1.0) > 1e-4 for s_ in scales for c in s_):
             tracks.append(dict(kind=10, target=b, times=key_times, keys=scales))
-    return dict(frame_count=total, flag=1, hierarchy=[-1] + [0] * len(anchors), tracks=tracks), expected, shear
+    return dict(frame_count=total, flag=0 if once else 1, hierarchy=[-1] + [0] * len(anchors), tracks=tracks), expected, shear
 
 
 def anchor_extents(chunk, anchors, binds):
@@ -1414,7 +1491,7 @@ def port(stage):
           '%d flip-books (atlases, sampling check worst %.3f), parts %s' % (
               stage, len(entries), sum(1 for e in entries if e['inst']), sorted({e['length'] for e in entries}), len(cams),
               sum(1 for e in entries for r in e['records'] if r['screen']), sum(1 for pl in plans_of.values() if pl['uv']),
-              len(flips), min([pl['check'] for pl in flips] + [1.0]), ['%s@%d' % (n, L) for n, _k, L, _c in parts]))
+              len(flips), min([pl['check'] for pl in flips] + [1.0]), ['%s@%d%s' % (n, L, ' once' if o else '') for n, _k, L, o, _c in parts]))
 
     out_dir = os.path.join(OUT_BASE, label)
     set_dir = os.path.join(out_dir, 'mapset_' + key)
@@ -1426,7 +1503,7 @@ def port(stage):
                 os.remove(os.path.join(pdir, f))
             os.rmdir(pdir)
     written = []
-    for part, kind, length, chunk in parts:
+    for part, kind, length, once, chunk in parts:
         P.fresh_scene()
         arm, objects, anchors, binds = build_part(key, part, chunk)
         if not objects:
@@ -1446,7 +1523,7 @@ def port(stage):
             sorted({(hex(me['flags']), me.get('flags2', 0)) for me in m['meshes']}))
         file_binds = [np.array(b['bind'], dtype=float).reshape(4, 4) for b in m['bones']]
         if anchors and length:
-            lspec, expected, shear = loop_spec(anchors, entry_of, binds, file_binds, length)
+            lspec, expected, shear = loop_spec(anchors, entry_of, binds, file_binds, length, once)
             ext = anchor_extents(chunk, anchors, binds)
             sheared = {b: v * ext.get(b, 0.0) for b, v in shear.items() if v * ext.get(b, 0.0) > 0.005}
             if sheared:
@@ -1456,7 +1533,8 @@ def port(stage):
             er, et = check_loop(data, expected, part_times(length)[0])
             assert er < 2e-3 and et < 2e-4, '%s %s: loop error rot %.5f trans %.5f' % (stage, part, er, et)
             open(os.path.join(pdir, model_name + '_play_loop.anm'), 'wb').write(data)
-            info += ', loop %d frames (%d anchors, err %.1e / %.1e rel)' % (lspec['frame_count'], len(anchors), er, et)
+            info += ', %s %d frames (%d anchors, err %.1e / %.1e rel)' % (
+                'ONE-SHOT' if once else 'loop', lspec['frame_count'], len(anchors), er, et)
         if sspec:
             idents = {mm['identity'] for mm in m['materials']}
             missing = [t for t in sspec['material_targets'] if t['identity'] not in idents]
@@ -1471,6 +1549,15 @@ def port(stage):
         print(info)
         written.append((part, kind))
 
+    marker = os.path.join(set_dir, FLIGHT_MARKER)
+    if is_flight_stage(stage):
+        with open(marker, 'w') as f:
+            f.write('# Background Dancers FLIGHT stage (%s %s): the dancers play motion/flight/takeoff, then fly;\n'
+                    '# parts pre_* show until the take-off ends (pre_plat / pre_sky / pre_hole follow the\n'
+                    '# game\'s intro script), fly_* after it (port_stage_hottest2.FLIGHT_PHASES)\n'
+                    % (TITLE, stage))
+    elif os.path.exists(marker):
+        os.remove(marker)
     fields = ['%s:%d' % (p, PRIORITY[k]) if k in PRIORITY else p for p, k in written]
     with open(os.path.join(out_dir, 'map_resources.rlist.txt'), 'w') as f:
         f.write('# %s %s.bin, ported with its models as parts and their loops\n' % (TITLE, stage))
@@ -1532,7 +1619,7 @@ def unlit_preview_materials():
                 if tex is not None and tex.image is not None and \
                         tex.image.name.lower().replace('_', '').startswith(SCREEN_TEXTURE):
                     tex.image = screen_test_card()
-                _unlit(mat, int(ob.get('ddr_flags', 1) or 1), int(ob.get('ddr_flags2', 0) or 0))
+                _unlit(mat, int(ob.get('ddr_flags', 1)), int(ob.get('ddr_flags2', 0) or 0))
 
 
 def _unlit(mat, flags, flags2):
@@ -1570,8 +1657,11 @@ def _unlit(mat, flags, flags2):
         nt.links.new(tr.outputs['BSDF'], mix.inputs[1])
         nt.links.new(em.outputs['Emission'], mix.inputs[2])
     nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
-    mat.surface_render_method = 'BLENDED'
-    mat.use_backface_culling = False
+    # opaque parts (FLAGS 'dec' / 'bg': no blend bits) must write depth: EEVEE sorts BLENDED
+    # surfaces by object origin, so a sky sphere drawn blended after a nearer additive or
+    # alpha part painted over it (the flight stages' fly_dec space hid the whole tunnel)
+    mat.surface_render_method = 'BLENDED' if flags & 0x02C0 else 'DITHERED'
+    mat.use_backface_culling = not (flags & K.MESH_FLAG_TWO_SIDED)   # the exported cull mode
     mat['ddr_preview_unlit'] = 1
 
 

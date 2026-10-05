@@ -366,6 +366,24 @@ class TestChoreography(unittest.TestCase):
         self.assertEqual(set().union(*hands), set(range(10)))
         self.assertEqual(hands, Z.deal_rotating(range(10), 4, 3, seed=1))
 
+    def test_piece_class(self):
+        body = Z.parse_zmb(zmb([dict(name='Hips', parent=-1, local=trs((0, Z.HIPS_UNITS, 0))),
+                                dict(name='Head', parent=0, local=trs((0, 5, 0)))], []))
+        level = (math.sin(math.radians(45)), 0.0, 0.0, math.cos(math.radians(45)))   # 90 deg about x
+        stand = (0.0, 0.0, 0.0, 1.0)
+
+        def piece(t0, t1, q, length=84):
+            return Z.parse_zab(zab(length, [('Hips', {Z.CH_T: [(0, t0), (length, t1)],
+                                                      Z.CH_R: [(0, q), (length, q)]})]))
+        h = Z.HIPS_UNITS
+        self.assertEqual(Z.piece_class(body, piece((0, h, 0), (0, h, 0), stand)), 'dance')
+        # flight: the Hips at the origin, the body level (MUSIC FIT 046's pieces)
+        self.assertEqual(Z.piece_class(body, piece((0, 0.1, 1), (0, 0.1, 1), level)), 'flight')
+        # lying on the floor at standing hip height is not flight
+        self.assertEqual(Z.piece_class(body, piece((0, h, 0), (0, h, 0), level)), 'dance')
+        # the take-off: standing, then a leap to 7x the hip height
+        self.assertEqual(Z.piece_class(body, piece((0, h, -21), (0, 7 * h, 38), stand, 600)), 'takeoff')
+
 
 def dol(data, addr=0x80001000):
     """A minimal DOL: one data section `data` at `addr`."""

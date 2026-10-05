@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "jun 1" (CHR7100 + CHR7101), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s002_000 h4s004_032 h4s004_040 h4s015_056 h4s017_016 h4s039_048 h4s041_008 h4s043_016 h4s049_056 h4s051_040 h4s060_008 h4s060_024)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001l_040 h4s004_032 h4s013_064 h4s014_040 h4s015_056 h4s017_016 h4s039_048 h4s045_032 h4s050_000 h4s050_024 h4s052_031 h4s060_048)
+# flight stages: motion/flight/ takeoff fly_h4s053_008 fly_h4s054_006 fly_h4s054_015 fly_h4s055_008
 hp4jun01, pl, F, A, 1.0, 0.75, 0.0

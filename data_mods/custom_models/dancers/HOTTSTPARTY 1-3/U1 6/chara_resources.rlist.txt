@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "U1 6" (CHR520 + CHR522), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s014_049 h3s015j_053 h3s021_079 h3s021j_027 h3s025j_061 h3s026j_036 h3s032_055 h3s041_025 h3s041_059 h3s068_007 h3s068_038 h2s060_060)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s004j_004 h3s014_049 h3s022j_049 h3s025j_050 h3s027_032 h3s031_036 h3s033_033 h3s037_024 h3s055_020 h3s064_050 h3s065_089 h2s032_064)
+# flight stages: motion/flight/ takeoff fly_h3s046_000 fly_h3s046_008 fly_h3s048_000 fly_h3s048_008
 hpu106, pl, M, A, 1.0, 0.8, 0.0

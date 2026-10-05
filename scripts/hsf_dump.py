@@ -741,6 +741,20 @@ def consistent_winding(pos, nrm, tris):
     return t, int(flip.sum())
 
 
+def cull_winding(pos, nrm, tris, two_sided):
+    """World triangle order for GX-ordered triangles. A two-sided (no-cull) mesh: consistent_winding
+    (only the shading normal's side matters). A CULLED one keeps the Wii's visible side: GX's front
+    face is the reverse of the order in which it receives the corners (both the Hudson HSF and the
+    zan engine set GX_CULL_BACK unless the material asks for no culling -- HP1 FUN_8006a3a8, zan
+    FUN_8010dec8), so every triangle flips, whatever its normals say (~99 % agree with that; the
+    rest are seen from the side the Wii shows them). Single-sided front / back faces modelled
+    back to back (the HP1 stg04 / HP2 STG021 fans) then no longer z-fight in World."""
+    t = np.asarray(tris).copy()
+    if two_sided:
+        return consistent_winding(pos, nrm, t)[0]
+    return t[:, [0, 2, 1]] if len(t) else t
+
+
 def clip_game_worlds(model, motion, names, frames, s=GAME_SCALE, time_of=None):
     """(frames x joints x 4 x 4) ROW-vector game-space worlds of `names` driven by `motion`
     at output frames `frames` (source time = time_of(frame), default the frame itself)."""

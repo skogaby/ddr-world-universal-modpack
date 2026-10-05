@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Gaku 2" (CHR270 + CHR272), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001_033 h3s004j_054 h3s006_026 h3s007j_008 h3s016_072 h3s026_056 h3s029_024 h3s040_040 h3s042_000 h2s031_008 h2s032_048 h2s034_016)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s001j_095 h3s006_026 h3s013j_059 h3s016j_029 h3s018j_054 h3s021_031 h3s021_039 h3s040_008 h3s054_093 h3s062_027 h2s031_016 h2s056_044)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s049_013
 hpgaku02, pl, M, A, 1.0, 0.8, 0.0

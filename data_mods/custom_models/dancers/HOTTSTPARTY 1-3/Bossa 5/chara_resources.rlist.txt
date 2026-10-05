@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Bossa 5" (CHR540 + CHR541), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s007_006 h3s010j_040 h3s014_057 h3s018j_026 h3s019_060 h3s023_032 h3s027j_034 h3s043_054 h3s052_031 h3s058_048 h3s060_017 h2s035_048)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002j_039 h3s003j_114 h3s006j_036 h3s007j_032 h3s011j_064 h3s018_033 h3s020_060 h3s028_016 h3s028_024 h3s031_000 h3s035_036 h3s061_036)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s049_013 fly_h3s049_021
 hpbossa05, pl, F, A, 1.0, 0.75, 0.0

@@ -91,6 +91,9 @@ pub fn build_pick(
                     stage.parts.truncate(MAX_PREVIEW_INSTANCES);
                 }
             }
+            // A flight stage previews its take-off switch (no dancers: the
+            // default take-off length).
+            let (pick, _) = super::super::pick::fly_pick(rng, pick, dancers, |_| false);
             Some(pick)
         }
         Kind::Dancer => {

@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "EMI 2" (CHR20100 + CHR20102), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u026l01_008 h5s2u027e01_000 h5s2u028l01_000 h5s2u029l02_000 h5s2u034s01_008 h5s3j007e01_000 h5s3j007l01_000 h5s3j007l02_008 h5s3u032l03_000 h5s3u033l01_000 h5s3u039l01_000 h5s3u045s01_000)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u046e01_000 h5s2u046s01_000 h5s3j007e01_000 h5s3u002l01_016 h5s3u020l01_000 h5s3u031l01_000 h5s3u034l02_008 h5s3u036l01_000 h5s3u041l01_000 h5s4u001ll02_000 h5s5u031e01_000 h5s5u031l02_008)
+# flight stages: motion/flight/ takeoff fly_h5s4u053l02_013 fly_h5s4u054e01_008 fly_h5s4u054l02_009 fly_h5s4u055l03_003
 hp5emi02, pl, F, A, 1.0, 0.75, 0.0

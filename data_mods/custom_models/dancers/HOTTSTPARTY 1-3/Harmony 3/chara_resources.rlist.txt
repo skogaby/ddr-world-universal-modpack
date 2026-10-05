@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Harmony 3" (CHR260 + CHR263), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s008_000 h3s011_021 h3s015j_024 h3s017_000 h3s024j_020 h3s026_103 h3s026j_071 h3s027_016 h3s031_000 h3s050_080 h3s059_022 h2s025_079)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s003_048 h3s005_041 h3s008j_023 h3s013j_033 h3s015_045 h3s022j_082 h3s026_103 h3s026j_056 h3s027_056 h3s040_016 h3s053_000 h3s068_032)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s048_008
 hpharmony03, pl, F, A, 1.0, 0.75, 0.0

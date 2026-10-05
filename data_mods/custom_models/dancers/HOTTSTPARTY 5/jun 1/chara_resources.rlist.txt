@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "jun 1" (CHR20800 + CHR20801), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u021l01_016 h5s2u028l02_000 h5s2u031l02_008 h5s3j006e01_000 h5s3u001l02_009 h5s3u002s01_000 h5s3u034l02_008 h5s3u042l03_008 h5s3u044l01_008 h5s3u044l02_000 h5s3u053l02_000 h5s3u058e01_016)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u027l03_008 h5s2u032l03_008 h5s2u033l01_000 h5s3j007s01_000 h5s3u021l02_000 h5s3u031s01_000 h5s3u033l01_008 h5s3u039e01_000 h5s3u041l01_012 h5s3u054l01_000 h5s3u056l03_056 h5s3u057l02_000)
+# flight stages: motion/flight/ takeoff fly_h5s4u054e01_000 fly_h5s4u054l01_001 fly_h5s4u055l01_000 fly_h5s4u055l02_016
 hp5jun01, pl, F, A, 1.0, 0.75, 0.0

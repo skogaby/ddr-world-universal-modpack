@@ -152,6 +152,11 @@ pub struct StageCandidate {
     pub row: usize,
     /// `(part name, :N priority)` from fields `[2..]`.
     pub parts: Vec<(String, Option<i32>)>,
+    /// A FLIGHT stage (custom content: the arc holds [`STAGE_FLIGHT_MARKER`]):
+    /// the dancers take off and fly ([`super::pick::fly_pick`]); parts named
+    /// `pre_*` / `fly_*` switch at the end of the take-off
+    /// (`director_math::part_phase`). Stock rows: never.
+    pub flight: bool,
 }
 
 impl StageCandidate {
@@ -181,10 +186,23 @@ pub struct DancerCandidate {
     /// dancers ported with their original rig — design 2026-09-28 D1). Empty
     /// = the stock pool of `sex` from `mc_<sex>.arc` (every stock dancer).
     pub motion: Vec<String>,
+    /// Its FLIGHT clips: `flight/<stem>` of the body arc's
+    /// `data/chara/pl_<key>/motion/flight/<stem>.anm` members, sorted
+    /// ([`own_flight_from_members`]); `takeoff*` stems are take-offs, the
+    /// rest flight loops. Never part of [`motion`](Self::motion) (direct
+    /// children only), so they play on flight stages alone.
+    pub flight: Vec<String>,
 }
 
 /// The body-folder subdirectory holding a dancer's own clips.
 pub const OWN_MOTION_DIR: &str = "motion";
+/// The subdirectory of [`OWN_MOTION_DIR`] holding the flight clips.
+pub const FLIGHT_MOTION_DIR: &str = "flight";
+/// Flight-clip stems starting with this are take-offs.
+pub const TAKEOFF_PREFIX: &str = "takeoff";
+/// The member that marks a custom stage arc as a FLIGHT stage
+/// (`mapset_<key>/flight.txt` in a stage folder).
+pub const STAGE_FLIGHT_MARKER: &str = "data/map/flight.txt";
 
 impl DancerCandidate {
     pub fn body_arc_name(&self) -> String {
@@ -203,10 +221,30 @@ impl DancerCandidate {
             format!("{}.arc", self.sex.arc_stem())
         }
     }
+    /// Its take-off clips (`flight/takeoff*`).
+    pub fn takeoff_clips(&self) -> Vec<&str> {
+        self.flight
+            .iter()
+            .filter(|c| is_takeoff_clip(c))
+            .map(String::as_str)
+            .collect()
+    }
+    /// Its flight loops (`flight/*` but the take-offs).
+    pub fn flight_loops(&self) -> Vec<&str> {
+        self.flight
+            .iter()
+            .filter(|c| !is_takeoff_clip(c))
+            .map(String::as_str)
+            .collect()
+    }
+    /// Can fly a flight stage: at least one take-off and one flight loop.
+    pub fn can_fly(&self) -> bool {
+        !self.takeoff_clips().is_empty() && !self.flight_loops().is_empty()
+    }
     /// Arc member path of one of its playlist clips (a name from
-    /// [`playlist_for`]).
+    /// [`playlist_for`] / [`flight_playlist_for`]).
     pub fn clip_member(&self, clip: &str) -> String {
-        if self.has_own_motion() {
+        if self.has_own_motion() || is_flight_clip(clip) {
             own_clip_member_path(&self.key, clip)
         } else {
             clip_member_path(self.sex, clip)
@@ -304,6 +342,7 @@ pub fn stage_candidates(
             key: key.clone(),
             row,
             parts,
+            flight: false,
         });
     }
     out
@@ -410,6 +449,7 @@ pub fn dancer_candidates(
             model_scale,
             shadow_scale,
             motion: Vec::new(),
+            flight: Vec::new(),
         });
     }
     out
@@ -451,6 +491,39 @@ pub fn playlist_for(rng: &mut Rng, dancer: &DancerCandidate) -> Vec<String> {
     names
 }
 
+/// A FLIGHT playlist: one of its take-offs (seeded) first, then its flight
+/// loops shuffled — [`super::schedule::DanceSchedule::with_intro`] plays
+/// element 0 once, uncut, and cycles the rest. Empty when it cannot fly.
+pub fn flight_playlist_for(rng: &mut Rng, dancer: &DancerCandidate) -> Vec<String> {
+    let takeoffs = dancer.takeoff_clips();
+    let mut loops: Vec<String> = dancer
+        .flight_loops()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if takeoffs.is_empty() || loops.is_empty() {
+        return Vec::new();
+    }
+    let first = takeoffs[rng.below(takeoffs.len() as u32) as usize].to_string();
+    rng.shuffle(&mut loops);
+    let mut out = vec![first];
+    out.extend(loops);
+    out
+}
+
+/// A playlist name naming a flight clip (`flight/<stem>`).
+pub fn is_flight_clip(clip: &str) -> bool {
+    clip.strip_prefix(FLIGHT_MOTION_DIR)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A playlist name naming a take-off (`flight/takeoff*`).
+pub fn is_takeoff_clip(clip: &str) -> bool {
+    clip.strip_prefix(FLIGHT_MOTION_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|stem| stem.starts_with(TAKEOFF_PREFIX))
+}
+
 /// Arc member path of a choreography clip: `data/chara/mc_<sex>/<clip>.anm`.
 pub fn clip_member_path(sex: Sex, clip: &str) -> String {
     format!("data/chara/{}/{}.anm", sex.arc_stem(), clip)
@@ -479,6 +552,29 @@ pub fn own_motion_from_members(key: &str, members: &[String]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The flight clips among an arc's members for body `key`: `flight/<stem>`
+/// for every `data/chara/pl_<key>/motion/flight/<stem>.anm` (direct children
+/// of that directory), sorted and deduplicated.
+pub fn own_flight_from_members(key: &str, members: &[String]) -> Vec<String> {
+    let prefix = format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{FLIGHT_MOTION_DIR}/");
+    let mut out: Vec<String> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".anm"))
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| format!("{FLIGHT_MOTION_DIR}/{stem}"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A stage arc's members carry the FLIGHT marker.
+pub fn stage_flight_from_members(members: &[String]) -> bool {
+    members.iter().any(|m| m == STAGE_FLIGHT_MARKER)
 }
 
 /// The stage-mode camera lists: names containing `_non` are the cut-away
@@ -586,6 +682,9 @@ pub enum PickSource {
     Option,
     /// The developer `DDR_DANCERS_PIN`.
     Pin,
+    /// A flight stage replaced a dancer that cannot fly
+    /// (`pick::fly_pick`).
+    Flight,
 }
 
 impl PickSource {
@@ -595,6 +694,7 @@ impl PickSource {
             PickSource::Source => "source",
             PickSource::Option => "option",
             PickSource::Pin => "pin",
+            PickSource::Flight => "flight",
         }
     }
 }
@@ -1158,7 +1258,74 @@ mod tests {
             model_scale: 1.0,
             shadow_scale: 0.8,
             motion: motion.iter().map(|s| s.to_string()).collect(),
+            flight: Vec::new(),
         }
+    }
+
+    #[test]
+    fn flight_clips_route_to_the_body_arc_and_lead_with_a_takeoff() {
+        let members: Vec<String> = [
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/flight/fly_b.anm",
+            "data/chara/pl_umxafro00/motion/flight/takeoff.anm",
+            "data/chara/pl_umxafro00/motion/flight/fly_a.anm",
+            "data/chara/pl_umxafro00/motion/flight/deeper/x.anm",
+            "data/chara/pl_other00/motion/flight/fly_c.anm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let flight = own_flight_from_members("umxafro00", &members);
+        assert_eq!(
+            flight,
+            vec!["flight/fly_a", "flight/fly_b", "flight/takeoff"]
+        );
+        // the dance pool never sees them
+        assert_eq!(
+            own_motion_from_members("umxafro00", &members),
+            vec!["ht01_m"]
+        );
+        let d = DancerCandidate {
+            flight,
+            ..own_motion_dancer(&["ht01_m"])
+        };
+        assert!(d.can_fly());
+        assert_eq!(d.takeoff_clips(), vec!["flight/takeoff"]);
+        assert_eq!(d.flight_loops(), vec!["flight/fly_a", "flight/fly_b"]);
+        assert_eq!(
+            d.clip_member("flight/takeoff"),
+            "data/chara/pl_umxafro00/motion/flight/takeoff.anm"
+        );
+        let pl = flight_playlist_for(&mut Rng::new(3), &d);
+        assert_eq!(pl[0], "flight/takeoff");
+        assert_eq!(pl.len(), 3);
+        assert!(pl[1..].iter().all(|c| c.starts_with("flight/fly_")));
+        // a stock-pool dancer with flight clips still reads them from its body arc
+        let stock = DancerCandidate {
+            motion: vec![],
+            ..d.clone()
+        };
+        assert_eq!(
+            stock.clip_member("flight/fly_a"),
+            "data/chara/pl_umxafro00/motion/flight/fly_a.anm"
+        );
+        // no take-off (or no loop): cannot fly, no flight playlist
+        let half = DancerCandidate {
+            flight: vec!["flight/fly_a".into()],
+            ..d.clone()
+        };
+        assert!(!half.can_fly());
+        assert!(flight_playlist_for(&mut Rng::new(3), &half).is_empty());
+        assert!(
+            is_flight_clip("flight/x") && !is_flight_clip("flightx") && !is_flight_clip("ht01_m")
+        );
+        assert!(is_takeoff_clip("flight/takeoff2") && !is_takeoff_clip("takeoff"));
+        assert!(stage_flight_from_members(&[
+            "data/map/flight.txt".to_string()
+        ]));
+        assert!(!stage_flight_from_members(&[
+            "data/map/x/flight.txt".to_string()
+        ]));
     }
 
     #[test]

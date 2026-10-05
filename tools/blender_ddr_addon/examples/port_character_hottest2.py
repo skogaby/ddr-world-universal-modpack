@@ -34,6 +34,11 @@ Per dancer:
      dance all of it). A clip is retimed so one bar = 120 frames (World's dance clock runs at chart
      BPM / 120 under `bpm_sync`), keyed every 2nd frame, the Hips' x/z path re-centred on the mark
      (ROOT_MODE), and checked against the zan pose (< 1 mm per joint);
+     FLIGHT: the flight songs (zan_dump.piece_class; research 2/3 §7.5) stay out of that library.
+     Their take-off piece becomes motion/flight/takeoff.anm (1:1, 10 s of dance time, its run and
+     leap where authored) and their flight pieces ~8-bar motion/flight/fly_*.anm clips, the Hips
+     lifted from the origin to the standing hip height, FLIGHT_PER_DANCER per dancer dealt in a
+     rotation -- what Background Dancers plays on a flight stage (`mapset_<key>/flight.txt`);
   5. the `chara_resources.rlist.txt` sidecar (sex from the cast table, shadow 0.75 F / 0.8 M).
 
 GAME=hp4 / hp5 port DanceDanceRevolution HOTTEST PARTY 4 / 5 (Wii, EU 2010 / 2011; the same zan
@@ -97,6 +102,13 @@ TITLE = {'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
 KEY_PREFIX = {'hp3': 'hp', 'hp4': 'hp4', 'hp5': 'hp5'}[GAME]
 OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', SOURCE)))
 PER_DANCER = int(os.environ.get('PER_DANCER', '12'))
+# FLIGHT stages (Background Dancers: `mapset_<key>/flight.txt`): motion/flight/takeoff.anm + these
+# many flight clips per dancer (motion/flight/fly_*.anm; the DLL's normal playlist reads only the
+# direct children of motion/, so they never play on a normal stage or in the preview)
+FLIGHT_PER_DANCER = int(os.environ.get('FLIGHT_PER_DANCER', '4'))
+FLIGHT_DIR = 'flight'
+TAKEOFF_CLIP = 'takeoff'
+FLIGHT_LIFT = Z.HIPS_UNITS * Z.GAME_SCALE   # flight pieces fly the Hips at the origin: lift to 0.97 m
 ROOT_MODE = os.environ.get('ROOT_MODE', 'recentre')
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_previews')
@@ -263,28 +275,59 @@ def song_files():
 
 
 _LIBRARY = None
+_FLIGHT = None
 
 
 def library(body, joints):
     """[clip dict(name, pieces [(motion, frames, bars)], bars)]: every song's choreography
     chained into takes, cut into ~8-bar clips, duplicates (same piece bytes) dropped; a FuruFuru
-    Party clip is kept only when it holds a piece MUSIC FIT does not (its own songs / takes)."""
-    global _LIBRARY
+    Party clip is kept only when it holds a piece MUSIC FIT does not (its own songs / takes).
+    The FLIGHT songs (any piece zan_dump.piece_class calls 'flight') are not dance: they go to
+    flight_library() instead (until 2026-10-05 they were dealt here, and a level body half in the
+    floor showed on every stage and in the options-menu preview)."""
+    global _LIBRARY, _FLIGHT
     if _LIBRARY is not None:
         return _LIBRARY
     seen, clips = set(), []
     hp3_pieces = set()
     total_bars = 0.0
     songs = song_files()
+    flight = dict(takeoff=None, clips=[], songs=[])
+    flight_seen = set()
     for game, tag, mot, ssq in songs:
         blobs = [z for _p, _n, z in Z.members(open(mot, 'rb').read(), 'zab')]
         motions = [Z.parse_zab(z) for z in blobs]
         lengths = [m['length'] for m in motions]
-        if not motions or min(lengths) > 250:       # the 3-clip demo / showcase files
-            print('LIBRARY skip %s %s (%d clips of %s frames)' % (game, tag, len(lengths), sorted(set(lengths))))
+        if not motions:
             continue
         bpm = Z.dominant_bpm(Z.ssq_tempo(open(ssq, 'rb').read())) if ssq and os.path.exists(ssq) else 14400.0 / float(np.median(lengths))
         hashes = [hashlib.md5(z).hexdigest() for z in blobs]
+        classes = [Z.piece_class(body, m) for m in motions]
+        if 'flight' in classes:
+            flight['songs'].append('%s %s' % (game, tag))
+            for i, c in enumerate(classes):
+                if c == 'takeoff' and flight['takeoff'] is None:
+                    flight['takeoff'] = dict(name=TAKEOFF_CLIP, pieces=[(motions[i], lengths[i], lengths[i] / 120.0)],
+                                             bars=lengths[i] / 120.0, bpm=120.0, flight=True, lift=False)
+            fl = [i for i, c in enumerate(classes) if c == 'flight']
+            for chain in Z.chain_motions(body, [(i, motions[i]) for i in fl], joints):
+                # a flight piece keeps about its authored speed (whole 120-frame bars): no beat to
+                # hit, and some flight songs' SSQ tempo reads doubled (MUSIC FIT 051: 440 BPM)
+                pieces = [(motions[i], lengths[i], max(1.0, float(round(lengths[i] / 120.0))), hashes[i]) for i in chain]
+                for run in Z.chunk_take([(p[3], p[2]) for p in pieces]):
+                    ps = [pieces[k] for k in run]
+                    key = tuple(p[3] for p in ps)
+                    bars = sum(p[2] for p in ps)
+                    if bars < 3 or key in flight_seen:
+                        continue
+                    flight_seen.add(key)
+                    flight['clips'].append(dict(name='fly_h%ss%s_%03d' % (game[2], tag.lower(), chain[run[0]]),
+                                                pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm,
+                                                flight=True, lift=True))
+            continue
+        if min(lengths) > 250:       # the 3-clip demo / showcase files
+            print('LIBRARY skip %s %s (%d clips of %s frames)' % (game, tag, len(lengths), sorted(set(lengths))))
+            continue
         if game == 'hp3':
             hp3_pieces.update(hashes)
         for chain in Z.chain_motions(body, list(enumerate(motions)), joints):
@@ -308,11 +351,25 @@ def library(body, joints):
                 total_bars += bars
     print('LIBRARY %s: %d clips (%d FuruFuru Party), %.0f bars from %d song files' % (
         GAME, len(clips), sum(1 for c in clips if c['name'].startswith('h2')), total_bars, len(songs)))
-    _LIBRARY = clips
+    print('FLIGHT %s: take-off %s, %d flight clips (%.0f bars) from %d flight song(s): %s' % (
+        GAME, '%d frames' % flight['takeoff']['pieces'][0][1] if flight['takeoff'] else 'NONE', len(flight['clips']),
+        sum(c['bars'] for c in flight['clips']), len(flight['songs']), ', '.join(flight['songs'])))
+    _LIBRARY, _FLIGHT = clips, flight
     return clips
 
 
+def flight_library(body, joints):
+    """dict(takeoff clip or None, clips [flight clips], songs): the flight songs' pieces
+    (research 2/3 §7.5) -- the one take-off piece (MUSIC FIT / HP4: 600 frames, exported 1:1 =
+    10 s of dance time, its run and leap kept where they were authored) and the flight pieces
+    chained into ~8-bar clips like the dance library, lifted so the Hips fly at the standing hip
+    height (FLIGHT_LIFT; the zan pieces put them at the model origin)."""
+    library(body, joints)
+    return _FLIGHT
+
+
 _HANDS = None
+_FLIGHT_HANDS = None
 
 
 def hand_of(index, body, joints):
@@ -322,6 +379,18 @@ def hand_of(index, body, joints):
         _HANDS = Z.deal_rotating(range(len(lib)), len(DANCERS_TABLE), PER_DANCER, seed=SEED)
     lib = library(body, joints)
     return [lib[i] for i in sorted(_HANDS[index])]
+
+
+def flight_hand_of(index, body, joints):
+    """The take-off + FLIGHT_PER_DANCER flight clips of dancer `index` (dealt in a rotation like
+    the dance clips, so the cast together flies all of them), or [] without a take-off."""
+    global _FLIGHT_HANDS
+    fl = flight_library(body, joints)
+    if not fl['takeoff'] or not fl['clips']:
+        return []
+    if _FLIGHT_HANDS is None:
+        _FLIGHT_HANDS = Z.deal_rotating(range(len(fl['clips'])), len(DANCERS_TABLE), FLIGHT_PER_DANCER, seed=SEED + 1)
+    return [fl['takeoff']] + [fl['clips'][i] for i in sorted(_FLIGHT_HANDS[index])]
 
 
 def clip_worlds(body, clip, joints, frames):
@@ -608,8 +677,9 @@ def port(key):
     bname = 'pl_' + key
     body_dir = os.path.join(out_dir, bname)
     motion_dir = os.path.join(body_dir, 'motion')
-    os.makedirs(motion_dir, exist_ok=True)
-    for d, ext in ((body_dir, '.dds'), (motion_dir, '.anm')):
+    flight_dir = os.path.join(motion_dir, FLIGHT_DIR)
+    os.makedirs(flight_dir, exist_ok=True)
+    for d, ext in ((body_dir, '.dds'), (motion_dir, '.anm'), (flight_dir, '.anm')):
         for stale in os.listdir(d):
             if stale.endswith(ext):
                 os.remove(os.path.join(d, stale))
@@ -630,24 +700,30 @@ def port(key):
     names = [zan_of[n] for n in file_names]
     game_binds = {n: binds[n] for n in names}
     hand = hand_of(entry['index'], body, names)
+    flight = flight_hand_of(entry['index'], body, names)
+    if not flight:
+        os.rmdir(flight_dir)
     total = 0
-    for clip in hand:
+    for clip in hand + flight:
         n_out = int(round(clip['bars'] * 120))
         frames = list(range(0, n_out + 1, 2))
         worlds = clip_worlds(body, clip, names, frames)
+        if clip.get('lift'):
+            worlds[:, :, 3, 1] += FLIGHT_LIFT
         shift = None
-        if ROOT_MODE == 'recentre':
+        if ROOT_MODE == 'recentre' and clip['name'] != TAKEOFF_CLIP:
             hips = worlds[:, names.index('Hips'), 3]
             shift = ((hips[:, 0].min() + hips[:, 0].max()) / 2, (hips[:, 2].min() + hips[:, 2].max()) / 2)
         spec, wq = H.worlds_to_anm_spec(worlds, names, parents, file_binds, game_binds, frames, frames[-1], shift)
         data = A.write_anm(spec)
         err = check_clip(data, wq, parents, frames)
         assert err < 1e-3, '%s: joint error %.5f m' % (clip['name'], err)
-        open(os.path.join(motion_dir, clip['name'] + '.anm'), 'wb').write(data)
+        open(os.path.join(flight_dir if clip.get('flight') else motion_dir, clip['name'] + '.anm'), 'wb').write(data)
         total += len(data)
         print('CLIP %s %2d piece(s) %5.1f bars (song %3.0f BPM) -> %5d frames @60, %7d bytes, max joint err %.2e m' % (
             clip['name'], len(clip['pieces']), clip['bars'], clip['bpm'], frames[-1], len(data), err))
-    print('CLIPS %s: %d clips, %.1f bars, %.2f MB' % (key, len(hand), sum(c['bars'] for c in hand), total / 1e6))
+    print('CLIPS %s: %d clips, %.1f bars + flight %s, %.2f MB' % (key, len(hand), sum(c['bars'] for c in hand),
+                                                             [c['name'] for c in flight] or 'none', total / 1e6))
 
     sidecar = os.path.join(out_dir, 'chara_resources.rlist.txt')
     with open(sidecar, 'w') as f:
@@ -656,6 +732,8 @@ def port(key):
             os.path.basename(chr_path(entry['nn'], entry['variant']))[:-4]))
         f.write('# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips %s)\n' % (
             ' '.join(c['name'] for c in hand)))
+        if flight:
+            f.write('# flight stages: motion/%s/ %s\n' % (FLIGHT_DIR, ' '.join(c['name'] for c in flight)))
         f.write('%s, pl, %s, A, 1.0, %s, 0.0\n' % (key, sex, export_character.fmt_num(SHADOW[sex])))
     if PREVIEW:
         preview(out_dir, key, max(hand, key=lambda c: c['bars'])['name'] if hand else None)

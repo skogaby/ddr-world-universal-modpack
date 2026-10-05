@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Root 2" (CHR240 + CHR242), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s003_041 h3s004_008 h3s011_031 h3s015j_084 h3s016j_100 h3s026j_020 h3s036_024 h3s040_016 h3s043_078 h2s025_008 h2s036_000 h2s043_027)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s003_041 h3s003j_000 h3s004_008 h3s011_031 h3s014j_037 h3s015j_049 h3s015j_067 h3s026_111 h3s039_088 h3s050_056 h2s025_012 h2s036_000)
+# flight stages: motion/flight/ takeoff fly_h3s049_000 fly_h3s049_013 fly_h3s049_021 fly_h2s049_000
 hproot02, pl, M, A, 1.0, 0.8, 0.0

@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Ceja 1" (CHR6800 + CHR6801), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001l_008 h4s001_024 h4s007l_000 h4s010l_040 h4s010l_048 h4s011l_056 h4s011_040 h4s014_024 h4s039_056 h4s049_008 h4s060_016 h4s065_056)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001_024 h4s007l_000 h4s010l_040 h4s010l_048 h4s010l_056 h4s014_048 h4s018_000 h4s018_008 h4s018_032 h4s057_056 h4s063_000 h4s067_048)
+# flight stages: motion/flight/ takeoff fly_h4s053_008 fly_h4s054_006 fly_h4s054_015 fly_h4s055_008
 hp4ceja01, pl, F, A, 1.0, 0.75, 0.0

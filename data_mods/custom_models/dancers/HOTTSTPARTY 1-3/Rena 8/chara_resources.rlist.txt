@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Rena 8" (CHR410 + CHR412), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s007_015 h3s007j_000 h3s010j_022 h3s011_000 h3s013j_000 h3s021j_064 h3s022j_038 h3s024_018 h3s024j_000 h3s025_033 h3s027_008 h3s027_081)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s003_018 h3s007j_024 h3s010_034 h3s011_000 h3s016_088 h3s022_043 h3s042_040 h3s050_008 h3s057_040 h3s059_082 h2s034_040 h2s055_034)
+# flight stages: motion/flight/ takeoff fly_h3s047_008 fly_h3s049_013 fly_h3s049_021 fly_h2s049_000
 hprena08, pl, F, A, 1.0, 0.75, 0.0

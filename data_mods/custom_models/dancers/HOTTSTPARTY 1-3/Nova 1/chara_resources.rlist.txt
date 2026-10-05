@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Nova 1" (CHR310 + CHR313), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002j_039 h3s006j_036 h3s007j_032 h3s011j_064 h3s018_033 h3s028j_038 h3s031_044 h3s032_071 h3s034_071 h3s036_048 h3s061_028 h2s035_032)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s004_014 h3s006_006 h3s016j_016 h3s017_008 h3s017j_100 h3s019j_009 h3s021j_000 h3s022j_014 h3s026_048 h3s034_063 h3s035_028 h3s062_037)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s049_013
 hpnova01, pl, F, A, 1.0, 0.75, 0.0

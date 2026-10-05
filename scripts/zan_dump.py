@@ -776,6 +776,29 @@ def pose_positions(model, motion, joints, t):
     return joint_worlds(model, motion, joints, [t])[0][:, 3, :3]
 
 
+FLIGHT_HIPS_MAX = 0.35 * HIPS_UNITS   # a flight piece keeps the Hips below this (file units)
+FLIGHT_LEVEL_MAX = 0.5                 # ... and Hips -> Head's mean |y| (the torso level)
+
+
+def piece_class(model, motion, samples=16):
+    """'flight', 'takeoff' or 'dance' for one choreography piece. The flight songs (MUSIC FIT
+    046-049 / 051, HOTTEST PARTY 4 053-055, FuruFuru Party 049; research 2/3 §7.5) author their
+    flight with the Hips at the model ORIGIN (a dancer stands at HIPS_UNITS) and the body level
+    (Hips -> Head along +z); their one TAKE-OFF piece starts standing and ends in a leap (MUSIC
+    FIT / HP4: 600 frames, the Hips to ~7x their standing height). Every other piece is dance."""
+    hi, he = model['by_name']['Hips'], model['by_name']['Head']
+    t = np.linspace(0.0, max(float(motion['length']) - 1.0, 0.0), samples)
+    w = posed_worlds(model, motion, t)
+    hips, head = w[:, hi, 3, :3], w[:, he, 3, :3]
+    d = head - hips
+    d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+    if hips[:, 1].max() < FLIGHT_HIPS_MAX and np.abs(d[:, 1]).mean() < FLIGHT_LEVEL_MAX:
+        return 'flight'
+    if d[0, 1] > 0.8 and abs(hips[0, 1] - HIPS_UNITS) < 0.3 * HIPS_UNITS and hips[-1, 1] > 3.0 * HIPS_UNITS:
+        return 'takeoff'
+    return 'dance'
+
+
 def chain_motions(model, motions, joints, tol=0.05):
     """Group consecutive (id, motion) whose last pose equals the next one's first (within `tol`
     file units on every joint): a song's MOT file is its choreography as a run of one-bar

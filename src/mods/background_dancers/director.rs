@@ -14,8 +14,28 @@
 //! the evaluation and the body publish, so every derived instance inherits it
 //! (`docs/big_head_mode_feasibility.md`).
 //!
+//! FLIGHT stages (`Session::flight_stage`): a `pre_*` part (the launch
+//! platform, its sky, the intro space and the tunnel mouth) shows until
+//! `Session::flight_switch` (the take-off's end), a `fly_*` part (the tunnel
+//! and its space) from it on, on its own clock `t − switch`; a one-shot
+//! `.anm` on either side holds its last frame. The `pre_*` parts follow
+//! MUSIC FIT's intro script on the way (`director_math::intro_look`: the
+//! platform dims, the mouth fades in and opens, the sky fades out) through
+//! the instance tint; the floor shadows go with the platform
+//! (`director_math::phase_clock`).
+//!
+//! FLIGHT EFFECTS (`flight_fx.rs`): every flying dancer runs player
+//! (index mod 4)'s `boss_ddr3.TEB` effects — the leap burst from take-off
+//! frame 544 at its Hips (position only) and feet, the orb / trail / hand
+//! stars from the switch at its Hips and hands — on the real clock (the
+//! game's 60 Hz effect tick), billboarded at this frame's camera
+//! (`Session::fx_camera`), the world scrolling from the switch; the pools'
+//! bones / record colours / flip-book offsets go out on the effect
+//! instances' slots.
+//!
 //! No per-frame allocation: the session's scratch buffers are sized once;
-//! the ground-point buffer is a fixed array.
+//! the ground-point buffer is a fixed array; the effect pools are sized at
+//! session build.
 
 use crate::core::anm::camera::sample_camera;
 use crate::core::anm::pose::evaluate_into;
@@ -23,15 +43,18 @@ use crate::core::anm::sanm;
 use crate::services::scene3d::{frame_board, scene_graph};
 
 use super::director_math::{
-    clip_frame, part_world, scale_subtree_about_root, shadow_step, shadow_target, shadow_world,
-    transform_point, BLACK, IDENTITY, WHITE,
+    clip_frame, intro_look, mat_mul, part_phase, part_world, phase_clock, scale_subtree_about_root,
+    shadow_step, shadow_target, shadow_world, transform_point, PartPhase, BLACK, IDENTITY, WHITE,
 };
+use super::flight_fx::{Affine, Camera};
 use super::movie_mode::SceneMask;
 use super::schedule::ClipSel;
 use super::session::{CameraSet, Clip, InstanceKind, InstanceStatus, Session};
 
 /// Produce + publish every built instance's frame for song time `t`
-/// (seconds since the song-start edge). `visible = false` publishes the
+/// (seconds since the song-start edge; DANCE time under the tempo map) and
+/// `real_s` (the music count in real seconds — what the flight effects tick
+/// on). `visible = false` publishes the
 /// same poses hidden (the pre-edge / abandoned states). `mask` hides whole
 /// instance kinds on top of that (Background Movies = FULLSCREEN: the stage
 /// parts — and with them their hull twins, which read the part's slot — and
@@ -40,10 +63,15 @@ use super::session::{CameraSet, Clip, InstanceKind, InstanceStatus, Session};
 /// body's / part's slot too); the poses keep advancing underneath so a kind
 /// that comes back (a course stage without a movie after one with) is
 /// already current.
-pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
+pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: SceneMask) {
     let hidden = !visible;
     let stage_hidden = hidden || !mask.stage;
-    let shadow_hidden = hidden || !mask.shadows;
+    // FLIGHT stages: `pre_` / `fly_` parts switch at the take-off's end
+    // (`Session::flight_switch`); there is no floor to shadow after it.
+    let flight_stage = sess.flight_stage;
+    let flight_switch = sess.flight_switch;
+    let flying = flight_stage && flight_switch.is_some_and(|s| t >= s);
+    let shadow_hidden = hidden || !mask.shadows || flying;
     let dancer_hidden = hidden || !mask.dancers;
     let n_dancers = sess.parsed.dancers.len();
     // BIG HEAD is live: read every frame (gameplay and previews share this
@@ -65,6 +93,24 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         let Some(p) = sess.parsed.stage_parts.get(i) else {
             continue;
         };
+        // Flight phase: shown / its clock (a `fly_` part runs from the
+        // switch; a one-shot clip — no loop bit: the tunnel mouth's opening —
+        // holds its last frame instead of re-opening every loop). A `pre_`
+        // part also follows MUSIC FIT's intro script (`intro_look`: the
+        // platform dims, the sky fades out, the mouth fades in and opens).
+        let (phase, (mut shown, mut pt)) = if flight_stage {
+            let ph = part_phase(&p.part);
+            (ph, phase_clock(ph, flight_switch, t))
+        } else {
+            (PartPhase::Always, (true, t))
+        };
+        let mut tint = WHITE;
+        if phase == PartPhase::Pre {
+            let look = intro_look(&p.part, pt);
+            tint = look.tint;
+            shown &= look.shown;
+            pt = look.clock;
+        }
         let Session {
             scratch,
             bones,
@@ -73,7 +119,8 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         } = sess;
         match &p.loop_clip {
             Some(clip) => {
-                let frame = clip_frame(t, clip.anm.duration_s(), clip.anm.fps, true);
+                let loops = phase == PartPhase::Always || clip.anm.loops;
+                let frame = clip_frame(pt, clip.anm.duration_s(), clip.anm.fps, loops);
                 evaluate_into(
                     &clip.anm,
                     &clip.bytes,
@@ -96,7 +143,7 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         // same dance clock, always wrapped.
         mat_params.clear();
         if let Some(mc) = &p.material_clip {
-            let frame = clip_frame(t, mc.sanm.duration_s(), mc.sanm.fps, true);
+            let frame = clip_frame(pt, mc.sanm.duration_s(), mc.sanm.fps, true);
             sanm::sample_writes(&mc.sanm, &mc.bytes, frame, &mc.binding, |w| {
                 if mat_params.len() < frame_board::MAX_MAT_PARAMS {
                     mat_params.push(frame_board::MatParam {
@@ -110,8 +157,8 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
         frame_board::publish_with_materials(
             slot,
             &world,
-            WHITE,
-            stage_hidden,
+            tint,
+            stage_hidden || !shown,
             &bones[..bone_count.min(bones.len())],
             mat_params,
         );
@@ -194,6 +241,7 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
                 &sess.bones[..n],
             );
         }
+        tick_flight_fx(sess, i, t, real_s, &body_world);
 
         // Children read the freshly evaluated `sess.bones`.
         let Some(children) = sess.children.get(i).cloned() else {
@@ -248,10 +296,81 @@ pub fn produce(sess: &mut Session, t: f32, visible: bool, mask: SceneMask) {
                     let world = shadow_world(size, transform_point(&body_world, centre));
                     frame_board::publish(slot, &world, BLACK, shadow_hidden, &[IDENTITY]);
                 }
+                InstanceKind::Fx { dancer, pool } if dancer == i => {
+                    let Session { fx, mat_params, .. } = sess;
+                    let Some(frame) = fx
+                        .get(i)
+                        .and_then(Option::as_ref)
+                        .and_then(|f| f.frames.get(pool))
+                    else {
+                        continue;
+                    };
+                    mat_params.clear();
+                    for w in frame.mats.iter().take(frame_board::MAX_MAT_PARAMS) {
+                        mat_params.push(frame_board::MatParam {
+                            material: w.material,
+                            index: w.index,
+                            value: w.value,
+                        });
+                    }
+                    frame_board::publish_full(
+                        slot,
+                        &IDENTITY,
+                        WHITE,
+                        dancer_hidden || frame.drawn == 0,
+                        &frame.bones,
+                        mat_params,
+                        &frame.colours,
+                    );
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// Dancer `i`'s flight effects for this frame (no-op without them): its
+/// attach joints from the freshly evaluated `sess.bones` (model space) under
+/// `body_world`, the camera of this frame, the leap / switch times.
+fn tick_flight_fx(sess: &mut Session, i: usize, t: f32, real_s: f32, body_world: &[f32; 16]) {
+    let Session {
+        fx,
+        parsed,
+        bones,
+        fx_leap,
+        fx_camera,
+        flight_switch,
+        ..
+    } = sess;
+    let (Some(Some(dfx)), Some(assets), Some(switch)) =
+        (fx.get_mut(i), parsed.flight_fx.as_ref(), *flight_switch)
+    else {
+        return;
+    };
+    let Some(joints_idx) = parsed.dancers.get(i).and_then(|d| d.fx_joints) else {
+        return;
+    };
+    let k = assets.layout.metres_per_unit;
+    let mut joints = [Affine::IDENTITY; 5];
+    for (dst, &b) in joints.iter_mut().zip(joints_idx.iter()) {
+        let m = bones.get(b).copied().unwrap_or(IDENTITY);
+        *dst = Affine::from_world_row(&mat_mul(&m, body_world), k);
+    }
+    let cam = match fx_camera.as_ref() {
+        Some(c) => Camera::look_at_world(c.eye, c.target, c.up, k),
+        None => Camera::look_at_world([0.0, 1.6, 5.0], [0.0, 0.9, 0.0], [0.0, 1.0, 0.0], k),
+    };
+    let leap = fx_leap.get(i).copied().unwrap_or(switch).min(switch);
+    dfx.tick(
+        &assets.teb,
+        &assets.layout,
+        t,
+        real_s,
+        leap,
+        switch,
+        &joints,
+        &cam,
+    );
 }
 
 /// The camera for song time `t` (design §4.3.3/§4.3.4): advance the A3

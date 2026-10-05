@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Dyna 1" (CHR420 + CHR421), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_000 h3s017_004 h3s017j_053 h3s020j_010 h3s026_071 h3s027j_020 h3s028_040 h3s028_048 h3s037_032 h3s058_000 h3s062_049 h2s038_013)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s011j_012 h3s013j_037 h3s019_068 h3s021_000 h3s021j_023 h3s025_027 h3s031_084 h3s036_005 h3s050_064 h3s057_048 h3s059_006 h2s035_016)
+# flight stages: motion/flight/ takeoff fly_h3s049_000 fly_h3s049_013 fly_h3s049_021 fly_h2s049_000
 hpdyna01, pl, F, A, 1.0, 0.75, 0.0

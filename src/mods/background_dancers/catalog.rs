@@ -589,6 +589,7 @@ mod tests {
             key: "griffin00".to_string(),
             row: 34,
             parts: vec![("room".to_string(), None)],
+            flight: false,
         });
         let custom = vec![
             entry("peter00", "PETER GRIFFIN", "custom", "CUSTOM"),
@@ -679,6 +680,7 @@ mod tests {
             key: "room00".to_string(),
             row: 34,
             parts: vec![("bg".to_string(), None)],
+            flight: false,
         }];
         let custom = vec![
             entry("u00", "AFRO", "umx2", "UMX2"),

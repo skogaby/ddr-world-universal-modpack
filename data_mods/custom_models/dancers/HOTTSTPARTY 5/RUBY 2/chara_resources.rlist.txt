@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "RUBY 2" (CHR20300 + CHR20302), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u008s01_000 h5s2u029s01_000 h5s2u032l02_000 h5s3u032e01_000 h5s3u033l01_008 h5s3u037l04_000 h5s3u042e01_000 h5s3u043s01_000 h5s3u044l03_000 h5s3u053l01_000 h5s3u058l01_008 h5s5u031s01_000)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u008l01_000 h5s2u029l01_000 h5s2u029l04_000 h5s2u033l01_008 h5s2u036s01_008 h5s2u037l01_008 h5s3j007l01_000 h5s3j007l02_000 h5s3u025e01_008 h5s3u035e01_000 h5s4u001ll03_000 h5s4u001s01_000)
+# flight stages: motion/flight/ takeoff fly_h5s4u054e01_000 fly_h5s4u054l01_001 fly_h5s4u055l01_000 fly_h5s4u055l02_016
 hp5ruby02, pl, F, A, 1.0, 0.75, 0.0

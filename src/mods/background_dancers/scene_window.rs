@@ -277,9 +277,9 @@ impl SceneWindow {
                     sess.built_at = Some(Instant::now());
                     if !self.built_logged {
                         self.built_logged = true;
-                        let (st, dn, pt, sh, hu) = sess.built_counts();
+                        let (st, dn, pt, sh, hu, fx) = sess.built_counts();
                         log_info!(
-                            "{}: built {} ms after request -- {} instance(s) attached hidden ({} stage, {} dancer, {} part, {} shadow, {} hull), {} skipped",
+                            "{}: built {} ms after request -- {} instance(s) attached hidden ({} stage, {} dancer, {} part, {} shadow, {} hull, {} fx), {} skipped",
                             self.tag,
                             since_request_ms,
                             sess.built().count(),
@@ -288,6 +288,7 @@ impl SceneWindow {
                             pt,
                             sh,
                             hu,
+                            fx,
                             sess.instances.len() - sess.built().count()
                         );
                     }
@@ -351,15 +352,16 @@ impl SceneWindow {
         }
     }
 
-    /// Publish every built instance's pose for scene time `t` (hidden when
+    /// Publish every built instance's pose for scene time `t` (`real_s`: the
+    /// real clock the flight effects tick on; hidden when
     /// `!visible`; `mask` hides whole instance kinds on top — see
     /// `director::produce`) and drop the node-level "force hidden" of every
     /// instance that has now been published at least once.
-    pub fn publish(&mut self, t: f32, visible: bool, mask: SceneMask) {
+    pub fn publish(&mut self, t: f32, real_s: f32, visible: bool, mask: SceneMask) {
         let Some(sess) = self.session.as_mut() else {
             return;
         };
-        director::produce(sess, t, visible, mask);
+        director::produce(sess, t, real_s, visible, mask);
         // Every built instance has now been published at least once, so
         // its board slot — hidden bit included — is authoritative: drop
         // the node-level "force hidden" it was attached with. Deploy #2:

@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Harmony 1" (CHR6700 + CHR6701), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s002_008 h4s006_048 h4s007_040 h4s010_016 h4s011l_064 h4s011_048 h4s015_016 h4s042_048 h4s049_016 h4s063_008 h4s065_048 h4s065_064)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s002_048 h4s006_048 h4s007_008 h4s007_040 h4s010_016 h4s011_048 h4s014_008 h4s018_024 h4s019_008 h4s042_008 h4s052_055 h4s064_064)
+# flight stages: motion/flight/ takeoff fly_h4s053_008 fly_h4s054_006 fly_h4s054_015 fly_h4s055_008
 hp4harmony01, pl, F, A, 1.0, 0.75, 0.0

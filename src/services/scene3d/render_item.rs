@@ -192,6 +192,14 @@ impl RenderItem {
         (idx, flags)
     }
 
+    /// Per draw record: the index of the material copy it binds
+    /// (`usize::MAX` when outside the copies) — build-time diagnostics.
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn record_materials(&self) -> Vec<usize> {
+        self.record_material_map().0
+    }
+
     /// Per material copy: whether it samples the resource texture-table
     /// entry hashed `texture_hash` through any masked slot
     /// (`layout::materials_sampling`).
@@ -355,6 +363,8 @@ impl RenderItem {
 pub const BONES_PTR_OFF: usize = layout::ITEM_BONES;
 /// Header offset of the tint.
 pub const TINT_OFF: usize = layout::ITEM_TINT;
+/// Header offset of the world matrix.
+pub const WORLD_OFF: usize = layout::ITEM_WORLD;
 
 /// The item's own bone count as `build` recorded it in `ModelParameters.x`
 /// (an `f32`; 0 when unreadable/implausible).
@@ -424,6 +434,25 @@ pub unsafe fn set_material_params_raw(item: *mut u8, params: &[MatParam]) -> usi
         applied += 1;
     }
     applied
+}
+/// The item's record colours as a raw destination: record 0's colour
+/// (`rec + REC_COLOR`, 4 f32), the stride between records in floats and
+/// the record count (`res+0x24` — the collector's own bound). `None` when
+/// the record array / resource pointer is null.
+/// # Safety
+/// As [`set_world_raw`].
+pub unsafe fn record_colours_raw(item: *mut u8) -> Option<(*mut f32, usize, usize)> {
+    let recs = memory::read_ptr(item.add(layout::ITEM_DRAW_RECORDS)) as *mut u8;
+    let res = memory::read_ptr(item.add(layout::ITEM_RES));
+    if recs.is_null() || res.is_null() {
+        return None;
+    }
+    let count = memory::read_u32(res.add(super::model_registry::RES_DRAW_RECORD_COUNT)) as usize;
+    Some((
+        recs.add(layout::REC_COLOR) as *mut f32,
+        layout::REC_SIZE / 4,
+        count,
+    ))
 }
 /// # Safety
 /// As [`set_world_raw`].

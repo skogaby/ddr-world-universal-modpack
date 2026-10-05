@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Gliss 2" (CHR290 + CHR294), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s007j_024 h3s013j_025 h3s022j_014 h3s024j_067 h3s025_073 h3s027_048 h3s028j_074 h3s035_060 h3s046_000 h3s054_077 h3s062_027 h2s041_062)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s002_055 h3s002j_077 h3s012j_053 h3s013j_025 h3s019_008 h3s019j_037 h3s024j_049 h3s038_024 h3s043_016 h3s054_085 h3s061_012 h2s038_005)
+# flight stages: motion/flight/ takeoff fly_h3s046_000 fly_h3s046_008 fly_h3s048_000 fly_h3s048_008
 hpgliss02, pl, F, A, 1.0, 0.75, 0.0

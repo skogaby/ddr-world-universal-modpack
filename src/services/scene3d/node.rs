@@ -14,8 +14,8 @@
 //!
 //! * `visit(this, pass, ctx)`: pass 2 → for a board-driven node (`instance
 //!   != frame_board::NO_SLOT`) copy the newest consistent
-//!   [`frame_board`](super::frame_board) snapshot (world, tint, hidden, bones)
-//!   into the item — the ONLY writer of an attached item's pose (design §4.4);
+//!   [`frame_board`](super::frame_board) snapshot (world, tint, hidden, bones,
+//!   material writes, record colours) straight into the item — the ONLY writer of an attached item's pose (design §4.4);
 //!   a static node (the Step 3/4 shape) does nothing here; pass 4 → refresh
 //!   the item's hidden bit (static nodes: the node flag; board nodes: the flag
 //!   can only FORCE hidden, the board's own hidden bit from pass 2 otherwise
@@ -38,7 +38,7 @@ use crate::core::memory;
 use crate::log_warn;
 use crate::services::song_reset;
 
-use super::frame_board::{self, SlotRead, NO_SLOT};
+use super::frame_board::{self, ItemDst, MatParam, MAX_MAT_PARAMS, NO_SLOT};
 use super::node_layout::{
     push_visible, SceneNode, VisibleVec, NODE_FLAG_ENABLED, NODE_ITEM_OFF, NODE_PASS_MASK,
     NODE_SIZE, NODE_SORT_KEY_OFF, PASS_COLLECT, PASS_UPDATE,
@@ -108,20 +108,36 @@ unsafe extern "C" fn node_visit(this: *mut SceneNode, pass: i32, ctx: *mut u8) -
         if pass == PASS_UPDATE {
             // Board-driven node: copy the newest consistent snapshot. A
             // torn/unpublished read leaves the item exactly as it was.
+            // Copied STRAIGHT into the item (world, tint, bones, record
+            // colours); only the material writes pass through 1 KB of stack.
             if instance != NO_SLOT {
-                let mut snap = SlotRead::zeroed();
-                if frame_board::read_slot_into(instance, &mut snap) {
-                    render_item::set_world_raw(item, &snap.world);
-                    render_item::set_tint_raw(item, snap.tint);
-                    render_item::set_bones_raw(
-                        item,
-                        &snap.bones[..snap.bone_count],
-                        snap.bone_count,
-                    );
-                    if snap.mat_count > 0 {
-                        render_item::set_material_params_raw(item, &snap.mats[..snap.mat_count]);
+                let bones = memory::read_ptr(item.add(render_item::BONES_PTR_OFF)) as *mut f32;
+                let bones_cap = if bones.is_null() {
+                    0
+                } else {
+                    render_item::item_bone_count(item)
+                };
+                let (colours, colour_stride, colours_cap) =
+                    render_item::record_colours_raw(item).unwrap_or((std::ptr::null_mut(), 0, 0));
+                let dst = ItemDst {
+                    world: item.add(render_item::WORLD_OFF) as *mut f32,
+                    tint: item.add(render_item::TINT_OFF) as *mut f32,
+                    bones: if bones.is_null() {
+                        std::ptr::NonNull::dangling().as_ptr()
+                    } else {
+                        bones
+                    },
+                    bones_cap,
+                    colours,
+                    colour_stride,
+                    colours_cap,
+                };
+                let mut mats = [MatParam::ZERO; MAX_MAT_PARAMS];
+                if let Some(r) = frame_board::read_slot_into_item_raw(instance, &dst, &mut mats) {
+                    if r.mats > 0 {
+                        render_item::set_material_params_raw(item, &mats[..r.mats]);
                     }
-                    render_item::set_hidden_raw(item, snap.hidden);
+                    render_item::set_hidden_raw(item, r.hidden);
                 }
             }
             return 0;

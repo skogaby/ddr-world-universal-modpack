@@ -11,7 +11,10 @@ object SRT tracks, attribute (UV scroll) and material (litColor) tracks -- then 
      vertex, baked through its object's rest world into game metres (hsf_dump.GAME_SCALE, the
      dancers' scale); the material picks the World blend group (hsf_dump.material_kind:
      ADDCOL -> `add`, INVCOL -> `sub`, a translucent pass with real partial alpha -> `ble`, else
-     `dec` alpha-tested; every mesh two-sided like the GX NOCULL default of these scenes);
+     `dec` alpha-tested); CULLING as on the Wii: NOCULL (object | material flags bit 1,
+     FUN_8006a3a8) -> two-sided, else single-sided in the GX winding (hsf_dump.cull_winding; a
+     mesh under a mirroring world stays two-sided) -- until 2026-10-05 every mesh shipped
+     two-sided and back-to-back faces (stg04's fans) z-fought;
      vertex colours are kept for vtxMode 5 materials (COLOR0 x texture, the `_vc` shader);
   2. parts: the backdrop model's opaque meshes -> `bg` (priority -2, World's `_bg` skydome
      rules); everything else one part per (blend group, loop group). Models whose loop length
@@ -194,6 +197,9 @@ def mesh_records(entry, rest, unit_rest, animated):
         col_buf = model['color'][o['color']]['data'] if o['color'] >= 0 else None
         Wm = rest[o['index']]
         Nm = np.linalg.pinv(Wm[:3, :3]).T
+        # a mirroring world reverses the screen winding (the draw's cull-mode swap, model flag
+        # 0x800000, is not tied to it): those meshes stay two-sided
+        mirrored = bool(np.linalg.det(Wm[:3, :3]) < 0)
         by_mat = {}
         for t, mt in zip(tris, mats):
             by_mat.setdefault(mt, []).append(t)
@@ -223,7 +229,9 @@ def mesh_records(entry, rest, unit_rest, animated):
             col = np.array(C_)
             out.append(dict(kind=world_kind(model, mt, bool((col[:, 3] < 0.999).any())), anchor=anchor, material=mt,
                             bitmap=H.mesh_bitmap(model, mt), pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_),
-                            col=col, tris=np.array(tri_out), obj=o['index']))
+                            col=col, tris=np.array(tri_out), obj=o['index'], mirrored=mirrored,
+                            two_sided=mirrored or bool((o['flags'] | (model['materials'][mt]['flags'] if 0 <= mt < len(model['materials'])
+                                                                      else 0)) & H.MATERIAL_FLAG_NOCULL)))
     return out
 
 
@@ -363,8 +371,8 @@ def build_part(key, part, chunk):
         model = e['model']
         by_mat = {}
         for r in recs:
-            by_mat.setdefault(r['material'], []).append(r)
-        for mi, rs in sorted(by_mat.items()):
+            by_mat.setdefault((r['material'], r['two_sided'], r['mirrored']), []).append(r)
+        for (mi, two, mirrored), rs in sorted(by_mat.items()):
             pos = np.concatenate([r['pos'] for r in rs])
             nrm = np.concatenate([r['nrm'] for r in rs])
             uv = np.concatenate([r['uv'] for r in rs])
@@ -373,8 +381,8 @@ def build_part(key, part, chunk):
             tris = np.concatenate([r['tris'] + o for r, o in zip(rs, offs)])
             bones = np.concatenate([np.full(len(r['pos']), 0 if r['anchor'] is None else 1 + anchors.index((e['index'], r['anchor'])))
                                     for r in rs])
-            tris, _f = H.consistent_winding(pos, nrm, tris)
-            name = 'gm_%s_%s_m%02d_%03d' % (key, part, e['index'], mi)
+            tris = H.cull_winding(pos, nrm, tris, two)
+            name = 'gm_%s_%s_m%02d_%03d%s' % (key, part, e['index'], mi, 'r' if mirrored else 'n' if two else '')
             me = bpy.data.meshes.new(name)
             me.from_pydata([tuple(convert.vec_to_blender(p)) for p in pos], [], tris.tolist())
             me.update()
@@ -404,13 +412,13 @@ def build_part(key, part, chunk):
             b = rs[0]['bitmap']
             image = texture_image(key, model, b) if b is not None else P.palette_texture(
                 '%s_white' % key.replace('hpstage', 'hp'), [(1.0, 1.0, 1.0)], size=8)
-            mat = P.make_material(name, image, two_sided=True)
+            mat = P.make_material(name, image, two_sided=two)
             if rs[0]['kind'] in ('ble', 'add', 'sub'):
                 mat.surface_render_method = 'BLENDED'
             mat['ddr_hsf_material'] = '%d.%d' % (e['index'], mi)
             me.materials.append(mat)
             f1, f2 = FLAGS[rs[0]['kind']]
-            ob['ddr_flags'] = f1
+            ob['ddr_flags'] = f1 if two else f1 & ~K.MESH_FLAG_TWO_SIDED
             ob['ddr_flags2'] = f2
             objects.append(ob)
     return arm, objects, anchors, binds
@@ -739,7 +747,7 @@ def unlit_preview_materials():
             continue
         for mat in ob.data.materials:
             if mat is not None and mat.use_nodes and not mat.get('ddr_preview_unlit'):
-                _unlit(mat, int(ob.get('ddr_flags', 1) or 1), int(ob.get('ddr_flags2', 0) or 0))
+                _unlit(mat, int(ob.get('ddr_flags', 1)), int(ob.get('ddr_flags2', 0) or 0))
 
 
 def _unlit(mat, flags, flags2):
@@ -779,7 +787,7 @@ def _unlit(mat, flags, flags2):
             nt.links.new(em.outputs['Emission'], mix.inputs[2])
         nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
         mat.surface_render_method = 'BLENDED'
-        mat.use_backface_culling = False
+        mat.use_backface_culling = not (flags & K.MESH_FLAG_TWO_SIDED)   # the exported cull mode
         mat['ddr_preview_unlit'] = 1
 
 

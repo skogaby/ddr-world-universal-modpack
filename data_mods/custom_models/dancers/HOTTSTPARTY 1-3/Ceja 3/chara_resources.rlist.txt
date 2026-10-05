@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Ceja 3" (CHR480 + CHR483), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s003j_037 h3s007j_016 h3s010_008 h3s017j_023 h3s022_014 h3s026_064 h3s031_004 h3s043_030 h3s054_061 h3s057_075 h3s058_024 h2s002_030)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s009j_000 h3s011_027 h3s011_065 h3s011j_004 h3s011j_032 h3s015j_010 h3s020_016 h3s022_000 h3s023j_075 h3s024j_087 h3s063_001 h2s045_032)
+# flight stages: motion/flight/ takeoff fly_h3s046_000 fly_h3s046_008 fly_h3s048_000 fly_h3s048_008
 hpceja03, pl, F, A, 1.0, 0.75, 0.0

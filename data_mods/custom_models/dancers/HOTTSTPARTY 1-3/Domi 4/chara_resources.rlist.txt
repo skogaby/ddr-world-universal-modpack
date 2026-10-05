@@ -1,3 +1,4 @@
 # DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3 "Domi 4" (CHR220 + CHR224), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s007j_024 h3s013j_025 h3s022j_014 h3s024j_067 h3s026_048 h3s027_048 h3s028j_074 h3s046_000 h3s054_077 h3s062_027 h3s062_045 h2s041_062)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h3s007_028 h3s012_000 h3s014j_055 h3s016_020 h3s017_044 h3s019j_037 h3s023_032 h3s032_035 h3s045_008 h3s045_089 h3s061_012 h3s063_037)
+# flight stages: motion/flight/ takeoff fly_h3s046_008 fly_h3s047_008 fly_h3s048_000 fly_h3s049_013
 hpdomi04, pl, F, A, 1.0, 0.75, 0.0

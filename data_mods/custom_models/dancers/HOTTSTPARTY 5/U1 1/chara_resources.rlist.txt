@@ -1,3 +1,4 @@
 # DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU) "U1 1" (CHR20900 + CHR20901), ported with its own rig and choreography
-# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u032l03_008 h5s2u033l01_000 h5s3j007s01_000 h5s3u021l02_000 h5s3u036l01_000 h5s3u037s01_000 h5s3u056l02_000 h5s3u057l03_008 h5s3u058e01_000 h5s3u058l02_000 h5s5u031l02_000 h5s5u031l04_000)
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h5s2u031l02_000 h5s2u033l02_008 h5s2u035l02_000 h5s2u037l02_000 h5s2u037l02_008 h5s3j006l01_000 h5s3u004l01_016 h5s3u004l02_008 h5s3u044l01_008 h5s3u053l01_000 h5s3u053l03_000 h5s3u058e01_016)
+# flight stages: motion/flight/ takeoff fly_h5s4u053l02_000 fly_h5s4u053l02_008 fly_h5s4u054e01_008 fly_h5s4u055l03_003
 hp5u101, pl, M, A, 1.0, 0.8, 0.0
