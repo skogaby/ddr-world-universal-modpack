@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Root 2" (CHR6500 + CHR6502), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001l_000 h4s005_000 h4s010l_032 h4s012_040 h4s014_000 h4s037_008 h4s037_032 h4s045_008 h4s048_032 h4s052_061 h4s060_032 h4s064_072)
+hp4root02, pl, M, A, 1.0, 0.8, 0.0

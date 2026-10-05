@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Chordia 2" (CHR6600 + CHR6602), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s002_016 h4s004_024 h4s035_024 h4s037_056 h4s039_032 h4s040_064 h4s052_039 h4s057_048 h4s063_040 h4s065_080 h4s067_040 h4s067_048)
+hp4chordia02, pl, F, A, 1.0, 0.75, 0.0

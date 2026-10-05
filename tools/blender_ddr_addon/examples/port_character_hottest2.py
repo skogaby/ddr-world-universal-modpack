@@ -36,13 +36,25 @@ Per dancer:
      (ROOT_MODE), and checked against the zan pose (< 1 mm per joint);
   5. the `chara_resources.rlist.txt` sidecar (sex from the cast table, shadow 0.75 F / 0.8 M).
 
+GAME=hp4 / hp5 port DanceDanceRevolution HOTTEST PARTY 4 / 5 (Wii, EU 2010 / 2011; the same zan
+engine, rig and formats -- docs/wii_ddr_hottest_party_4_5_research.md) into their own sources
+`HOTTSTPARTY 4` / `HOTTSTPARTY 5` (neither cast contains the other's, nor is HOTTEST PARTY 1-3's a
+part of them). Their costume files are CHR<id><variant:02>.bin, ids 61..75 + 101 (HP4) and
+201..209 (HP5); names from each disc's select-screen plates / portraits and the costume texture
+codes (HP4A_01 = Rena as in MUSIC FIT's HP3A_01, ...). HP4's CHR72 / 73 are MUSIC FIT's CHR49 / 50
+(Pia / Forte, variants 1-2) byte for byte -- shipped already, not re-ported. HP4 / HP5 bodies have
+no colour-group-2 skin material (the skin is in the texture): no tone. The library is that disc's
+own dance/DANCE_*_MOT_010.bin (HP4: 77 song choreographies, the `NNNL` ones alternate dances of
+song NNN; HP5: 200 choreographies of HP2..HP5 songs, nearly all pieces HP2 / HP3 / HP4 ones
+again), tempo from ssq/ss4 where the file maps to a song (HP4), else the pieces' own length.
+
 Inputs (environment):
-  HP3_GAME / HP2_GAME  the dumped disc trees (scripts/extract_wii_ddr_data.py disc ...), default
-              ~/Desktop/DDR Wii ISOs/Music Fit / Furu Furu Party (HP2 only feeds
-              the choreography library)
-  DANCERS     comma list of keys (hprena01 ..) or person stems (rena, pia, ...: every costume),
-              default the first dancer, or 'all'
-  OUT_BASE    default data_mods/custom_models/dancers/HOTTSTPARTY 1-3 (one folder per dancer)
+  GAME        hp3 (default: the HOTTSTPARTY 1-3 port) | hp4 | hp5
+  HP3_GAME / HP2_GAME / HP4_GAME / HP5_GAME  the dumped disc trees (scripts/extract_wii_ddr_data.py
+              disc ...), default ~/Desktop/DDR Wii ISOs/<title> (HP2 only feeds the hp3 library)
+  DANCERS     comma list of keys (hprena01 .., hp4rena01 ..) or person stems (rena, pia, ...:
+              every costume), default the first dancer, or 'all'
+  OUT_BASE    default data_mods/custom_models/dancers/HOTTSTPARTY 1-3 | 4 | 5 (one folder per dancer)
   PER_DANCER  clips per dancer (default 12)
   ROOT_MODE   recentre (default) | travel
   PREVIEW     1 = also render Workbench previews of the RE-IMPORTED export into PREVIEW_DIR
@@ -52,6 +64,7 @@ Run: DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-s
 """
 import hashlib
 import os
+import re
 import sys
 import tempfile
 
@@ -71,12 +84,17 @@ from blender_ddr_addon import convert, export_character, import_anm, import_char
 from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
-DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit'}
-DISC = os.path.expanduser(os.environ.get('HP3_GAME', DISCS['hp3']))
+GAME = os.environ.get('GAME', 'hp3').lower()
+assert GAME in ('hp3', 'hp4', 'hp5'), GAME
+DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Music Fit (Japan)',
+         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)'}
+DISC = os.path.expanduser(os.environ.get('%s_GAME' % GAME.upper(), DISCS[GAME]))
 HP2_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
-SOURCE = 'HOTTSTPARTY 1-3'
-TITLE = 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3'
-KEY_PREFIX = 'hp'
+SOURCE = {'hp3': 'HOTTSTPARTY 1-3', 'hp4': 'HOTTSTPARTY 4', 'hp5': 'HOTTSTPARTY 5'}[GAME]
+TITLE = {'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
+         'hp4': 'DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU)',
+         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)'}[GAME]
+KEY_PREFIX = {'hp3': 'hp', 'hp4': 'hp4', 'hp5': 'hp5'}[GAME]
 OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', SOURCE)))
 PER_DANCER = int(os.environ.get('PER_DANCER', '12'))
 ROOT_MODE = os.environ.get('ROOT_MODE', 'recentre')
@@ -103,7 +121,7 @@ SEED = 3
 # stem -> (label, sex, [(nn, (variant, ...))])
 # ---------------------------------------------------------------------------------------------
 V2, V4, V12, V34 = (1, 2), (1, 2, 3, 4), (1, 2), (3, 4)
-CAST = {
+CAST_HP3 = {
     'rena': ('Rena', 'F', [(21, V4), (1, V2), (41, V2)]),
     'domi': ('Domi', 'F', [(22, V4), (2, V2)]),
     'ug': ('U.G.', 'M', [(23, V4), (3, V2), (43, V2)]),
@@ -129,6 +147,50 @@ CAST = {
 }
 
 
+# HOTTEST PARTY 4 (EU): CHR<id><variant:02>. The leads wear one new outfit each in two colours;
+# the texture codes keep MUSIC FIT's per-person numbering (HP4A_01 Rena, _03 U.G., _04 Root, _05
+# Chordia, _06 Harmony, _09 Dyna, _10 Bridget, _11 Ceja; HP4C_01 NAOKI, _02 U1, _03 jun; HP4B_03
+# Bossa / Nova, _04 Hip / Hop) and the select screen's plates and portraits agree (Rena's teal hat,
+# U.G.'s visor, Harmony / U.G. the dark-skinned ones). CHR101 is U1's outfit with other legs
+# (HP4C_04_leg). CHR72 / 73 (HP3B_01 / 02 = Pia / Forte in their MUSIC FIT outfit) are MUSIC FIT's
+# CHR49 / 50 byte for byte: shipped in HOTTSTPARTY 1-3, skipped here. CHR81..90 are Mii bodies.
+CAST_HP4 = {
+    'rena': ('Rena', 'F', [(61, V2)]),
+    'dyna': ('Dyna', 'F', [(62, V2)]),
+    'bridget': ('Bridget', 'F', [(63, V2)]),
+    'ug': ('U.G.', 'M', [(64, V2)]),
+    'root': ('Root', 'M', [(65, V2)]),
+    'chordia': ('Chordia', 'F', [(66, V2)]),
+    'harmony': ('Harmony', 'F', [(67, V2)]),
+    'ceja': ('Ceja', 'F', [(68, V2)]),
+    'naoki': ('NAOKI', 'M', [(69, V2)]),
+    'u1': ('U1', 'M', [(70, V2), (101, V2)]),
+    'jun': ('jun', 'F', [(71, V2)]),
+    'bossa': ('Bossa', 'F', [(74, V12)]),
+    'nova': ('Nova', 'F', [(74, V34)]),
+    'hip': ('Hip', 'M', [(75, V12)]),
+    'hop': ('Hop', 'M', [(75, V34)]),
+}
+# HOTTEST PARTY 5 (EU): five new characters (plates DISCO, EMI, RUBY, RAGE, YUNI) and a new Rena,
+# matched through the portraits (afro DISCO = CHR202, blue-haired EMI = 201, tanned RUBY = 203 --
+# its texture is `HP5_03_ruby_*` --, pink-haired YUNI = 204, capped RAGE = 205, teal-haired Rena =
+# 206), plus HP4's NAOKI / jun / U1 outfits re-exported with retouched heads (HP5C_01 / 03 / 02 =
+# CHR207 / 208 / 209; bodies identical to HP4's CHR69 / 71 / 70). Root, Harmony and the back-ups
+# have portraits but no costume file on the disc. CHR81..90 are Mii bodies.
+CAST_HP5 = {
+    'disco': ('DISCO', 'M', [(202, V2)]),
+    'emi': ('EMI', 'F', [(201, V2)]),
+    'ruby': ('RUBY', 'F', [(203, V2)]),
+    'rage': ('RAGE', 'M', [(205, V2)]),
+    'yuni': ('YUNI', 'F', [(204, V2)]),
+    'rena': ('Rena', 'F', [(206, V2)]),
+    'naoki': ('NAOKI', 'M', [(207, V2)]),
+    'jun': ('jun', 'F', [(208, V2)]),
+    'u1': ('U1', 'M', [(209, V2)]),
+}
+CAST = {'hp3': CAST_HP3, 'hp4': CAST_HP4, 'hp5': CAST_HP5}[GAME]
+
+
 def dancers():
     """{key: dict(label, sex, nn, variant, stem, index)} in cast order."""
     out = {}
@@ -150,16 +212,39 @@ def bone_name(n):
 
 
 def chr_path(nn, k):
-    return os.path.join(CHR_DIR, 'CHR%02d%d.bin' % (nn, k))
+    """FuruFuru Party / MUSIC FIT: CHR<nn:02><k>; HOTTEST PARTY 4 / 5: CHR<id><k:02>."""
+    return os.path.join(CHR_DIR, ('CHR%02d%d.bin' if GAME == 'hp3' else 'CHR%d%02d.bin') % (nn, k))
 
 
 # ---------------------------------------------------------------------------------------------
 # the choreography library
 # ---------------------------------------------------------------------------------------------
+HP5_DANCE = re.compile(r'^DANCE_HP(\d)([A-Z])_(\d+)(L?)_([A-Z])(\d+)_MOT_010\.bin$', re.I)
+HP4_DANCE = re.compile(r'^DANCE_(\d{3})(L?)_MOT_010\.bin$', re.I)
+
+
 def song_files():
     """[(game, song tag, MOT path, SSQ path)] of the songs' choreographies (no lesson files):
-    MUSIC FIT's, then FuruFuru Party's (whose pieces MUSIC FIT also carries are dropped later)."""
+    MUSIC FIT's, then FuruFuru Party's (whose pieces MUSIC FIT also carries are dropped later).
+    HOTTEST PARTY 4: dance/DANCE_<song>[L]_MOT_010.bin (`L` = the song's alternate dance, its own
+    pieces), tempo from ssq/ss4/MU_DDR_<song>.ss4. HOTTEST PARTY 5: dance/DANCE_HP<n><U|J>_<song>
+    _<E|L|S><nn>_MOT_010.bin (HP<n> = the song's origin game, its numbering, not HP5's ss4 one):
+    no SSQ, so library() takes the tempo from the pieces (one bar each)."""
     out = []
+    if GAME in ('hp4', 'hp5'):
+        ddir = os.path.join(DISC, 'dance')
+        for f in sorted(os.listdir(ddir)):
+            if GAME == 'hp4':
+                m = HP4_DANCE.match(f)
+                if m:
+                    out.append((GAME, m.group(1) + m.group(2).lower(), os.path.join(ddir, f),
+                                os.path.join(DISC, 'ssq', 'ss4', 'MU_DDR_%s.ss4' % m.group(1))))
+            else:
+                m = HP5_DANCE.match(f)
+                if m:
+                    tag = '%s%s%s%s%s%s' % tuple(x.lower() for x in m.groups())     # 2u008l01
+                    out.append((GAME, tag, os.path.join(ddir, f), ''))
+        return out
     for game, disc in (('hp3', DISC), ('hp2', HP2_DISC)):
         mdir = os.path.join(disc, 'motion')
         if not os.path.isdir(mdir):
@@ -198,7 +283,7 @@ def library(body, joints):
         if not motions or min(lengths) > 250:       # the 3-clip demo / showcase files
             print('LIBRARY skip %s %s (%d clips of %s frames)' % (game, tag, len(lengths), sorted(set(lengths))))
             continue
-        bpm = Z.dominant_bpm(Z.ssq_tempo(open(ssq, 'rb').read())) if os.path.exists(ssq) else 14400.0 / float(np.median(lengths))
+        bpm = Z.dominant_bpm(Z.ssq_tempo(open(ssq, 'rb').read())) if ssq and os.path.exists(ssq) else 14400.0 / float(np.median(lengths))
         hashes = [hashlib.md5(z).hexdigest() for z in blobs]
         if game == 'hp3':
             hp3_pieces.update(hashes)
@@ -221,8 +306,8 @@ def library(body, joints):
                 clips.append(dict(name='h%ss%s_%03d' % (game[2], tag.lower(), chain[0] + run[0]),
                                   pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm))
                 total_bars += bars
-    print('LIBRARY %d clips (%d FuruFuru Party), %.0f bars from %d song files' % (
-        len(clips), sum(1 for c in clips if c['name'].startswith('h2')), total_bars, len(songs)))
+    print('LIBRARY %s: %d clips (%d FuruFuru Party), %.0f bars from %d song files' % (
+        GAME, len(clips), sum(1 for c in clips if c['name'].startswith('h2')), total_bars, len(songs)))
     _LIBRARY = clips
     return clips
 
@@ -261,10 +346,14 @@ def clip_worlds(body, clip, joints, frames):
 _TONES = None
 
 
-def skin_tone(entry):
+def skin_tone(entry, body=None):
     """The (r, g, b) skin tone the game gives this costume / colour variant: MUSIC FIT's
-    main.dol table (zan_dump.skin_tone_table, slot = variant - 1)."""
+    main.dol table (zan_dump.skin_tone_table, slot = variant - 1). None for a body without a
+    skin material (colour group 2): HOTTEST PARTY 4 / 5 bake the skin into the texture."""
     global _TONES
+    if body is not None and Z.skin_material(body) is None:
+        assert GAME != 'hp3', 'CHR%02d has no skin material' % entry['nn']
+        return None
     if _TONES is None:
         dol = W.main_dol(DISC)
         assert dol, 'no main.dol under %s/sys: the skin tones come from it' % Z._tilde(DISC)
@@ -295,13 +384,16 @@ def accessories(body, head, variant):
     if not m:
         return []
     code = m.group(1).lower()
+    # HOTTEST PARTY 5 ships HP4's accessory files only: its re-exported HP5C_<nn> outfits (NAOKI /
+    # jun / U1 = HP4C_<nn>) wear HP4C_<nn>'s (jun's fan, AccRHand_HP4C_03)
+    codes = [code] + (['hp4c_' + code[5:]] if GAME == 'hp5' and code.startswith('hp5c_') else [])
     adir = os.path.join(DISC, 'accessory')
     out = []
     for f in sorted(os.listdir(adir)) if os.path.isdir(adir) else []:
         stem = f[:-4].lower() if f.lower().endswith('.bin') else None
         if not stem or 'wii_con' in stem:
             continue
-        for joint in [n['name'] for n in body['nodes']]:
+        for joint, code in [(n['name'], c) for c in codes for n in body['nodes']]:
             if stem.startswith(joint.lower() + '_' + code) and (len(stem) == len(joint) + 1 + len(code) or
                                                               stem[len(joint) + 1 + len(code)] == '_'):
                 blob = open(os.path.join(adir, f), 'rb').read()
@@ -504,13 +596,13 @@ def port(key):
     binds = Z.game_bind_matrices(body, joints)
     arm = build_armature(key, joints, binds)
     acc = accessories(body, head, entry['variant'])
-    tone = skin_tone(entry)
+    tone = skin_tone(entry, body)
     pieces = costume_pieces(body, head, body_tex, head_tex, set(jnames), acc, tone)
     _ob, nslots = build_mesh(key, pieces, arm)
     bpy.context.view_layer.update()
-    print('MODEL %s (CHR%02d%d): %d joints, %d pieces, %d material slots, skin %s, accessories %s' % (
-        key, entry['nn'], entry['variant'], len(joints), len(pieces), nslots, '#%02x%02x%02x' % tone,
-        [a[3] for a in acc]))
+    print('MODEL %s (%s): %d joints, %d pieces, %d material slots, skin %s, accessories %s' % (
+        key, os.path.basename(chr_path(entry['nn'], entry['variant'])), len(joints), len(pieces), nslots,
+        '#%02x%02x%02x' % tone if tone else 'in texture', [a[3] for a in acc]))
 
     out_dir = os.path.join(OUT_BASE, label)
     bname = 'pl_' + key
@@ -559,8 +651,9 @@ def port(key):
 
     sidecar = os.path.join(out_dir, 'chara_resources.rlist.txt')
     with open(sidecar, 'w') as f:
-        f.write('# %s "%s" (CHR%02d0 + CHR%02d%d), ported with its own rig and choreography\n' % (
-            TITLE, label, entry['nn'], entry['nn'], entry['variant']))
+        f.write('# %s "%s" (%s + %s), ported with its own rig and choreography\n' % (
+            TITLE, label, os.path.basename(chr_path(entry['nn'], 0))[:-4],
+            os.path.basename(chr_path(entry['nn'], entry['variant']))[:-4]))
         f.write('# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips %s)\n' % (
             ' '.join(c['name'] for c in hand)))
         f.write('%s, pl, %s, A, 1.0, %s, 0.0\n' % (key, sex, export_character.fmt_num(SHADOW[sex])))

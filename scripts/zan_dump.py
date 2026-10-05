@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Reference decoder for Konami's `zan` engine formats as used by DanceDanceRevolution
 FuruFuru Party (Wii, JP 2008 = HOTTEST PARTY 2, `RD4JA4`) and DanceDanceRevolution MUSIC FIT
-(Wii, JP 2009 = HOTTEST PARTY 3, `RJRJA4`): the polygon dancers, their dance clips, the stages and
-the cameras, plus the conversion math the DDR World ports use
+(Wii, JP 2009 = HOTTEST PARTY 3, `RJRJA4`), and DanceDanceRevolution HOTTEST PARTY 4 / 5 (Wii, EU
+2010 / 2011, `SDYPA4` / `SURPA4`): the polygon dancers, their dance clips, the stages and the
+cameras, plus the conversion math the DDR World ports use
 (tools/blender_ddr_addon/examples/port_character_hottest2.py, port_stage_hottest2.py).
-Formats and RE: docs/wii_ddr_hottest_party_2_3_research.md. All values are big-endian.
+Formats and RE: docs/wii_ddr_hottest_party_2_3_research.md, docs/wii_ddr_hottest_party_4_5_research.md.
+All values are big-endian.
 
-Unlike HOTTEST PARTY 1 (Hudson's Mario Party engine, scripts/hsf_dump.py) these two games run on
+Unlike HOTTEST PARTY 1 (Hudson's Mario Party engine, scripts/hsf_dump.py) these games run on
 Konami's own Wii library (`CzanFileManager`, `CzanModel`, ... in main.dol). Every container on the
 disc is a `WII\\0` archive:
 
@@ -56,7 +58,8 @@ disc is a `WII\\0` archive:
   camera    f32 length (seconds; 3.0 = "@@\\0\\0" for most), then 6 x {u32 nkeys, u32 offset}:
             position {f32 time (s), xyz}, rotation {time, quaternion (its row 1 is minus the view
             direction; no roll)}, fov {time, deg -- MTXPerspective's fovY}, aim {time, xyz}, near
-            {time, v}, far {time, v}; 12 constant bytes at 0x34 (28f81200 7cf71200 5cf71200).
+            {time, v}, far {time, v}; 12 constant bytes at 0x34 (28f81200 7cf71200 5cf71200;
+            HOTTEST PARTY 4 / 5: 5a005b00 5c005d00 5e005f00).
 
 Usage:
     zan_dump.py ls <file>                       # archive tree with member kinds
@@ -81,7 +84,10 @@ import extract_wii_ddr_data as W  # noqa: E402  (GX textures, TPL, PNG)
 ARCHIVE_MAGIC = b'WII\0'
 ZMB_MAGIC = b'ZMB GC\0\0'
 ZAB_MAGIC = b'ZAB GC\0\0'
-CAM_SIGNATURE = bytes.fromhex('28f812007cf712005cf71200')   # at 0x34 of every camera
+CAM_SIGNATURE = bytes.fromhex('28f812007cf712005cf71200')   # at 0x34 of every camera (HP2 / HP3)
+# HOTTEST PARTY 4 / 5 write other bytes there (runtime scratch the exporter leaves behind); the
+# layout before them is the same
+CAM_SIGNATURES = (CAM_SIGNATURE, bytes.fromhex('5a005b005c005d005e005f00'))
 NODE_SIZE = 0xA0
 SUBMESH_SIZE = 0x40
 MATERIAL_SIZE = {1.0: 0x38, 3.0: 0x50}
@@ -155,7 +161,7 @@ def kind_of(blob, at=0):
         return 'zmb'
     if m == ZAB_MAGIC:
         return 'zab'
-    if blob[at + 0x34:at + 0x40] == CAM_SIGNATURE:
+    if blob[at + 0x34:at + 0x40] in CAM_SIGNATURES:
         return 'cam'
     if m[:4] == W.TPL_MAGIC:
         return 'tpl'
@@ -196,10 +202,19 @@ def _block(b, off):
     return _u32(b, off), _f32(b, off + 4), _u32(b, off + 8)
 
 
+MAX_FLIP = 1024   # flip-book entries a material may list (MUSIC FIT STG102: 253, HP5 STG426: 113;
+                  # the old cap of 64 dropped those lists and the meshes drew untextured)
+
+
 def _material(b, o, size):
     w = struct.unpack_from('>%dI' % (size // 4), b, o)
     ntex = w[5] & 0xFFFF
-    tex = [_u32(b, w[6] + 4 * k) for k in range(ntex)] if w[6] and ntex < 64 else []
+    if ntex >= 0x100:
+        # HOTTEST PARTY 4 / 5 pack more into the word: {u16 purpose (1 = eye, 2 = mouth
+        # flip-book layer; 0x400 on some stage materials), u8 flag, u8 count} -- 0x00010107 is
+        # a 7-frame eye layer. FuruFuru Party / MUSIC FIT keep the upper bytes 0.
+        ntex = w[5] & 0xFF
+    tex = [_u32(b, w[6] + 4 * k) for k in range(ntex)] if w[6] and ntex < MAX_FLIP else []
     m = dict(offset=o, color0=w[0], color1=w[1], color2=w[2], value=_f32(b, o + 12),
              flags=bytes(b[o + 16:o + 20]), ntex_word=w[5], textures=tex, words=w)
     if size == 0x38:
@@ -207,7 +222,7 @@ def _material(b, o, size):
     else:
         nlay, lay, nfr, fr = w[10] & 0xFFFF, w[11], w[12], w[13]
     m['layer_offsets'] = [lay + size * k for k in range(nlay)] if lay and nlay < 16 else []
-    m['frames'] = [_u32(b, fr + 4 * k) for k in range(nfr)] if fr and nfr < 256 else []
+    m['frames'] = [_u32(b, fr + 4 * k) for k in range(nfr)] if fr and nfr < MAX_FLIP else []
     return m
 
 
@@ -851,6 +866,9 @@ def deal_rotating(items, hands, per_hand, seed=0):
 # swept cull hulls, never drawn --, EFF_* effect emitters, LIGPOS_* / LIGTAR_* lights),
 # /#1: the stage's camera shots }. STG<nnn>_S.bin is a lighter copy (split-screen) and is not
 # ported. Every model's .zab is one loop of its own length; a mesh node is drawn at its node world.
+# HOTTEST PARTY 4 / 5 name the archives instead: { /STG<nnn>_MDL.bin/<members>, /STG<nnn>_CAM.bin
+# (the shots), /STG<nnn>_EFF.bin, /STG<nnn>_Prm.bin } (some keep the /#0 + /#1 layout; the member
+# names inside need not match the file's number -- HP5 STG011 holds `DRAW_STG101_01`).
 OBJ_PREFIX = re.compile(r'^OBJ[AB]_[NZS]_', re.I)
 
 
@@ -863,10 +881,14 @@ def stage_sources(blob):
     cams [(name, cam)])."""
     named = {}
     cams = []
-    for p, n, o, s, k in walk(blob):
+    items = list(walk(blob))
+    # the model archive: the first-level archive whose named members include a ZMB (`/#0` in HP2 /
+    # HP3, `/STG<nnn>_MDL.bin` in most HP4 / HP5 stages)
+    homes = {p.rsplit('/', 1)[0] for p, n, o, s, k in items if n and k == 'zmb' and p.count('/') == 2}
+    for p, n, o, s, k in items:
         if k == 'cam':
             cams.append((p, parse_cam(blob[o:o + s])))
-        if n and p.startswith('/#0/'):
+        if n and p.count('/') == 2 and p.rsplit('/', 1)[0] in homes:
             named.setdefault(n, (k, blob[o:o + s]))
     zabs = {_stem(n): b for n, (k, b) in named.items() if k == 'zab'}
 
@@ -896,6 +918,133 @@ def stage_sources(blob):
     order = {'bg': 0, 'draw': 1, 'obj': 2}
     models.sort(key=lambda e: (order[e['kind']], e['stem']))
     return dict(models=models, col=col, cams=cams)
+
+
+SCREEN_GROUP = 92   # colour group of a stage material the game draws the movie on (see below)
+
+
+def material_group(material):
+    """A material's colour group (+0x28 high u16; 0 = none). Stages use 11..43 for the per-stage
+    tint slots, 91..103 for movie-related surfaces; dancers 2 (skin) / 3 (a Mii's colour)."""
+    return material['words'][10] >> 16
+
+
+def is_screen_material(material):
+    """A movie screen material (colour group 92): MUSIC FIT and HOTTEST PARTY 4 / 5 model their
+    video screens as ordinary meshes whose material is in group 92 -- a white or tiny placeholder
+    card (`monitor01.tga`, `MOV_cap.tga`, `movie_test.tga`) the game swaps for the movie, on
+    HP5's `OBJB_Z_pv0n_43 / _CE / _WI` screens, its `movieBox` video wall, HP4's arena domes,
+    MUSIC FIT's TV sets. FuruFuru Party has none (its screens are the `root` quads of `_MOV`
+    props, group 0). Surveyed over all four discs: group 92 is only ever on such surfaces."""
+    return material_group(material) == SCREEN_GROUP
+
+
+def stage_signature(src):
+    """A content fingerprint of a stage (stage_sources output): the sorted per-model digests of
+    node transforms, geometry (positions + UVs), pictures and motion, the COL layout included, names
+    ignored -- re-exports rename members
+    (HP5 STG011 = STG002 with `_NC` suffixes) and some discs ship a stage twice under two
+    numbers. Two stages with the same signature draw the same thing."""
+    import hashlib
+    out = []
+    models = list(src['models'])
+    if src.get('col'):
+        models.append(dict(model=src['col'][0], textures=[], motion=src['col'][1]))   # the layout
+    for e in models:
+        h = hashlib.md5()
+        for nd in e['model']['nodes']:
+            h.update(np.round(nd['local'], 3).astype(np.float32).tobytes())
+            for sm in nd['submeshes']:
+                h.update(np.round(sm['pos'], 2).astype(np.float32).tobytes())
+                h.update(np.round(sm['uv'], 3).astype(np.float32).tobytes())
+        for im in e['textures']:
+            h.update(np.ascontiguousarray(im).tobytes())
+        if e['motion']:
+            for name in sorted(e['motion']['bones']):
+                for kind, (fr, v) in sorted(e['motion']['bones'][name].items()):
+                    h.update(np.asarray(fr, np.float32).tobytes())
+                    h.update(np.round(v, 4).astype(np.float32).tobytes())
+        out.append(h.hexdigest())
+    return tuple(sorted(out))
+
+
+def stage_params(blob):
+    """HOTTEST PARTY 4 / 5's `STG<nnn>_Prm.bin` /#0 (a `ZAR` record): dict(type, movie) or None.
+    +0xC0 u8 type -- 0 a plain 3D stage, 1 a full-screen background video (`bgv<nn>`, the COL-only
+    STG4xx), 2 a stage video played on the colour-group-91 surfaces (`quarter`: the
+    movie/stage/*quarter*.thp 2x2 mosaics, each surface's UVs picking its quadrant), 3 likewise
+    with one named video (`single02` .. `single07`), 4 the song's PV on the group-92 monitors
+    (HP5 STG028..030); +0xE0 the video name (C string; absent below 0xE1 bytes)."""
+    for p, n, o, s, k in walk(blob):
+        if '_Prm' in p and k == 'bin' and s > 0xC0:
+            x = blob[o:o + s]
+            name = x[0xE0:].split(b'\0')[0].decode('ascii', 'replace') if s > 0xE0 else ''
+            return dict(type=x[0xC0], movie=name or None)
+    return None
+
+
+STAGE_FILE = re.compile(r'^STG(\d{3})\.bin$', re.I)   # not _S (split screen), _P, _EFF, STGChgWipe
+
+
+def _named_digests(blob):
+    import hashlib
+    return {n: hashlib.md5(b).hexdigest() for _p, n, b in members(blob) if n}
+
+
+def plan_stage_ports(stage_dir, shipped=(), covered=None, reexport_of=None, log=None):
+    """Which stage/STG<nnn>.bin of one disc to port, given the sources already shipped.
+
+    `shipped` = [(label, stage_dir, [stage names] or None for every stage)]: what earlier sources
+    ship. `covered` = {stage_signature: reason} of stages an earlier disc skipped because they
+    are shipped elsewhere (the third return value of a previous call), so a re-export of a
+    re-export is caught. `reexport_of` = (label, stage_dir): the disc this one re-exports stages
+    from (MUSIC FIT -> FuruFuru Party only; HP4 / HP5 reuse MUSIC FIT's re-exports as they are,
+    which `covered` catches, and their generic member names would make the byte rule misfire --
+    HP5 STG001 is no HP4 STG001). A stage is skipped when
+      - it draws nothing (HP4 / HP5's STG4xx are mostly bare COL layouts, STG000 is empty);
+      - its stage_signature equals a shipped stage's or a covered one's (HP4 STG107..111 /
+        202..206 are MUSIC FIT's, HP5 STG201 / 202..206 / 301 / 4xx are HP4's);
+      - the same-named file of `reexport_of` shares a byte-identical named member (MUSIC FIT's
+        STG041..055 are FuruFuru Party's re-exported: the screens swapped, the rest the same);
+      - its signature equals a lower-numbered stage of this disc (HP5 STG011 = STG002, 022 = 019 ...).
+    Returns ([stage name], {stage name: reason}, {signature: reason} for the skipped ones)."""
+    known = dict(covered or {})
+    for label, sdir, names in shipped:
+        for f in sorted(os.listdir(sdir)):
+            if not STAGE_FILE.match(f) or (names is not None and f[:-4] not in names):
+                continue
+            src = stage_sources(open(os.path.join(sdir, f), 'rb').read())
+            if src['models']:
+                known.setdefault(stage_signature(src), 'same as %s %s' % (label, f[:-4]))
+    port, skipped, mine, skipped_sigs = [], {}, {}, {}
+    for f in sorted(os.listdir(stage_dir)):
+        if not STAGE_FILE.match(f):
+            continue
+        stage = f[:-4]
+        blob = open(os.path.join(stage_dir, f), 'rb').read()
+        src = stage_sources(blob)
+        if not src['models']:
+            skipped[stage] = 'draws nothing'
+            continue
+        sig = stage_signature(src)
+        why = known.get(sig)
+        if why is None and reexport_of is not None:
+            other = os.path.join(reexport_of[1], f)
+            if os.path.exists(other):
+                theirs = _named_digests(open(other, 'rb').read())
+                if any(theirs.get(n) == h for n, h in _named_digests(blob).items()):
+                    why = 're-export of %s %s' % (reexport_of[0], stage)
+        if why is None and sig in mine:
+            why = 'duplicate of %s' % mine[sig]
+        if why:
+            skipped[stage] = why
+            skipped_sigs[sig] = why
+        else:
+            mine[sig] = stage
+            port.append(stage)
+        if log:
+            log('  %s: %s' % (stage, why or 'port'))
+    return port, skipped, skipped_sigs
 
 
 def instance_key(objset_name):
@@ -1032,7 +1181,7 @@ CAM_KEY_FLOATS = {'pos': 4, 'rot': 5, 'fov': 2, 'aim': 4, 'near': 2, 'far': 2}
 
 def parse_cam(b):
     """{track: (n, 1 + values) array of keys, time in seconds}."""
-    if b[0x34:0x40] != CAM_SIGNATURE:
+    if b[0x34:0x40] not in CAM_SIGNATURES:
         raise ValueError('not a camera')
     out = {}
     for i, name in enumerate(CAM_TRACKS):

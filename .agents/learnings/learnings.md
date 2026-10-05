@@ -1760,3 +1760,21 @@ Two colour traps, both silent, both found on shipped content:
   which is how FESTIVAL's Rage 1 got salmon hair beside a brown-haired face texture.
   The tell: ~40 % of the doubled swatch channels sat at 255. When a "0x80 = 1.0" rule clamps
   that often, the rule is wrong.
+
+## `port_lib.conform` assumed a T-pose, metre-scaled source (2026-10-04)
+
+The Ironmouse port, a UE5 Fortnite rip, broke three silent assumptions:
+- **Terminal bones keep their REST orientation.** `conform` reads every direction from rest
+  data, and a bone with no `next_of` gets an identity rotation. On an A-pose source the forearm
+  swings ~45° up to the T-pose while the hand stays as it was, bent 45° down at the wrist. Pass
+  `follow_parent_rot=(hands, toes)`. The older Peter script did not hit this because it read the
+  current POSED matrix instead of the rest one.
+- **`terminal_len` is wrong on a centimetre FBX.** The FBX imports with armature object scale
+  0.01, and `L / pb.bone.length` divides world metres by armature-space centimetres, which makes
+  the stretch 100× too large. Leave `terminal_len` out and let `s` keep the size.
+- **The stretch axis is the bone's Y, and on a UE rig Y runs across the limb.** `conform` printed
+  "Y axis is 90 deg off its child" and would have thickened the limbs instead of lengthening them.
+  Blender's automatic bone orientation fixes most bones but aims thigh / `spine_04` at a helper
+  child. `align_chain_bones(fa, next_of)` re-aims the chain in edit mode. Always read the
+  conform WARN lines. A clean preview does not show this when the stretch factors happen to be
+  near 1.

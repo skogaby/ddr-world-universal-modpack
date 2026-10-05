@@ -1,8 +1,9 @@
-"""EXAMPLE / PORT: the DanceDanceRevolution FuruFuru Party (Wii, JP 2008 = HOTTEST PARTY 2) and
-DanceDanceRevolution MUSIC FIT (Wii, JP 2009 = HOTTEST PARTY 3) 3D stages as Background Dancers
-custom stages, fed by the zan decoder in scripts/zan_dump.py (formats + RE:
-docs/wii_ddr_hottest_party_2_3_research.md). The part / loop / camera machinery is
-port_stage_hottest.py's (HOTTEST PARTY 1); only the sources differ.
+"""EXAMPLE / PORT: the 3D stages of the zan-engine HOTTEST PARTY games -- DanceDanceRevolution
+FuruFuru Party (Wii, JP 2008 = HOTTEST PARTY 2), DanceDanceRevolution MUSIC FIT (Wii, JP 2009 =
+HOTTEST PARTY 3) and DanceDanceRevolution HOTTEST PARTY 4 / 5 (Wii, EU 2010 / 2011) -- as
+Background Dancers custom stages, fed by the zan decoder in scripts/zan_dump.py (formats + RE:
+docs/wii_ddr_hottest_party_2_3_research.md, docs/wii_ddr_hottest_party_4_5_research.md). The part /
+loop / camera machinery is port_stage_hottest.py's (HOTTEST PARTY 1); only the sources differ.
 
 A stage (stage/STG<nnn>.bin) is a set of ZMB models, each with its own one-loop ZAB motion of node
 SRT tracks: DRAW_* (the stage and set), BG_* (the backdrop), OBJ[AB]_[NZS]_<name>_* props placed by
@@ -17,6 +18,8 @@ nodes are effect and light spots), plus its camera shots. Per stage:
   2. MOVIE SCREENS: the `root` quad of a `*_MOV*` prop (where the game plays its stage movie / the
      song's PV) is textured `offscreen1` (README "Stage screens": World's STAGE SCREENS mode plays
      the song's movie there), its v range remapped onto the 16:9 band, opaque white, no animation;
+     HP4 / HP5: every mesh on a colour-group-92 material (zan_dump.is_screen_material) likewise,
+     keeping its blend and vertex alpha, its v mapped onto the band as authored;
   3. FLIP-BOOKS (a material cycling TPL images, zan_dump.flip_book) become ATLASES: World's .sanm
      only animates shader parameters, so the frames go side by side along the axis that does not
      scroll, the triangles are clipped at that axis' tile lines into one cell, and the UV offset
@@ -38,16 +41,22 @@ nodes are effect and light spots), plus its camera shots. Per stage:
      as two keys on one frame; checked frame by frame against the analytic offsets;
   8. cameras: the stage's shots -> `camera/<key>_st01..`, the generic dance cameras of
      game/GAME_DEF_CAM.bin /#0 -> `_non01..` (position + aim, no roll; the FOV is MTXPerspective's
-     vertical angle, kept on World's 16:9 frame);
+     vertical angle, kept on World's 16:9 frame); HP4 / HP5 stages with fewer than three moving
+     shots of their own get GAME_DEF_CAM's eight 6 s front shots as mains too (main_cameras);
   9. sidecar `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, ..., ble:-1`.
 STG<nnn>_S.bin (the split-screen copies) are not ported, nor MUSIC FIT's STG000 / STG041..055
-(FuruFuru Party's again, shipped once from there with their screens: is_hp2_reexport).
+(FuruFuru Party's again, shipped once from there with their screens: is_hp2_reexport). HP4 / HP5
+port what zan_dump.plan_stage_ports leaves (planned_stages): HP4 27 stages, HP5 15 -- not their
+re-shipped HP2 / HP3 / HP4 stages, their in-disc duplicates, the COL-only STG4xx, STG<nnn>_P (HP4's
+copies of HP2's STG042 / 046) or HP4 / HP5's props no OBJSET node places (unused, at the origin).
 
 Inputs (environment):
-  GAME        hp2 | hp3 (default hp2); HP2_GAME / HP3_GAME the dumped disc trees
+  GAME        hp2 | hp3 | hp4 | hp5 (default hp2); HP2_GAME .. HP5_GAME the dumped disc trees
+              (scripts/extract_wii_ddr_data.py disc ...; default ~/Desktop/DDR Wii ISOs/<title>;
+              hp4 / hp5 read the earlier discs too, to skip what those already ship)
   STAGES      comma list (STG027, 27, ...), default the first stage, or 'all'
-  OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 2|3 (one folder per stage,
-              `Stage 27` ..; keys hp2stage027 ..)
+  OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 2|3|4|5 (one folder per stage,
+              `Stage 27` ..; keys hp2stage027 .. hp5stage030)
   PREVIEW     1 = render Workbench / EEVEE previews of the RE-IMPORTED parts into PREVIEW_DIR (a
               test card on the screens), plus a ported dancer through two of the written .camanm
 Run: GAME=hp2 STAGES=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
@@ -77,13 +86,23 @@ from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 GAME = os.environ.get('GAME', 'hp2').lower()
-assert GAME in ('hp2', 'hp3'), GAME
-DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Furu Furu Party', 'hp3': '~/Desktop/DDR Wii ISOs/Music Fit'}
-DISC = os.path.expanduser(os.environ.get('%s_GAME' % GAME.upper(), DISCS[GAME]))
-OTHER_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
-SOURCE = {'hp2': 'HOTTEST PARTY 2', 'hp3': 'HOTTEST PARTY 3'}[GAME]
+assert GAME in ('hp2', 'hp3', 'hp4', 'hp5'), GAME
+DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Music Fit (Japan)',
+         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)'}
+
+
+def disc_dir(game):
+    return os.path.expanduser(os.environ.get('%s_GAME' % game.upper(), DISCS[game]))
+
+
+DISC = disc_dir(GAME)
+OTHER_DISC = disc_dir('hp2')
+SOURCES = {g: 'HOTTEST PARTY %s' % g[2] for g in DISCS}
+SOURCE = SOURCES[GAME]
 TITLE = {'hp2': 'DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2',
-         'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3'}[GAME]
+         'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
+         'hp4': 'DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU)',
+         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)'}[GAME]
 OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'stages', SOURCE)))
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_%s_stage_previews' % GAME)
@@ -103,6 +122,8 @@ NEAR, FAR = 0.1, 32768.0
 
 
 def stage_list():
+    if GAME in ('hp4', 'hp5'):
+        return planned_stages(GAME)
     out = []
     for f in sorted(os.listdir(STAGE_DIR)):
         if not (f.startswith('STG') and f.endswith('.bin')) or '_S' in f or '_EFF' in f:
@@ -111,6 +132,55 @@ def stage_list():
             continue       # FuruFuru Party's stage again: shipped once, in HOTTEST PARTY 2
         out.append(f[:-4])
     return out
+
+
+# MUSIC FIT's shipped stages (stage_list(hp3) -- its STG202 is FuruFuru Party's STG101 again,
+# shipped twice since the HP2 / HP3 port)
+HP3_SHIPPED = ['STG%03d' % n for n in list(range(101, 112)) + list(range(201, 207))]
+
+
+# planned_stages' result with all four discs present (2026-10-04); used when the older dumps are
+# not at hand (the plan needs them to know what HOTTEST PARTY 2 / 3 / 4 already ship)
+RECORDED_PLAN = {
+    'hp4': ['STG001', 'STG002', 'STG003', 'STG004', 'STG005', 'STG006', 'STG007', 'STG008', 'STG042', 'STG043',
+            'STG044', 'STG101', 'STG102', 'STG103', 'STG104', 'STG105', 'STG106', 'STG200', 'STG201', 'STG301',
+            'STG402', 'STG403', 'STG404', 'STG405', 'STG406', 'STG431', 'STG432'],
+    'hp5': ['STG001', 'STG002', 'STG003', 'STG012', 'STG013', 'STG014', 'STG015', 'STG016', 'STG018', 'STG019',
+            'STG020', 'STG028', 'STG029', 'STG030', 'STG426'],
+}
+
+
+# stages the content signature cannot fold: HP4 STG201 is STG301 (shipped) with half-size textures
+# and its camera rig nudged -- the same set on screen
+NEAR_DUPLICATES = {'hp4': {'STG201': 'STG301 at half the texture resolution (the same set)'}}
+
+
+def planned_stages(game):
+    """HOTTEST PARTY 4 / 5: zan_dump.plan_stage_ports against what the earlier sources ship --
+    HP4 re-ships MUSIC FIT's STG041..055 (FuruFuru Party's) / 107..111 / 202..206, HP5 re-ships
+    HP4's STG201 / 301 / 4xx and holds several stages twice; the bare COL-only STG4xx draw
+    nothing. Prints the skip reasons."""
+    hp2, hp3, hp4 = (os.path.join(disc_dir(g), 'stage') for g in ('hp2', 'hp3', 'hp4'))
+    missing = [d for d in (hp2, hp3, hp4) if not os.path.isdir(d)]
+    if missing:
+        print('PLAN %s: no %s -- using the plan recorded with all four discs (RECORDED_PLAN)' % (
+            GAME, ', '.join(Z._tilde(d) for d in missing)))
+        return [p for p in RECORDED_PLAN[game] if p not in NEAR_DUPLICATES.get(game, {})]
+    _p3, _s3, c3 = Z.plan_stage_ports(hp3, [(SOURCES['hp2'], hp2, None)], reexport_of=(SOURCES['hp2'], hp2))
+    shipped = [(SOURCES['hp2'], hp2, None), (SOURCES['hp3'], hp3, HP3_SHIPPED)]
+    p4, s4, c4 = Z.plan_stage_ports(hp4, shipped, c3)
+    port, skipped = p4, s4
+    if game == 'hp5':
+        port, skipped, _c5 = Z.plan_stage_ports(STAGE_DIR, shipped + [(SOURCES['hp4'], hp4, p4)], {**c3, **c4})
+    for stage, why in NEAR_DUPLICATES.get(game, {}).items():
+        if stage in port:
+            port = [p for p in port if p != stage]
+            skipped[stage] = why
+    for stage, why in sorted(skipped.items()):
+        if why != 'draws nothing':
+            print('SKIP %s %s: %s' % (GAME, stage, why))
+    print('SKIP %s (draw nothing): %s' % (GAME, ' '.join(k for k, v in sorted(skipped.items()) if v == 'draws nothing')))
+    return port
 
 
 def is_hp2_reexport(f):
@@ -175,6 +245,12 @@ def load_stage(stage):
     for e in src['models']:
         frames = inst.get(e['stem'], []) if e['kind'] == 'obj' else [None]
         if e['kind'] == 'obj' and not frames:
+            if GAME in ('hp4', 'hp5'):
+                # HP4 / HP5 leave unused props in the archive: every one without an OBJSET node sits
+                # at the origin (HP4 STG042 keeps three of HP2 STG011's sixteen, STG102 / 106 a spare
+                # twin of a placed prop, STG103 STG003's monitor without its layout slots)
+                print('  PROP %s: no OBJSET node places it -- not drawn' % e['stem'])
+                continue
             print('  PROP %s: no OBJSET node places it -- drawn where it was modelled' % e['stem'])
             frames = [None]
         own = animated_nodes(e['model'], e['motion'])
@@ -216,6 +292,27 @@ def make_worlds(e, col_model, col_motion):
 def generic_cameras():
     blob = open(os.path.join(DISC, 'game', 'GAME_DEF_CAM.bin'), 'rb').read()
     return [(p, Z.parse_cam(b)) for p, _n, b in Z.members(blob, 'cam') if p.startswith('/#0/') and p.count('/') == 2]
+
+
+MIN_MAIN = 3                  # HP4 / HP5: fewer own shots than this -> add the fallback mains
+FALLBACK_MAIN = range(78, 86)  # HP4 / HP5 GAME_DEF_CAM /#0/#78..#85: their new 6 s front shots
+
+
+def main_cameras(cams, generic):
+    """The `_st` (main) shots of a stage. HP2 / HP3: the stage's own. HP4 / HP5 choreograph most
+    cameras per song (dance/DANCE_*_FRE.bin) and many stages carry a single default shot or none
+    (HP5's are one static 3 s view; HP4's STG4xx have no camera file): there the own shots that
+    move at all are kept and, below MIN_MAIN, the eight 6-second front shots HP4 added to
+    GAME_DEF_CAM (dolly / pan / crane moves on the dancers, 2.4..4.1 m out) join them -- World's
+    director keeps a fixed camera when a stage has no main clip."""
+    if GAME not in ('hp4', 'hp5'):
+        return cams
+    own = [(p, c) for p, c in cams if Z.cam_length(c) > 0.05]
+    if len(own) >= MIN_MAIN:
+        return own
+    extra = [generic[i] for i in FALLBACK_MAIN if i < len(generic)]
+    print('  CAMERAS %d own shot(s) + %d GAME_DEF_CAM front shots as main' % (len(own), len(extra)))
+    return own + extra
 
 
 # ---------------------------------------------------------------------------------------------
@@ -262,6 +359,92 @@ def is_screen(e, nd):
     flags `_MOV` props 0x20000000) shows its stage movie / the song's PV there; the rest of the prop
     is bezel, letterbox bars and a glass overlay. The quad comes white with vertex alpha 0."""
     return '_MOV' in e['stem'].upper() and nd['name'] == 'root'
+
+
+# HOTTEST PARTY 4 / 5 model their screens as ordinary meshes on a colour-group-92 material
+# (zan_dump.is_screen_material: HP5's pv01_43 / pv02_CE / pv03_WI monitors, its movieBox wall,
+# HP4's STG044 dome, the STG001 / 405 / 431 monitors). They keep their own blend and vertex alpha
+# (STG044's dome shows the movie at a third of its strength, STG431's glows additively). MUSIC FIT
+# uses the same group (its TV sets): on since the 2026-10-04 re-port.
+GROUP_SCREENS = GAME in ('hp3', 'hp4', 'hp5')
+
+
+def is_group_screen(e, mt):
+    return GROUP_SCREENS and Z.is_screen_material(mt)
+
+
+# STAGE VIDEOS: a colour-group-91 material is where the game plays the STAGE's own video
+# (movie/stage/*.thp -- abstract VJ loops, not the song's PV): HP4 / HP5's `_Prm.bin` names it
+# (zan_dump.stage_params: `quarter` = a 2x2 mosaic whose quadrants the surfaces' UVs pick,
+# `single02`..), MUSIC FIT and HP4's plain stages leave the pick to the song (ani / fvo / mvo / pop /
+# upt, 01..04), here fixed to DEFAULT_STAGE_VIDEO. The port decodes STAGE_VIDEO_FRAMES frames
+# (ffmpeg) into a flip-book on that material -- the atlas machinery below does the rest.
+VIDEO_SURFACES = GAME in ('hp3', 'hp4', 'hp5')
+VIDEO_GROUP = 91
+DEFAULT_STAGE_VIDEO = 'upt01'
+STAGE_VIDEO_FRAMES = 16
+STAGE_VIDEO_PX = 240          # a 16-frame strip of 240 px cells + gutters fits ATLAS_MAX unfolded
+STAGE_VIDEO_STEP = 45         # 60 Hz frames per video frame (0.75 s; 12 s per loop)
+_VIDEO = {}
+
+
+def stage_video_name(stage):
+    prm = Z.stage_params(open(os.path.join(STAGE_DIR, stage + '.bin'), 'rb').read())
+    name = prm['movie'] if prm and prm['type'] in (2, 3) and prm['movie'] else DEFAULT_STAGE_VIDEO
+    if name == 'quarter':
+        name = 'quarter01'
+    return name
+
+
+def video_frames(name):
+    """[RGBA (STAGE_VIDEO_PX square) x STAGE_VIDEO_FRAMES] of movie/stage/<name>.thp, evenly over
+    its first STAGE_VIDEO_FRAMES * STAGE_VIDEO_STEP / 60 s (wrapping a shorter video), or None."""
+    if name in _VIDEO:
+        return _VIDEO[name]
+    import subprocess
+    path = os.path.join(DISC, 'movie', 'stage', name + '.thp')
+    out = None
+    if os.path.exists(path):
+        n, px = STAGE_VIDEO_FRAMES, STAGE_VIDEO_PX
+        fps = 60.0 / STAGE_VIDEO_STEP
+        # (ffmpeg's -stream_loop does not seek THP: a shorter video wraps here instead)
+        raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-vf',
+                              'fps=%.6f,scale=%d:%d:flags=area' % (fps, px, px), '-frames:v', str(n),
+                              '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], capture_output=True, check=True).stdout
+        got = len(raw) // (px * px * 4)
+        if got:
+            frames = np.frombuffer(raw[:got * px * px * 4], np.uint8).reshape(got, px, px, 4)
+            out = [frames[k % got].copy() for k in range(n)]
+    print('  VIDEO %s: %s' % (name, '%d frames' % len(out) if out else 'not on the disc -- placeholder kept'))
+    _VIDEO[name] = out
+    return out
+
+
+def is_video_material(mt):
+    return VIDEO_SURFACES and Z.material_group(mt) == VIDEO_GROUP
+
+
+def attach_video(e, stage):
+    """Append the stage video's frames to the entry's pictures once; their indices, or None."""
+    if 'video' not in e:
+        frames = video_frames(stage_video_name(stage))
+        e['video'] = None
+        if frames:
+            e['video'] = list(range(len(e['textures']), len(e['textures']) + len(frames)))
+            e['textures'] = list(e['textures']) + frames
+    return e['video']
+
+
+def screen_kind(mt, col):
+    """World blend group of a group-92 screen: additive stays additive, an alpha-blended one with
+    real vertex alpha blends, anything else is an opaque screen (its placeholder texture's alpha
+    no longer applies once the movie replaces it)."""
+    blend, _soft, _two, _lit = Z.material_mode(mt)
+    if blend == Z.BLEND_ADD:
+        return 'add'
+    if blend == Z.BLEND_ALPHA and (col[:, 3] < 0.999).any():
+        return 'ble'
+    return 'dec'
 
 
 def mesh_records(e):
@@ -312,11 +495,19 @@ def mesh_records(e):
             if not tri_out:
                 continue
             col = np.array(C_)
-            screen = is_screen(e, nd)
-            kind = 'dec' if screen else world_kind(e, mi, bool((col[:, 3] < 0.999).any()))
-            if screen:
+            group_screen = is_group_screen(e, mt)
+            screen = is_screen(e, nd) or group_screen
+            if is_video_material(mt) and e.get('video'):
+                kind = screen_kind(mt, col)               # the video replaces the placeholder card
+            elif group_screen:
+                kind = screen_kind(mt, col)
+                col = col.copy()
+                col[:, :3] = 1.0                          # the movie's own colours, the authored alpha
+            else:
+                kind = 'dec' if screen else world_kind(e, mi, bool((col[:, 3] < 0.999).any()))
+            if screen and not group_screen:
                 col = np.ones_like(col)                  # the movie at full strength
-            out.append(dict(kind=kind, anchor=anchor, material=mi, screen=screen,
+            out.append(dict(kind=kind, anchor=anchor, material=mi, screen=screen, group_screen=group_screen,
                             bitmap=mt['textures'][0] if mt['textures'] and mt['textures'][0] < len(e['textures']) else None,
                             pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_), col=col, tris=np.array(tri_out),
                             obj=nd['index'], two_sided=Z.material_mode(mt)[2]))
@@ -549,9 +740,11 @@ def build_part(key, part, chunk):
             tris, _f = H.consistent_winding(pos, nrm, tris)
             name = 'gm_%s_%s_m%02d_%03d%s' % (key, part, e['index'], mi, 's' if screen else '')
             if screen:
-                # the screen's authored v band (the whole picture) -> World's 16:9 movie band
+                # the screen's authored v band (the whole picture) -> World's 16:9 movie band; a
+                # group-92 surface samples the movie through its own UVs (0..1 = the whole picture;
+                # HP5's movieBox wall gives each box its window of it), so its v maps as is
                 uv = uv.copy()
-                v_lo, v_hi = float(uv[:, 1].min()), float(uv[:, 1].max())
+                v_lo, v_hi = (0.0, 1.0) if rs[0].get('group_screen') else (float(uv[:, 1].min()), float(uv[:, 1].max()))
                 uv[:, 1] = SCREEN_BAND[0] + (uv[:, 1] - v_lo) / max(v_hi - v_lo, 1e-6) * (SCREEN_BAND[1] - SCREEN_BAND[0])
             me = bpy.data.meshes.new(name)
             me.from_pydata([tuple(convert.vec_to_blender(p)) for p in pos], [], tris.tolist())
@@ -573,9 +766,9 @@ def build_part(key, part, chunk):
             mod = ob.modifiers.new('Armature', 'ARMATURE')
             mod.object = arm
             c_attr = P.white_color_attribute(ob)
+            # additive keeps its vertex alpha: the Wii draws it SRCALPHA + ONE (FUN_8010def4), as World's
+            # flags2 = 4 does, so a 0.25-alpha floor glow stays a glow (until 2026-10-04 it shipped at 1.0)
             rgba = col[loops_v].astype(np.float32)
-            if rs[0]['kind'] == 'add':
-                rgba[:, 3] = 1.0
             # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
             # them: a file 0.5 would ship as 0.74)
             c_attr.data.foreach_set('color_srgb', rgba.ravel())
@@ -761,6 +954,9 @@ def material_plan(e, mi, blob_of):
             if su or sv:
                 uv = (lambda f, a=su, b=sv: Z.scroll_offset(a, b, f))
     flip = Z.flip_book(mt)
+    if is_video_material(mt) and e.get('video'):
+        idx = e['video']
+        flip = (idx, [STAGE_VIDEO_STEP * (k + 1) for k in range(len(idx))], STAGE_VIDEO_STEP * len(idx))
     if flip and not all(t < len(e['textures']) for t in flip[0]):
         print('  WARN %s material %d: flip-book textures %s beyond the TPL (%d)' % (e['stem'], mi, flip[0], len(e['textures'])))
         flip = None
@@ -1161,6 +1357,7 @@ def export_cameras(cams, set_dir, key):
     for stale in os.listdir(cam_dir):
         if stale.lower().endswith('.camanm'):
             os.remove(os.path.join(cam_dir, stale))
+    cams = main_cameras(cams, _GENERIC)
     plan = [('%s_st%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(cams)]
     plan += [('%s_non%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(_GENERIC)]
     stems, worst = [], (0.0, 0.0)
@@ -1198,6 +1395,9 @@ def port(stage):
 
     plans_of = {}
     for e in entries:
+        if any(is_video_material(e['model']['materials'][sm['material']]) for nd in e['model']['nodes']
+               for sm in nd['submeshes'] if sm['material'] < len(e['model']['materials'])):
+            attach_video(e, stage)
         e['records'] = mesh_records(e)
         used = sorted({r['material'] for r in e['records'] if not r['screen']})
         plans = {mi: material_plan(e, mi, blob_of) for mi in used}

@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Bossa 2" (CHR7400 + CHR7402), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s002_040 h4s005_032 h4s007l_032 h4s008_048 h4s010l_016 h4s012l_016 h4s013_016 h4s016_016 h4s043_056 h4s048_040 h4s057_056 h4s064_000)
+hp4bossa02, pl, F, A, 1.0, 0.75, 0.0

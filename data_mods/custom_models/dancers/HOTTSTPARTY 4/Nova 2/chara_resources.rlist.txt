@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Nova 2" (CHR7400 + CHR7404), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s001_032 h4s003_016 h4s004_064 h4s006_008 h4s007_024 h4s013_024 h4s016_040 h4s034_064 h4s035_008 h4s060_048 h4s065_008 h4s067_016)
+hp4nova02, pl, F, A, 1.0, 0.75, 0.0

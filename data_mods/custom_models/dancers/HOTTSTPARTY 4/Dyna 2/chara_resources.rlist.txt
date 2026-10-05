@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Dyna 2" (CHR6200 + CHR6202), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s008_040 h4s009_056 h4s011l_072 h4s011_016 h4s018_024 h4s034_016 h4s036_032 h4s039_016 h4s045_000 h4s048_048 h4s050_000 h4s064_040)
+hp4dyna02, pl, F, A, 1.0, 0.75, 0.0

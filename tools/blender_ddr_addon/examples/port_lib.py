@@ -192,19 +192,57 @@ def bone_depth(b):
     return d
 
 
+def align_chain_bones(fa, next_of):
+    """Point every chain bone's rest Y axis at its `next_of` child's head (edit mode, length kept,
+    children disconnected first so no head moves). `conform` stretches along the bone's Y axis;
+    a UE rig imported without automatic bone orientation has Y across the limb, and automatic
+    orientation picks the wrong child where a bone has helper children (thigh -> deform_groin,
+    spine_04 -> pec helpers). The mesh is untouched: at rest, pose == rest whatever the frame."""
+    bpy.context.view_layer.objects.active = fa
+    for o in bpy.context.view_layer.objects:
+        o.select_set(o == fa)
+    bpy.ops.object.mode_set(mode='EDIT')
+    ebs = fa.data.edit_bones
+    for eb in ebs:
+        eb.use_connect = False
+    fixed = []
+    for n, child in next_of.items():
+        eb, cb = ebs.get(n), ebs.get(child)
+        if eb is None or cb is None:
+            continue
+        d = cb.head - eb.head
+        if d.length < 1e-6:
+            continue
+        ang = math.degrees(d.angle(eb.tail - eb.head)) if (eb.tail - eb.head).length > 1e-9 else 180.0
+        if ang > 0.5:
+            fixed.append((n, round(ang, 1)))
+        eb.tail = eb.head + d.normalized() * max(eb.length, 1e-3 * d.length)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print('align_chain_bones: re-aimed %d bones (deg off before): %s' % (len(fixed), fixed))
+    return fixed
+
+
 # ---------------------------------------------------------------------------------------------
 # pose-conform
 # ---------------------------------------------------------------------------------------------
-def conform(fa, s, targets, next_of, terminal_len=None, y_scale=None, identity_rot=(), angle_warn_deg=12.0):
+def conform(fa, s, targets, next_of, terminal_len=None, y_scale=None, identity_rot=(), angle_warn_deg=12.0,
+            follow_parent_rot=()):
     """Pose the source rig so every bone in `targets` has its head at the given world point.
 
     s            uniform pre-scale (source units -> metres) applied to every placed bone's X/Z
     targets      {bone: Vector}  world target for the bone HEAD
     next_of      {bone: child}   the bone's Y axis is rotated + stretched so that `child`'s head
                                  (rest offset) lands on `targets[child]` — limb/spine chain bones
-    terminal_len {bone: L|None}  bones without a next: stretch to world length L (None/absent = s)
+    terminal_len {bone: L|None}  bones without a next: stretch to world length L (None/absent = s).
+                                 L is in WORLD metres but divided by the bone's ARMATURE-space length,
+                                 so only use it on a rig whose object scale is 1 (an FBX in cm imports
+                                 at 0.01 — leave L out there, s keeps the size)
     y_scale      {bone: sy}      explicit metres-per-source-unit along Y for identity bones (pelvis)
     identity_rot bones whose rotation is kept even if listed in next_of (rare)
+    follow_parent_rot  terminal bones that take the rotation their (placed) parent was given instead
+                 of keeping their rest orientation. An A-pose source needs this for the hands: the
+                 forearm swings ~45 deg up to the T-pose, and a rest-oriented hand would stay bent
+                 down at the wrist (a T-pose source has nothing to swing, so the default is off)
 
     Every placed bone gets inherit_scale NONE (explicit placement); all other bones (fingers,
     twist/helper/physics bones) keep FULL inheritance and ride their parents. Uses REST data for
@@ -224,6 +262,7 @@ def conform(fa, s, targets, next_of, terminal_len=None, y_scale=None, identity_r
         fa.data.bones[n].inherit_scale = 'NONE'
     order = sorted(chain, key=lambda n: bone_depth(fa.data.bones[n]))
     report = []
+    applied = {}
     for n in order:
         pb = fa.pose.bones[n]
         head0, R0 = rest[n]
@@ -247,6 +286,10 @@ def conform(fa, s, targets, next_of, terminal_len=None, y_scale=None, identity_r
             sy = (L / pb.bone.length) if L else s
             if n in y_scale:
                 sy = y_scale[n]
+            parent = fa.data.bones[n].parent
+            if n in follow_parent_rot and parent is not None and parent.name in applied:
+                rot = applied[parent.name].copy()
+        applied[n] = rot
         S = Matrix.Diagonal((s, sy, s, 1.0))
         new = Matrix.Translation(tgt) @ (rot @ R0).to_4x4() @ S
         pb.matrix = fa.matrix_world.inverted() @ new

@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "U1 3" (CHR10100 + CHR10101), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s004_000 h4s008l_008 h4s008_024 h4s009_048 h4s016_032 h4s020_048 h4s036_008 h4s045_040 h4s048_024 h4s052_055 h4s057_024 h4s066_040)
+hp4u103, pl, M, A, 1.0, 0.8, 0.0

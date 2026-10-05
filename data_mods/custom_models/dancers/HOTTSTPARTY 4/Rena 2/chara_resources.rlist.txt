@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Rena 2" (CHR6100 + CHR6102), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s008l_048 h4s012_016 h4s013_008 h4s041_024 h4s043_032 h4s045_024 h4s045_048 h4s047_048 h4s049_040 h4s050_032 h4s053_008 h4s066_008)
+hp4rena02, pl, F, A, 1.0, 0.75, 0.0

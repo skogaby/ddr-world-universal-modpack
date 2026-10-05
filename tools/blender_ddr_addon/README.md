@@ -191,6 +191,83 @@ diffuse maps). Every step below exists because of a rule of the game's format:
    stock row moved to the end. No face-part arcs are needed (a body without `_face01..03`
    loads fine).
 
+### A current Fortnite rip with a tail and a weapon (`examples/port_character_fortnite.py`)
+
+Ironmouse (2026-10-04) ships as `data_mods/custom_models/dancers/Custom/Ironmouse` (`ironmouse00`,
+no weapon) and `Custom/Ironmouse 2` (`ironmouse01`, holding her *Blade of Love*); both sidecars are
+`<key>, pl, F, A, 0.9, 0.75, 0.0` on the `pl_emi00` donor. Round-trip previewed; not yet
+cabinet-tested. The source is the same UE rig family as Peter's, from a newer Fortnite build: an
+`F_MED` body FBX (304 bones, A-pose, 4 meshes: hair, body, head, tail) plus a separate weapon FBX.
+It uses `port_lib`, the Peter steps above, and these differences:
+
+* **Bone axes.** The raw UE bone Y axis runs across the limb, and Blender's automatic bone
+  orientation points thigh and `spine_04` at a helper child. `conform` stretches along Y, so
+  `port_lib.align_chain_bones(fa, next_of)` re-aims every chain bone at its child first, in edit
+  mode. The mesh does not move: at rest the pose equals the rest pose in any frame.
+* **A-pose hands.** The hand is a terminal bone. `conform` keeps a terminal bone in its rest
+  orientation, so the hand would stay bent 45° down when the forearm swings up to the T-pose.
+  `conform(..., follow_parent_rot=('hand_l', 'hand_r', 'ball_l', 'ball_r'))` gives each of these
+  the rotation of its parent instead. A T-pose source does not need this.
+* **Centimetre FBX.** The armature imports at object scale 0.01. Do not pass `terminal_len` (it
+  divides world metres by the armature-space length); leave it out and `s` = 1 keeps the size.
+* **Trunk.** The Fortnite pelvis sits 1 cm above the thigh sockets, while DDR's Hips sit 6 cm above.
+  The trunk takes the linear z-map of the CJ port (thigh sockets → DDR UpLeg, `neck_01` → DDR
+  Neck, kz ≈ 1.05), and the thighs keep the source socket width.
+* **Tail.** It is on its own root (`C_Root_Main_Root_Jnt` → `C_Tail_A_Base/1..9_Jnt`), authored
+  flat on the floor behind the feet. Before the bake, each joint's world matrix is set so the
+  chain hangs from the lower back in a curve: `TAIL_ATTACH` (source y,z) and `TAIL_PITCH`
+  (degrees below horizontal per segment). The tail is weighted rigidly to Hips.
+* **Textures.** These are toon maps:
+  - `*_ColorL`: the lit colour. This is the one used, downscaled from 2048² to 1024².
+  - `_ColorS`: the shadow colour.
+  - `_DFL` / `_DFLC`: an ink-line mask and its colour.
+  - `_STT`: shading thresholds.
+  - `_N`: normals.
+  - `_FX`: an effect mask.
+
+  The game's shaders are unlit, so only ColorL ships. Its lines are already enough: the brows and
+  lashes are geometry. The `_FX`-masked body islands render flat light grey: the band around the
+  waist and the patches on the sleeve tops. Fortnite draws an effect over them, which is not
+  reproduced here.
+* **Physics chains.** `dyn_skirt*` → `skirt`; jacket, bow, ribbon, hood and chest → `spine`;
+  belt, heart and the tail → `hips`; hair and pigtails → `head`. `rigid_head` forces every
+  vertex that started above the chin (jaw pivot − 4.5 cm) to `Head` 1.00. The 83 facial shape
+  keys are cleared, and the basis is the neutral face.
+* **Weapon** (`WEAPON=hand` + `WEAPON_SRC`). The right-hand fingers are curled into a fist
+  (`FIST_CURL` degrees per phalanx, about the knuckle axis expressed in each bone's rest frame).
+  The weapon's handle origin goes to the fist centre: the blade comes out of the thumb side and
+  the edge faces the knuckles. It is weighted 1.0 to `RightHand` as an extra body material slot.
+  A `forearm00` part would not work, because the game mirrors it onto the left arm too.
+  `WEAPON=back` slings it across the back on `Spine2` instead. `WEAPON_SCALE` and `WEAPON_TILT`
+  are optional. At full size the 1.08 m sword clips the legs in some moves.
+
+```bash
+# runbook (macOS paths; any scratch dir works)
+W=$TMPDIR/ironmouse; A="$DDR_WORLD_INSTALL/data/arc"
+for a in pl_emi00 mc_female mc_female_lovy; do python3 scripts/arc_tool.py unpack "$A/$a.arc" -o $W/game; done
+python3 scripts/arc_tool.py unpack "$A/startup.arc" -o $W/startup
+export DDR_3D_DATA=$W/game/data DDR_3D_RLIST=$W/startup/data/chara/chara_resources.rlist
+export PREVIEW_ANM=$DDR_3D_DATA/chara/mc_female/mc_female_hh01_exec.anm:$DDR_3D_DATA/chara/mc_female_lovy/mc_female_lovy_lovy_exec.anm
+B=/Applications/Blender.app/Contents/MacOS/Blender; S=tools/blender_ddr_addon/examples/port_character_fortnite.py
+SRC=~/Desktop/Ironmouse/Model/"Ironmouse FN.fbx" OUT_DIR=$W/v1 $B -b --factory-startup --python-exit-code 1 --python $S
+SRC=~/Desktop/Ironmouse/Model/"Ironmouse FN.fbx" OUT_DIR=$W/v2 CHARA_KEY=ironmouse01 WEAPON=hand \
+  WEAPON_SRC=~/Desktop/Ironmouse/Weapon/"Blade of Love.fbx" $B -b --factory-startup --python-exit-code 1 --python $S
+# check $W/v*/ironmouse0*_{front,side,close_*,mc_female_*}.png, then ship the export folders:
+cp -R $W/v1/export/. data_mods/custom_models/dancers/Custom/Ironmouse/
+cp -R $W/v2/export/. "data_mods/custom_models/dancers/Custom/Ironmouse 2/"
+```
+
+Adapting this to another Fortnite rip:
+
+1. Inspect the FBX first (bone list, mesh and material names, texture set).
+2. Edit `MAT_TEX` and `TWO_SIDED`.
+3. Check the bone names in `classify`. The unknown-groups line must print `{}`.
+4. Drop the tail block if there is no `C_Tail_*` chain.
+5. For an `M_MED` body, use `DONOR=pl_rage00 SEX=M MODEL_SCALE=1.0`.
+
+The folder name is the in-game label (≤ 15 bytes), and the key comes from `pl_<key>`. Two variants
+need two keys.
+
 ### Anime characters: a Rigify-style GLB and an MMD model (`examples/port_lib.py` + two configs)
 
 The Peter flow above, factored into a reusable module (`port_lib.py`: DDR-rig load, pose-conform

@@ -1,0 +1,3 @@
+# DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU) "Hop 1" (CHR7500 + CHR7503), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips h4s017_008 h4s020_016 h4s034_048 h4s036_000 h4s036_064 h4s042_000 h4s043_048 h4s047_008 h4s047_056 h4s057_064 h4s063_056 h4s067_000)
+hp4hop01, pl, M, A, 1.0, 0.8, 0.0

@@ -395,9 +395,9 @@ def build_part(key, part, chunk):
             mod = ob.modifiers.new('Armature', 'ARMATURE')
             mod.object = arm
             c_attr = P.white_color_attribute(ob)
+            # additive keeps its vertex alpha: the HSF draw (main.dol FUN_8006a3a8) blends ADDCOL as
+            # SRCALPHA + ONE, as World's flags2 = 4 does (until 2026-10-04 it shipped at 1.0)
             rgba = col[loops_v].astype(np.float32)
-            if rs[0]['kind'] == 'add':
-                rgba[:, 3] = 1.0
             # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
             # them: a file 0.5 would ship as 0.74)
             c_attr.data.foreach_set('color_srgb', rgba.ravel())

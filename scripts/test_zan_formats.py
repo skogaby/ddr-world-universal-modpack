@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Host tests for the zan-engine decoder (scripts/zan_dump.py) used by the DanceDanceRevolution
-FuruFuru Party (HOTTEST PARTY 2) and MUSIC FIT (HOTTEST PARTY 3) ports, and for the zan leg of
+FuruFuru Party (HOTTEST PARTY 2), MUSIC FIT (HOTTEST PARTY 3) and HOTTEST PARTY 4 / 5 ports, and for the zan leg of
 scripts/extract_wii_ddr_data.py: `WII\\0` archives (named and unnamed, nested, the packed name
 strides), ZMB models (texture / material / node blocks, strips, skin by joint name, rigid and
 skinned submeshes), ZAB motions (the row-vector quaternion convention), cameras (the 0x34
 signature), material modes, the overlay bake, the choreography helpers (chaining, bars, chunks,
-dealing), SSQ tempo, the stage instancing rule and the UV-offset keys. Everything is built
+dealing), SSQ tempo, the stage instancing rule, the UV-offset keys and the HOTTEST PARTY 4 / 5
+additions (the packed texture-count word, the second camera signature, `STG<nnn>_MDL.bin` stages,
+colour-group-92 screens, the stage signature / port planner). Everything is built
 synthetically -- no disc needed.
 
 Run: scripts/validate_wii_ddr_tools.sh (or `python3 -m unittest test_zan_formats` in scripts/).
@@ -91,9 +93,11 @@ def zmb(nodes, materials, textures=(), material_version=1.0):
         B.put(o, '>IIIf', 0x959595FF, 0x959595FF, 0xFF, 0.0)
         B.b[o + 0x10:o + 0x14] = bytes(m['flags'])
         tl = B.add(b''.join(struct.pack('>I', t) for t in m['tex']))
-        B.put(o + 0x14, '>II', len(m['tex']), tl)
+        B.put(o + 0x14, '>II', m.get('ntex_word', len(m['tex'])), tl)
+        if m.get('group'):
+            B.put(o + 0x28, '>H', m['group'])
         if m.get('layer'):
-            B.put(o + 0x28, '>II', 1, mo + size * allm.index(m['layer']))
+            B.put(o + 0x28, '>HHI', m.get('group', 0), 1, mo + size * allm.index(m['layer']))
         if material_version == 3.0 and m.get('uv'):
             keys = m['uv']
             ko = B.add(b''.join(struct.pack('>fff4B', t, u, v, *fl) for t, u, v, fl in keys))
@@ -162,11 +166,11 @@ def zab(length, bones):
     return bytes(B.b)
 
 
-def cam(length, pos, aim, fov=45.0):
+def cam(length, pos, aim, fov=45.0, signature=None):
     """A camera: 2 keys per track."""
     B = Blob(0x40)
     B.put(0, '>f', length)
-    B.b[0x34:0x40] = Z.CAM_SIGNATURE
+    B.b[0x34:0x40] = signature or Z.CAM_SIGNATURE
     tracks = [
         [(0.0, *pos[0]), (length, *pos[1])],
         [(0.0, 0.0, 0.0, 0.0, 1.0), (length, 0.0, 0.0, 0.0, 1.0)],
@@ -454,6 +458,100 @@ class TestStage(unittest.TestCase):
         s = Z.cam_samples(c, [1.5])
         np.testing.assert_allclose(s['pos'][0], [0, 10, 45])
         self.assertAlmostEqual(float(s['fov'][0, 0]), 54.0, 5)
+
+
+def quad(material=0):
+    return dict(material=material, flags=0, pos=[(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)], nrm=[(0, 0, 1)],
+                uv=[(0, 0), (1, 0), (0, 1), (1, 1)], col=[(255, 255, 255, 255)],
+                strips=[[(0, 0, 0, 0), (1, 0, 0, 1), (2, 0, 0, 2), (3, 0, 0, 3)]])
+
+
+def tpl1():
+    """A TPL with one 4x4 RGBA8 image."""
+    head = struct.pack('>III', 0x0020AF30, 1, 0x0C) + struct.pack('>II', 0x14, 0)
+    img = struct.pack('>HHIIIIIIfBBBB', 4, 4, 6, 0x40, 0, 0, 1, 1, 0.0, 0, 0, 0, 0)
+    return (head + img).ljust(0x40, b'\0') + bytes(4 * 4 * 4)
+
+
+def stage_blob(prefix, offset=0.0, layout='hp4'):
+    """A stage file: DRAW + BG models (+ TPL), named as `prefix`, in HP4's `_MDL.bin` layout or
+    HP2 / HP3's /#0."""
+    nodes = [dict(name='root', parent=-1, local=trs((offset, 0, 0)), subs=[quad()])]
+    mats = [dict(flags=(1, 0, 0, 0), tex=[0])]
+    members = [('DRAW_%s_01.zmb' % prefix, zmb(nodes, mats, ['a.tga'])), ('DRAW_%s_01.tpl' % prefix, tpl1()),
+               ('BG_%s.zmb' % prefix, zmb(nodes, mats, ['b.tga'])), ('BG_%s.tpl' % prefix, tpl1())]
+    cams = archive([(None, cam(3.0, [(0, 1, 9), (0, 1, 9)], [(0, 1, 0), (0, 1, 0)],
+                                signature=Z.CAM_SIGNATURES[1]))])
+    if layout == 'hp4':
+        return archive([('%s_MDL.bin' % prefix, archive(members, 16)), ('%s_CAM.bin' % prefix, cams)], 16)
+    return archive([(None, archive(members, 16)), (None, cams)])
+
+
+class TestHottestParty45(unittest.TestCase):
+    def test_packed_texture_count(self):
+        # HP4 / HP5 eye / mouth layers: 0x00010107 = purpose 1 (eye), flag 1, 7 frames
+        lay = dict(flags=(1, 0, 0x83, 0), tex=[2, 3, 4, 5, 6, 7, 8], ntex_word=0x00010107)
+        m = Z.parse_zmb(zmb([dict(name='root', parent=-1)], [dict(flags=(1, 0, 0, 0), tex=[0], layer=lay)]))
+        self.assertEqual(m['layers'][m['materials'][0]['layer_offsets'][0]]['textures'], [2, 3, 4, 5, 6, 7, 8])
+        one = Z.parse_zmb(zmb([dict(name='root', parent=-1)], [dict(flags=(1, 0, 0, 0), tex=[9], ntex_word=0x101)]))
+        self.assertEqual(one['materials'][0]['textures'], [9])
+
+    def test_second_camera_signature(self):
+        blob = cam(3.0, [(0, 1, 9), (0, 1, 9)], [(0, 1, 0), (0, 1, 0)], signature=Z.CAM_SIGNATURES[1])
+        self.assertEqual(Z.kind_of(blob), 'cam')
+        self.assertAlmostEqual(Z.cam_length(Z.parse_cam(blob)), 3.0)
+
+    def test_mdl_archive_stage(self):
+        src = Z.stage_sources(stage_blob('STG001'))
+        self.assertEqual([e['stem'] for e in src['models']], ['BG_STG001', 'DRAW_STG001_01'])
+        self.assertEqual(len(src['cams']), 1)
+        self.assertEqual(len(src['models'][0]['textures']), 1)
+        # the signature ignores names and layout: the same content under other names matches
+        same = Z.stage_sources(stage_blob('STG101', layout='hp3'))
+        moved = Z.stage_sources(stage_blob('STG001', offset=5.0))
+        self.assertEqual(Z.stage_signature(src), Z.stage_signature(same))
+        self.assertNotEqual(Z.stage_signature(src), Z.stage_signature(moved))
+
+    def test_long_flip_book(self):
+        # MUSIC FIT STG102 / HP5 STG426 list 253 / 77 flip-book entries (the old 64 cap dropped them)
+        tex = [k % 18 for k in range(253)]
+        m = Z.parse_zmb(zmb([dict(name='root', parent=-1)], [dict(flags=(1, 0, 0, 0), tex=tex)]))
+        self.assertEqual(m['materials'][0]['textures'], tex)
+
+    def test_stage_params(self):
+        def prm(kind, name=b''):
+            rec = bytearray(0xE0) + name + (b'\0' if name else b'')
+            rec[0:8] = b'ZAR\0WII\0'
+            rec[0xC0] = kind
+            return bytes(rec)
+        blob = archive([('STG013_MDL.bin', archive([])), ('STG013_Prm.bin', archive([(None, prm(3, b'single02'))]))], 16)
+        self.assertEqual(Z.stage_params(blob), dict(type=3, movie='single02'))
+        plain = archive([('STG001_Prm.bin', archive([(None, prm(0)[:0xE1])]))], 16)
+        self.assertEqual(Z.stage_params(plain), dict(type=0, movie=None))
+        self.assertIsNone(Z.stage_params(archive([(None, archive([]))])))
+
+    def test_screen_group(self):
+        m = Z.parse_zmb(zmb([dict(name='root', parent=-1)], [dict(flags=(1, 0, 0, 0), tex=[0], group=92),
+                                                            dict(flags=(1, 0, 0, 0), tex=[0], group=24)]))
+        self.assertEqual([Z.material_group(mt) for mt in m['materials']], [92, 24])
+        self.assertEqual([Z.is_screen_material(mt) for mt in m['materials']], [True, False])
+
+    def test_plan_stage_ports(self):
+        with tempfile.TemporaryDirectory() as d:
+            old, new = os.path.join(d, 'old'), os.path.join(d, 'new')
+            os.makedirs(old)
+            os.makedirs(new)
+            open(os.path.join(old, 'STG101.bin'), 'wb').write(stage_blob('STG101', 1.0, 'hp3'))
+            open(os.path.join(new, 'STG001.bin'), 'wb').write(stage_blob('STG001', 1.0))      # = old STG101
+            open(os.path.join(new, 'STG002.bin'), 'wb').write(stage_blob('STG002', 2.0))
+            open(os.path.join(new, 'STG011.bin'), 'wb').write(stage_blob('STG011', 2.0))      # = STG002
+            open(os.path.join(new, 'STG000.bin'), 'wb').write(archive([(None, archive([]))]))
+            open(os.path.join(new, 'STG002_S.bin'), 'wb').write(stage_blob('STG002', 3.0))   # not a stage file
+            port, skipped, sigs = Z.plan_stage_ports(new, [('OLD', old, None)])
+        self.assertEqual(port, ['STG002'])
+        self.assertEqual(skipped, {'STG000': 'draws nothing', 'STG001': 'same as OLD STG101',
+                                   'STG011': 'duplicate of STG002'})
+        self.assertEqual(sorted(sigs.values()), ['duplicate of STG002', 'same as OLD STG101'])
 
 
 if __name__ == '__main__':

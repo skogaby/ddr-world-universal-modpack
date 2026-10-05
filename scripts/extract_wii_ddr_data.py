@@ -5,6 +5,15 @@ Hottest Party runs on Hudson Soft's Mario Party engine, so its data uses Hudson'
 Mario Party 4 decompilation (mariopartyrd/marioparty4) documents them, and each one is checked
 against this game's own files. See docs/wii_ddr_hottest_party_research.md for the RE.
 
+The zan-engine sequels -- FuruFuru Party (HOTTEST PARTY 2), MUSIC FIT (HOTTEST PARTY 3) and
+HOTTEST PARTY 4 / 5 (EU) -- are handled too: there every container is a `WII\\0` archive
+(scripts/zan_dump.py), unpacked recursively by `extract` / `archive` (docs/
+wii_ddr_hottest_party_2_3_research.md, wii_ddr_hottest_party_4_5_research.md). HP4 / HP5 keep
+their dancers in sound/stream/character/CHR<id><variant:02>.bin, the choreography in
+dance/DANCE_*_MOT_010.bin and the stages as stage/STG<nnn>.bin = {STG<nnn>_MDL.bin, _CAM.bin,
+_EFF.bin, _Prm.bin}; their discs also carry Subversion `.svn/` copies of every directory, which
+`extract` skips.
+
 Input: the game's file tree, either the unpacked disc (`DATA/files` of a Dolphin / wit dump:
 data/, dll/, mess/, movie/, sound/, sys/main.dol...) or a .wbfs / .iso image read directly
 (`disc` subcommand; the partition is decrypted with the Wii common key, so this needs the
@@ -1107,7 +1116,7 @@ def _tilde(path):
 
 def game_root(game_dir):
     """The directory holding data/ (HOTTEST PARTY 1) or stage/ + sound/ (the zan games:
-    FuruFuru Party, MUSIC FIT) and sys/ (a Dolphin `DATA/files` dump nests it)."""
+    FuruFuru Party, MUSIC FIT, HOTTEST PARTY 4 / 5) and sys/ (a Dolphin `DATA/files` dump nests it)."""
     for cand in (game_dir, os.path.join(game_dir, 'files'), os.path.join(game_dir, 'DATA', 'files')):
         if os.path.isdir(os.path.join(cand, 'data')) or is_zan_game(cand):
             return cand
@@ -1115,12 +1124,13 @@ def game_root(game_dir):
 
 
 def is_zan_game(root):
-    """FuruFuru Party / MUSIC FIT: Konami's zan engine, `WII\\0` archives instead of HuData packs."""
+    """FuruFuru Party / MUSIC FIT / HOTTEST PARTY 4 / 5: Konami's zan engine, `WII\\0` archives
+    instead of HuData packs."""
     return os.path.isdir(os.path.join(root, 'stage')) and os.path.isdir(os.path.join(root, 'sound', 'stream'))
 
 
 # ---------------------------------------------------------------------------
-# zan archives (FuruFuru Party = HOTTEST PARTY 2, MUSIC FIT = HOTTEST PARTY 3)
+# zan archives (FuruFuru Party = HOTTEST PARTY 2, MUSIC FIT = HOTTEST PARTY 3, HOTTEST PARTY 4 / 5)
 # ---------------------------------------------------------------------------
 ZAN_EXT = {'zmb': 'zmb', 'zab': 'zab', 'tpl': 'tpl', 'cam': 'cam', 'zms': 'zms', 'teb': 'teb', 'bin': 'bin',
            'empty': 'bin'}
@@ -1389,7 +1399,9 @@ def cmd_extract(args):
         print('main.dol: %d data directories, %d songs; danceviewDll.rel: %d clip lengths' % (
             len(dirs), len(songs), len(write_rel_tables(root, out))))
     for dirpath, dnames, fnames in os.walk(root):
-        dnames.sort()
+        # HOTTEST PARTY 4 / 5 shipped their Subversion working copies: every directory has a
+        # `.svn/` whose text-base holds a second copy of each file -- not game data
+        dnames[:] = sorted(d for d in dnames if not d.startswith('.'))
         for fn in sorted(fnames):
             if fn.startswith('.'):
                 continue
@@ -1483,7 +1495,7 @@ def main(argv=None):
     p.add_argument('out_dir')
     p.add_argument('--png', action='store_true')
     p.set_defaults(fn=cmd_pack)
-    p = sub.add_parser('archive', help='unpack one zan `WII\\0` archive (FuruFuru Party / MUSIC FIT)')
+    p = sub.add_parser('archive', help='unpack one zan `WII\\0` archive (FuruFuru Party / MUSIC FIT / HOTTEST PARTY 4 / 5)')
     p.add_argument('file')
     p.add_argument('out_dir')
     p.add_argument('--png', action='store_true')
