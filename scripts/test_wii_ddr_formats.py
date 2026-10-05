@@ -366,6 +366,32 @@ class TestAudio(unittest.TestCase):
             self.assertEqual(data[:4], b'RIFF')
             self.assertEqual(struct.unpack('<2h', data[44:48]), (2, 4))
 
+    def test_rwsd_1_3_waves_in_rwar(self):
+        # FuruFuru Party / MUSIC FIT: an RWSD 1.3 with only a DATA block; its wave is an RWAV
+        # inside the RWAR that fills the group's wave block
+        info = bytearray(0x5C + 0x30)
+        info[0], info[1], info[2] = 2, 0, 1
+        struct.pack_into('>H', info, 4, 32000)
+        struct.pack_into('>IIII', info, 8, 2, 16, 0x1C, 0)
+        struct.pack_into('>I', info, 0x1C, 0x20)
+        struct.pack_into('>II', info, 0x20, 0, 0x5C)
+        samples = bytes([0x01, 0x12]) + bytes(6)
+        info_blk = b'INFO' + struct.pack('>I', 8 + len(info)) + bytes(info)
+        data_blk = b'DATA' + struct.pack('>I', 8 + len(samples)) + samples
+        rwav = b'RWAV' + struct.pack('>HHIHH', 0xFEFF, 0x0102, 0, 0x20, 2)
+        rwav += struct.pack('>IIII', 0x20, len(info_blk), 0x20 + len(info_blk), len(data_blk))
+        rwav += info_blk + data_blk
+        tabl = b'TABL' + struct.pack('>II', 24, 1) + struct.pack('>III', 0x01000000, 8, len(rwav))
+        rwar = b'RWAR' + struct.pack('>HHIHH', 0xFEFF, 0x0100, 0, 0x20, 2)
+        rwar += struct.pack('>IIII', 0x20, len(tabl), 0x20 + len(tabl), 8 + len(rwav))
+        rwar += tabl + b'DATA' + struct.pack('>I', 8 + len(rwav)) + rwav
+        rwsd = bytearray(b'RWSD' + struct.pack('>HHIHH', 0xFEFF, 0x0103, 0, 0x20, 1))
+        rwsd += struct.pack('>IIII', 0x20, 8, 0, 0)
+        rwsd += b'DATA' + struct.pack('>I', 8)
+        waves = W.rwsd_waves(bytes(rwsd), rwar)
+        self.assertEqual(len(waves), 1)
+        self.assertEqual((waves[0]['channels'], waves[0]['rate'], waves[0]['samples']), (1, 32000, 14))
+
 
 class TestDolTables(unittest.TestCase):
     def dol(self):

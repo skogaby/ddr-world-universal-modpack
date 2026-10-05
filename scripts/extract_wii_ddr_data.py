@@ -759,6 +759,10 @@ def rwsd_waves(rwsd, wave_area):
     """Waves of an RWSD whose wave data sits in `wave_area` (the group's wave block)."""
     if rwsd[:4] != b'RWSD':
         raise ValueError('not an RWSD')
+    # RWSD 1.3 (FuruFuru Party / MUSIC FIT) has only a DATA block; its waves are an RWAR in the
+    # group's wave block instead of a WAVE section.
+    if struct.unpack_from('>H', rwsd, 0x0E)[0] < 2 and wave_area[:4] == b'RWAR':
+        return rwar_waves(wave_area)
     wave = struct.unpack_from('>I', rwsd, 0x18)[0]
     n = struct.unpack_from('>I', rwsd, wave + 8)[0]
     blob = rwsd + wave_area
