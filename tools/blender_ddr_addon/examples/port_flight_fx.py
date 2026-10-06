@@ -25,7 +25,10 @@ particle path -- so per stage this writes, into the stage's mapset folder:
                                 (the DLL rescales it per frame through m_vTexAnime.y); strips longer
                                 than 52 points are split into overlapping meshes (the loader's
                                 52-bone palette limit);
-  textures (<key>fx<NN>.dds)    the TPL images the pools sample, each in the first model folder
+  flight_fx/burst_44k_mono.pcm  the intro's sound (SE_DDR_BOSS, from intro frame 180), mono i16 44.1 kHz
+  flight_fx/stage_fx.teb +      the intro's STAGE effect (the sky burst at the tunnel mouth, intro frame 180):
+  fx_<key>_x<k>/                its bank verbatim and its sprite pool (pseudo-player 4)
+  textures (<key>fx<NN>.dds,    the TPL images the pools sample, each in the first model folder
                                 that uses it; a fully transparent image (the carrier particles'
                                 32x32, which only exist to drag ribbons) gets no pool at all.
 
@@ -44,6 +47,9 @@ Manifest (`flight_fx.txt`, whitespace-separated, `#` comments):
     group <first> <count> <tex> <flip 0|1> <cell> <additive 0|1> <depth 0|1>
     ribbons <player> <model> <bones> <records>
     strip <first_bone> <points> <first_record> <records> <tex> <additive 0|1>
+    stage_effect <intro frame> <x> <y> <z> <effect>   the stage bank's effect at a zan-unit point
+    stage_sound <intro frame> <member>              the intro sound (flight_fx/<member>)
+  (player 4 = the stage effect's pools)
   (quad i = mesh / draw record / material / bone i; a strip's material = its index in the model)
 
 Run (plain python3 + numpy; no Blender):
@@ -82,6 +88,162 @@ BLEND_ADDITIVE = 2                # a draw block's blend 2: SRCALPHA / ONE
 IDENTITY = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
 
 
+# The intro's STAGE effect (the sky burst, research §1.2): main.dol plays effect 0 of category 5 at
+# intro frame 180 at one COL node -- MUSIC FIT: `EFF_04_01` (table entry 227 of 0x80288828), bank
+# stage/STG201_EFF.bin for every flight song (STG205 / 206 too); HP4 (`FUN_8004d7bc`): every
+# `EFF_03_*` node, bank STG301.bin's STG301_EFF.bin. Both sit at (0, 740, 2730), the tunnel mouth.
+STAGE_FX = {
+    'hp3stage201': ('MUSIC FIT stage/STG201_EFF.bin', 'mf', 'stage/STG201_EFF.bin', 'stage/STG201.bin', 'EFF_04_01'),
+    'hp3stage205': ('MUSIC FIT stage/STG201_EFF.bin', 'mf', 'stage/STG201_EFF.bin', 'stage/STG205.bin', 'EFF_04_01'),
+    'hp3stage206': ('MUSIC FIT stage/STG201_EFF.bin', 'mf', 'stage/STG201_EFF.bin', 'stage/STG206.bin', 'EFF_04_01'),
+    'hp4stage301': ('HP4 stage/STG301.bin STG301_EFF.bin', 'hp4', 'stage/STG301.bin', 'stage/STG301.bin', 'EFF_03_01'),
+}
+STAGE_FX_FRAME = 180              # FUN_80037354 / HP4 FUN_80106298: r2-0x7ca0 / r2-0x6890 = 180.0
+STAGE_PLAYER = 4                  # the layout's pseudo-player of the stage effect's pools
+
+
+def stage_fx_source(key):
+    """(label, TEB bytes, TPL bytes, anchor position in zan units) or None."""
+    import numpy as np
+    spec = STAGE_FX.get(key)
+    if not spec:
+        return None
+    label, disc, bank, stage, node = spec
+    root = MUSIC_FIT if disc == 'mf' else HP4
+    if not os.path.exists(os.path.join(root, bank)):
+        print('  %s: %s missing -- no stage effect' % (key, label))
+        return None
+    (_p, teb, tpl), = [m for m in T.teb_members(open(os.path.join(root, bank), 'rb').read())][:1]
+    cm, cmo = Z.stage_sources(open(os.path.join(root, stage), 'rb').read())['col']
+    w = Z.posed_worlds(cm, cmo, np.array([float(STAGE_FX_FRAME)]))[0, cm['by_name'][node]]
+    return label, teb, tpl, [float(x) for x in w[3, :3]]
+
+
+# The intro's sound (`FUN_80037354` / HP4 `FUN_80106298` at intro frame 180, with the sky burst):
+# SE_DDR_BOSS (MUSIC FIT sound 0xF6, HP4 0x115; the BOSSMULTI twin in multi-player play adds a
+# second note). Its RSEQ is one note of one bank instrument (`prg N .. note key vel len, fin`); the
+# note at the instrument's root key plays its wave as recorded -- extracted, mixed to mono and
+# resampled to 44.1 kHz (the DLL's XACT wave format) as flight_fx/burst_44k_mono.pcm.
+SOUND = {'mf': ('sound/DDRHP3J_SOUND.brsar', 'SE_DDR_BOSS'), 'hp4': ('sound/DDRHP4_SOUND.brsar', 'SE_DDR_BOSS')}
+SOUND_RATE = 44100
+
+
+def _rsar_info(blob):
+    import struct
+    symb, _ss, info, _is, _fo, _fs = struct.unpack_from('>6I', blob, 0x10)
+    I = info + 8
+
+    def ref(o):
+        return struct.unpack_from('>I', blob, o + 4)[0]
+
+    def table(o):
+        c = struct.unpack_from('>I', blob, I + o)[0]
+        return [ref(I + o + 4 + 8 * k) for k in range(c)]
+    return I, ref, table, [ref(I + 8 * k) for k in range(6)]
+
+
+def _file_bytes(rsar, blob, fid):
+    for g in rsar['groups']:
+        for it in g['items']:
+            if it['file'] == fid:
+                return blob[it['offset']:it['offset'] + it['size']], blob[it['wave_offset']:it['wave_offset'] + it['wave_size']]
+    raise ValueError('file %d in no group' % fid)
+
+
+def _varint(b, o):
+    v = 0
+    while True:
+        c = b[o]
+        o += 1
+        v = (v << 7) | (c & 0x7F)
+        if not c & 0x80:
+            return v, o
+
+
+def single_note(seq, at):
+    """(program, key) of an RSEQ sequence that plays exactly one note; ValueError otherwise."""
+    prog, notes, o = None, [], at
+    for _ in range(64):
+        c = seq[o]
+        o += 1
+        if c < 0x80:
+            notes.append((c, seq[o]))
+            _len, o = _varint(seq, o + 1)
+        elif c == 0x81:
+            prog, o = _varint(seq, o)
+        elif c == 0x80:
+            raise ValueError('a wait: more than one note')
+        elif 0xC0 <= c <= 0xDF:
+            o += 1
+        elif 0xE0 <= c <= 0xE3:
+            o += 2
+        elif c == 0xFF:
+            break
+        else:
+            raise ValueError('RSEQ command %02x not understood' % c)
+    if prog is None or len(notes) != 1:
+        raise ValueError('not a single-note sequence (%s, %d notes)' % (prog, len(notes)))
+    return prog, notes[0][0]
+
+
+def instrument(rbnk, prog, key):
+    """{wave, key, tune} of program `prog` at `key` (RBNK DATA: direct 1 / key ranges 2 / index 3)."""
+    import struct
+    D = struct.unpack_from('>I', rbnk, 0x10)[0] + 8
+
+    def resolve(kind, off):
+        if kind == 1:
+            w = struct.unpack_from('>i', rbnk, D + off)[0]
+            return dict(wave=w, key=rbnk[D + off + 12], tune=struct.unpack_from('>f', rbnk, D + off + 16)[0])
+        if kind == 2:
+            n = rbnk[D + off]
+            keys = list(rbnk[D + off + 1:D + off + 1 + n])
+            base = D + off + ((1 + n + 3) & ~3)
+            i = next(i for i, kk in enumerate(keys) if key <= kk)
+            return resolve(rbnk[base + 8 * i + 1], struct.unpack_from('>I', rbnk, base + 8 * i + 4)[0])
+        if kind == 3:
+            i = key - rbnk[D + off]
+            return resolve(rbnk[D + off + 4 + 8 * i + 1], struct.unpack_from('>I', rbnk, D + off + 4 + 8 * i + 4)[0])
+        raise ValueError('instrument kind %d' % kind)
+    e = D + 4 + 8 * prog
+    return resolve(rbnk[e + 1], struct.unpack_from('>I', rbnk, e + 4)[0])
+
+
+def burst_sound(disc_root, which):
+    """The intro sound as mono i16 PCM at SOUND_RATE (numpy array), or None when the disc lacks it."""
+    import struct
+    import numpy as np
+    sys.path.insert(0, os.path.join(REPO, 'scripts'))
+    import extract_wii_ddr_data as X
+    path, name = SOUND[which]
+    if not os.path.exists(os.path.join(disc_root, path)):
+        return None
+    blob = open(os.path.join(disc_root, path), 'rb').read()
+    rsar = X.parse_rsar(blob)
+    sid = next(i for i, snd in enumerate(rsar['sounds']) if snd['name'] == name)
+    I, ref, table, tabs = _rsar_info(blob)
+    o = table(tabs[0])[sid]
+    data_off, bank_id = struct.unpack_from('>II', blob, I + ref(I + o + 0x18))
+    seq, _ = _file_bytes(rsar, blob, rsar['sounds'][sid]['file'])
+    body = struct.unpack_from('>I', seq, 0x10)[0] + struct.unpack_from('>I', seq, struct.unpack_from('>I', seq, 0x10)[0] + 8)[0]
+    prog, key = single_note(seq, body + data_off)
+    bank_fid = struct.unpack_from('>I', blob, I + table(tabs[1])[bank_id] + 4)[0]
+    rbnk, rwar = _file_bytes(rsar, blob, bank_fid)
+    ins = instrument(rbnk, prog, key)
+    wave = X.rwar_waves(rwar)[ins['wave']]
+    chans = [np.array(X.dsp_decode(d, wave['samples'], a['coefs'], a['hist1'], a['hist2']), float)
+             for d, a in zip(wave['data'], wave['adpcm'])]
+    n0 = min(len(c) for c in chans)
+    mono = np.mean([c[:n0] for c in chans], axis=0)
+    ratio = 2.0 ** ((key - ins['key']) / 12.0) * ins['tune']       # the note's pitch (1.0 at the root)
+    src_rate = wave['rate'] * ratio
+    n = int(len(mono) * SOUND_RATE / src_rate)
+    out = np.interp(np.arange(n) * (src_rate / SOUND_RATE), np.arange(len(mono)), mono)
+    print('  sound %s: prg %d note %d -> wave %d (%d Hz, %d ch, %.2f s), pitch x%.3f' % (
+        name, prog, key, ins['wave'], wave['rate'], wave['channels'], len(mono) / wave['rate'], ratio))
+    return np.clip(np.round(out), -32768, 32767).astype('<i2')
+
+
 def bank_for(stage_dir):
     """(source label, WII archive path) of the effect bank a stage uses."""
     if 'HOTTEST PARTY 4' in stage_dir and os.path.exists(os.path.join(HP4, 'character', 'CHR_EFF.bin')):
@@ -100,10 +262,15 @@ def visible_textures(images):
 
 def pools_for(fx, images, p):
     """(sprite groups, ribbon strips) of player p: {key: count}, [(tex, points, additive)]."""
+    return pools_of(fx, images, [pair for mode in MODES for pair in player_effects(p, mode)])
+
+
+def pools_of(fx, images, effects):
+    """(sprite groups, ribbon strips) peak-sized for `effects` [(effect, instances)]."""
     vis = visible_textures(images)
     groups, strips = {}, []
-    for mode in MODES:
-        for ei, inst in player_effects(p, mode):
+    if True:
+        for ei, inst in effects:
             if ei >= len(fx['effects']):
                 continue
             for nd in fx['effects'][ei]['nodes']:
@@ -356,6 +523,36 @@ def port_stage(mapset, bank_label, bank_path):
             out.append('ribbons %d %s %d %d' % (p, rm.name, rbones, rrecs))
             out += slines
             print('  %s player %d: %s %d strips (%d bones, %d meshes)' % (key, p, rm.name, len(slines), rbones, rrecs))
+    sfx = stage_fx_source(key)
+    if sfx:
+        label, steb, stpl, at = sfx
+        with open(os.path.join(fx_dir, 'stage_fx.teb'), 'wb') as f:
+            f.write(steb)
+        simages = Z.tpl_images(stpl)
+        sfx_fx = T.parse_teb(steb)
+
+        def stem_s(i):
+            return '%ssfx%02d' % (key, i)
+        groups, strips = pools_of(sfx_fx, simages, [(0, 1)])
+        out.append('# the intro sky burst: %s effect 0 at intro frame %d (zan units)' % (label, STAGE_FX_FRAME))
+        out.append('stage_effect %d %.3f %.3f %.3f 0' % (STAGE_FX_FRAME, at[0], at[1], at[2]))
+        for k, load in enumerate(chunk_groups(groups)):
+            sm, quads, glines = sprite_model('fx_%s_x%s' % (key, chr(ord('a') + k)), load, stem_s)
+            d = sm.write(mapset, quads)
+            for t in sorted(sm.tex_of):
+                im = simages[t]
+                rows = [bytes(im[r].astype('uint8').tobytes()) for r in range(im.shape[0])]
+                with open(os.path.join(d, stem_s(t) + '.dds'), 'wb') as f:
+                    f.write(K.write_dds_a8r8g8b8(im.shape[1], im.shape[0], rows))
+            out.append('sprites %d %s %d' % (STAGE_PLAYER, sm.name, quads))
+            out += glines
+            print('  %s stage effect: %s %d quads in %d groups' % (key, sm.name, quads, len(glines)))
+        assert not strips, 'the stage effect has ribbons -- not laid out'
+        pcm = burst_sound(MUSIC_FIT if STAGE_FX[key][1] == 'mf' else HP4, STAGE_FX[key][1])
+        if pcm is not None:
+            with open(os.path.join(fx_dir, 'burst_44k_mono.pcm'), 'wb') as f:
+                f.write(pcm.tobytes())
+            out.append('stage_sound %d burst_44k_mono.pcm' % STAGE_FX_FRAME)
     s = '\n'.join(out) + '\n'
     assert isinstance(s, str)
     with open(os.path.join(fx_dir, 'flight_fx.txt'), 'w') as f:

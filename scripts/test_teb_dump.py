@@ -50,7 +50,8 @@ class Writer:
 
 
 def part(w, flags=T.P_EMITTER | T.P_DRAW, shape=0, life=1.0, interval=0.1, mx=4, per=1, speed=0.0,
-         spread=(0, 0, 0), billboard=0, colour=(200, 100, 50, 128), tex=3, ribbon=None, track=(0.0, 100.0)):
+         spread=(0, 0, 0), billboard=0, colour=(200, 100, 50, 128), tex=3, ribbon=None, track=(0.0, 100.0),
+         gravity=None):
     head = w.zeros(0x30)
     w.put(head, 'I', flags)
     w.put(head + 0x2C, 'B', shape)
@@ -67,6 +68,8 @@ def part(w, flags=T.P_EMITTER | T.P_DRAW, shape=0, life=1.0, interval=0.1, mx=4,
     w.put(d + 0x26, 'B', 2)
     w.put(d + 0x28, 'h', tex)
     w.put(head + 12, 'I', d)
+    if gravity:
+        w.put(head + 8, 'I', w.f32s(list(gravity)))
     if ribbon:
         r = w.zeros(8)
         w.put(r, 'fBxh', ribbon[0], ribbon[1], ribbon[2])
@@ -166,6 +169,18 @@ class TestSimulate(unittest.TestCase):
         z = s['axes'][:, 2]
         np.testing.assert_allclose(z / np.linalg.norm(z), [1, 0, 0], atol=1e-6)
         self.assertAlmostEqual(np.linalg.norm(s['axes'][:, 0]), T.EFFECT_SCALE)
+
+    def test_gravity_world_space(self):
+        kw = dict(flags=T.P_EMITTER | T.P_DRAW | T.P_GRAVITY, mx=1, life=5.0, gravity=(0, -1, 0, 0, 0, 0, 2.0, 0))
+        fx = T.parse_teb(bank([[(0, kw)]]))
+        self.assertAlmostEqual(fx['effects'][0]['nodes'][1]['part']['gravity']['accel'], 2.0)
+
+        def attach(i):
+            a = np.eye(4)
+            a[:3, :3] = T.axis_angle((0, 0, 1), math.pi / 2)
+            return a
+        s = frames(fx['effects'][0], 61, attach=attach)[-1][0]
+        np.testing.assert_allclose(s['centre'], [0, -10, 0], atol=1e-3)   # dir . accel . a^2/2 . 10
 
     def test_scroll_streams_the_ribbon(self):
         kw = dict(flags=T.P_EMITTER | T.P_DRAW | T.P_RIBBON | T.P_IMMORTAL, mx=1, ribbon=(0.5, 30, 7))

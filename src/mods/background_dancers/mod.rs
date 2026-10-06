@@ -10,7 +10,8 @@
 //! points (render items, the mod-owned scene node, the seqlocked
 //! `frame_board`, camera slot 0, `arc_set`, the `viewport_pass` compositor);
 //! this mod supplies the game logic. No rendering detours; the only code
-//! patch is STAGE SCREENS' layer-select byte. RE:
+//! patches are STAGE SCREENS' layer-select byte and `texture_wrap`'s boot
+//! imm32 (mod textures WRAP, not CLAMP). RE:
 //! `docs/background_dancers_research.md`, `docs/3d_model_format_research.md`.
 //!
 //! **Per song:** at the first entry into the song window {26, 27, 28} the
@@ -47,7 +48,10 @@
 //! normal stage or in the BACKGROUND DANCER preview. The flyers carry the
 //! games' own effects (`flight_fx.rs`: zan's `CzanEff` particle runtime run
 //! from the stage's `flight_fx/flight_fx.teb`, drawn through per-player
-//! sprite / ribbon POOL models — instances `InstanceKind::Fx`).
+//! sprite / ribbon POOL models — instances `InstanceKind::Fx`). The take-off
+//! is the Wii's intro: on the real clock, filmed by the stage's `_intro`
+//! shots, with the sky burst at the tunnel mouth (`StageFx`) and its sound
+//! (a one-shot XACT bank); the tunnel scrolls on the real clock too.
 //!
 //! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
 //! Outlines** (one black inverted-hull twin per mesh; CEL + outline are
@@ -109,7 +113,8 @@
 //! Everything else is per-song fail-open, one WARN/INFO each. `is_active()`
 //! = "this mod CAN work", never "something rendered this boot". Developer
 //! knobs (`layeredfs.developer_mode`): `DDR_DANCERS_PIN`,
-//! `DDR_DANCERS_STATIC`, `DDR_DANCERS_VIEWPORT_SMOKE`.
+//! `DDR_DANCERS_STATIC`, `DDR_DANCERS_VIEWPORT_SMOKE`,
+//! `DDR_DANCERS_NO_FLIGHT_HOLD` (no READY hold on flight stages).
 //!
 //! **Host tests:** `scripts/validate_background_dancers.sh` mounts the pure
 //! files marked † below plus the pure `scene3d` / `core::anm` layers; its
@@ -125,6 +130,9 @@
 //!   [`scene_window`] (load / build / teardown, shared with previews),
 //!   [`director`] + [`director_math`]†, [`schedule`]†, [`clock`]†,
 //!   [`tempo`]† + [`tempo_source`], [`background_hide`].
+//! - Flight stages: [`flight_fx`]† (the zan particle runtime),
+//!   [`flight_hold_logic`]† + [`flight_hold`] (the READY hold: the take-off
+//!   before the song).
 //! - Movies: [`movie_mode`]†, [`movie_size`], [`movie_backdrop`],
 //!   [`movie_camera`]†, [`screen_route`], [`song_movie`].
 //! - Look: [`style`] (rows, live values, config — incl. BIG HEAD),
@@ -140,6 +148,8 @@ pub mod custom_scan;
 pub mod director;
 pub mod director_math;
 pub mod flight_fx;
+pub mod flight_hold;
+pub mod flight_hold_logic;
 pub mod instance_plan;
 pub mod lifecycle;
 pub mod movie_backdrop;
@@ -162,12 +172,13 @@ pub mod sources;
 pub mod style;
 pub mod tempo;
 pub mod tempo_source;
+pub mod texture_wrap;
 pub mod viewport_smoke;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::mods::mod_trait::{Mod, ModContext};
+use crate::mods::mod_trait::{EarlyContext, Mod, ModContext};
 use crate::services::{input_manager, scene3d, scene_manager};
 use crate::{log_info, log_warn};
 
@@ -231,11 +242,19 @@ impl Mod for BackgroundDancersMod {
         ]
     }
 
+    fn early_apply(&mut self, ctx: &EarlyContext) -> bool {
+        // Custom-model textures must WRAP like the stock ones: the default
+        // sampler attr onBoot gives db-absent textures is CLAMP, and onBoot
+        // runs right after this phase (`texture_wrap`).
+        texture_wrap::apply(ctx.signatures)
+    }
+
     fn init(&mut self, ctx: &ModContext) -> bool {
         // Optional: the movie-size override and the fullscreen-movie probe
         // behind Background Movies = FULLSCREEN (fail-open without them).
         let _ = movie_size::init(ctx.signatures);
         let _ = movie_backdrop::init(ctx.signatures);
+        let _ = flight_hold::init(ctx.signatures);
         // Optional: Background Movies = STAGE SCREENS (the layer-select
         // byte + the MovieActor fit fields; THUMBNAIL without them).
         let _ = screen_route::init(ctx.signatures);

@@ -498,6 +498,7 @@ impl SceneWindow {
         }
         if let Some(sess) = self.session.as_mut() {
             director::hide_all(sess);
+            super::lifecycle::stop_flight_sound(sess);
         }
         for n in built {
             let n = n as *mut SceneNode;

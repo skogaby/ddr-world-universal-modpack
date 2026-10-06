@@ -41,6 +41,14 @@
 //!   take-off frame [`LEAP_FRAME`]) and the flight (mode 0, from the switch)
 //!   — on the real clock, and its pool frames.
 //!
+//! * The flight INTRO (after the first cabinet run): [`StageFx`] runs the
+//!   stage bank's sky burst at the layout's `stage_effect` point from intro
+//!   frame 180 (pseudo-player [`STAGE_PLAYER`]'s pools), the layout's
+//!   `stage_sound` names the intro sound, and [`flight_schedule_time`] puts
+//!   the take-off on the real clock (the Wii's 60 Hz intro) and the flight
+//!   on the dance clock, continuous at the switch. Gravity (part flag 0x2)
+//!   is ported for it (research §3.2).
+//!
 //! Harness-mounted (`scripts/validate_background_dancers.sh`, module
 //! `flight_fx`): no `crate::` imports.
 
@@ -374,6 +382,15 @@ pub struct Emitter {
     pub billboard: u8,
 }
 
+/// A part's gravity block (flag 0x2; `FUN_8012c790` / `FUN_8012c438`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gravity {
+    pub dir: V3,
+    pub rot_spread: V3,
+    pub accel: f32,
+    pub accel_rand: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Flipbook {
     pub width: u16,
@@ -429,6 +446,8 @@ pub struct Part {
     pub shape: u8,
     pub tracks: Vec<Track>,
     pub emitter: Option<Emitter>,
+    /// Gravity (flag 0x2): `{dir[3], rot_spread[3], accel, accel_rand}`.
+    pub gravity: Option<Gravity>,
     pub draw: Option<Draw>,
     pub ribbon: Option<Ribbon>,
     /// roll0, roll0_rand, roll_rate, rate_rand, roll_accel, accel_rand,
@@ -565,6 +584,7 @@ fn parse_part(r: &Rd, o: usize) -> Option<Part> {
         shape,
         tracks: parse_tracks(r, r.off(o + 0x28)?)?,
         emitter: None,
+        gravity: None,
         draw: None,
         ribbon: None,
         spin: None,
@@ -590,6 +610,15 @@ fn parse_part(r: &Rd, o: usize) -> Option<Part> {
             max,
             per_spawn: per,
             billboard: r.u8(e + 0x32)?,
+        });
+    }
+    if flags & P_GRAVITY != 0 {
+        let g = w(2)?;
+        p.gravity = Some(Gravity {
+            dir: r.v3(g)?,
+            rot_spread: r.v3(g + 12)?,
+            accel: r.f32(g + 0x18)?,
+            accel_rand: r.f32(g + 0x1C)?,
         });
     }
     if flags & P_DRAW != 0 {
@@ -1030,6 +1059,8 @@ struct Particle {
     size: f32,
     rgb: V3,
     spin: Option<[f32; 3]>,
+    /// Gravity direction (unnormalised, as the game keeps it) and accel.
+    gravity: Option<(V3, f32)>,
     anchor: Option<(V3, Quat)>,
     ribbon: VecDeque<RibbonPoint>,
     pose: Sprite,
@@ -1061,6 +1092,7 @@ impl PartState {
                 size: 1.0,
                 rgb: [255.0; 3],
                 spin: None,
+                gravity: None,
                 anchor: None,
                 ribbon: VecDeque::with_capacity(ribbon_cap),
                 pose: Sprite::ZERO,
@@ -1173,6 +1205,24 @@ impl PartState {
         q.size = 1.0;
         q.rgb = [255.0; 3];
         q.ribbon.clear();
+        // gravity: the block's direction turned by a random rotation, or
+        // (an ellipsoid with radial velocity) inward; accel ± rand
+        // (`FUN_8012c790` / `FUN_8012c92c`, then `FUN_8012c438`)
+        q.gravity = part.gravity.map(|g| {
+            let dir = if part.shape == 1 && radial {
+                let n = norm(vdir);
+                if n > 1e-12 {
+                    scale(vdir, -1.0 / n)
+                } else {
+                    [0.0; 3]
+                }
+            } else {
+                let rs = g.rot_spread;
+                let m = euler_yzx(rng.pm(rs[0]), rng.pm(rs[1]), rng.pm(rs[2]));
+                mv(&m, g.dir)
+            };
+            (dir, g.accel + rng.pm(g.accel_rand))
+        });
         q.spin = part.spin.map(|s| {
             [
                 s[0] + rng.pm(s[1]),
@@ -1281,7 +1331,13 @@ fn pose(
             pos,
         );
     }
-    let (wpos, r0) = match q.anchor.as_mut() {
+    // gravity (`FUN_8012ce18`): a radial ring falls in the emitter's frame;
+    // every other part in WORLD space, × the manager scale
+    let ring_radial = part.shape == 2 && part.ring.is_some_and(|r| r.flags & 4 != 0);
+    if let (Some((gdir, accel)), true) = (q.gravity, ring_radial) {
+        pos = add(pos, scale(gdir, accel * age * age * 0.5));
+    }
+    let (mut wpos, r0) = match q.anchor.as_mut() {
         Some((apos, aq)) if part.flags & P_WORLD != 0 && age > 0.0 => {
             let fol = part.follow.map_or(0.0, |f| f.0);
             *aq = slerp(*aq, wquat, fol);
@@ -1291,6 +1347,9 @@ fn pose(
         }
         _ => (add(mv(&world.r, pos), world.t), world.r),
     };
+    if let (Some((gdir, accel)), false) = (q.gravity, ring_radial) {
+        wpos = add(wpos, scale(gdir, age * age * accel * EFFECT_SCALE * 0.5));
+    }
     // billboard: the camera's basis (mode 0) or the emitter's frame laid flat
     let mut r = if em.billboard == 0 {
         scale_cols(&transpose(&cam.view_rot), [sc[0], sc[1], 1.0])
@@ -1644,6 +1703,8 @@ pub fn additive_colour(rgba: [f32; 4]) -> [f32; 4] {
 
 /// Players with their own effect set (`FUN_8004b5a8`: P1..P4 colours).
 pub const PLAYERS: usize = 4;
+/// The layout's pseudo-player owning the stage effect's pools.
+pub const STAGE_PLAYER: usize = 4;
 
 /// Quads `[first, first + count)` of a sprite pool draw TPL `tex` with
 /// these UVs / blend / depth.
@@ -1710,10 +1771,22 @@ impl Pool {
     }
 }
 
+/// The intro's stage effect (the sky burst): `effect` of the stage bank at
+/// intro frame `frame` (60 Hz), anchored at `at` (zan units, no rotation).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageEffect {
+    pub frame: f32,
+    pub at: V3,
+    pub effect: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FxLayout {
     pub metres_per_unit: f32,
     pub pools: Vec<Pool>,
+    pub stage_effect: Option<StageEffect>,
+    /// The intro sound: `(intro frame, flight_fx/ member)`.
+    pub stage_sound: Option<(f32, String)>,
 }
 
 impl FxLayout {
@@ -1723,6 +1796,8 @@ impl FxLayout {
         let mut out = FxLayout {
             metres_per_unit: 0.0,
             pools: Vec::new(),
+            stage_effect: None,
+            stage_sound: None,
         };
         let mut version = false;
         for (ln, raw) in text.lines().enumerate() {
@@ -1758,7 +1833,7 @@ impl FxLayout {
                 Some("sprites") | Some("ribbons") => {
                     let player = num(1)?;
                     let model = f.get(2).ok_or_else(bad)?.to_string();
-                    if player >= PLAYERS || model.is_empty() {
+                    if player > STAGE_PLAYER || model.is_empty() {
                         return Err(bad());
                     }
                     let kind = if f[0] == "sprites" {
@@ -1831,6 +1906,31 @@ impl FxLayout {
                         }
                         _ => return Err(format!("{}: outside a ribbon pool", bad())),
                     }
+                }
+                Some("stage_effect") => {
+                    let fl = |i: usize| -> Result<f32, String> {
+                        f.get(i)
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .filter(|v| v.is_finite())
+                            .ok_or_else(bad)
+                    };
+                    out.stage_effect = Some(StageEffect {
+                        frame: fl(1)?.max(0.0),
+                        at: [fl(2)?, fl(3)?, fl(4)?],
+                        effect: num(5)?,
+                    });
+                }
+                Some("stage_sound") => {
+                    let frame = f
+                        .get(1)
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .filter(|v| v.is_finite() && *v >= 0.0)
+                        .ok_or_else(bad)?;
+                    let member = f.get(2).ok_or_else(bad)?;
+                    if member.contains('/') || member.contains("..") {
+                        return Err(bad());
+                    }
+                    out.stage_sound = Some((frame, member.to_string()));
                 }
                 _ => return Err(format!("{}: unknown record", bad())),
             }
@@ -2219,6 +2319,105 @@ impl DancerFx {
 /// Pools one player may use (the port writes 1 sprite + 2 ribbon models).
 pub const MAX_POOLS: usize = 8;
 
+/// The intro's stage effect (the sky burst at the tunnel mouth): one
+/// effect of the stage bank, started at intro frame `StageEffect::frame`,
+/// ticked on the intro clock, drawn through the [`STAGE_PLAYER`] pools.
+pub struct StageFx {
+    pub spec: StageEffect,
+    /// Pool indices into the layout (= `frames` order).
+    pub pools: Vec<usize>,
+    pub frames: Vec<PoolFrame>,
+    sim: EffectSim,
+    pub dropped: usize,
+}
+
+impl StageFx {
+    /// `None` without a `stage_effect` line, its effect, or a pool.
+    pub fn new(teb: &Teb, layout: &FxLayout, seed: u32) -> Option<StageFx> {
+        let spec = layout.stage_effect?;
+        let mut pools = layout.pools_of(STAGE_PLAYER);
+        pools.truncate(MAX_POOLS);
+        if pools.is_empty() {
+            return None;
+        }
+        let frames = pools
+            .iter()
+            .filter_map(|&i| layout.pools.get(i))
+            .map(PoolFrame::new)
+            .collect();
+        Some(StageFx {
+            spec,
+            pools,
+            frames,
+            sim: EffectSim::new(teb, spec.effect, seed ^ 0x5747_4346)?,
+            dropped: 0,
+        })
+    }
+
+    /// When the effect starts, seconds of intro clock.
+    pub fn start_s(&self) -> f32 {
+        self.spec.frame / 60.0
+    }
+
+    /// One frame at intro clock `intro_s` (real seconds since the take-off
+    /// began); refills `frames`, returns the entries drawn. Before the start
+    /// (or after a rewind past it) nothing draws.
+    pub fn tick(&mut self, teb: &Teb, layout: &FxLayout, intro_s: f32, cam: &Camera) -> usize {
+        for f in self.frames.iter_mut() {
+            f.clear();
+        }
+        let elapsed = intro_s - self.start_s();
+        if elapsed < 0.0 {
+            if self.sim.steps() > 0 {
+                self.sim.reset(teb);
+            }
+            return 0;
+        }
+        if self.sim.finished(teb) {
+            return 0;
+        }
+        let at = Affine {
+            r: M3_IDENTITY,
+            t: self.spec.at,
+        };
+        self.sim.advance(teb, elapsed, &at, cam, [0.0; 3]);
+        let mut flat: [&Pool; MAX_POOLS] = [&EMPTY_POOL; MAX_POOLS];
+        for (dst, &i) in flat.iter_mut().zip(self.pools.iter()) {
+            if let Some(p) = layout.pools.get(i) {
+                *dst = p;
+            }
+        }
+        let n = self.pools.len().min(self.frames.len()).min(MAX_POOLS);
+        let mut w = PoolWriter {
+            pools: &flat[..n],
+            frames: &mut self.frames[..n],
+            metres_per_unit: layout.metres_per_unit,
+            dropped: 0,
+        };
+        self.sim.emit(teb, &mut w);
+        self.dropped += w.dropped;
+        self.frames.iter().map(|f| f.drawn).sum()
+    }
+}
+
+/// The SCHEDULE time of a flight stage frame: the take-off (until `switch`,
+/// = the take-off clip's length) runs on the REAL clock like the Wii's 60 Hz
+/// intro (`real_s`, the music count in seconds), the flight after it on the
+/// dance clock, continuous at the switch (`dance_at_switch` = the dance time
+/// at real time `switch`). Without a flight it is the dance time.
+pub fn flight_schedule_time(
+    switch: Option<f32>,
+    t_dance: f32,
+    real_s: f32,
+    dance_at_switch: f32,
+) -> f32 {
+    match switch {
+        Some(s) if real_s < s => real_s,
+        Some(s) => s + (t_dance - dance_at_switch),
+        None => t_dance,
+    }
+}
+
 /// Placeholder for unused writer slots (never matches: no groups/strips).
 static EMPTY_POOL: Pool = Pool {
     player: 0,
@@ -2332,6 +2531,7 @@ mod tests {
         spin: [f32; 8],
         follow: (f32, f32),
         shape_block: (u32, V3),
+        gravity: [f32; 8],
     }
 
     fn base_part() -> PartSpec {
@@ -2359,6 +2559,7 @@ mod tests {
             spin: [0.0; 8],
             follow: (0.0, 1.0),
             shape_block: (0, [1.0, 1.0, 1.0]),
+            gravity: [0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
         }
     }
 
@@ -2443,6 +2644,10 @@ mod tests {
                 &[p.colour_keys.len() as u8, p.size_var.0, p.size_var.1],
             );
             b.put_u32(head + 12, d);
+        }
+        if p.flags & P_GRAVITY != 0 {
+            let o = b.f32s(&p.gravity);
+            b.put_u32(head + 8, o);
         }
         if p.flags & P_RIBBON != 0 {
             let o = b.zeros(8);
@@ -2918,6 +3123,34 @@ mod tests {
         assert!(approx(s.rgba[3], 127.5, 0.5));
     }
 
+    #[test]
+    fn gravity_falls_in_world_space_by_the_manager_scale() {
+        let mut p = base_part();
+        p.flags |= P_GRAVITY;
+        p.em.max = 1;
+        p.em.life = 5.0;
+        let (teb, mut sim) = sim_of(p);
+        assert_eq!(
+            teb.effects[0].nodes[1]
+                .part
+                .as_ref()
+                .unwrap()
+                .gravity
+                .unwrap()
+                .accel,
+            2.0
+        );
+        // the emitter turned 90° about z: gravity is world-space (dir −y)
+        let r = axis_angle([0.0, 0.0, 1.0], PI / 2.0);
+        let a = Affine { r, t: [0.0; 3] };
+        for _ in 0..61 {
+            sim.step(&teb, &a, &cam(), [0.0; 3]);
+        }
+        // age 1 s: Δ = dir · accel · a² / 2 · 10 = (0, −10, 0)
+        let s = frame(&sim, &teb).sprites[0];
+        assert!(approx3(s.centre, [0.0, -10.0, 0.0], 1e-3), "{:?}", s.centre);
+    }
+
     // ── ribbons and the world scroll ────────────────────────────────────
 
     fn ribbon_part(segments: u8) -> PartSpec {
@@ -3072,7 +3305,7 @@ mod tests {
             "flight_fx 1\nmetres_per_unit 1\ngroup 0 1 3 0 0 1 1\n", // outside a pool
             "flight_fx 1\nmetres_per_unit 1\nsprites 0 m 2\ngroup 1 2 3 0 0 1 1\n", // past the pool
             "flight_fx 1\nmetres_per_unit 1\nribbons 0 m 4 1\nstrip 0 5 0 1 7 1\n",
-            "flight_fx 1\nmetres_per_unit 1\nsprites 4 m 1\n", // player
+            "flight_fx 1\nmetres_per_unit 1\nsprites 5 m 1\n", // player
             "flight_fx 1\nmetres_per_unit 1\nbogus\n",
         ] {
             assert!(FxLayout::parse(bad).is_err(), "{bad:?}");
@@ -3241,6 +3474,70 @@ mod tests {
             fx.tick(&teb, &l, 1.3, 1.3, leap, switch, &joints, &cam()),
             3 + 3
         );
+    }
+
+    #[test]
+    fn stage_effect_line_and_driver() {
+        let l = FxLayout::parse(
+            "flight_fx 1\nmetres_per_unit 1\nstage_effect 180 0 740 2730 0\nsprites 4 x 4\ngroup 0 4 3 0 0 1 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            l.stage_effect,
+            Some(StageEffect {
+                frame: 180.0,
+                at: [0.0, 740.0, 2730.0],
+                effect: 0
+            })
+        );
+        assert_eq!(l.pools_of(STAGE_PLAYER), vec![0]);
+        let ls =
+            FxLayout::parse("flight_fx 1\nmetres_per_unit 1\nstage_sound 180 burst.pcm\n").unwrap();
+        assert_eq!(ls.stage_sound, Some((180.0, "burst.pcm".to_string())));
+        assert!(FxLayout::parse("flight_fx 1\nmetres_per_unit 1\nstage_sound 180 ../x\n").is_err());
+        assert!(FxLayout::parse("flight_fx 1\nmetres_per_unit 1\nsprites 5 x 1\n").is_err());
+        let mut p = base_part();
+        p.em.max = 2;
+        p.track = (0.0, 1.0);
+        let teb = parse_teb(&build(&[effect(vec![(0, p)])])).unwrap();
+        let mut fx = StageFx::new(&teb, &l, 1).unwrap();
+        assert_eq!(fx.start_s(), 3.0);
+        assert_eq!(fx.tick(&teb, &l, 2.9, &cam()), 0, "before frame 180");
+        assert!(fx.tick(&teb, &l, 3.2, &cam()) > 0);
+        let b = fx.frames[0].bones[0];
+        assert!(
+            approx(b[13], 740.0, 1e-3) && approx(b[14], 2730.0, 1e-3),
+            "at the anchor"
+        );
+        assert_eq!(
+            fx.tick(&teb, &l, 1.0, &cam()),
+            0,
+            "rewound before the start"
+        );
+        // the one-shot effect ends (track 2 s + particle life)
+        let mut last = 1;
+        for i in 0..400 {
+            last = fx.tick(&teb, &l, 3.0 + i as f32 / 60.0, &cam());
+        }
+        assert_eq!(last, 0);
+        // no stage_effect line: none
+        let l2 = FxLayout::parse("flight_fx 1\nmetres_per_unit 1\n").unwrap();
+        assert!(StageFx::new(&teb, &l2, 1).is_none());
+    }
+
+    #[test]
+    fn schedule_time_runs_the_takeoff_on_real_time() {
+        let s = Some(10.0);
+        assert_eq!(flight_schedule_time(None, 7.5, 6.0, 0.0), 7.5);
+        assert_eq!(
+            flight_schedule_time(s, 12.5, 6.0, 12.5),
+            6.0,
+            "intro: real time"
+        );
+        // at and after the switch: the dance clock, continuous
+        assert_eq!(flight_schedule_time(s, 12.5, 10.0, 12.5), 10.0);
+        assert_eq!(flight_schedule_time(s, 15.0, 12.0, 12.5), 12.5);
+        assert_eq!(flight_schedule_time(s, 0.0, -0.3, 0.0), -0.3, "pre-song");
     }
 
     // ── World conversions ───────────────────────────────────────────────

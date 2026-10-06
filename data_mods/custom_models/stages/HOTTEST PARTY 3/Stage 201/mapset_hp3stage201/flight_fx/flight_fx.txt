@@ -70,3 +70,21 @@ strip 0 61 0 2 7 1
 strip 61 30 2 1 3 1
 strip 91 20 3 1 2 1
 strip 111 20 4 1 2 1
+# the intro sky burst: MUSIC FIT stage/STG201_EFF.bin effect 0 at intro frame 180 (zan units)
+stage_effect 180 -0.000 740.000 2730.000 0
+sprites 4 fx_hp3stage201_xa 69
+group 0 2 0 0 0.000000 1 0
+group 2 3 1 1 0.000000 1 0
+group 5 1 2 0 0.500000 1 0
+group 6 1 3 0 0.000000 1 0
+group 7 1 3 1 0.000000 1 0
+group 8 4 4 0 0.000000 1 0
+group 12 8 5 0 0.000000 1 0
+group 20 5 5 1 0.000000 1 0
+group 25 1 6 1 0.000000 1 0
+group 26 4 7 1 0.000000 1 0
+group 30 21 8 1 0.000000 1 0
+group 51 15 9 1 0.000000 1 0
+group 66 1 10 0 0.000000 1 0
+group 67 2 11 1 0.000000 1 0
+stage_sound 180 burst_44k_mono.pcm

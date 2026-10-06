@@ -34,7 +34,9 @@ nodes are effect and light spots), plus its camera shots. Per stage:
   5. rig per part: `root` + one FLAT bone per animated anchor (a mesh's deepest animated
      ancestor, or the instance itself when only COL moves it), every vertex rigidly on it; the
      bind = the nearest rotation of the anchor's rest world (a shearing anchor's: its motion's
-     principal axes), the keys = bind . rest^-1 . world(t) against the bind the exporter wrote;
+     principal axes), the keys = bind . rest^-1 . world(t) against the bind the exporter wrote.
+     A SKINNED submesh (the flight tunnels' grid tubes: SKIN_ANCHOR) gets one bone per skin
+     joint referenced to the joint's rest world, its vertices their zan weights (<= 4);
   6. `gm_<key>_<part>_play_loop.anm` (loop bit): per bone q / t / scale, keys every 2nd frame +
      a wrap key, checked against the zan worlds (a node rotating under a non-uniformly scaled
      parent shears, which TRS bones cannot carry: logged as SHEAR with its worst vertex offset);
@@ -321,6 +323,10 @@ def load_stage(stage):
         e['worlds'] = make_worlds(e, col_model, col_motion)
         e['rest'] = e['worlds']([0.0])[0]
         e['unit_rest'] = e['worlds']([0.0], True)[0]
+        # skinned meshes (SKIN_ANCHOR): the joints' rest worlds and the instance's frame-0 world
+        e['model_rest'] = Z.rest_worlds(e['model'])
+        e['inst0'] = (Z.posed_worlds(col_model, col_motion, np.zeros(1))[0, e['inst_index']]
+                      if e['inst'] is not None else np.eye(4))
         e['phase'] = entry_phase(stage, e['stem'], stems)
         e['once'] = False
         if e['phase'] and e['L_own'] and not e['L_inst']:
@@ -510,9 +516,88 @@ def screen_kind(mt, col):
     return 'dec'
 
 
+# SKINNED stage meshes (only the flight stages' tunnels and HP4 STG002 / 043's filter props carry
+# them): a zan skinned submesh is in MODEL space and deforms as v(t) = sum_j w_j . p . R_j^-1 . W_j(t)
+# (R_j the joint's rest world from the ZMB's node locals, W_j(t) its posed world incl. the
+# instance). The flight tunnels need it: MUSIC FIT's grid tube DRAW_B03_grid01 bends with Dummy01 /
+# Dummy03 (its ends sway up to ~1400 units over the 2000-frame loop) and the tunnel mouth's
+# DRAW_B03_grid02 STRETCHES with Dummy_tube_front / center / back from the mouth back past the
+# launch platform over its opening (frames 0..134) -- the scrolling tube the take-off runs through.
+# Until 2026-10-05 the port baked them rigid at rest (a straight tube; a stub at the mouth). Each
+# skin joint becomes its own flat bone (anchor id SKIN_ANCHOR + node), referenced to R_j placed by
+# the instance's frame-0 world (`anchor_ref`), the vertices baked through that instance world
+# alone, so the engine's v . bind^-1 . key(t) reproduces the zan deformation exactly (blended
+# weights included).
+SKIN_ANCHOR = 1 << 20
+MAX_WEIGHTS = 4              # KTMDL: <= 4 weights per vertex
+
+
+def is_skin_anchor(oi):
+    return oi >= SKIN_ANCHOR
+
+
+def anchor_node(oi):
+    """The zan node whose posed world drives anchor `oi` (a rigid anchor or a skin joint's bone)."""
+    return oi - SKIN_ANCHOR if is_skin_anchor(oi) else oi
+
+
+def anchor_ref(e, oi, unit=False):
+    """An anchor's reference world (zan units, row-vector): the world its vertices were baked
+    through -- a rigid anchor's frame-0 world, a skin joint's rest world placed by the instance's
+    frame-0 world."""
+    if is_skin_anchor(oi):
+        return e['model_rest'][anchor_node(oi)] @ e['inst0']
+    return e['unit_rest' if unit else 'rest'][oi]
+
+
+def chain_animated(e, i):
+    nodes = e['model']['nodes']
+    while i >= 0:
+        if i in e['animated']:
+            return True
+        i = nodes[i]['parent']
+    return False
+
+
+def record_anchors(r):
+    """The anchor ids a record's vertices ride (empty = the root)."""
+    if r.get('skin_anchors'):
+        return list(r['skin_anchors'])
+    return [] if r['anchor'] is None else [r['anchor']]
+
+
+def vertex_bones(r, anchors, ei):
+    """[[(bone index, w)] per vertex of record `r`] in a part whose anchor list is `anchors` (bone
+    0 = root); a skinned record's top MAX_WEIGHTS weights, renormalised."""
+    n = len(r['pos'])
+    if not r.get('skin_anchors'):
+        b = 0 if r['anchor'] is None else 1 + anchors.index((ei, r['anchor']))
+        return [[(b, 1.0)] for _ in range(n)]
+    bones = [1 + anchors.index((ei, a)) for a in r['skin_anchors']]
+    out = []
+    for wv in r['skin_w']:
+        ws = sorted(((bones[k], float(w)) for k, w in enumerate(wv) if w > 1e-6), key=lambda bw: -bw[1])[:MAX_WEIGHTS]
+        tot = sum(w for _b, w in ws)
+        out.append([(b, w / tot) for b, w in ws] if tot > 0 else [(0, 1.0)])
+    return out
+
+
+def skin_weights(sm, model):
+    """[[(joint node, w)] per position], at most MAX_WEIGHTS each, renormalised."""
+    out = []
+    for ws in sm['skin']:
+        ws = sorted(((model['by_name'][j], w) for j, w in ws if w > 0 and j in model['by_name']), key=lambda jw: -jw[1])
+        ws = ws[:MAX_WEIGHTS]
+        tot = sum(w for _j, w in ws) or 1.0
+        out.append([(j, w / tot) for j, w in ws])
+    return out
+
+
 def mesh_records(e):
     """Every (mesh node, material) piece of one entry, baked into game space at its frame-0
-    world: dict(kind, anchor, material, bitmap, pos, nrm, uv, col, tris, obj)."""
+    world: dict(kind, anchor, material, bitmap, pos, nrm, uv, col, tris, obj) -- a skinned piece
+    (`skin_anchors` [anchor ids], `skin_w` (n, k) weights) is baked through the instance's frame-0
+    world and rides its joints' bones (SKIN_ANCHOR)."""
     model = e['model']
     nodes = model['nodes']
     out = []
@@ -525,11 +610,6 @@ def mesh_records(e):
                 anchor = i
                 break
             i = nodes[i]['parent']
-        Wm = e['rest'][nd['index']]
-        # a mirroring world reverses the screen winding; whether the engine re-flips its cull mode
-        # there (FUN_8010dec8's cull-front argument) is not settled, so those few meshes (HP2 / HP3
-        # STG043 / 045 backdrops, ~0.6 % of the single-sided ones) stay two-sided
-        mirrored = bool(np.linalg.det(Wm[:3, :3]) < 0)
         for sm in nd['submeshes']:
             if not len(sm['pos']) or not sm['packets']:
                 continue
@@ -537,7 +617,31 @@ def mesh_records(e):
             if mi >= len(model['materials']):
                 continue
             mt = model['materials'][mi]
-            index, P_, N_, UV_, C_, tri_out = {}, [], [], [], [], []
+            skin_anchors, vert_w = None, None
+            if sm['skin'] is not None and len(sm['skin']) == len(sm['pos']):
+                weights = skin_weights(sm, model)
+                joints = sorted({j for ws in weights for j, _w in ws})
+                if any(chain_animated(e, j) for j in joints):
+                    # deforming: model space through the frame-0 instance world, on its joints' bones
+                    pos_w = [e['inst0']] * len(sm['pos'])
+                    skin_anchors = [SKIN_ANCHOR + j for j in joints]
+                    vert_w = np.zeros((len(sm['pos']), len(joints)))
+                    for k, ws in enumerate(weights):
+                        for j, w in ws:
+                            vert_w[k, joints.index(j)] = w
+                else:
+                    # static: the frame-0 deformation baked in, rigid on the root
+                    pos_w = [sum(w * (np.linalg.inv(e['model_rest'][j]) @ e['rest'][j]) for j, w in ws) if ws else e['inst0']
+                             for ws in weights]
+                piece_anchor = None
+            else:
+                pos_w, piece_anchor = None, anchor
+            Wm = e['inst0'] if pos_w is not None else e['rest'][nd['index']]
+            # a mirroring world reverses the screen winding; whether the engine re-flips its cull mode
+            # there (FUN_8010dec8's cull-front argument) is not settled, so those few meshes (HP2 / HP3
+            # STG043 / 045 backdrops, ~0.6 % of the single-sided ones) stay two-sided
+            mirrored = bool(np.linalg.det(Wm[:3, :3]) < 0)
+            index, P_, N_, UV_, C_, SW_, tri_out = {}, [], [], [], [], [], []
             for pk in sm['packets']:
                 n = pk['corners']
                 cs = []
@@ -546,14 +650,17 @@ def mesh_records(e):
                            int(pk['col'][c]) if pk['col'] is not None else 0, int(pk['uv0'][c]) if pk['uv0'] is not None else 0)
                     if key not in index:
                         index[key] = len(P_)
-                        P_.append((sm['pos'][key[0]] @ Wm[:3, :3] + Wm[3, :3]) * S)
+                        Mv = pos_w[key[0]] if pos_w is not None else Wm
+                        P_.append((sm['pos'][key[0]] @ Mv[:3, :3] + Mv[3, :3]) * S)
                         if len(sm['nrm']) and key[1] < len(sm['nrm']):
-                            nv = sm['nrm'][key[1]] @ np.linalg.pinv(Wm[:3, :3]).T
+                            nv = sm['nrm'][key[1]] @ np.linalg.pinv(Mv[:3, :3]).T
                         else:
                             nv = np.array([0.0, 1.0, 0.0])
                         N_.append(nv / (np.linalg.norm(nv) or 1.0))
                         UV_.append(sm['uv'][key[3]] if len(sm['uv']) and key[3] < len(sm['uv']) else (0.0, 0.0))
                         C_.append(sm['col'][key[2]] if sm['col'] is not None and key[2] < len(sm['col']) else np.ones(4))
+                        if vert_w is not None:
+                            SW_.append(vert_w[key[0]])
                     cs.append(index[key])
                 for a, b, c in Z.strip_triangles(n):
                     t = (cs[a], cs[b], cs[c])
@@ -574,7 +681,8 @@ def mesh_records(e):
                 kind = 'dec' if screen else world_kind(e, mi, bool((col[:, 3] < 0.999).any()))
             if screen and not group_screen:
                 col = np.ones_like(col)                  # the movie at full strength
-            out.append(dict(kind=kind, anchor=anchor, material=mi, screen=screen, group_screen=group_screen,
+            out.append(dict(kind=kind, anchor=piece_anchor, material=mi, screen=screen, group_screen=group_screen,
+                            skin_anchors=skin_anchors, skin_w=np.array(SW_) if skin_anchors else None,
                             bitmap=mt['textures'][0] if mt['textures'] and mt['textures'][0] < len(e['textures']) else None,
                             pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_), col=col, tris=np.array(tri_out),
                             obj=nd['index'], two_sided=Z.material_mode(mt)[2] or mirrored, mirrored=mirrored))
@@ -603,18 +711,17 @@ def plan_parts(entries):
                 for r in e['records']:
                     if r['kind'] != kind:
                         continue
-                    a = None if r['anchor'] is None else (e['index'], r['anchor'])
+                    a = {(e['index'], x) for x in record_anchors(r)}
                     pl = None if r['screen'] else e.get('plans', {}).get(r['material'])
                     mk, need = (e['index'], r['material']), (pl['params'] if pl else 0)
                     for ch in chunks:
-                        if (a is None or a in ch[1] or len(ch[1]) < MAX_ANCHORS) and \
+                        if len(ch[1] | a) <= MAX_ANCHORS and \
                                 (not need or mk in ch[2] or sum(ch[2].values()) + need <= MAX_MAT_PARAMS):
                             break
                     else:
                         ch = [{}, set(), {}]
                         chunks.append(ch)
-                    if a is not None:
-                        ch[1].add(a)
+                    ch[1].update(a)
                     if need:
                         ch[2][mk] = need
                     ch[0].setdefault(e['index'], (e, []))[1].append(r)
@@ -724,7 +831,8 @@ def anchor_bind(e, oi, length):
     bones cannot carry). Then the bind is turned onto the motion's mean principal (stretch) axes,
     which keeps the TRS fit of bind . rest^-1 . world(t) closest. A flattened prop takes the
     unit-scale chain's rotation."""
-    rest, unit_rest = e['rest'][oi], e['unit_rest'][oi]
+    rest, unit_rest = anchor_ref(e, oi), anchor_ref(e, oi, True)
+    node = anchor_node(oi)
     out = np.eye(4)
     out[3, :3] = rest[3, :3] * S
     if degenerate(rest):
@@ -736,7 +844,7 @@ def anchor_bind(e, oi, length):
         return out
     t = np.linspace(0.0, float(length), 61)[:-1]
     inv0 = np.linalg.inv(rest[:3, :3])
-    ds = [inv0 @ w[oi][:3, :3] for w in e['worlds'](t)]
+    ds = [inv0 @ w[node][:3, :3] for w in e['worlds'](t)]
     us, worst, ref = [], 0.0, None
     for d in ds:
         u, sv, _vt = np.linalg.svd(d)
@@ -774,7 +882,7 @@ def game_rowm(m):
 def build_part(key, part, chunk):
     """Armature (root + flat anchor bones) + one mesh object per (entry, material). Returns
     (arm, objects, anchors [(entry index, node index)], binds (row, game))."""
-    anchors = sorted({(e['index'], r['anchor']) for e, recs in chunk for r in recs if r['anchor'] is not None})
+    anchors = sorted({(e['index'], a) for e, recs in chunk for r in recs for a in record_anchors(r)})
     entry_of = {e['index']: e for e, _r in chunk}
     bone_names = ['root'] + ['m%d.%d' % a for a in anchors]
     binds = [np.eye(4)] + [anchor_bind(entry_of[ei], oi, entry_of[ei]['length']) for ei, oi in anchors]
@@ -807,8 +915,7 @@ def build_part(key, part, chunk):
             col = np.concatenate([r['col'] for r in rs])
             offs = np.cumsum([0] + [len(r['pos']) for r in rs])
             tris = np.concatenate([r['tris'] + o for r, o in zip(rs, offs)])
-            bones = np.concatenate([np.full(len(r['pos']), 0 if r['anchor'] is None else 1 + anchors.index((e['index'], r['anchor'])))
-                                    for r in rs])
+            vbones = [vb for r in rs for vb in vertex_bones(r, anchors, e['index'])]
             two = bool(rs[0]['two_sided'])
             tris = H.cull_winding(pos, nrm, tris, two)
             name = 'gm_%s_%s_m%02d_%03d%s%s' % (key, part, e['index'], mi, 's' if screen else '', 'r' if mirrored else '')
@@ -834,8 +941,12 @@ def build_part(key, part, chunk):
             bpy.context.scene.collection.objects.link(ob)
             ob.parent = arm
             groups = {n: ob.vertex_groups.new(name=n) for n in bone_names}
-            for bi in np.unique(bones):
-                groups[bone_names[int(bi)]].add(np.nonzero(bones == bi)[0].tolist(), 1.0, 'REPLACE')
+            by_bone = {}
+            for vi, vb in enumerate(vbones):
+                for bi, w in vb:
+                    by_bone.setdefault((bi, round(w, 6)), []).append(vi)
+            for (bi, w), vis in sorted(by_bone.items()):
+                groups[bone_names[bi]].add(vis, w, 'REPLACE')
             mod = ob.modifiers.new('Armature', 'ARMATURE')
             mod.object = arm
             c_attr = P.white_color_attribute(ob)
@@ -899,7 +1010,8 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length, once=False):
         if ei not in cache:
             cache[ei] = (e['worlds'](eval_times.astype(np.float64)), e['worlds'](eval_times.astype(np.float64), True))
         wf, uf = cache[ei]
-        s_rest = rigid_row(e['rest'][oi], e['unit_rest'][oi])[1]
+        ref, node = anchor_ref(e, oi), anchor_node(oi)
+        s_rest = rigid_row(ref, anchor_ref(e, oi, True))[1]
         fb, mb = np.asarray(file_binds[b]), np.asarray(my_binds[b])
         # the exporter's bind comes back through Blender's bone roll, a few 1e-4 off ours at
         # some 180-degree turns: key the bone so the WRITTEN bind skins the vertices where ours
@@ -909,15 +1021,15 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length, once=False):
         assert dev < 2e-2, 'bone %d: the exporter re-framed the bind by %.4f\n%s\n%s' % (b, dev, fb, mb)
         if dev > 1e-3:
             print('    WARN bone %d: exporter bind %.1e off ours -- keyed against the written one' % (b, dev))
-        M0 = game_rowm(e['rest'][oi])
-        flat = degenerate(e['rest'][oi])
+        M0 = game_rowm(ref)
+        flat = degenerate(ref)
         inv0 = None if flat else np.linalg.inv(M0)
         quats, trans, scales, prev = [], [], [], None
         for f in range(len(eval_times)):
             if flat:
                 # a flattened prop (a ~0 rest scale, vertices baked flat): rotation from the
                 # unit-scale chain, the scale relative to the rest's
-                rig, sc = rigid_row(wf[f, oi], uf[f, oi])
+                rig, sc = rigid_row(wf[f, node], uf[f, node])
                 rel = np.where(np.abs(s_rest) > 1e-9, sc / np.where(np.abs(s_rest) > 1e-9, s_rest, 1.0), 1.0)
                 mine = np.eye(4)
                 mine[:3, :3] = np.diag(rel) @ rig[:3, :3]
@@ -925,7 +1037,7 @@ def loop_spec(anchors, entry_of, my_binds, file_binds, length, once=False):
             else:
                 # skin = v . bind^-1 . world must equal v . M0^-1 . M(t) (the vertices are baked
                 # through the rest world M0), so world = bind . M0^-1 . M(t)
-                mine = mb @ inv0 @ game_rowm(wf[f, oi])
+                mine = mb @ inv0 @ game_rowm(wf[f, node])
             world = corr @ mine
             r_row, sc_f = polar_rows(world[:3, :3])
             fit = np.eye(4)
@@ -956,11 +1068,13 @@ def anchor_extents(chunk, anchors, binds):
     out = {}
     for e, recs in chunk:
         for r in recs:
-            if r['anchor'] is None:
+            if not len(r['pos']):
                 continue
-            b = 1 + anchors.index((e['index'], r['anchor']))
-            d = float(np.linalg.norm(r['pos'] - binds[b][3, :3], axis=1).max()) if len(r['pos']) else 0.0
-            out[b] = max(out.get(b, 0.0), d)
+            for k, a in enumerate(record_anchors(r)):
+                b = 1 + anchors.index((e['index'], a))
+                sel = r['pos'] if not r.get('skin_anchors') else r['pos'][r['skin_w'][:, k] > 1e-6]
+                d = float(np.linalg.norm(sel - binds[b][3, :3], axis=1).max()) if len(sel) else 0.0
+                out[b] = max(out.get(b, 0.0), d)
     return out
 
 
@@ -1117,16 +1231,19 @@ def clip_records_on_axis(r, axis):
     """Split a record's triangles at the integer lines of uv[axis] so every piece lies in one tile;
     returns the record with uv[axis] made tile-local (0..1) and the tile shift recorded."""
     pos, nrm, uv, col = r['pos'], r['nrm'], r['uv'], r['col']
-    P_, N_, U_, C_, T_ = [], [], [], [], []
+    # a skinned record's weights ride along (interpolated at the cuts like every attribute)
+    sw = r['skin_w'] if r.get('skin_anchors') else np.zeros((len(pos), 0))
+    P_, N_, U_, C_, W_, T_ = [], [], [], [], [], []
     index = {}
 
-    def vert(p, n, u, c, key=None):
+    def vert(p, n, u, c, w, key=None):
         if key is not None and key in index:
             return index[key]
         P_.append(p)
         N_.append(n / (np.linalg.norm(n) or 1.0))
         U_.append(u)
         C_.append(c)
+        W_.append(w)
         if key is not None:
             index[key] = len(P_) - 1
         return len(P_) - 1
@@ -1137,10 +1254,10 @@ def clip_records_on_axis(r, axis):
         k0, k1 = int(math.floor(ua.min() + eps)), int(math.ceil(ua.max() - eps))
         if k1 <= k0 + 1:
             k = k0
-            ids = [vert(pos[i], nrm[i], uv[i] - (np.eye(2)[axis] * k), col[i], (int(i), k)) for i in tri]
+            ids = [vert(pos[i], nrm[i], uv[i] - (np.eye(2)[axis] * k), col[i], sw[i], (int(i), k)) for i in tri]
             T_.append(ids)
             continue
-        poly = [(pos[i], nrm[i], uv[i], col[i]) for i in tri]
+        poly = [(pos[i], nrm[i], uv[i], col[i], sw[i]) for i in tri]
         for k in range(k0, k1):
             piece = poly
             for lo, keep_ge in ((k, True), (k + 1, False)):
@@ -1159,11 +1276,13 @@ def clip_records_on_axis(r, axis):
                     break
             if len(piece) < 3:
                 continue
-            ids = [vert(p, n, u - np.eye(2)[axis] * k, c) for p, n, u, c in piece]
+            ids = [vert(p, n, u - np.eye(2)[axis] * k, c, w) for p, n, u, c, w in piece]
             for q in range(1, len(ids) - 1):
                 T_.append([ids[0], ids[q], ids[q + 1]])
     out = dict(r)
     out.update(pos=np.array(P_), nrm=np.array(N_), uv=np.array(U_), col=np.array(C_), tris=np.array(T_, dtype=np.int64))
+    if r.get('skin_anchors'):
+        out['skin_w'] = np.array(W_).reshape(len(P_), sw.shape[1])
     return out
 
 
@@ -1204,7 +1323,7 @@ def apply_atlases(e, plans):
             uvn[:, axis] *= at['cell']
             if at['grid']:
                 uvn[:, cross] *= at['cell_c']
-            r.update(pos=c['pos'], nrm=c['nrm'], uv=uvn, col=c['col'], tris=c['tris'], atlas=at)
+            r.update(pos=c['pos'], nrm=c['nrm'], uv=uvn, col=c['col'], tris=c['tris'], atlas=at, skin_w=c.get('skin_w'))
             r['orig_uv_tile'] = c['uv']
         check_atlas(e, plan, recs)
 
@@ -1298,11 +1417,27 @@ def offset_keys(plan, ax, L, tol=1e-6):
     vl[0] = v[0]
     jump = np.abs(vl - v) > 1e-5
     slope = np.r_[0.0, vl[1:] - v[:-1]]                   # slope of the segment ending at frame i
+    # a wrap BETWEEN two frames (a scroll whose period is not a whole number of frames: STG201's
+    # tunnel v at 40 frames + a hair, u at 482.x): no integer frame sees the jump, and the segment
+    # into the next key would slide the texture back almost a whole repeat within one frame (the
+    # cabinet's "shuffling" tunnel, 2026-10-05). Continue the previous slope up to frame i and
+    # jump there -- by a whole repeat, or by a cell where an atlas axis wraps inside its cell.
+    at = plan.get('atlas')
+    quanta = [1.0] + ([at['cell']] if at and ax == at['axis'] else []) + ([at['cell_c']] if at and at['grid'] and ax != at['axis'] else [])
+    between = np.zeros(L + 1, dtype=bool)
+    cont = v.copy()
+    for i in range(2, L + 1):
+        if jump[i] or jump[i - 1] or between[i - 1]:
+            continue
+        c = v[i - 1] + (v[i - 1] - v[i - 2])
+        J = c - v[i]
+        if abs(J) > 1e-4 and any(abs(J / q - round(J / q)) < 1e-3 and round(J / q) != 0 for q in quanta):
+            between[i], cont[i] = True, c
     times, vals = [0], [float(v[0])]
     for i in range(1, L + 1):
-        if jump[i]:
+        if jump[i] or between[i]:
             times += [i, i]
-            vals += [float(vl[i]), float(v[i])]
+            vals += [float(vl[i] if jump[i] else cont[i]), float(v[i])]
         elif i == L or abs(slope[i + 1] - slope[i]) > tol:
             times.append(i)
             vals.append(float(v[i]))
@@ -1425,6 +1560,23 @@ def check_camera(data, times, pos_m, aim_m):
 _GENERIC = None
 
 
+def is_intro_camera(path):
+    """A stage's INTRO shot ("mode 2" of the camera controller, played first at the song start --
+    the song waits for it): a camera DIRECTLY in the stage's camera archive `/#1/`. FuruFuru Party
+    `FUN_8003d234` / MUSIC FIT `FUN_800472d0` take `/#1/#0` as the main shots, `/#1/#1`, `/#1/#2`
+    as close-up groups (MUSIC FIT: a `CAM02` entry) and append the single cameras after them:
+    MUSIC FIT STG201's `STG201_CAM00_01..03` (3 + 4 + 3 s = the 600-frame take-off), FuruFuru
+    Party STG102 / 103's `/#1/#3` (3 s). HP4: STG301_CAM.bin's shots (its only ones -- the flight
+    itself is filmed by per-song choreography cameras)."""
+    if GAME == 'hp4':
+        name = path.rsplit('/', 2)
+        return len(name) >= 2 and name[-2].upper().endswith('_CAM.BIN')
+    return path.startswith('/#1/') and path.count('/') == 2
+
+
+STAGE_NOW = None              # the stage being ported (export_cameras reads it)
+
+
 def export_cameras(cams, set_dir, key):
     global _GENERIC
     if _GENERIC is None:
@@ -1434,8 +1586,13 @@ def export_cameras(cams, set_dir, key):
     for stale in os.listdir(cam_dir):
         if stale.lower().endswith('.camanm'):
             os.remove(os.path.join(cam_dir, stale))
-    cams = main_cameras(cams, _GENERIC)
-    plan = [('%s_st%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(cams)]
+    # FLIGHT stages: the take-off's own camera sequence (main.dol's intro camera, 3 + 4 + 3 s = the
+    # 600-frame intro: MUSIC FIT STG201_CAM00_01..03, shared by STG205 / 206; HP4 STG301_CAM.bin
+    # #1..#3) is no main shot -- `<key>_intro01..03`, played in order by the DLL during the take-off
+    intro = [(p_, c) for p_, c in cams if is_intro_camera(p_)] if is_flight_stage(STAGE_NOW) else []
+    cams = main_cameras([pc for pc in cams if pc not in intro], _GENERIC)
+    plan = [('%s_intro%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(intro)]
+    plan += [('%s_st%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(cams)]
     plan += [('%s_non%02d' % (key, i + 1), c) for i, (_p, c) in enumerate(_GENERIC)]
     stems, worst = [], (0.0, 0.0)
     for stem, c in plan:
@@ -1446,7 +1603,7 @@ def export_cameras(cams, set_dir, key):
         worst = (max(worst[0], ep), max(worst[1], ed))
         open(os.path.join(cam_dir, stem + '.camanm'), 'wb').write(data)
         stems.append(stem)
-    print('  CAMERAS %d main + %d close-ups, worst err %.1e m / %.1e' % (len(cams), len(_GENERIC), *worst))
+    print('  CAMERAS %d intro + %d main + %d close-ups, worst err %.1e m / %.1e' % (len(intro), len(cams), len(_GENERIC), *worst))
     return stems
 
 
@@ -1454,6 +1611,8 @@ def export_cameras(cams, set_dir, key):
 # port
 # ---------------------------------------------------------------------------------------------
 def port(stage):
+    global STAGE_NOW
+    STAGE_NOW = stage
     label, key = stage_label(stage), stage_key(stage)
     assert len(label.encode()) <= 15, label
     entries, cams = load_stage(stage)

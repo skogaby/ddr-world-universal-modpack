@@ -38,7 +38,7 @@ use super::director_math::{
     body_world, part_world, shadow_target, shadow_world, subtree_of, transform_point, BLACK,
     SHADOW_FLOOR_Y, WHITE,
 };
-use super::flight_fx::{self, DancerFx, FxLayout, Teb};
+use super::flight_fx::{self, DancerFx, FxLayout, StageFx, Teb};
 use super::instance_plan::{
     plan_instances, DancerSpec, FxSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
 };
@@ -149,16 +149,67 @@ pub struct FlightFxAssets {
     pub layout: FxLayout,
     /// Per layout pool: its model's bone count (from the `.model` file).
     pub pool_bones: Vec<Option<usize>>,
+    /// The intro's stage effect bank (the sky burst; the layout's
+    /// `stage_effect` line says where and when), when the stage ships one.
+    pub stage_teb: Option<Teb>,
+    /// The intro sound, ready to register (`game_audio::register_one_shot_bank`).
+    pub stage_sound: Option<StageSound>,
+}
+
+/// The flight intro's sound (SE_DDR_BOSS, from intro frame 180): a one-cue
+/// XACT pair built on the parse thread from the stage's mono 44.1 kHz PCM.
+pub struct StageSound {
+    /// Bank / wave bank / cue name (`fxb` + a hash of the samples: two
+    /// stages shipping the same sound share one registered bank).
+    pub name: String,
+    pub start_s: f32,
+    pub xwb: Vec<u8>,
+    pub xsb: Vec<u8>,
+}
+
+/// Build the one-cue bank pair for `pcm` (mono i16, 44.1 kHz).
+fn stage_sound(pcm: &[i16], start_s: f32) -> Option<StageSound> {
+    use crate::services::se_bank_synth::{adpcm, xsb, xwb};
+    if pcm.is_empty() {
+        return None;
+    }
+    let mut h: u32 = 0x811C_9DC5;
+    for v in pcm {
+        for b in v.to_le_bytes() {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+    }
+    let name = format!("fxb{h:08x}");
+    let encoded = adpcm::encode_mono(pcm);
+    let blocks = encoded.len() / adpcm::BLOCK_ALIGN;
+    let mut wave = xwb::build(
+        &name,
+        (blocks * adpcm::SAMPLES_PER_BLOCK) as u32,
+        blocks * adpcm::BLOCK_ALIGN,
+    );
+    wave.bytes
+        .get_mut(wave.sample_seg_offset..wave.sample_seg_offset + wave.sample_seg_len)?
+        .copy_from_slice(encoded.get(..wave.sample_seg_len)?);
+    Some(StageSound {
+        xsb: xsb::build_se(&name),
+        name,
+        start_s,
+        xwb: wave.bytes,
+    })
 }
 
 /// The effect bank / layout members inside a flight stage's arc.
 pub const FLIGHT_FX_TEB: &str = "data/map/flight_fx/flight_fx.teb";
 pub const FLIGHT_FX_LAYOUT: &str = "data/map/flight_fx/flight_fx.txt";
+pub const FLIGHT_FX_STAGE_TEB: &str = "data/map/flight_fx/stage_fx.teb";
 
 /// The stage's camera sets that parsed (in the pick's shuffled order).
 pub struct ParsedCameras {
     pub main: Vec<Clip>,
     pub non: Vec<Clip>,
+    /// A FLIGHT stage's take-off shots, played in order during the take-off
+    /// (`Pick::camera_intro`; empty elsewhere).
+    pub intro: Vec<Clip>,
 }
 
 pub struct Parsed {
@@ -631,11 +682,12 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             };
             let main = load(&pick.camera_main);
             let non = load(&pick.camera_non);
+            let intro = load(&pick.camera_intro);
             if main.is_empty() {
                 warnings.push("no main camera clip parsed -- fixed camera".to_string());
                 None
             } else {
-                Some(ParsedCameras { main, non })
+                Some(ParsedCameras { main, non, intro })
             }
         }
     };
@@ -683,7 +735,11 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             );
             None
         } else {
-            Some(ParsedCameras { main, non })
+            Some(ParsedCameras {
+                main,
+                non,
+                intro: Vec::new(),
+            })
         }
     };
 
@@ -747,10 +803,46 @@ fn parse_flight_fx(reader: &ArcReader, warnings: &mut Vec<String>) -> Option<Arc
             Some(n)
         })
         .collect();
+    let stage_teb = match (layout.stage_effect, reader.get(FLIGHT_FX_STAGE_TEB)) {
+        (None, _) => None,
+        (Some(_), None) => {
+            warnings.push(format!(
+                "{FLIGHT_FX_LAYOUT} names a stage effect but {FLIGHT_FX_STAGE_TEB} is missing -- no sky burst"
+            ));
+            None
+        }
+        (Some(_), Some(b)) => {
+            let t = flight_fx::parse_teb(&b);
+            if t.is_none() {
+                warnings.push(format!(
+                    "{FLIGHT_FX_STAGE_TEB}: not a readable TEB -- no sky burst"
+                ));
+            }
+            t
+        }
+    };
+    let stage_sound = layout.stage_sound.as_ref().and_then(|(frame, member)| {
+        let path = format!("data/map/flight_fx/{member}");
+        let Some(bytes) = reader.get(&path) else {
+            warnings.push(format!("{path}: member missing -- no intro sound"));
+            return None;
+        };
+        let pcm: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let s = stage_sound(&pcm, frame / 60.0);
+        if s.is_none() {
+            warnings.push(format!("{path}: no usable samples -- no intro sound"));
+        }
+        s
+    });
     Some(Arc::new(FlightFxAssets {
         teb,
         layout,
         pool_bones,
+        stage_teb,
+        stage_sound,
     }))
 }
 
@@ -886,6 +978,17 @@ pub struct Session {
     /// The camera this frame is filmed with (set by the camera director
     /// before the publish): what the effects' billboards face.
     pub fx_camera: Option<scene_graph::CamSample>,
+    /// The flight intro's stage effect (the sky burst), when shipped.
+    pub stage_fx: Option<StageFx>,
+    /// The intro sound's state: played this pass of the intro (re-armed
+    /// when the clock goes back before its start).
+    pub stage_sound_played: bool,
+    /// Its registered bank (process lifetime; first play registers it).
+    pub stage_sound_bank: Option<crate::services::game_audio::OneShotBankHandle>,
+    /// The dance time at real time `flight_switch` (the lifecycle keeps it
+    /// current from the tempo map; `None` = dance time is real time): the
+    /// take-off runs on the real clock (`flight_fx::flight_schedule_time`).
+    pub dance_at_switch: Option<f32>,
     /// Per dancer: the shadow's low-passed size (A3 `prev += 0.1·(target −
     /// prev)`), reset at every song (re)start.
     pub shadow_size: Vec<f32>,
@@ -1006,8 +1109,44 @@ impl Session {
                 .collect(),
             shadow_bone_count: parsed.shadow.as_ref().map(|s| s.bone_count()),
             shadow_model: SHADOW_MODEL.to_string(),
+            stage_fx: Vec::new(),
         };
         let mut input = input;
+        // The intro's stage effect (the sky burst): its pools, when the
+        // take-off leads into a flight. A dancer-less (stage-only preview)
+        // flight plays it too.
+        let stage_fx = parsed
+            .flight_fx
+            .as_ref()
+            .filter(|_| flight_switch.is_some())
+            .and_then(|a| {
+                let teb = a.stage_teb.as_ref()?;
+                let sfx = StageFx::new(teb, &a.layout, pick.seed as u32)?;
+                let specs: Vec<FxSpec> = sfx
+                    .pools
+                    .iter()
+                    .filter_map(|&k| {
+                        Some(FxSpec {
+                            model_name: a.layout.pools.get(k)?.model.clone(),
+                            bone_count: (*a.pool_bones.get(k)?)?,
+                        })
+                    })
+                    .collect();
+                (specs.len() == sfx.pools.len()).then_some((sfx, specs))
+            });
+        if let Some((sfx, specs)) = stage_fx.as_ref() {
+            input.stage_fx = specs.clone();
+            log_info!(
+                "BackgroundDancers: flight intro stage effect -- effect {} at intro frame {} at ({:.0}, {:.0}, {:.0}), {} pool(s)",
+                sfx.spec.effect,
+                sfx.spec.frame,
+                sfx.spec.at[0],
+                sfx.spec.at[1],
+                sfx.spec.at[2],
+                specs.len()
+            );
+        }
+        let stage_fx = stage_fx.map(|(sfx, _)| sfx);
         let mut fx: Vec<Option<DancerFx>> = Vec::new();
         for (i, d) in input.dancers.iter_mut().enumerate() {
             let specs = fx_pool_specs(i);
@@ -1089,6 +1228,10 @@ impl Session {
             fx,
             fx_leap,
             fx_camera: None,
+            stage_fx,
+            stage_sound_played: false,
+            stage_sound_bank: None,
+            dance_at_switch: None,
             shadow_size,
             camera,
             camera_state: None,
@@ -1100,6 +1243,15 @@ impl Session {
             requested_at,
             built_at: None,
         }
+    }
+
+    /// The schedule time of a frame at dance time `t` / real time `real_s`
+    /// (`flight_fx::flight_schedule_time`: a flight's take-off on the real
+    /// clock; everything else unchanged).
+    pub fn schedule_time(&self, t: f32, real_s: f32) -> f32 {
+        let switch = self.flight_switch.filter(|_| self.pick.flight);
+        let at = self.dance_at_switch.or(switch).unwrap_or(0.0);
+        flight_fx::flight_schedule_time(switch, t, real_s, at)
     }
 
     /// Install `fallback` as the dance schedule when the parse produced none
@@ -1148,7 +1300,8 @@ impl Session {
     }
 
     /// Instance counts by kind (built ones) for the `built` INFO:
-    /// `(stage parts, dancers, parts, shadows, hulls, effect pools)`.
+    /// `(stage parts, dancers, parts, shadows, hulls, effect pools — the
+    /// stage effect's included)`.
     pub fn built_counts(&self) -> (usize, usize, usize, usize, usize, usize) {
         let mut c = (0, 0, 0, 0, 0, 0);
         for i in self.built() {
@@ -1158,7 +1311,7 @@ impl Session {
                 InstanceKind::Part { .. } => c.2 += 1,
                 InstanceKind::Shadow(_) => c.3 += 1,
                 InstanceKind::Hull { .. } => c.4 += 1,
-                InstanceKind::Fx { .. } => c.5 += 1,
+                InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => c.5 += 1,
             }
         }
         c
@@ -1194,7 +1347,9 @@ impl Session {
                 _ => IDENTITY,
             },
             // Effect pools: bones carry world positions (identity bind).
-            InstanceKind::StagePart(_) | InstanceKind::Fx { .. } => IDENTITY,
+            InstanceKind::StagePart(_) | InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => {
+                IDENTITY
+            }
             InstanceKind::Dancer(i) => self.dancer_body_world(i),
             InstanceKind::Part { dancer, part } => {
                 // Rest pose: the part on its bind bone.

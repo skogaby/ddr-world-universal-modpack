@@ -99,6 +99,39 @@ The texture matrix is a GX 2×4 matrix in a per-model 0x50-byte array (`model+0x
   v-down), so the `.sanm` offU / offV are `(-u, +v)` (`zan_dump.texmtx_offset`,
   `scroll_offset`). The first port wrote `+u` — every horizontal scroll ran backwards.
 
+**MUSIC FIT twins and the units (verified 2026-10-06, decompiled).** The addresses above are
+FuruFuru Party's; MUSIC FIT's are `FUN_8010b98c` (per-frame update), `FUN_8010bf58`
+(absolute-time variant), both called from the per-model update `FUN_8010c518` ←
+`FUN_8010c3b8` (node pose) ← the motion player `FUN_8010b128` (or the motion-less
+`FUN_801037e4` / `FUN_80103834`). What `FUN_8010b98c(dt_s, model)` does, in order:
+- `frames = 60 · dt_s`; for every material with a non-zero constant speed (`+0x20` u,
+  `+0x24` v): `m03 -= speedU · frames`, `m13 += speedV · frames`, each wrapped into (−1, 1)
+  (`> 1 → −1`, `< −1 → +1`). Speeds are therefore **texture repeats per 60 Hz frame**.
+- then, for every material with UV keys (material version ≥ 3): `T += dt_s` (key times are
+  **seconds**), `T` wrapped by the key period, per-axis hold / linear as above, and the result
+  is **written** to `m03` / `m13` (`−u`, `+v`) — so when a material has both, the keys WIN
+  (the constant-speed increment is overwritten every frame). MUSIC FIT STG201 grid material
+  3 has both: keys v 0 → 1 over 0.13333 s (2 keys, `FF 00 FF 00`) and speed (0, 0.125); they
+  agree at 0.125 repeat / frame = **7.5 repeats per second**.
+- `dt_s` for a stage object = `rate(+0x24c, default 1.0) · speed(+0x198) / 60` per update
+  call (`FUN_8010b128`: `(*(obj+0x24c) * *(model+0x198)) / 60.0`) — a FIXED 1/60 s per
+  tick, not wall time; `+0x198` is 1.2 when the display runs 50 Hz (`FUN_80100ef0`:
+  `**(game+0x258) == 1`), so the scroll stays 7.5 repeats / real second on PAL. No scale, no
+  rate multiplier is applied to objects 0 / 1 at the switch (`FUN_80037354` only calls
+  `FUN_8010b108(0.0, hole, 0, 0, 0)` at f 300 = seek the hole's motion to frame 0).
+- the matrix is the only per-frame texture effect: the draw (`FUN_80107744`) loads it with
+  `GXLoadTexMtxImm(mtx, GX_TEXMTX0, 2x4)` (`FUN_80184ce4(.., 0x1e, 1)`) and sets
+  `GXSetTexCoordGen2(TEXCOORD0, MTX2x4, TEX0, TEXMTX0 = 0x1E)` (`FUN_801807cc(0,1,4,0x1e,0,0x7d)`)
+  when material byte `+0x1F` is set, else matrix 0x3C (identity). No second matrix, no
+  projection, no TEV-side coordinate generation.
+- the Wii **wraps**: every TPL image header of STG201 (`DRAW_STG201_01.tpl` 15 images,
+  `BG_STG201.tpl` 8, the OBJA sets) carries `wrapS = wrapT = GX_REPEAT`, `min = mag =
+  GX_LINEAR`, no mips (`extract_wii_ddr_data.parse_tpl` + the 0x20-byte image header:
+  `>HHIIIIIIfBBBB`). A 60 Hz emulation of the grid tube with exactly these values
+  (`.agents/scratchpad/2026-10-06-flight-re/emu_grid.py`) streams the ring + its three
+  trails forward by 16 px of 128 every frame, seamlessly across the wrap — no aliasing, as
+  the footage shows.
+
 The older reading in `zan_dump` (step when `flags[2·axis] == 0xFF`) was wrong; 2881 of the 5574
 stage UV keys on both discs (`_S` copies included) are `(FF, 01, FF, 01)` = "no u keys, v held" —
 atlas-row light animations (STG000 `pl01`: v steps 0 → .25 → .5 → .75).
@@ -332,7 +365,7 @@ interior points over a cycle, and every `.sanm` against the analytic offsets fra
 Sizes: `HOTTEST PARTY 2` 115 MB, `HOTTEST PARTY 3` 198 MB (the add-on writes uncompressed
 A8R8G8B8 DDS; STG111's three 1024 × 2048 atlases are 10.7 MB each), dancers 521 MB.
 
-### 7.5 The flight stages (investigated and ported 2026-10-05; effects not ported)
+### 7.5 The flight stages (investigated and ported 2026-10-05; effects, intro cameras, sky burst and its sound too)
 
 Cabinet report: on the "flying tunnel" stages the dancer dances on the launch platform while the
 tunnel animation loops. In the games the dancer takes off and flies through the tunnel for the
@@ -370,7 +403,10 @@ whole song. What the data shows:
   - f 180: stage effect (category 5 = STG201_EFF, `FUN_800431a4`, at a COL node) + sound 0xf6 / 0xf7;
   - f 300..360: object 6 fades in (alpha `(f − 300)/60`) and starts its motion at 300 — the
     one-shot opening (`Dummy_scale` 0.3 → 1 and the `Dummy_tube_*` nodes extending over its frames
-    0–134, then held to 2000);
+    0–134, then held to 2000). Its grid tube `DRAW_B03_grid02` is SKINNED to
+    `Dummy_tube_front / center / back`: over the opening it stretches from the mouth (z ≈ +2500,
+    y ≈ 650) back to z ≈ −2500 through the origin — around the launch platform, so from about 7 s
+    the take-off runs inside the scrolling grid tube (the tunnel "arriving" at the burst);
   - f 360..420: object 3 fades out (`(420 − f)/60`; hidden at alpha ≤ 1e-5), revealing object 4;
   - f 544: the character effects, mode 2 (`FUN_8004b5a8(.., 2)`) — the leap of the take-off;
   - a stage-controller value (`+0xea0`, by its shape a light level: 1 → 0.5 over f 60..210, → 0.15
@@ -384,7 +420,7 @@ whole song. What the data shows:
     trail (`docs/wii_ddr_zan_effects_research.md` §3.4).
   The first port looped every model's ZAB and showed them all, so the tube re-opened every 33 s —
   the "broken looping tunnel".
-- **The effects** (not ported; full RE in `docs/wii_ddr_zan_effects_research.md`). zan `CzanEff` banks by category: 1 `GAME_STG_EFF`,
+- **The effects** (ported 2026-10-05; full RE in `docs/wii_ddr_zan_effects_research.md`). zan `CzanEff` banks by category: 1 `GAME_STG_EFF`,
   3 `GAME_APL_EFF`, 5 `STG201_EFF` (`stage_effects01.teb`, 1 effect), 6 `GAME_CHR_EFF`
   (`boss_ddr3.TEB`, 24 effects + 17 textures: star sprites per player colour — gold, blue, pink,
   green — a rainbow gradient strip, rings, flares). `FUN_8004b5a8` plays, for player p in mode m,
@@ -399,8 +435,8 @@ whole song. What the data shows:
   camera-facing billboards from the camera matrix, size / alpha / colour keys over the normalised
   life, flip-book UVs; `FUN_8012ddf4` draw; `FUN_80131d08` / `FUN_80131764` ribbon strips; play /
   matrix / stop API `FUN_8012aca8` / `FUN_8012af28` / `FUN_8012ae74`). Nothing in it is geometry
-  that could be ported as a model: porting it means re-implementing the particle runtime and giving
-  World a way to draw per-frame camera-facing sprites and ribbons.
+  that could be ported as a model: the port re-implements the particle runtime
+  (`src/mods/background_dancers/flight_fx.rs`) and draws it through bone-driven pool models.
 - **The port** (2026-10-05). Characters: flight / take-off pieces (`zan_dump.piece_class`) leave
   the dance library; every zan dancer gets `motion/flight/takeoff.anm` + 4 flight loops
   (`port_character_hottest2` FLIGHT). Stages: `mapset_<key>/flight.txt` marks the six stages; parts
@@ -410,7 +446,98 @@ whole song. What the data shows:
   (`director_math::intro_look`, through the instance tint) and switches at the take-off's end. The
   FuruFuru Party ring tunnels (STG102 / 103, no platform) carry the marker alone; how FuruFuru
   Party switches them (its flight song 049 has its own 260-frame take-off) was not looked at.
-  HP4 STG301 is assumed to run MUSIC FIT's script (HP4's main.dol is not imported).
+  HP4 STG301 runs MUSIC FIT's script (HP4's `FUN_80106298` is the same at f 180 / 544; its sky
+  fades 390..420, not ported).
+- **After the first cabinet run (2026-10-05).** (1) The tunnel lines shuffled back and forth: two
+  causes, both fixed. The tunnel's UV scrolls (`DRAW_STG201_0n`: a 40-frame-and-a-hair v period,
+  a 482.x-frame u period) wrap BETWEEN two integer frames, where the `.sanm` key writer saw no jump,
+  so the segment after the wrap slid the texture back a whole repeat within one frame — the writer
+  now continues the slope to the wrap frame and pairs the keys there (`offset_keys`; every stage
+  re-ported, the fix is generic). And the `fly_*` parts ran on DANCE time: at chart tempo × the
+  grid's 0.125-texture-per-frame scroll the lines strobed; they run on the real clock now, as on the
+  Wii. (2) The take-off ran on dance time and was filmed by the stage's main shots: it now runs on the
+  real clock and through the intro shots (exported as `<key>_intro01..03`, see
+  `docs/wii_ddr_zan_effects_research.md` §5), so the camera faces the mouth during the burst
+  (STG201_CAM00_02, intro 3–7 s, ~10° off the burst). (3) The sky burst (f 180 stage effect at
+  `EFF_04_01`) and its sound `SE_DDR_BOSS` are ported (effects doc §1.2 / §5).
+- **Intro cameras (the camera controller's mode 2).** Both games load a stage's camera archive
+  `/#1/` the same way (FuruFuru Party `FUN_8003d234` from `FUN_8002cbb8`; MUSIC FIT `FUN_800472d0`
+  from `FUN_80033c20`): `/#1/#0` = the main shots, `/#1/#1`, `/#1/#2` = close-up groups (MUSIC
+  FIT: a `CAM02` entry), and any camera DIRECTLY in `/#1/` is appended as the intro list (`+0x1f4`
+  / `+0x240`, mode `+0xc4` / `+0x100` = 2). `FUN_8003dfd0` / `FUN_80048290` report the intro over;
+  FuruFuru Party's play sequence (`FUN_800302e8` state 4) waits for it AND 1 s (`r2-0x7d4c` = 1.0
+  × 60 frames) before state 5 starts the song (and the PV) — every FuruFuru Party stage has one
+  3 s intro shot `/#1/#3`, played before the song. MUSIC FIT STG201's intro list is
+  `STG201_CAM00_01..03` (10 s) = the take-off, which is why READY comes after the take-off there.
+  The port exports a flight stage's intro shots as `<key>_intro01..` (`is_intro_camera`):
+  FuruFuru Party STG102 / 103 get their `/#1/#3` (3 s; the stage cycle takes over after it).
+- **READY delay (implemented 2026-10-05, cabinet check pending).** In the games the take-off is a
+  cut-in BEFORE gameplay (READY after it). World's intro: DPS step 5 waits for the 5.0 s READY?
+  dwell (`DPS+0x130` vs 5.0, `docs/quick_restart_fail_speedup_research.md` §12.2) with the stage
+  panel (ShutterActor kind 3) up; the song starts at step 6/7; the panel reveals and shows READY?
+  after that. The hold (`background_dancers::flight_hold_logic`): the stock panel for 4 s of the
+  dwell, then the panel's layer hidden (`afp_layer_set_attribute(id, 1, 0)` — not dismissed, so
+  its own reveal and READY? still follow the song's start) and the dwell timer held at 4.0 while
+  the take-off plays on its own wall clock (the scene graph is already enabled in step 5); 0.30 s
+  before the take-off's end the panel shows again and the timer is seeded past the threshold, so
+  music 0 lands on the switch. Cabinet run #4 (both skins: no hold) and the disassembly of 20260915
+  `DancePlaySequence::onUpdate` step 5 (+0x591E4..+0x592B5) refined it: the gate is `timer >= 5.0`
+  ∧ ShutterActor state ∈ {0, 4} ∧ the song bank prepared, and only once it passes does the DPS
+  broadcast `0x1043`, call the shutter's reveal (state 4), set the SceneGraph ENABLE bit and step
+  on — nothing 3D draws during the dwell, so the hold sets the bit itself
+  (`scene3d::scene_graph::set_enabled`) and starts only once the panel settled (state 4). DDR
+  SELECTION's legacy panel seeds the timer to 1000 every pre-song frame from the ShutterActor
+  update; it defers to a hold announced through `services::ready_hold`. Stand-down (the take-off then plays over the song as before):
+  another driver seeding the timer (quick restart's fresh DPS, DDR SELECTION's legacy intro), the
+  scene not ready within 4 s, the timer unresolved. Open for the cabinet: what else World draws
+  in step 5 (lanes / HUD under the panel), the release-to-anchor latency (logged), whether the
+  panel's own animation re-asserts its visibility.
+- **After the third cabinet run (2026-10-05).** (1) The tunnel grid still stuttered at 120 Hz, the
+  `.sanm` offline monotonic. A smoothed real clock (`clock::SmoothClock`, the music count tracked
+  in wall time) was tried, deployed in runs #4 / #5 with no visible effect, and removed: the real
+  clock is the raw music count again (nothing in the DLL alters or substitutes the game's clock),
+  and a bounded read-only diagnostic (`lifecycle::FlightDiag`, removed after run #6) logged the
+  clock, the grid offset and the frame-board reads after the switch. The stutter's cause was
+  World's CLAMP sampling of mod textures — see "Session 6 RE" below.
+  (2) No scroll during the
+  take-off: the port baked every stage mesh RIGID at rest, but both tunnels are skinned (the only
+  skinned stage meshes on the four discs, with HP4 STG002 / 043's filter props): the mouth's tube
+  never stretched around the platform, and the flight tunnel `DRAW_B03_grid01` (skinned to
+  `Dummy01` / `Dummy02` / `Dummy03`) stayed straight where the Wii bends it — its ends sway up to
+  ~1400 units over the 2000-frame loop. `port_stage_hottest2` now ports skinned submeshes (one
+  bone per skin joint referenced to the joint's rest world, ≤ 4 weights; checked by re-skinning
+  the exported `.model` with its `.anm` against the zan deformation); HP3 STG201 / 205 / 206,
+  HP4 STG301 / 002 / 043 re-ported. (3) The READY hold above.
+
+- **Session 6 RE (2026-10-06) — the tunnel jitter and the skybox smears have ONE root
+  cause, in World, not in the clock.** (1) The world offset re-verified (`FUN_800377e0`):
+  `z += 3.0` per unpaused tick while `z < 50000`; the same vec3 is copied into the camera
+  (`camera+0x60`, added to eye AND target in `FUN_800478b8`), into every stage object's base
+  matrix (`FUN_80042fa0` → `FUN_800459fc(obj+0x14)` = `MTXTransApply(identity, offset)`) and
+  into every dancer's matrix (`FUN_800fb500`) — same sign, same value: nothing moves relative
+  to the camera, the tunnel's motion IS the texture matrix alone (§2.1). The port is right not
+  to move the tunnel. (2) World samples every mod-shipped texture with **CLAMP** (not in
+  `data/data/texture.db` → default attr `0x55`; `docs/3d_model_format_research.md` §3.8),
+  where the Wii's TPL says REPEAT. The ported grid tube maps v −2 → −0.5 → 1 across each pair
+  of rings and repeats that (plus −5 / 4 at the ends), so under CLAMP each segment shows ONE
+  ring cluster where `v + offV ∈ [0, 1]`; as `offV` runs 0 → 1 the cluster slides one repeat
+  along the tube and then **snaps back** a whole repeat when the clip wraps — a 7.5 Hz
+  sawtooth at any frame rate (offline: ring at mesh v 0.24 → −0.61 over 8 frames, then 0.24
+  again; under WRAP a third ring enters as one leaves and the stream is seamless). That is
+  the "back and forth" (the "slow creep" is the tube's skinned bend); it is why neither the
+  `.sanm` wrap fix nor the smoothed clock changed anything, and why the cabinet shows sparse
+  single rings (one per segment) instead of the Wii's dense ring + trail clusters. The same
+  CLAMP smears `fly_bg` (u −4.19..5.13) into grey bands and `fly_add`'s streaks; the planets
+  (UVs inside [0, 1]) are untouched. (3) Second, independent issue kept from the run-#5
+  analysis: `fly_ble` is `0x2C0` (alpha blend, z-write ON) and World's blended alpha test is
+  `GREATEREQUAL 0`, so fully transparent grid texels write depth and reject the additive smoke
+  behind the tube (hard-edged patches). The Wii's z-write for its "soft" (`0x83`) materials
+  was NOT traced (the GX state wrappers in `FUN_80107744` are TEV / vertex-descriptor calls;
+  the blend / z-mode set-up sits in the stage pass, not RE'd) — assumption, not fact.
+  Fix applied and cabinet-confirmed (run #6, 2026-10-06): `background_dancers::texture_wrap`
+  patches World's texture.db default attr to WRAP (`docs/3d_model_format_research.md` §3.8) —
+  the grid streams steadily and the sky is clean; the z-write issue (3) produced no visible
+  artefact once the textures wrapped, so mesh flag `0x400` was not applied.
 
 ## 8. Not done / open
 

@@ -255,6 +255,8 @@ struct Inner {
     /// per process by design (NFR-2) — the handle's bank is immortal and its
     /// wave content is rewritten in place per song.
     tick_bank: Option<(String, TickBankHandle)>,
+    /// Slot-less one-shot banks ([`register_one_shot_bank`]), by name.
+    one_shot: Vec<(String, OneShotBankHandle)>,
 }
 
 // These are fixed addresses in the game's address space, valid for the process
@@ -307,6 +309,9 @@ static REGISTER_DECLINED: AtomicBool = AtomicBool::new(false);
 /// the transition both banks coexist, and one path's permanent failure must
 /// not silence the other's diagnostic (or block its registration).
 static TICK_REGISTER_DECLINED: AtomicBool = AtomicBool::new(false);
+/// One-shot bank registration / playback warnings (once per session).
+static ONE_SHOT_DECLINED: AtomicBool = AtomicBool::new(false);
+static ONE_SHOT_PLAY_WARNED: AtomicBool = AtomicBool::new(false);
 /// Latches the tick-track playback/stop/rewrite failure warnings — one per
 /// session per failure class, not one per song.
 static TICK_PLAY_WARNED: AtomicBool = AtomicBool::new(false);
@@ -392,6 +397,7 @@ pub fn init(signatures: &SignatureStore) -> bool {
         named_bank_count_site: count_site,
         banks: Vec::new(),
         tick_bank: None,
+        one_shot: Vec::new(),
     };
     match AUDIO.lock() {
         Ok(mut g) => *g = Some(inner),
@@ -1224,6 +1230,155 @@ pub fn stop_cue(h: &TickBankHandle, cue: &CStr) -> bool {
         }
     }
     true
+}
+
+// ── Slot-less one-shot banks ─────────────────────────────────────────
+
+/// A registered one-shot bank (a mod sound played whole, e.g. the flight
+/// intro's sky-burst sound). Process lifetime, `Copy`, slot-less — the
+/// [`TickBankHandle`] model: never entered in the manager's slot array (so
+/// the game's bank destroyer can never find it and DDR SELECTION's slot 4
+/// stays free), dispatched directly through the sound bank's vtable.
+#[derive(Clone, Copy)]
+pub struct OneShotBankHandle {
+    sound_bank: usize,
+}
+
+/// Register a one-shot bank pair (XWB + XSB, e.g. built with
+/// `se_bank_synth::{xwb, xsb}`), keyed by `name` (idempotent: a repeat call
+/// returns the first handle and drops the new bytes). Both buffers are
+/// leaked (the engine reads them for the bank's lifetime). **GAME THREAD
+/// ONLY.** `None` with one WARN per session on any failure.
+pub fn register_one_shot_bank(name: &str, xwb: Vec<u8>, xsb: Vec<u8>) -> Option<OneShotBankHandle> {
+    let mut guard = AUDIO.lock().ok()?;
+    let inner = guard.as_mut()?;
+    if let Some((_, h)) = inner.one_shot.iter().find(|(n, _)| n == name) {
+        return Some(*h);
+    }
+    if ONE_SHOT_DECLINED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let decline = |why: String| {
+        if !ONE_SHOT_DECLINED.swap(true, Ordering::Relaxed) {
+            log_warn!(
+                "GameAudio: one-shot bank '{}' not registered -- {}",
+                name,
+                why
+            );
+        }
+    };
+    if !xact_module_present() {
+        decline(format!(
+            "{} not loaded (engine vtable indices unverified)",
+            XACT_MODULE
+        ));
+        return None;
+    }
+    let Some(mgr) = inner.manager() else {
+        // transient (boot not finished): no latch
+        log_warn!(
+            "GameAudio: audio manager global is null -- one-shot bank '{}' not registered yet",
+            name
+        );
+        return None;
+    };
+    unsafe {
+        if (*slot_bank_ptr(mgr, SE_NORMAL_SLOT)).is_null() {
+            decline("slot layout check failed (se_normal slot empty)".to_string());
+            return None;
+        }
+        let engine = *(mgr.add(MGR_ENGINE_PTR) as *const *mut u8);
+        if engine.is_null() {
+            decline("engine pointer on the audio manager is null".to_string());
+            return None;
+        }
+        let xwb: &'static [u8] = Box::leak(xwb.into_boxed_slice());
+        let xsb: &'static [u8] = Box::leak(xsb.into_boxed_slice());
+        let create_wave_bank: CreateBankFn = vtable_fn(engine, ENGINE_VT_CREATE_MEM_WAVE_BANK);
+        let mut wave_bank: *mut u8 = std::ptr::null_mut();
+        let hr = create_wave_bank(engine, xwb.as_ptr(), xwb.len() as u32, 0, 0, &mut wave_bank);
+        if hr < 0 {
+            decline(format!(
+                "CreateInMemoryWaveBank hr=0x{:08X} ({})",
+                hr as u32,
+                hresult_note(hr)
+            ));
+            return None;
+        }
+        let create_sound_bank: CreateBankFn = vtable_fn(engine, ENGINE_VT_CREATE_SOUND_BANK);
+        let mut sound_bank: *mut u8 = std::ptr::null_mut();
+        let hr = create_sound_bank(
+            engine,
+            xsb.as_ptr(),
+            xsb.len() as u32,
+            0,
+            0,
+            &mut sound_bank,
+        );
+        if hr < 0 || sound_bank.is_null() {
+            decline(format!(
+                "CreateSoundBank hr=0x{:08X} ({})",
+                hr as u32,
+                hresult_note(hr)
+            ));
+            return None;
+        }
+        let h = OneShotBankHandle {
+            sound_bank: sound_bank as usize,
+        };
+        inner.one_shot.push((name.to_string(), h));
+        log_info!(
+            "GameAudio: one-shot bank '{}' registered ({} + {} bytes, no manager slot)",
+            name,
+            xwb.len(),
+            xsb.len()
+        );
+        Some(h)
+    }
+}
+
+/// Play cue `cue` of a one-shot bank from its start. **GAME THREAD ONLY.**
+pub fn play_one_shot(h: &OneShotBankHandle, cue: &CStr) -> bool {
+    let bank = h.sound_bank as *mut u8;
+    unsafe {
+        let get_cue_index: GetCueIndexFn = vtable_fn(bank, SOUND_BANK_VT_GET_CUE_INDEX);
+        let index = get_cue_index(bank, cue.as_ptr());
+        if index == CUE_NOT_FOUND {
+            if !ONE_SHOT_PLAY_WARNED.swap(true, Ordering::Relaxed) {
+                log_warn!("GameAudio: one-shot cue {:?} not found (warned once)", cue);
+            }
+            return false;
+        }
+        let play: SoundBankPlayFn = vtable_fn(bank, SOUND_BANK_VT_PLAY);
+        let hr = play(bank, index, 0, 0, std::ptr::null_mut());
+        if hr < 0 {
+            if !ONE_SHOT_PLAY_WARNED.swap(true, Ordering::Relaxed) {
+                log_warn!(
+                    "GameAudio: one-shot SoundBank::Play({:?}) failed hr=0x{:08X} ({}) (warned once)",
+                    cue,
+                    hr as u32,
+                    hresult_note(hr)
+                );
+            }
+            return false;
+        }
+    }
+    true
+}
+
+/// Stop every instance of a one-shot cue immediately (a no-op when none
+/// plays). **GAME THREAD ONLY.**
+pub fn stop_one_shot(h: &OneShotBankHandle, cue: &CStr) -> bool {
+    let bank = h.sound_bank as *mut u8;
+    unsafe {
+        let get_cue_index: GetCueIndexFn = vtable_fn(bank, SOUND_BANK_VT_GET_CUE_INDEX);
+        let index = get_cue_index(bank, cue.as_ptr());
+        if index == CUE_NOT_FOUND {
+            return false;
+        }
+        let stop: SoundBankStopFn = vtable_fn(bank, SOUND_BANK_VT_STOP);
+        stop(bank, index, STOP_IMMEDIATE) >= 0
+    }
 }
 
 // ── Internals ────────────────────────────────────────────────────────

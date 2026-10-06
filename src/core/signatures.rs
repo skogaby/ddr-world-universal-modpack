@@ -1300,6 +1300,18 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "41 81 78 08 10 27 00 00 0F 8C",
         description: "ControlSpeedActor msg-0x1045 self-destruct gate — CMP [R8+8],10000ms; JL. Anytime-speedmod patches the imm32 at +4.",
     },
+    // Application::onBoot builds the texture.db lookup object: `MOV dword
+    // [RSP+d],1 (load the db); MOV dword [RSP+d],0x55 (the DEFAULT attr for a
+    // texture whose key is not in data/data/texture.db); XOR R8D,R8D; LEA
+    // EDX,[R8+0x18]; MOV RCX,[rip+heap]; CALL alloc`. attr bits 7:6 = 01 make
+    // the default CLAMP; Background Dancers' `texture_wrap` rewrites the imm
+    // to 0x15 (WRAP) so mod-shipped DDS textures — never listed in the db —
+    // repeat like the stock ones. RE: docs/3d_model_format_research.md §3.8.
+    SignatureDefinition {
+        name: "texture_db_default_attr_imm32",
+        pattern: "C7 44 24 ?? 01 00 00 00 C7 44 24 ?? 55 00 00 00 45 33 C0 41 8D 50 18 48 8B 0D ?? ?? ?? ?? E8",
+        description: "Application::onBoot's texture.db default sampler attr — MOV dword [RSP+d],1; MOV dword [RSP+d],0x55; XOR R8D,R8D; LEA EDX,[R8+0x18]; MOV RCX,[rip+heap]; CALL alloc (FUN_1800020d0+0x3bf on 20260915, right before FUN_180205a00 loads data/data/texture.db). The imm32 at match+12 (0x55 = CLAMP / LINEAR / mip LINEAR / aniso 1) is the usage source for every DDS whose registry key is absent from the db — i.e. every mod-shipped texture; stock ones are listed as 0x315 (WRAP). background_dancers::texture_wrap rewrites it to 0x15 (WRAP) in early_apply. Unique single match, byte-identical on 20250805/20260224/20260721/20260825/20260915.",
+    },
     SignatureDefinition {
         name: "fps_target_imm32",
         pattern: "C7 44 24 ?? 3C 00 00 00 75 08 C7 44 24 ?? 4B 00 00 00",

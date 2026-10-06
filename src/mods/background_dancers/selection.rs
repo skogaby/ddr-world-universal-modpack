@@ -577,15 +577,34 @@ pub fn stage_flight_from_members(members: &[String]) -> bool {
     members.iter().any(|m| m == STAGE_FLIGHT_MARKER)
 }
 
+/// A FLIGHT stage's take-off camera shots carry this in their name
+/// (`<key>_intro01..`, `port_stage_hottest2.is_intro_camera`): played in
+/// order during the take-off, never in the main / cut-away cycles.
+pub const INTRO_CAMERA_TAG: &str = "_intro";
+
+/// The take-off shots of a camera row, in name order ([`INTRO_CAMERA_TAG`]).
+pub fn intro_cameras(camera_row_fields: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = camera_row_fields
+        .iter()
+        .map(|f| f.trim())
+        .filter(|n| !n.is_empty() && n.contains(INTRO_CAMERA_TAG))
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The stage-mode camera lists: names containing `_non` are the cut-away
 /// list, everything else the main list; both shuffled (A3 `FUN_18005b490` +
-/// `FUN_18005b830`). Empty fields are skipped.
+/// `FUN_18005b830`). Empty fields and take-off shots ([`intro_cameras`]) are
+/// skipped.
 pub fn camera_lists(rng: &mut Rng, camera_row_fields: &[String]) -> (Vec<String>, Vec<String>) {
     let mut main = Vec::new();
     let mut non = Vec::new();
     for f in camera_row_fields {
         let name = f.trim();
-        if name.is_empty() {
+        if name.is_empty() || name.contains(INTRO_CAMERA_TAG) {
             continue;
         }
         if name.contains("_non") {
@@ -1016,6 +1035,26 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::{real_chara_rows, real_map_rows, rows};
     use super::*;
+
+    #[test]
+    fn intro_cameras_leave_the_cycles() {
+        let row: Vec<String> = [
+            "k_st01",
+            "k_intro02",
+            "k_non01",
+            " k_intro01 ",
+            "k_st02",
+            "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(intro_cameras(&row), vec!["k_intro01", "k_intro02"]);
+        let (mut main, non) = camera_lists(&mut Rng::new(3), &row);
+        main.sort();
+        assert_eq!(main, vec!["k_st01", "k_st02"]);
+        assert_eq!(non, vec!["k_non01"]);
+    }
 
     #[test]
     fn rng_basics() {

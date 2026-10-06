@@ -135,6 +135,10 @@
 //!   per-category entry-count leaf, which bounds each filter category's saved
 //!   `u64` round-trip. Contributors override one category each:
 //!   series_expansion (VERSION) and improved_song_title_sorting (MUSIC TITLE).
+//!
+//! - **ready_hold** — Ownership of the DPS READY? dwell timer between dwell
+//!   skippers (DDR SELECTION's legacy panel defers) and the one holder
+//!   (Background Dancers' flight take-off before the song).
 
 pub mod afp_patcher;
 pub mod analyze_hook;
@@ -165,6 +169,7 @@ pub mod movie_sync;
 pub mod ntdll_state_shim;
 pub mod options_scroll;
 pub mod overlay_draw;
+pub mod ready_hold;
 pub mod render_notes_hook;
 pub mod scene3d;
 pub mod scene_manager;

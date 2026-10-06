@@ -24,6 +24,14 @@
 //! the instance tint; the floor shadows go with the platform
 //! (`director_math::phase_clock`).
 //!
+//! FLIGHT CLOCKS: the caller passes SCHEDULE time `t`
+//! (`Session::schedule_time`: the take-off on the real clock, the flight on
+//! dance time) and the real clock `real_s`; the tunnel (`fly_*`) runs on the
+//! real clock from the switch, the intro's stage effect (the sky burst,
+//! `flight_fx::StageFx`, instances `InstanceKind::StageFx`) on the real
+//! clock from the take-off's start, and the take-off is filmed by the
+//! stage's `_intro` shots in order ([`camera_frame`]).
+//!
 //! FLIGHT EFFECTS (`flight_fx.rs`): every flying dancer runs player
 //! (index mod 4)'s `boss_ddr3.TEB` effects — the leap burst from take-off
 //! frame 544 at its Hips (position only) and feet, the orb / trail / hand
@@ -104,6 +112,22 @@ pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: Sce
         } else {
             (PartPhase::Always, (true, t))
         };
+        // The tunnel runs on the REAL clock from the switch, like the Wii's
+        // 60 Hz stage objects: its UV scrolls stay a steady flight at any
+        // chart tempo (on dance time a fast song strobed the grid lines
+        // into a back-and-forth shuffle, cabinet 2026-10-05). `real_s` is
+        // the lifecycle's real clock: the raw music count (+ the take-off
+        // length after a READY hold), never smoothed.
+        // A flight stage's phase-less parts (FuruFuru Party's ring tunnels,
+        // STG102 / 103: no platform, no pre_ / fly_ split) likewise run on
+        // the real clock — on the Wii every stage object does.
+        if phase == PartPhase::Fly {
+            if let Some(sw) = flight_switch {
+                pt = (real_s - sw).max(0.0);
+            }
+        } else if phase == PartPhase::Always && flight_stage && flight_switch.is_some() {
+            pt = real_s;
+        }
         let mut tint = WHITE;
         if phase == PartPhase::Pre {
             let look = intro_look(&p.part, pt);
@@ -163,6 +187,10 @@ pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: Sce
             mat_params,
         );
     }
+
+    // The flight intro's stage effect (the sky burst), on the intro clock
+    // (real time since the take-off began).
+    publish_stage_fx(sess, real_s, stage_hidden);
 
     // Dancers: evaluate the body ONCE, then derive its parts + shadow.
     for i in 0..n_dancers {
@@ -329,6 +357,58 @@ pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: Sce
     }
 }
 
+/// Tick the flight intro's stage effect and publish its pool instances.
+fn publish_stage_fx(sess: &mut Session, intro_s: f32, hidden: bool) {
+    let Session {
+        stage_fx,
+        parsed,
+        fx_camera,
+        instances,
+        mat_params,
+        ..
+    } = sess;
+    let (Some(sfx), Some(assets)) = (stage_fx.as_mut(), parsed.flight_fx.as_ref()) else {
+        return;
+    };
+    let Some(teb) = assets.stage_teb.as_ref() else {
+        return;
+    };
+    let k = assets.layout.metres_per_unit;
+    let cam = match fx_camera.as_ref() {
+        Some(c) => Camera::look_at_world(c.eye, c.target, c.up, k),
+        None => Camera::look_at_world([0.0, 1.6, 5.0], [0.0, 0.9, 0.0], [0.0, 1.0, 0.0], k),
+    };
+    sfx.tick(teb, &assets.layout, intro_s, &cam);
+    for inst in instances.iter() {
+        let InstanceKind::StageFx(pool) = inst.kind else {
+            continue;
+        };
+        if inst.status != InstanceStatus::Built || inst.queued {
+            continue;
+        }
+        let Some(frame) = sfx.frames.get(pool) else {
+            continue;
+        };
+        mat_params.clear();
+        for w in frame.mats.iter().take(frame_board::MAX_MAT_PARAMS) {
+            mat_params.push(frame_board::MatParam {
+                material: w.material,
+                index: w.index,
+                value: w.value,
+            });
+        }
+        frame_board::publish_full(
+            inst.slot,
+            &IDENTITY,
+            WHITE,
+            hidden || frame.drawn == 0,
+            &frame.bones,
+            mat_params,
+            &frame.colours,
+        );
+    }
+}
+
 /// Dancer `i`'s flight effects for this frame (no-op without them): its
 /// attach joints from the freshly evaluated `sess.bones` (model space) under
 /// `body_world`, the camera of this frame, the leap / switch times.
@@ -379,6 +459,12 @@ fn tick_flight_fx(sess: &mut Session, i: usize, t: f32, real_s: f32, body_world:
 /// films), then sample the selected `.camanm` at its local time. `None`
 /// without that set (the caller keeps / writes the fixed fallback camera).
 pub fn camera_frame(sess: &mut Session, t: f32, set: CameraSet) -> Option<scene_graph::CamSample> {
+    // FLIGHT: the take-off is filmed by its own shots, in order (main.dol's
+    // intro camera, STG201_CAM00_01..03 = 3 + 4 + 3 s = the 600-frame
+    // intro), then the stage set takes over at the switch.
+    if let Some(c) = intro_camera(sess, t) {
+        return Some(c);
+    }
     let dance = sess.schedule.as_ref()?;
     let (sched, state, cams) = match set {
         CameraSet::Stage => (
@@ -425,6 +511,40 @@ pub fn camera_frame(sess: &mut Session, t: f32, set: CameraSet) -> Option<scene_
         near: c.near,
         far: c.far,
     })
+}
+
+/// The take-off shot at schedule time `t` (`None` outside a flight's
+/// take-off, without intro shots, or once they ran out before the switch —
+/// FuruFuru Party's one 3 s shot: the stage's own cycle takes over, as the
+/// Wii's camera controller leaves its intro mode): shot k from the sum of
+/// the earlier shots' lengths.
+fn intro_camera(sess: &Session, t: f32) -> Option<scene_graph::CamSample> {
+    let sw = sess.flight_switch.filter(|_| sess.pick.flight)?;
+    if t >= sw {
+        return None;
+    }
+    let intro = &sess.parsed.cameras.as_ref()?.intro;
+    let mut start = 0.0f32;
+    for clip in intro.iter() {
+        let d = clip.anm.duration_s();
+        if t < start + d {
+            let frame = clip_frame((t - start).max(0.0), d, clip.anm.fps, false);
+            let c = sample_camera(&clip.anm, &clip.bytes, frame, 1.0, 1.0);
+            return Some(scene_graph::CamSample {
+                eye: c.eye,
+                target: c.target,
+                up: c.up,
+                l: c.l,
+                r: c.r,
+                b: c.b,
+                t: c.t,
+                near: c.near,
+                far: c.far,
+            });
+        }
+        start += d;
+    }
+    None
 }
 
 /// The camera timeline of `set` over the first `until_s` seconds — one entry

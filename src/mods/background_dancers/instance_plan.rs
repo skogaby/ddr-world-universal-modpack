@@ -44,6 +44,9 @@ pub enum InstanceKind {
     /// `flight_fx::DancerFx::pools` / `frames`): sprites or ribbons placed
     /// by bone matrices, coloured per draw record (`flight_fx.rs`).
     Fx { dancer: usize, pool: usize },
+    /// A pool model of the flight intro's stage effect (the sky burst;
+    /// index into `flight_fx::StageFx::pools`).
+    StageFx(usize),
 }
 
 impl InstanceKind {
@@ -56,6 +59,7 @@ impl InstanceKind {
             InstanceKind::Shadow(_) => "shadow",
             InstanceKind::Hull { .. } => "hull",
             InstanceKind::Fx { .. } => "fx",
+            InstanceKind::StageFx(_) => "stage fx",
         }
     }
 
@@ -75,7 +79,7 @@ pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
     match kind {
         // The effect pools keep their unlit additive materials (no style,
         // no outline).
-        InstanceKind::Shadow(_) | InstanceKind::Fx { .. } => false,
+        InstanceKind::Shadow(_) | InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => false,
         InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
         InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
         // The twin's model_name is the body's; a Hull of a Hull never exists.
@@ -210,6 +214,8 @@ pub struct PlanInput {
     pub shadow_bone_count: Option<usize>,
     /// The shadow quad's model name (`pl_shadow00`).
     pub shadow_model: String,
+    /// The flight intro's stage-effect pools (empty elsewhere).
+    pub stage_fx: Vec<FxSpec>,
 }
 
 /// The planned table.
@@ -320,6 +326,18 @@ pub fn plan_instances(
                 f.bone_count,
             ));
         }
+    }
+    for (k, f) in input.stage_fx.iter().enumerate() {
+        max_bones = max_bones.max(f.bone_count);
+        instances.push(Instance::pending(
+            InstanceKind::StageFx(k),
+            f.model_name.clone(),
+            mask_of(masks.stage),
+            0,
+            slot_for(instances.len()),
+            false,
+            f.bone_count,
+        ));
     }
     // Slot budget: every instance so far OWNS a board slot.
     let slot_owners = instances.len();
@@ -435,6 +453,7 @@ mod tests {
             ],
             shadow_bone_count: Some(1),
             shadow_model: SHADOW_MODEL.to_string(),
+            stage_fx: Vec::new(),
         }
     }
 

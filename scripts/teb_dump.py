@@ -94,7 +94,8 @@ def parse_part(b, T, do):
                             per_spawn=struct.unpack_from('>h', b, o + 0x2E)[0], billboard=b[o + 0x32])
     if flags & P_GRAVITY:
         o = T + w[2]
-        p['gravity'] = dict(dir=_f32(b, o, 3), accel=_f32(b, o + 0x18), accel_rand=_f32(b, o + 0x1C), raw=_f32(b, o, 8))
+        p['gravity'] = dict(dir=_f32(b, o, 3), rot_spread=_f32(b, o + 12, 3), accel=_f32(b, o + 0x18),
+                            accel_rand=_f32(b, o + 0x1C), raw=_f32(b, o, 8))
     if flags & P_DRAW:
         o = T + w[3]
         df = _u32(b, o)
@@ -357,6 +358,17 @@ class PartSim:
             vdir = euler_yzx(rng.pm(rs[0]), rng.pm(rs[1]), rng.pm(rs[2])) @ np.array([0.0, 1.0, 0.0])
         q = dict(age=age0, life=max(0.0, em['life'] + rng.pm(em['life_rand'])), speed=em['speed'] + rng.pm(em['speed_rand']),
                  pos0=pos, vdir=vdir, size=1.0, rgb=np.array([255.0, 255.0, 255.0]), ribbon=[])
+        g = p.get('gravity')
+        if g:
+            # FUN_8012c790 / FUN_8012c92c: the block's direction under a random rotation, or inward
+            # for a radial ellipsoid; accel +- rand (FUN_8012c438)
+            if p['shape'] == 1 and radial:
+                n = np.linalg.norm(vdir)
+                gdir = -vdir / n if n > 1e-12 else np.zeros(3)
+            else:
+                rs = g['rot_spread']
+                gdir = euler_yzx(rng.pm(rs[0]), rng.pm(rs[1]), rng.pm(rs[2])) @ np.array(g['dir'], float)
+            q['gravity'] = (gdir, g['accel'] + rng.pm(g['accel_rand']))
         if 'spin' in p:
             s = p['spin']['raw']
             q['spin'] = (s[0] + rng.pm(s[1]), s[2] + rng.pm(s[3]), s[4] + rng.pm(s[5]))
@@ -413,6 +425,11 @@ class PartSim:
         if 'spin' in p:
             s = p['spin']['raw']
             pos = axis_angle((0, 1, 0), s[6] * age + s[7] * age * age * 0.5) @ pos
+        # gravity (FUN_8012ce18): a radial ring falls in the emitter's frame, every other part in
+        # world space x the manager scale
+        ring_radial = p['shape'] == 2 and bool(p.get('ring', {}).get('flags', 0) & 4)
+        if 'gravity' in q and ring_radial:
+            pos = pos + q['gravity'][0] * (q['gravity'][1] * age * age * 0.5)
         if p['flags'] & P_WORLD and age > 0 and 'anchor' in q:
             apos, aq = q['anchor']
             fol = p.get('follow', {}).get('follow', 0.0)
@@ -425,6 +442,8 @@ class PartSim:
         else:
             wpos = world[:3, :3] @ pos + world[:3, 3]
             R0 = world[:3, :3]
+        if 'gravity' in q and not ring_radial:
+            wpos = wpos + q['gravity'][0] * (age * age * q['gravity'][1] * EFFECT_SCALE * 0.5)
         # billboard: the camera's basis (mode 0) or the emitter's frame laid flat (mode 1)
         if self.em['billboard'] == 0:
             R = view_rot.T * np.array([scale[0], scale[1], 1.0])

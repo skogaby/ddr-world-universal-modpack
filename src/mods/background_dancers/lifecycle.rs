@@ -30,19 +30,21 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::anm::rlist;
 use crate::core::arc as arcfile;
 use crate::services::movie_policy::{self, MovieSuppressor};
 use crate::services::scene3d::{arc_set, frame_board, scene_graph};
-use crate::services::{song_reset, stage_records, widget_renderer};
+use crate::services::{game_audio, ready_hold, song_reset, stage_records, widget_renderer};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
 
 use super::background_hide;
 use super::clock::{Clock, ClockEvent};
 use super::director;
+use super::flight_hold;
+use super::flight_hold_logic::{self as hold_logic, Hold, Phase as HoldPhase};
 use super::movie_backdrop;
 use super::movie_camera;
 use super::movie_mode::{
@@ -384,6 +386,22 @@ struct Window {
     /// The live song's movie state (re-probed every frame in FULLSCREEN and
     /// MOVIE ONLY — `movie_mode::probes_backdrop`; always `None` otherwise).
     backdrop: Backdrop,
+    /// The wall-clock stamp of a READY hold's take-off start: the take-off
+    /// then plays BEFORE the song, with no music count to follow, so its
+    /// clock is plain wall time from this stamp (`None` = no held take-off).
+    takeoff_started: Option<Instant>,
+    /// The previous frame's wall time (the hold's wait budgets).
+    last_frame: Option<Instant>,
+    /// The READY hold of the live DPS (`flight_hold_logic`) and that DPS.
+    hold: Hold,
+    hold_dps: usize,
+    /// The held DPS's song anchored at least once (the take-off clock then
+    /// follows the count for good).
+    hold_anchored: bool,
+    /// `DDR_DANCERS_NO_FLIGHT_HOLD` (developer_mode): never hold READY.
+    hold_disabled: bool,
+    /// The held DPS reached its READY? step (one-shot state log).
+    hold_seen_ready: bool,
 }
 
 struct State {
@@ -997,6 +1015,10 @@ fn option_pick(
 /// Game thread: hand the arcs to the FileManager and start the parse thread.
 fn request_load(generation: u64, pick: Pick) {
     let loaded = scene_window::load_arcs(&pick, &ParseOptions::GAMEPLAY);
+    let hold_disabled = dev_mode() && std::env::var_os("DDR_DANCERS_NO_FLIGHT_HOLD").is_some();
+    // Announce the READY hold before the DPS exists, so the dwell skippers
+    // that defer (DDR SELECTION's legacy panel) never seed this song's dwell.
+    let hold_wanted = pick.flight && flight_hold::available() && !hold_disabled;
     let Ok(mut st) = STATE.lock() else {
         loaded.free();
         return;
@@ -1046,7 +1068,15 @@ fn request_load(generation: u64, pick: Pick) {
         static_published: false,
         movie_mode: window_movie_mode(),
         backdrop: Backdrop::None,
+        takeoff_started: None,
+        last_frame: None,
+        hold: Hold::new(false),
+        hold_dps: 0,
+        hold_anchored: false,
+        hold_disabled,
+        hold_seen_ready: false,
     });
+    ready_hold::set_hold_wanted(hold_wanted);
     ACTIVE.store(true, Ordering::Release);
 }
 
@@ -1059,6 +1089,11 @@ fn begin_teardown(window_gen: u64) {
     }
     background_hide::disarm();
     let Some(w) = st.live.as_mut() else { return };
+    if matches!(w.hold.phase(), HoldPhase::Playing { .. }) {
+        let _ = flight_hold::panel(hold_logic::PanelOp::Show);
+        w.hold = Hold::new(false);
+    }
+    ready_hold::set_hold_wanted(false);
     if w.scene.begin_teardown("song-window exit") {
         ACTIVE.store(true, Ordering::Release);
     }
@@ -1124,6 +1159,15 @@ fn drive_live(w: &mut Window) {
             None,
         )
     });
+    // The frame's wall dt (the hold's wait budgets) and the READY hold —
+    // stepped even before the scene is built (the hold waits for it with the
+    // dwell held), always before the DPS update reads its dwell timer.
+    let now = Instant::now();
+    let dt = w
+        .last_frame
+        .map_or(0.0, |p| now.saturating_duration_since(p).as_secs_f64());
+    w.last_frame = Some(now);
+    hold_tick(w, now, dt, has_built);
     if !has_built {
         return;
     }
@@ -1280,15 +1324,226 @@ fn drive_live(w: &mut Window) {
     } else {
         true
     };
+    // FLIGHT stages: the take-off runs on the REAL clock (the Wii's 60 Hz
+    // intro: its cameras, the platform script, the sky burst, the leap), the
+    // flight after it on dance time (`Session::schedule_time`). The real
+    // clock is the music count, read as is (never smoothed or substituted —
+    // a smoothed tracker was tried, deployed and removed: no visible effect);
+    // with the READY hold the take-off plays BEFORE the song on wall time
+    // from its start stamp, and the song's music 0 is the switch (the clock
+    // = count + take-off length).
+    let switch = w.scene.session_mut().and_then(|s| s.flight_switch);
+    if anchored {
+        w.hold_anchored = true;
+    }
+    let offset = match switch {
+        Some(sw) if w.hold.offsets_song() => sw as f64,
+        _ => 0.0,
+    };
+    let real_s = if w.hold.free_runs(w.hold_anchored) {
+        takeoff_elapsed(w, now)
+    } else {
+        mc_ms as f64 / 1000.0 + offset
+    } as f32;
+    let t = match w.scene.session_mut() {
+        Some(sess) => {
+            if let Some(sw) = sess.flight_switch {
+                let song_ms = (sw as f64 - offset) * 1000.0;
+                sess.dance_at_switch = Some(match w.tempo.as_ref() {
+                    Some(map) => map.tau(song_ms),
+                    None => (song_ms / 1000.0) as f32,
+                });
+            }
+            sess.schedule_time(t, real_s)
+        }
+        None => t,
+    };
     // The camera first: the flight effects' billboards face THIS frame's
     // camera (`Session::fx_camera`, read by the publish).
     camera_tick(w, t, mask);
     if publish {
-        w.scene.publish(t, mc_ms as f32 / 1000.0, visible, mask);
+        w.scene.publish(t, real_s, visible, mask);
+    }
+    if let Some(sess) = w.scene.session_mut() {
+        flight_sound_tick(sess, real_s, visible);
     }
 
     w.scene.retry_textures();
     w.scene.attached_diagnostics();
+}
+
+/// The READY hold (`flight_hold_logic`): per live DPS, armed for a flight
+/// take-off; holds the DPS's READY? dwell while the take-off plays before
+/// the song, the stage panel hidden, and releases it at the take-off's end.
+fn hold_tick(w: &mut Window, now: Instant, dt: f64, built: bool) {
+    let dps = flight_hold::live_dps();
+    if dps != w.hold_dps {
+        // A take-off cut short by a new DPS: never leave the (singleton)
+        // shutter's stage panel hidden.
+        if matches!(w.hold.phase(), HoldPhase::Playing { .. }) {
+            let _ = flight_hold::panel(hold_logic::PanelOp::Show);
+        }
+        w.hold_dps = dps;
+        w.hold_anchored = false;
+        w.hold_seen_ready = false;
+        w.takeoff_started = None;
+        let armed =
+            dps != 0 && !w.hold_disabled && w.scene.pick().flight && flight_hold::available();
+        w.hold = Hold::new(armed);
+    }
+    if w.hold.phase() == HoldPhase::Off {
+        return;
+    }
+    let step = flight_hold::dps_step();
+    let timer = flight_hold::read_timer();
+    let (scene_ready, takeoff_s) = match w.scene.session_mut() {
+        Some(sess) if built => match sess.flight_switch {
+            Some(sw) if sess.flight_stage && sess.pick.flight => (true, sw as f64),
+            _ => (false, director_math_takeoff()),
+        },
+        _ => (false, director_math_takeoff()),
+    };
+    let (panel_settled, panel_state) = flight_hold::panel_settled();
+    let mask = movie_mode::scene_mask(w.movie_mode, w.backdrop);
+    let scene_hidden = !(mask.stage && mask.dancers);
+    if step == Some(hold_logic::STEP_READY) && !w.hold_seen_ready {
+        w.hold_seen_ready = true;
+        log_info!(
+            "BackgroundDancers: flight take-off -- READY? step reached: timer {:?}, scene {}, stage panel state {:?}, 3D {}",
+            timer,
+            if scene_ready { "built" } else { "not built yet" },
+            panel_state,
+            if scene_hidden { "masked off" } else { "shown" }
+        );
+    }
+    let intro_s = takeoff_elapsed(w, now);
+    let a = w.hold.step(hold_logic::Inputs {
+        step,
+        timer,
+        scene_ready,
+        panel_settled,
+        scene_hidden,
+        intro_s,
+        takeoff_s,
+        dt,
+    });
+    if a.started {
+        w.takeoff_started = Some(now);
+    }
+    if let Some(v) = a.write_timer {
+        let _ = flight_hold::write_timer(v);
+    }
+    if a.enable_graph && !scene_graph::set_enabled() && a.started {
+        log_warn!("BackgroundDancers: flight take-off -- the SceneGraph could not be enabled; the take-off may not draw");
+    }
+    if a.released.is_some() || a.stood_down.is_some() {
+        ready_hold::set_hold_wanted(false);
+    }
+    let layer = flight_hold::panel(a.panel);
+    if a.started {
+        log_info!(
+            "BackgroundDancers: flight take-off before the song -- READY? dwell held at {:.1} s (timer {:.2} s), stage panel {}; {:.2} s take-off",
+            hold_logic::HOLD_AT_S,
+            timer.unwrap_or(f32::NAN),
+            match layer {
+                Some(l) => format!("layer 0x{l:08X} hidden"),
+                None => String::from("NOT hidden"),
+            },
+            takeoff_s
+        );
+    }
+    if let Some(why) = a.released {
+        log_info!(
+            "BackgroundDancers: flight take-off -- READY? dwell released ({why}) at take-off {:.2} s, dps step {:?}, stage panel {}",
+            intro_s,
+            step,
+            if layer.is_some() { "shown" } else { "not touched" }
+        );
+    }
+    if let Some(why) = a.stood_down {
+        log_info!(
+            "BackgroundDancers: flight take-off plays over the song -- READY hold stood down: {why} (dps step {:?}, timer {:?})",
+            step,
+            timer
+        );
+    }
+}
+
+fn director_math_takeoff() -> f64 {
+    super::director_math::DEFAULT_TAKEOFF_S as f64
+}
+
+/// Wall seconds since a held take-off began (0 without one).
+fn takeoff_elapsed(w: &Window, now: Instant) -> f64 {
+    w.takeoff_started
+        .map_or(0.0, |s| now.saturating_duration_since(s).as_secs_f64())
+}
+
+/// The flight intro's sound (SE_DDR_BOSS at intro frame 180, with the sky
+/// burst): played once when the real clock passes its start while the scene
+/// shows (gameplay only — previews never call this); a jump back before the
+/// start stops it and re-arms. Its one-cue bank registers on first use.
+fn flight_sound_tick(sess: &mut Session, real_s: f32, visible: bool) {
+    let Some((name, start_s)) = sess
+        .parsed
+        .flight_fx
+        .as_ref()
+        .and_then(|a| a.stage_sound.as_ref())
+        .map(|s| (s.name.clone(), s.start_s))
+    else {
+        return;
+    };
+    if sess.flight_switch.is_none() {
+        return;
+    }
+    if real_s < start_s {
+        if sess.stage_sound_played {
+            sess.stage_sound_played = false;
+            stop_flight_sound(sess);
+        }
+        return;
+    }
+    // Only a start seen live plays (a song entered past it stays silent).
+    if !visible || sess.stage_sound_played || real_s > start_s + 0.5 {
+        return;
+    }
+    sess.stage_sound_played = true;
+    let bank = sess.stage_sound_bank.or_else(|| {
+        let s = sess.parsed.flight_fx.as_ref()?.stage_sound.as_ref()?;
+        game_audio::register_one_shot_bank(&s.name, s.xwb.clone(), s.xsb.clone())
+    });
+    sess.stage_sound_bank = bank;
+    let (Some(h), Ok(cue)) = (bank, std::ffi::CString::new(name.as_str())) else {
+        log_warn!(
+            "BackgroundDancers: flight intro sound {} -- bank not registered, silent",
+            name
+        );
+        return;
+    };
+    let ok = game_audio::play_one_shot(&h, &cue);
+    log_info!(
+        "BackgroundDancers: flight intro sound {} at {:.2} s{}",
+        name,
+        real_s,
+        if ok { "" } else { " -- play FAILED" }
+    );
+}
+
+/// Stop the flight intro's sound (a rewind before its start, the window
+/// teardown). No-op when it never played.
+pub fn stop_flight_sound(sess: &Session) {
+    let (Some(h), Some(s)) = (
+        sess.stage_sound_bank,
+        sess.parsed
+            .flight_fx
+            .as_ref()
+            .and_then(|a| a.stage_sound.as_ref()),
+    ) else {
+        return;
+    };
+    if let Ok(cue) = std::ffi::CString::new(s.name.as_str()) {
+        game_audio::stop_one_shot(&h, &cue);
+    }
 }
 
 /// Which camera films a frame.

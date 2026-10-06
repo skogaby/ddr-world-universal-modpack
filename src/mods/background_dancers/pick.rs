@@ -11,8 +11,8 @@
 //! carries the one parse-time switch the previews need (no floor shadow).
 
 use super::selection::{
-    camera_lists, dancer_x, flight_playlist_for, pick_dancers, pick_stage, playlist_for,
-    DancerCandidate, PickSource, Rng, Sex, StageCandidate, SHADOW_ARC,
+    camera_lists, dancer_x, flight_playlist_for, intro_cameras, pick_dancers, pick_stage,
+    playlist_for, DancerCandidate, PickSource, Rng, Sex, StageCandidate, SHADOW_ARC,
 };
 
 /// Parse-time switches for a pick (design §4.8): gameplay parses the
@@ -40,6 +40,9 @@ pub struct Pick {
     /// cycle and the `_non` cut-aways.
     pub camera_main: Vec<String>,
     pub camera_non: Vec<String>,
+    /// A FLIGHT stage's take-off shots, in order (`selection::intro_cameras`;
+    /// empty elsewhere).
+    pub camera_intro: Vec<String>,
     /// The MOVIE camera set (`movie_camera.rs`) split + shuffled like the
     /// stage's: used instead of the stage cameras while Background Movies =
     /// FULLSCREEN has a movie as the backdrop. Empty unless the song window
@@ -285,6 +288,7 @@ pub fn assemble_pick_opt(
         .map(|d| d.parts_present(&arc_exists))
         .collect();
     let (camera_main, camera_non) = camera_lists(rng, &camera_row);
+    let camera_intro = intro_cameras(&camera_row);
     let n = dancers.len();
     Pick {
         seed: 0,
@@ -292,6 +296,7 @@ pub fn assemble_pick_opt(
         camera_row,
         camera_main,
         camera_non,
+        camera_intro,
         movie_camera_main: Vec::new(),
         movie_camera_non: Vec::new(),
         dancers,

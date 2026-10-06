@@ -1,12 +1,11 @@
 # Progress — HOTTEST PARTY flight stages (take-off + tunnel flight)
 
-Updated: 2026-10-05 (session 3)
-Status: Step 7 of 7 — done (all uncommitted); FX F1–F6 implemented and gate-green; NOTHING
-cabinet-tested yet (flight or FX).
-NEXT ACTION: cabinet deploy of the DLL + the six flight stage folders (`data_mods/custom_models/
-stages/HOTTEST PARTY {2,3,4}/Stage {102,103,201,205,206,301}` — they now carry `flight_fx/` + the
-`fx_<key>_*` pool models; a DLL-only deploy flies WITHOUT effects) and walk the watch-list in
-"Deploy & test log".
+Updated: 2026-10-06 (session 6, after cabinet run #6)
+Status: DONE — flight stages fully working on the cabinet (run #6): take-off, READY hold, FX,
+steady tunnel scroll, clean skybox. All work uncommitted (maintainer commits).
+NEXT ACTION: none open. The run-#4/#5 diagnostics (`FlightDiag`, `frame_board::{now_ns,
+reader_stats}`, `render_item::material_param_raw`) were removed after run #6 (gate green). P3
+(z-write off on the blended grid) NOT needed — the WRAP build shows no visible smoke occlusion.
 Resume protocol: this file → `docs/wii_ddr_zan_effects_research.md` (effects RE) →
 `docs/wii_ddr_hottest_party_2_3_research.md` §7.5 (flight stages) →
 docstrings of `port_character_hottest2.py` / `port_stage_hottest2.py` (`FLIGHT_*`) → `//!` headers of
@@ -152,8 +151,225 @@ Estimate: several sessions (RE ~1, runtime ~1–2, renderer + content ~1–2) + 
 An offline bake along each flight clip is possible but camera-independent (no true billboards) —
 an approximation, so not offered as the port.
 
+## Session 4 (2026-10-05) — cabinet run #1 feedback → fixes
+- Tunnel lines "shuffled back and forth": (a) `.sanm` keys of UV scrolls whose period is not a
+  whole number of frames (STG201 grid v 40.x f, u 482.x f) interpolated backwards across the wrap —
+  `port_stage_hottest2.offset_keys` now continues the slope and pairs keys at the wrap frame
+  (generic; ALL HP stages re-ported); (b) `fly_*` parts ran on dance time — now the real clock from
+  the switch (`director::produce`).
+- Take-off = the Wii intro on the REAL clock (`flight_fx::flight_schedule_time`, lifecycle passes
+  schedule time + real time; `Session::{schedule_time, dance_at_switch}`); filmed by the intro
+  shots `<key>_intro01..03` (port: `is_intro_camera`; DLL: `selection::intro_cameras`,
+  `Pick::camera_intro`, `ParsedCameras::intro`, `director::intro_camera`).
+- Sky burst: MUSIC FIT stage effect at COL `EFF_04_01` (table entry 227, name "04_01"), HP4 at every
+  `EFF_03_*` (FUN_8004d7bc), both (0, 740, 2730); port writes `flight_fx/stage_fx.teb` + pool
+  `fx_<key>_xa` + layout `stage_effect 180 x y z 0`; DLL `flight_fx::StageFx`, `InstanceKind::StageFx`.
+  Gravity (0x2) RE'd + ported (Rust + teb_dump; cross-check on the burst within 7e-4 units).
+- Sound: SE_DDR_BOSS (MF 0xF6 / HP4 0x115) = one RSEQ note on BNK_SEDDR prg 10 = wave 10 (9.94 s);
+  port writes `flight_fx/burst_44k_mono.pcm`, layout `stage_sound 180 burst_44k_mono.pcm`; DLL
+  encodes a one-cue XACT pair (parse thread) and plays it once at intro 3.0 s via the new slot-less
+  `game_audio::{register_one_shot_bank, play_one_shot, stop_one_shot}` (gameplay only).
+- HP2 intro camera RE'd (session 4b): every camera directly in a stage's `/#1/` is the camera
+  controller's intro list (FFP `FUN_8003d234`, MF `FUN_800472d0`); FFP plays it before the song
+  (`FUN_800302e8` state 4 waits for it + 1 s). `is_intro_camera` now uses that rule; HP2 STG102 /
+  103 re-ported (`hp2stage10x_intro01`, 3 s); `director::intro_camera` returns None after the last
+  shot so the stage cycle takes over before the switch.
+- READY delay NOT done (needs live RE of the DPS dwell / panel / graph enable; design noted).
+
+## Session 5 (2026-10-05) — cabinet run #3 feedback → fixes
+- Tunnel grid still stutters (back and forth + slow forward creep) at 120 Hz. Offline: the
+  `.sanm` (fly_ble, 8 frames, v 0→1) samples monotonic and `core/anm/sample.rs` interpolates
+  fractional frames; the grid texture (`grid01nuki`, 128 px) is ONE bright line + three fading
+  trail lines 21 px apart, scrolled 1/8 tile per 60 Hz frame (0.76 line spacings: the trail lines
+  alias backwards on any coarse step, the head reads forward). Suspect = the clock: the i32-ms
+  music count, one update stale, possibly 0 / 16.7 ms steps at 120 Hz (a cursor-driven clock under
+  CrossOver: 11.6 ms staircase). Tried: `clock::SmoothClock` (2nd-order tracker of the count in
+  wall time) driving `real_s` — deployed in runs #4 / #5 with NO visible effect, REMOVED in session 6
+  (the real clock is the raw count again; the DLL never alters the game's clock). Diagnostic (kept): `FlightDiag` (developer_mode) logs 48 frames after the switch + a 1 s summary (dt,
+  count steps, real steps, the grid `offV`, frame-board publish/read counts via the new
+  `frame_board::reader_stats`).
+- No tunnel scroll during the take-off: ROOT CAUSE = the stage port baked skinned meshes rigid.
+  The mouth's grid tube (`OBJA_Z_hole0n` / `DRAW_B03_grid02`) is skinned to `Dummy_tube_*` and
+  stretches from the mouth back through the origin around the platform over the opening; the
+  flight tube (`DRAW_B03_grid01`) is skinned to `Dummy01..03` and BENDS (ends sway ~1400 units).
+  `port_stage_hottest2`: `SKIN_ANCHOR` bones per skin joint (rest-world referenced, ≤ 4 weights;
+  static skins baked deformed); verified by re-skinning the exported models offline (`.model` +
+  `.anm` vs the zan deformation: identical extents at frames 0 / 60 / 134 / 300 and 500 / 1000).
+  Only the flight tunnels and HP4 STG002 / 043 (filter props) carry skins on the four discs.
+  Re-ported HP3 STG201 / 205 / 206, HP4 STG301 / 002 / 043, then `port_flight_fx.py`.
+- READY hold implemented (`flight_hold_logic.rs` pure + 5 harness tests, `flight_hold.rs` engine,
+  `lifecycle::hold_tick`): stock panel 4 s → panel layer hidden + dwell held at 4.0 → take-off on
+  the real clock's free run → 0.30 s before its end panel shown + dwell seeded 1000 → song; the
+  real clock is then `count + take-off`, `dance_at_switch = tau(0)`. Stands down for a foreign
+  dwell seed (quick restart fresh DPS, DDR SELECTION legacy intro), a scene not ready in 4 s, no
+  timer offset. Dev knob `DDR_DANCERS_NO_FLIGHT_HOLD`.
+
+## Session 5b (2026-10-05) — cabinet run #4 feedback → fixes
+- READY hold never engaged. A3 skin (log): `stood down: another driver seeds the READY? dwell`
+  — DDR SELECTION's legacy panel seeds `DPS+0x130` to 1000 from the ShutterActor update (after our
+  input-poll write, before the DPS update), every pre-song frame. World skin (no log kept):
+  disassembly of 20260915 `DancePlaySequence::onUpdate` step 5 (+0x591E4..+0x592B5): the gate is
+  `timer >= 5.0` ∧ shutter state ∈ {0, 4} ∧ bank prepared; ONLY THEN `0x1043`, the shutter reveal
+  call (+0x5929A, when state 4), the SceneGraph enable bit (+0x592A9) and step++ — the graph is
+  disabled for the whole dwell, so the hold's `scene_ready` (built ∧ graph enabled) never held and
+  it stood down after its wait. Fixes: new `services::ready_hold` (the holder announces the next
+  song's hold at the window start; DDR SELECTION's `seed_dwell` defers; quick restart still seeds
+  and wins); the hold enables the SceneGraph itself (`scene_graph::set_enabled`) from the take-off
+  start; it starts only once the panel settled (ShutterActor state 4 or no panel) — waits up to
+  8 s; a one-shot `READY? step reached` state line.
+- Stutter unchanged with the smoothed clock (since removed, session 6), and the run had no `flight diag` lines
+  (developer_mode off) — the diagnostic now runs on every flight stage, bounded (48 frame lines +
+  10 one-second summaries + every 10th after), and adds: when `visit(2)` copied the grid's slot
+  (ms after the previous publish, shared `frame_board::now_ns`), and the item's material copy read
+  back at the next frame's start (`render_item::material_param_raw`; a MISMATCH = another
+  writer). Disassembly of the material-constant emit (`FUN_18026cce0` → `FUN_18026c440`, 20260825):
+  the params are COPIED into the command stream (no deferred read of the item copy by the
+  executor); a same-material state cache skips re-uploads within a pass.
+
+## Session 6 (2026-10-06) — revert of the clock smoothing; RE before any new fix
+- Maintainer's binding rules: nothing may alter the game's music or judgement clock (read-only use
+  is fine); the READY hold's writes (`DPS+0x130`, the SceneGraph enable bit) are approved and
+  kept; no new fix for the tunnel jitter or the skybox smears until the RE is written up and
+  approved; the HP3 footage shows NO jitter / aliasing (a character flies through a tunnel passing
+  grid lines), so any model of the Wii effect predicting aliasing is wrong.
+- REVERTED: `clock::SmoothClock` + its constants and tests; `Window.song_clock` / `real_clock`
+  (dance time `t` straight from the count via the tempo map; `real_s` = raw `mc_ms / 1000 +
+  offset`); the held take-off's clock is wall time from an `Instant` stamp
+  (`Window.takeoff_started`, `lifecycle::takeoff_elapsed`); `last_frame` / `dt` kept for the
+  hold's wait budgets only. KEPT as read-only diagnostics: `FlightDiag` (on the raw count),
+  `frame_board::{now_ns, reader_stats}`, `render_item::material_param_raw`. Docs updated
+  (`director.rs::produce` comment, effects §5, research 2/3 §7.5).
+- Run #5 data (120 Hz, CrossOver, `flight diag`): the game's frame dt and the count step alternate
+  ~5 / ~12 ms (mean 8.3 ms); the frame board shows TWO `visit(2)` reads per publish (`board
+  pub/read/lag (1, 2, 0)`, "120 frame(s) not read exactly once") — an earlier report of "read
+  once" was wrong. Unexplained; part of the Task 2 RE (World's frame pacing under `fps_unlock`).
+- Skybox smears (run #5 screenshots): offline raycaster — WRAP addressing renders `fly_bg` +
+  `fly_add` + `fly_ble` clean; CLAMP on `fly_add`'s textures only reproduces the screenshots
+  (grey bands with thin lines, radial streaks). Hypothesis (unconfirmed in-game): `fly_add`'s
+  textures sample with CLAMP. World facts (20260915): gs texture registry stride 0xA0 (base
+  RVA 0x6f1a90, spin 0x6f1a8c, index `id >> 0x11`), lookups 0x2375c0 / 0x236b20, init sites
+  0x235f10 / 0x2364e0 write entry +0x34/+0x38/+0x3C = 3, +0x44 = 1, +0x48 = 1, +0x58 = 1 (the
+  sampler desc per `docs/playfield_styling_research.md`). Second issue: `fly_ble` alpha-blends
+  with z-write ON (mesh flags 0x2C0) under an alpha test GREATEREQUAL 0, so transparent texels
+  write depth and may reject the additive smoke behind the tube. Candidate fix (0x400, z-write
+  off) is for the plan, not now.
+- RE findings of this session: see "Session 6 RE" below.
+
+## Session 6 RE (2026-10-06) — findings (verified) and the proposed plan (NOT applied)
+Full write-ups: `docs/3d_model_format_research.md` §3.8 (World sampler state = `texture.db`),
+`docs/wii_ddr_hottest_party_2_3_research.md` §2.1 (MUSIC FIT texture-matrix update) and §7.5
+("Session 6 RE"), `docs/wii_ddr_zan_effects_research.md` §3.4 (world offset re-verified).
+Scratch (raycaster, 60 Hz grid emulation, PE disassembler helper):
+`.agents/scratchpad/2026-10-06-flight-re/` (also in `$TMPDIR/opencode/s6`).
+
+**Verified:**
+1. Wii (MUSIC FIT main.dol): the grid's only per-frame effect is the GX texture matrix
+   (`FUN_8010b98c`): `m13 += 0.125` repeat per 60 Hz tick (keys 0 → 1 over 0.1333 s win over
+   the equal constant speed; key times in seconds, speeds per 60 Hz frame; dt = a fixed 1/60 s
+   per update call × 1.2 on 50 Hz; no rate on objects 0 / 1 at the switch). Textures: every
+   STG201 TPL image is `GX_REPEAT` / `GX_LINEAR`, no mips. The world offset translates camera,
+   stage AND dancers identically — no relative motion. 60 Hz emulation with these values:
+   seamless streaming, no aliasing (ring + 3 trails advance 16 px / frame as one group).
+2. World (20260915): a texture's address mode / filters are fixed at CREATE from the `usage`
+   word; for a `.dds` the loader takes it from `data/data/texture.db` (in `startup.arc`, FNV-1 of
+   the registry key = basename lower-cased, `_` removed), default attr `0x55` = **CLAMP** /
+   LINEAR / mip LINEAR when the key is absent. Stock textures are listed (318 / 345 names,
+   attr `0x315` = WRAP, aniso 2); our ported textures are not (1 / 75 by coincidence) → every
+   custom-model texture samples CLAMP. The KTMDL texture-entry bytes `+0x0A..0x0C` are
+   indeed never read. No other writer of the registry's sampler desc exists (exhaustive sweep).
+3. Why that is BOTH problems: the ported grid tube's v runs −2 → −0.5 → 1 per ring pair and
+   repeats; under CLAMP each segment shows one ring cluster that slides a whole repeat as
+   `offV` 0 → 1 and snaps back when the clip wraps — a 7.5 Hz sawtooth independent of frame
+   rate and clock (explains: unchanged by the `.sanm` fix, by dance → real time, by the
+   smoothed clock; sparse single rings in the screenshots vs the Wii's dense clusters). The
+   same CLAMP smears the sky sphere (u −4..5) and `fly_add`'s strips/streaks; UV-in-range
+   quads (planets, stars) are fine.
+4. Run #5 pacing data: dt and count steps alternate 3 / 8 / 12 ms at 120 Hz under CrossOver
+   (the game samples time where it runs, presentation is vsynced); the two `visit(2)` reads
+   per publish both copy the same slot (lag 0) → no visual effect. Neither is the cause.
+
+**Still assumed (not RE'd):** the Wii's z-write / alpha-compare for its "soft" (`0x83`)
+blended materials (the grid). World's engine enum → `D3DTADDRESS_*` tables are identity (as
+the 20260616 note found by live CE; not re-read on 20260915).
+
+**Decision (maintainer, 2026-10-06): P2 (code patch) over P1 — P1 would rescan every custom
+texture at boot to synthesise the db (IO cost); the intent is WRAP for all custom textures
+anyway. APPLIED (session 6, uncommitted): signature `texture_db_default_attr_imm32` (unique +
+byte-shape identical on all five builds; sweep + shape_diff green) and
+`background_dancers::texture_wrap::apply` run from the mod's new `early_apply`: imm32
+`0x55 → 0x15` (attr bits 7:6 cleared = WRAP; filter / mip / aniso unchanged), stock value
+verified first, fail-open with one WARN. Boot-only (onBoot reads it once), no revert path;
+skipped when the mod is config-disabled. Affects only db-absent textures: all mod content + 27
+stock `2d_font_*` / license sheets (UVs inside [0, 1]).
+
+**The plan as proposed (for the record):**
+- P1 — WRAP for mod textures, data-only (preferred): generate an extended
+  `data/data/texture.db` (stock 1604 records + one `0x315` record per
+  `data_mods/custom_models/**/*.dds` registry key, sorted; field +4 = 0) and ship it through
+  LayeredFS as `data_mods/background_dancers/data/arc/startup_arc/data/data/texture.db`
+  (the `.arc` overlay path `arc_handler` already repacks; `startup.arc` is read in `onBoot`
+  after LayeredFS installs). Open points: regenerate when models are added (a build step in the
+  port scripts, or the DLL writing it to `_cache/` at LayeredFS install from the scanned
+  model folders); keys of textures that need CLAMP (none known in our content; 2D sheets are
+  not DDS-through-this-path). Verification: a read-only diagnostic logging each bound
+  texture's desc (`entry+0x34..0x4C`) for the flight parts, then the cabinet.
+- P2 — alternative if P1 cannot be served early enough: a one-byte patch of the default attr
+  (`0x55` → `0x15`, `C7 44 24 ?? 55 00 00 00` in `onBoot`) — changes only db-absent textures
+  (ours + 27 stock font / license sheets that stay inside [0, 1]) — or a detour on
+  `FUN_1802058c0` returning WRAP for unknown keys. Both are code; P1 is not.
+- P3 — `fly_ble` z-write: set mesh flag `0x400` on the alpha-blended grid / cutout meshes of
+  the flight parts in `port_stage_hottest2` (stock A3 uses `0x6C0` for glows) so transparent
+  grid texels stop occluding the additive smoke; alternatively keep z-write and accept the
+  patches. Decide after P1 is seen on the cabinet (CLAMP → WRAP changes what is transparent).
+- P4 — nothing to change in the clock path: the raw count is correct; the Wii's 1/60 s tick
+  ⇔ World's `real_s` seconds at 7.5 repeats / s. `FlightDiag` removed after run #6.
+
 ## Deploy & test log
-- (none yet). Watch-list for the first flight deploy:
+- Run #1 (2026-10-05, maintainer): HP3 flight stage + random HP3 dancer: take-off, platform, flight
+  through the tunnel, orb / rainbow / stars all work. Issues → session 4 above.
+- Run #2 watch-list: intro shots during the take-off (3 + 4 + 3 s) then the stage shots; the burst
+  at the mouth ~3 s in (`flight intro stage effect -- effect 0 at intro frame 180 ...` INFO,
+  `built ... N fx` includes `fx_<key>_xa`), `flight intro sound fxbXXXXXXXX at 3.0x s` INFO + audible;
+  the mouth opening + its scroll at 5 s; tunnel lines stream steadily (any song tempo); no stage
+  scroll elsewhere regressed (re-port); fast songs: take-off still 10 s real; dancers' flight loops
+  still on the beat; rewind/quick restart re-arms the sound.
+- Run #3 (2026-10-05, maintainer, 120 Hz): intro shots, sky burst + sound, flyer FX, take-off
+  and flight work, HP2 intro shot works. Issues → session 5: grid lines still jitter back and
+  forth (now with a slow forward creep); no tunnel scroll during the take-off; World's READY?
+  over the take-off.
+- Run #4 watch-list: (a) `flight diag` lines after the switch — `mc (d N ms)`: are there 0-ms /
+  16-ms steps? `real (d …)` steps even (~8.3 ms at 120 Hz)? `board pub/read/lag` = (1, 1, 0)
+  every frame? The 1 s summary's "frame(s) without a step" / "not read exactly once"; and does the
+  grid now stream steadily? If the real steps are even AND every publish is read once but the grid
+  still shuffles, the cause is downstream of the board (the item's material copy vs the draw) —
+  next diagnostic there. (b) The take-off: the tube stretches out of the mouth from ~5 s and
+  wraps the platform by ~7 s with the grid scrolling; the flight tunnel bends gently. (c) READY
+  hold: `flight take-off before the song -- READY? dwell held ... stage panel layer 0x… hidden`,
+  the take-off visible with the panel gone, then `... released (take-off end) at take-off 9.70 s`,
+  the panel back and its reveal + READY? after the take-off; first count log `playing -- first
+  count …` and whether the flight starts on the music; watch for a stand-down line instead
+  (and why), lanes / HUD drawn during the take-off, and a panel that re-shows itself while hidden.
+  Quick restart on a flight stage: in place = no take-off replay; fresh DPS = stand-down line.
+- Run #4 (2026-10-05, maintainer, 120 Hz): the mouth's tube now stretches over the platform
+  (skinning fix confirmed). Stutter looks the same. READY hold failed with both the A3 Gold and
+  the World skin (READY as normal, the song starting with the take-off) → session 5b.
+- Run #5 (2026-10-05, maintainer, 120 Hz): READY hold works with every DDR SELECTION skin (the
+  take-off before the song, panel hidden / shown); stutter unchanged with the smoothed clock;
+  skybox smears (screenshots `$DDR_WORLD_INSTALL/screenshots/20261006_0..3.png`); `flight diag`
+  data → session 6.
+- Run #6 (2026-10-06, maintainer, 120 Hz, P2 build): everything works — tunnel scroll streams
+  exactly as intended, skybox streaks / stretching gone, "visually looks pretty great". Root
+  cause confirmed: CLAMP addressing on mod textures (texture.db default), fixed by
+  `texture_wrap` (session 6 RE).
+- Run #5 watch-list (kept for reference): (a) World skin: `READY? step reached: timer …, scene built, stage panel state
+  Some(4)`, then `before the song -- … stage panel layer 0x… hidden`, the take-off visible during
+  the dwell, `released (take-off end) at take-off 9.70 s`, the panel back + its reveal + READY?;
+  (b) A3 skin: the same, no `another driver seeds` stand-down (the legacy panel waits; its
+  `frame_out` after the release); (c) stutter: `flight diag f…` and `1 s #…` — dt min..max (frame
+  drops ⇒ 16.7 ms dt ⇒ the grid's trail lines alias even with a perfect clock), real-clock steps
+  even?, board `(1, 1, 0)` and `read +x ms` stable?, any `MISMATCH` (another writer of the grid's
+  material copy).
+- Still open from the run #1 watch-list:
   - take-off timing; the switch at the take-off's end; the intro fades (HP4 STG301 sky 0.5 s early);
   - `flight stage -- dancer N (x) cannot fly: y flies instead` when a non-flyer is picked;
   - no flight poses on normal stages / in the options preview; culled stages gone; delete

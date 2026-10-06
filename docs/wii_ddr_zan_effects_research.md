@@ -56,11 +56,28 @@ Player colours: gold (P1), blue, pink/red, green. TPL indices: 0 / 9 / 10 / 12 s
 flip-books, 1 / 8 / 11 / 13 big stars, 2 white flame gradient, 3 RAINBOW, 4 / 5 / 16 rings,
 6 an empty 32×32 (carrier particles that only draw ribbons), 7 helix strip, 14 swirl, 15 flare.
 
-### 1.2 The intro's stage effect
+### 1.2 The intro's stage effect and sound (the sky burst)
 
-`FUN_80037354` (the flight intro, research 2/3 §7.5) plays category 5's effect `DAT_802892d0` at
-f 180 via `FUN_800431a4`, attached to a COL node of the stage (`FUN_80045b88`). HP4's intro is
-`FUN_80106298` (same script; sky fade 390..420; lighting preset switch at f 390 `FUN_801030bc`).
+`FUN_80037354` (the flight intro, research 2/3 §7.5) plays category 5's effect `DAT_802892d0`
+(effect 0 of the one-effect bank `stage/STG201_EFF.bin` = stage_effects01.teb) at f 180
+(`r2-0x7ca0` = 180.0) via `FUN_800431a4`, attached to a COL node of the stage
+(`FUN_80045b88(col, mtx, stage+0x6ba4)`). The node: the stage builder `FUN_8003fe78` matches every
+COL node named `EFF_<xx_yy>` against a 0x104-entry table at 0x80288828 (12-byte entries `{char *name,
+u32 effect, ...}`, filled by a static initializer at 0x800c7ef0) and stores the node index at
+`stage+0x6100+12·i`; `+0x6ba4` is entry 227, name `"04_01"` (`r13-0x7b24`) — **`EFF_04_01`**, at
+(0, 740, 2730) zan units with no rotation on STG201 / 205 / 206 alike: the tunnel mouth in the sky.
+The same frame plays sound 0xF6 `SE_DDR_BOSS` (0xF7 `SE_DDR_BOSSMULTI` when play mode `+0xe4` != 1)
+through `FUN_8001f6b8` (sound id < 10000 = the BRSAR sound index, `FUN_800c7e28`). Both are a
+one-note RSEQ (`DDR_BOSS`: `prg 10, vol, ..., note 60 vel 127, fin`) on `BNK_SEDDR` program 10 =
+wave 10 of its RWAR: 9.94 s stereo 32 kHz at its root key — one sound for the whole burst-to-leap
+stretch (loud from 2.5 s into it, i.e. intro 5.5 s, fading out by 9 s ≈ the leap at 9.07 s).
+
+HP4's intro is `FUN_80106298` (same script: f 180 burst + sound, here 0x115 / 0x116 = HP4's
+`SE_DDR_BOSS` / `BOSSMULTI`, the same wave; f 544 leap; sky fade 390..420; a lighting preset switch
+at f 390 `FUN_801030bc`). Its stage effect starter `FUN_8004d7bc` plays the stage's bank (STG301.bin's
+own `STG301_EFF.bin`, 21 nodes, 4 s) at EVERY COL node whose name starts `EFF_03_` (`r13-0x7c14` =
+`"03_XX"`, compared on 3 chars; the builder `FUN_8004e4dc` lists them at `+0x8ed4`): STG301's
+`EFF_03_01`, again (0, 740, 2730).
 
 ## 2. TEB format (big-endian, offsets relative to the TEB)
 
@@ -121,7 +138,14 @@ non-looping effect ends once all particles are gone.
 - Random: `FUN_801322bc(x)` = (2x/10000)·(rand() % 10000) − x, `FUN_80132354(x)` = x/10000·(rand() %
   10000) (MSL rand).
 - Step at age a, tn = a / life: pos = p0 + dir·speed·a; with spin, pos = Rot_Y(orbit_rate·a +
-  orbit_accel·a²/2)·pos (orbits about the emitter's Y); gravity (0x2) adds g·a²/2.
+  orbit_accel·a²/2)·pos (orbits about the emitter's Y).
+- Gravity (flag 0x2; block `{f32 dir[3], rot_spread[3], accel, accel_rand}`): at spawn the
+  particle's gravity direction is `Ry·Rz·Rx(±rot_spread)·dir` (box `FUN_8012c790`, non-radial
+  ellipsoid `FUN_8012c92c`) or `−normalise(pos)` (ellipsoid with radial velocity), its accel
+  `accel ± accel_rand` (`FUN_8012c438`). Step (`FUN_8012ce18`): a RING with radial velocity
+  (flag 4) falls in the emitter's frame, `pos += g·accel·a²/2` before the emitter transform; every
+  other part falls in WORLD space after it, `wpos += g·a²·accel·(manager scale 10)/2` (the
+  direction kept unnormalised).
   Local particles: world = emitter.world · pos. World-space (0x80): rotation = slerp(stored,
   emitter, follow), stored position += emitter displacement this frame × follow.
 - Billboard (mode 0): the sprite's rotation = the camera basis (transpose of the view rotation,
@@ -169,6 +193,12 @@ effects keep in WORLD space: ribbon points (each lives 1 s, so the rainbow — r
 the hands' stars draw long white trails) and world-space (0x80) particles (the orb's sparkles drop
 behind). During the take-off the offset is 0, so the leap burst does not stream.
 
+Re-verified 2026-10-06 (decompiled `FUN_800377e0`, `FUN_80042fa0` → `FUN_800459fc`,
+`FUN_800478b8`): the camera's eye and target, every stage object's base matrix and every
+dancer's matrix receive the SAME translation — the stage does not move relative to the camera;
+the tunnel's visible motion is its texture matrix alone (`docs/wii_ddr_hottest_party_2_3_research.md`
+§2.1).
+
 A port reproduces it by running the effects in a world scrolling at (0, 0, 180) units / s from the
 switch (`teb_dump.simulate(scroll=FLIGHT_SCROLL)`), or equivalently by moving every world-space
 point / particle anchor by −scroll·dt each frame; World's camera and scene need not move.
@@ -176,8 +206,8 @@ point / particle anchor by −scroll·dt each frame; World's camera and scene ne
 ## 4. Reference simulator (`scripts/teb_dump.py`)
 
 `parse_teb`, `teb_members`, `simulate(effect, attach(i), frames, view_rot, cam_pos)` reproduce
-§3 for the features boss_ddr3 uses (shapes 0–2, flags 0x1 / 0x4 / 0x10 / 0x20 / 0x40 / 0x80 /
-0x200 / 0x400 / 0x800, draw flags 0x2 / 0x20). Not implemented: gravity (0x2), chains (0x8),
+§3 for the features boss_ddr3 and the stage burst use (shapes 0–2, flags 0x1 / 0x2 / 0x4 / 0x10 /
+0x20 / 0x40 / 0x80 / 0x200 / 0x400 / 0x800, draw flags 0x2 / 0x20). Not implemented: chains (0x8),
 follow scale (0x100), the lit sphere mesh (draw 0x4), model nodes (type 2), fades.
 Blender check: `tools/blender_ddr_addon/examples/preview_flight_fx.py` (the orb ring, stars
 orbiting the hands with trails, sparkles; the leap flash and foot sprays). Unit tests:
@@ -221,7 +251,59 @@ premultiplied with alpha 1 — the collector forces an entry with alpha < 1 into
 reads v = 1). The frame board grew for it: 64 slots, 256 bones, 128 material writes and 128 record
 colours a slot; `visit(2)` copies straight into the item.
 
-Not ported / deviations: gravity (0x2), chains (0x8), follow scale (0x100), the lit sphere mesh
+**The intro (2026-10-05, after the first cabinet run):** the take-off — everything the Wii runs on
+its 60 Hz intro clock — runs on the REAL clock (the music count): the take-off clip, the platform
+script (`intro_look`), the intro camera shots (`<key>_intro01..03` = STG201_CAM00_01..03 / HP4's
+STG301_CAM.bin, played in order, 3 + 4 + 3 s), the leap and the sky burst; the flight after the
+switch keeps dance time for the dancers (`flight_fx::flight_schedule_time`: continuous at the
+switch) while the tunnel (`fly_*` parts) runs on the real clock from the switch, as the Wii's stage
+objects do. The burst is the stage bank's effect 0 at the layout's `stage_effect` line (frame 180,
+the node position), drawn through its own sprite pool (pseudo-player 4, instances
+`InstanceKind::StageFx`); its gravity parts (nodes 10 / 11 / 15) use the gravity port above. The
+sound: `port_flight_fx.burst_sound` renders the one-note RSEQ (the wave at its root pitch), mixed
+to mono, 44.1 kHz, `flight_fx/burst_44k_mono.pcm`; the DLL encodes it into a one-cue MS-ADPCM XACT
+pair on the parse thread and plays it once through a slot-less one-shot bank
+(`game_audio::register_one_shot_bank`) when the real clock passes frame 180 (gameplay only;
+rewind = stop + re-arm; teardown = stop).
+
+**The real clock and the READY hold (2026-10-05, after the third cabinet run).** The tunnel grid
+(MUSIC FIT `DRAW_B03_grid01` material 3, `grid01nuki`: a bright line and three fading trail lines
+21 px apart in a 128 px tile, scrolled 0.125 texture / 60 Hz frame) is a temporal-aliasing probe:
+any unevenness in its clock turns the trail lines into a back-and-forth shuffle while the head
+creeps forward (what run #3 showed at 120 Hz). Offline the `.sanm` samples monotonic and the
+sampler interpolates fractional frames, so the music count was suspected: an i32-ms value written
+by `GamePlayActor::onUpdate`, read one update stale. A smoothed tracker of the count in wall time
+(`clock::SmoothClock`, a critically damped second-order lock driving `real_s`, and later the dance
+clock too) was tried and deployed (runs #4 / #5): NO visible change, so it was removed — the real
+clock is the raw count again (+ the take-off length after a READY hold), and nothing in the DLL
+smooths or substitutes the game's music or judgement clock (read-only use only). What remains is
+a read-only diagnostic (`lifecycle::FlightDiag`, every flight stage, bounded): the first 48 frames
+after the switch and one-second summaries — dt, count steps, real-clock steps, the grid's `offV`,
+the item's material copy read back a frame later (another writer = MISMATCH), and whether / when
+(ms after the publish) `visit(2)` copied each frame-board publish (`frame_board::reader_stats`).
+Ruled out by disassembly: a deferred read of the item copy by the command-list executor — the
+material constants are copied into the stream at build (`FUN_18026cce0` → `FUN_18026c440`,
+20260825). Run #5 data (120 Hz, CrossOver): the game's frame dt and the count step alternate
+~5 / ~12 ms (mean 8.3 ms) and the board shows two `visit(2)` reads per publish (`pub/read/lag
+(1, 2, 0)`). Still open — and under RE before any further fix: how MUSIC FIT itself drives the
+grid (texture-matrix update, world offset), and World's frame pacing / presentation under the
+frame-rate hack. The maintainer's HP3 footage shows NO aliasing: a model of the Wii effect that
+predicts visible aliasing is wrong.
+
+The take-off can now run BEFORE the song, as in the games (`flight_hold_logic.rs`, engine side
+`flight_hold.rs`; research 2/3 §7.5): the stock stage panel shows for 4 s of World's 5 s READY?
+dwell, then the panel layer is hidden, the dwell timer (`DPS+0x130`) is held at 4.0 and the
+take-off plays on the real clock's free run (no music count yet); 0.30 s before its end the panel
+comes back and the dwell is released (seeded to 1000), so the song's music 0 is the switch: the
+real clock is then `count + take-off length`, dance time at the switch = `tau(0)`. The take-off starts once
+the scene is built and the panel settled (ShutterActor state 4), and the hold enables the
+SceneGraph itself — World sets the bit only when the dwell gate passes (run #4). DDR SELECTION's
+legacy panel, which seeds the timer every pre-song frame, defers to the hold
+(`services::ready_hold`). It stands down (the take-off plays over the song as before) when quick
+restart's fresh-DPS path seeds the dwell, when scene / panel are not ready within 8 s, or when the
+dwell timer is unresolved; `DDR_DANCERS_NO_FLIGHT_HOLD` (developer_mode) disables it.
+
+Not ported / deviations: chains (0x8), follow scale (0x100), the lit sphere mesh
 (draw 0x4), model nodes (type 2), stop fades (none of them used by boss_ddr3's played effects);
 particles depth-sorted (additive: order-free); ribbon v spacing linear (the game's first step is
 1 / n, the last 2 / n); a drawable that finds no free pool entry is dropped (cannot happen with the
