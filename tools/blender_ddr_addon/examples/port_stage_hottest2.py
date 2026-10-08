@@ -436,6 +436,52 @@ def is_group_screen(e, mt):
     return GROUP_SCREENS and Z.is_screen_material(mt)
 
 
+# QUADRANT SCREENS: on a `_Prm` type-2 stage (`quarter`, stage_video_name) the group-92 surfaces
+# play the stage's 2x2 video mosaic too, and each surface is authored to ONE quadrant of it (= one
+# whole loop): HP5 STG016's box wall (fronts top-left, sides top-right, tops bottom-left), STG015's
+# planets (one loop each), STG003 / 012's monitors, STG405's four monitors. World shows a single
+# movie on `offscreen1`, so a quadrant must be unfolded onto the whole picture -- as authored the
+# wall showed the BGA's top-left quarter (2026-10-07). Per triangle: a surface whose every triangle
+# sits inside one quadrant is unfolded; one that tiles or straddles (STG431's additive glow, u 0..6)
+# is left as the whole picture.
+_QUARTER_STAGE = {}
+
+
+def stage_has_quarter_screens(stage):
+    if stage not in _QUARTER_STAGE:
+        prm = Z.stage_params(open(os.path.join(STAGE_DIR, stage + '.bin'), 'rb').read())
+        _QUARTER_STAGE[stage] = bool(prm and prm['type'] == 2)
+    return _QUARTER_STAGE[stage]
+
+
+def triangle_quadrants(uv, tris, eps=1e-5):
+    """(n_tris, 2) quadrant origins (0 or 0.5 per axis) when every triangle of `tris` lies inside
+    one quadrant of the unit square, else None."""
+    t = uv[tris]                                      # (n, 3, 2)
+    lo, hi = t.min(axis=1), t.max(axis=1)
+    if (lo < -eps).any() or (hi > 1.0 + eps).any():
+        return None
+    q_lo = np.floor(np.clip(lo, 0.0, 1.0 - eps) * 2.0 + eps)
+    q_hi = np.floor(np.clip(hi, 0.0, 1.0 - eps) * 2.0 - eps)
+    if (q_lo != q_hi).any():
+        return None
+    return q_lo / 2.0
+
+
+def unfold_quadrants(pos, nrm, uv, col, skin_w, tris, quads):
+    """Map each triangle's quadrant `quads[t]` onto 0..1. A surface in a single quadrant keeps its
+    shared vertices; one spanning several (STG016's boxes) is unshared per triangle first, since
+    a vertex on a quadrant edge belongs to a different picture on each side."""
+    if (quads == quads[0]).all():
+        return pos, nrm, np.clip((uv - quads[0]) * 2.0, 0.0, 1.0), col, skin_w, tris
+    corners = tris.reshape(-1)
+    uv = (uv[corners].reshape(-1, 3, 2) - quads[:, None, :]) * 2.0
+    uv = np.clip(uv, 0.0, 1.0).reshape(-1, 2)
+    tris = np.arange(len(corners)).reshape(-1, 3)
+    return (pos[corners], nrm[corners], uv, col[corners],
+            skin_w[corners] if skin_w is not None else None, tris)
+
+
 # STAGE VIDEOS: a colour-group-91 material is where the game plays the STAGE's own video
 # (movie/stage/*.thp -- abstract VJ loops, not the song's PV): HP4 / HP5's `_Prm.bin` names it
 # (zan_dump.stage_params: `quarter` = a 2x2 mosaic whose quadrants the surfaces' UVs pick,
@@ -681,10 +727,20 @@ def mesh_records(e):
                 kind = 'dec' if screen else world_kind(e, mi, bool((col[:, 3] < 0.999).any()))
             if screen and not group_screen:
                 col = np.ones_like(col)                  # the movie at full strength
+            pos_a, nrm_a, uv_a, tris_a = np.array(P_), np.array(N_), np.array(UV_), np.array(tri_out)
+            skin_w = np.array(SW_) if skin_anchors else None
+            if group_screen and stage_has_quarter_screens(STAGE_NOW):
+                quads = triangle_quadrants(uv_a, tris_a)
+                if quads is None:
+                    (u0, v0), (u1, v1) = uv_a.min(0), uv_a.max(0)
+                    print('  SCREEN %s/%s: not quadrant-authored (u %.2f..%.2f v %.2f..%.2f) -- kept as the whole picture'
+                          % (e['stem'], nd['name'], u0, u1, v0, v1))
+                else:
+                    pos_a, nrm_a, uv_a, col, skin_w, tris_a = unfold_quadrants(pos_a, nrm_a, uv_a, col, skin_w, tris_a, quads)
             out.append(dict(kind=kind, anchor=piece_anchor, material=mi, screen=screen, group_screen=group_screen,
-                            skin_anchors=skin_anchors, skin_w=np.array(SW_) if skin_anchors else None,
+                            skin_anchors=skin_anchors, skin_w=skin_w,
                             bitmap=mt['textures'][0] if mt['textures'] and mt['textures'][0] < len(e['textures']) else None,
-                            pos=np.array(P_), nrm=np.array(N_), uv=np.array(UV_), col=col, tris=np.array(tri_out),
+                            pos=pos_a, nrm=nrm_a, uv=uv_a, col=col, tris=tris_a,
                             obj=nd['index'], two_sided=Z.material_mode(mt)[2] or mirrored, mirrored=mirrored))
     return out
 
@@ -922,7 +978,8 @@ def build_part(key, part, chunk):
             if screen:
                 # the screen's authored v band (the whole picture) -> World's 16:9 movie band; a
                 # group-92 surface samples the movie through its own UVs (0..1 = the whole picture;
-                # HP5's movieBox wall gives each box its window of it), so its v maps as is
+                # HP5's movieBox wall gives each box its window of it -- a quadrant-authored surface
+                # of a `quarter` stage was unfolded to 0..1 in mesh_records), so its v maps as is
                 uv = uv.copy()
                 v_lo, v_hi = (0.0, 1.0) if rs[0].get('group_screen') else (float(uv[:, 1].min()), float(uv[:, 1].max()))
                 uv[:, 1] = SCREEN_BAND[0] + (uv[:, 1] - v_lo) / max(v_hi - v_lo, 1e-6) * (SCREEN_BAND[1] - SCREEN_BAND[0])

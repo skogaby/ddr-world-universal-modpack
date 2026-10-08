@@ -112,7 +112,7 @@ fn json_cache_snapshot_includes_local_rows() {
         let _ = state.set_value(id, 0, 500);
         let _ = state.set_value(id, 1, 250);
     }
-    let cached = state.json_cache_snapshot();
+    let cached = state.json_cache_snapshot(false);
     assert_eq!(
         cached,
         vec![
@@ -125,6 +125,78 @@ fn json_cache_snapshot_includes_local_rows() {
         .network_save_snapshot()
         .iter()
         .all(|(id, _)| id != "jc_local"));
+
+    // `SaveOnly` JSON fallback raised (`persist_network=false`): the
+    // SaveOnly row joins the cache — the only way it persists without the
+    // network leg. The network snapshot is unaffected by the flag.
+    let cached = state.json_cache_snapshot(true);
+    assert_eq!(
+        cached,
+        vec![
+            ("jc_full".to_string(), [500, 250]),
+            ("jc_saveonly".to_string(), [500, 250]),
+            ("jc_local".to_string(), [500, 250]),
+        ]
+    );
+}
+
+/// The fallback-aware matrix columns: with the flag raised, `SaveOnly` is
+/// JSON-cached and accepts the JSON prime — nothing else changes (no mode
+/// gains a network load, `None`/`Session` stay inert).
+#[test]
+fn save_only_json_fallback_matrix() {
+    for mode in ALL_MODES {
+        let expect_json = mode.json_cached() || mode == PersistMode::SaveOnly;
+        assert_eq!(
+            mode.json_cached_when(true),
+            expect_json,
+            "{mode:?} json/fallback"
+        );
+        assert_eq!(
+            mode.json_cached_when(false),
+            mode.json_cached(),
+            "{mode:?} json/no fallback"
+        );
+        assert_eq!(
+            mode.accepts_load_when(LoadSource::JsonPrime, true),
+            expect_json,
+            "{mode:?} gate/json/fallback"
+        );
+        assert_eq!(
+            mode.accepts_load_when(LoadSource::Network, true),
+            mode.loaded_from_network(),
+            "{mode:?} gate/network is fallback-independent"
+        );
+    }
+}
+
+/// `authoritative` tracks "a load or the player chose this" per side: set by
+/// `set_value` (facade edit / `resolve_from_load`), NOT by registration or
+/// the silent game→menu seed (`seed_value`). A `SaveOnly` owner uses it under
+/// the JSON fallback to decide whether to drive game memory from the cache.
+#[test]
+fn authoritative_flag_follows_loads_and_edits_not_seeds() {
+    let mut state = FrameworkState::default();
+    state
+        .try_register(spec("auth_row", PersistMode::SaveOnly))
+        .unwrap();
+    assert!(!state.is_authoritative("auth_row", 0));
+    assert!(!state.is_authoritative("auth_row", 1));
+
+    // Silent seed (mirroring the game) is not a choice.
+    assert!(state.seed_value("auth_row", 0, 300));
+    assert_eq!(state.get_value("auth_row", 0), Some(300));
+    assert!(!state.is_authoritative("auth_row", 0));
+
+    // A load / edit is — per side.
+    let _ = state.set_value("auth_row", 1, 400);
+    assert!(state.is_authoritative("auth_row", 1));
+    assert!(!state.is_authoritative("auth_row", 0));
+
+    // Unknown id / bad side are plain false, never a panic.
+    assert!(!state.is_authoritative("nope", 0));
+    assert!(!state.is_authoritative("auth_row", 2));
+    assert!(!state.seed_value("auth_row", 2, 1));
 }
 
 /// Both snapshots carry the post-`save_transform` wire value — the one the
@@ -143,7 +215,7 @@ fn json_cache_snapshot_applies_save_transform() {
         .unwrap();
     let _ = state.set_value("tx_local", 0, 200);
     assert_eq!(
-        state.json_cache_snapshot(),
+        state.json_cache_snapshot(false),
         vec![("tx_local".to_string(), [201, 101])]
     );
 }
@@ -333,7 +405,7 @@ fn local_rows_accept_json_prime_but_not_network_loads() {
 
     // The JSON writer's snapshot (`json_cache_snapshot`) includes Local.
     let cached: Vec<String> = state
-        .json_cache_snapshot()
+        .json_cache_snapshot(false)
         .into_iter()
         .map(|(id, _)| id)
         .collect();

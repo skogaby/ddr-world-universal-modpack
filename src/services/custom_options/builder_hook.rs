@@ -171,6 +171,11 @@ fn builder_detour_body(parent: *mut u8) {
         // ordering can keep families together (`ordering::parent_positions`).
         let handles: Vec<(OptionHandle, String, RowKindTag, Option<String>)> = {
             let state = registry::STATE.lock().unwrap();
+            // One-shot operator feedback for `option_menu_settings` typos,
+            // checked against EVERY registered id (the filtered snapshot
+            // below omits overlay-only / unavailable rows that are still
+            // perfectly real).
+            state.warn_unknown_configured_ids_once();
             state
                 .options
                 .iter()

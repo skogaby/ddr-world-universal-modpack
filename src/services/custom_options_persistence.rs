@@ -24,9 +24,11 @@
 //! record sanitiser registered here.
 //!
 //! Gated by `"custom_options": { "persist_network": true }` in mod-config.json
-//! (default true). When false, no network children are emitted; if
-//! `persist_json` is also false, no detours are installed and options reset
-//! to defaults on each card swipe.
+//! (default true). When false, no network children are emitted and the
+//! `PersistMode::SaveOnly` rows fall back to the offline JSON cache
+//! (`custom_options::set_save_only_json_fallback`) — otherwise nothing would
+//! persist them; if `persist_json` is also false, no detours are installed
+//! and options reset to defaults on each card swipe.
 
 use std::ffi::CString;
 use std::ptr::addr_of;
@@ -320,6 +322,20 @@ pub fn init(signatures: &SignatureStore) -> bool {
     let persist_json = co.map(|c| c.persist_json).unwrap_or(true);
     PERSIST_NETWORK.store(persist_network, Ordering::SeqCst);
     PERSIST_JSON.store(persist_json, Ordering::SeqCst);
+
+    // `SaveOnly` JSON fallback: with the network leg off, rows that persist
+    // only on the network save (WebUI cosmetics, VIDEO SIZE, weight/calorie)
+    // would never persist at all — the whole point of the JSON leg is to
+    // cover servers that don't honour the injected fields. Raise the flag
+    // before any mod registers (mod enable() runs after this init) so the
+    // JSON write, the prime and the owners' scene-25 sync all agree.
+    let save_only_fallback = !persist_network && persist_json;
+    custom_options::set_save_only_json_fallback(save_only_fallback);
+    if save_only_fallback {
+        log_info!(
+            "custom_options_persistence: persist_network=false — SaveOnly options fall back to the mod-config.json cache"
+        );
+    }
 
     // One-time migration of the legacy webui_options offline cache into the
     // custom_options section. Runs before the JSON-load timer reads the file.
@@ -1114,8 +1130,9 @@ unsafe extern "C" fn save_sender_trampoline(job: *mut u8, kbin_ctx: *mut u8) -> 
 /// block in `mod-config.json` (the offline persistence path). Stores the same
 /// post-`save_transform` wire values the network path emits, for every option
 /// whose `PersistMode` includes the JSON cache (`Full` and the cache-only
-/// `Local`; `SaveOnly` options ride the network save only and never enter the
-/// offline cache). Dirty-checked and per-side inside
+/// `Local`; `SaveOnly` options join only under the `persist_network=false`
+/// fallback — otherwise they ride the network save alone). Dirty-checked and
+/// per-side inside
 /// `config::save_custom_options_values`.
 fn write_json_cache(side: u8) {
     let mut values = serde_json::Map::new();

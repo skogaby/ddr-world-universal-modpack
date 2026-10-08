@@ -14,13 +14,16 @@
 //! *save* direction the stock game lacks:
 //!
 //! - [`register`] adds the two option rows to the Mods tab.
-//! - [`seed`] reads `PlayerWork` at SONG_SELECT and mirrors the values into the
-//!   menu registry (read-only w.r.t. game memory).
+//! - [`sync`] reads `PlayerWork` at SONG_SELECT and mirrors the values into the
+//!   menu registry (read-only w.r.t. game memory) — or, under the `SaveOnly`
+//!   JSON fallback (`persist_network=false`), writes the cached / player-chosen
+//!   values into `PlayerWork` instead.
 //! - the `on_change` writers push a user edit into `PlayerWork`.
 //! - persistence is [`PersistMode::SaveOnly`]: the framework auto-emits
 //!   `<mod_weight>` / `<mod_is_disp_weight>` s32 children on `playerdata_save`
 //!   (the option ids drive the `mod_{id}` wire names), and the backend writes
-//!   them into its native `weight` / `is_disp_weight` columns.
+//!   them into its native `weight` / `is_disp_weight` columns. With
+//!   `persist_network=false` the two rows ride the `mod-config.json` cache.
 //!
 //! Offsets are hardcoded (verified stable on gamemdx 20260324 & 20260616); the
 //! `player_work_table` base is resolved at runtime by the parent mod. See
@@ -57,7 +60,7 @@ static REGISTERED: AtomicBool = AtomicBool::new(false);
 /// Walk `player_work_table[side]` → `*wrapper` = `PlayerWork` for one side,
 /// null-guarded at every hop. Returns `None` if the table is unresolved or the
 /// side isn't carded in — every caller then no-ops (never writes/reads game
-/// memory), mirroring `webui_options::{seed_registry_from_game, try_apply_all}`.
+/// memory), mirroring `webui_options::{sync_registry_with_game, try_apply_all}`.
 fn player_work(side: u8) -> Option<*mut u8> {
     if side > 1 {
         return None;
@@ -153,20 +156,28 @@ pub fn register() {
     log_info!("profile_fields: registered {OPT_IS_DISP} + {OPT_WEIGHT}");
 }
 
-/// Seed both rows from the game's own `PlayerWork` for one player side.
+/// Reconcile both rows with the game's own `PlayerWork` for one player side.
 ///
 /// Called from the parent mod's SONG_SELECT (scene 25) callback, the point at
 /// which `PlayerWork` is fully populated from the server's `<common>` load.
-/// Strictly **read-only** w.r.t. game memory, and uses
-/// [`custom_options::set_value_silent`] (which does NOT fire `on_change`), so it
-/// can never write back into `PlayerWork` or loop. A side not carded in is
-/// skipped silently. A read-back `weight == 0` seeds the display to
-/// [`WEIGHT_DEFAULT_WHEN_UNSET`] (60) — matching the game's own unset assumption
-/// — without touching memory.
-pub fn seed(player_side: u8) {
+///
+/// Default direction (network persistence on): strictly **read-only** w.r.t.
+/// game memory, using [`custom_options::set_value_silent`] (which does NOT
+/// fire `on_change`), so it can never write back into `PlayerWork` or loop. A
+/// read-back `weight == 0` seeds the display to [`WEIGHT_DEFAULT_WHEN_UNSET`]
+/// (60) — matching the game's own unset assumption — without touching memory.
+///
+/// Under the `SaveOnly` JSON fallback (`persist_network=false`) a row the
+/// cache primed or the player chose ([`custom_options::value_is_authoritative`])
+/// is instead written INTO `PlayerWork` through the same writers a user edit
+/// uses — nothing else would restore it. A row nobody has chosen yet keeps
+/// mirroring the game. A side not carded in is skipped silently.
+pub fn sync(player_side: u8) {
     let Some(pw) = player_work(player_side) else {
         return;
     };
+
+    let drive_game = custom_options::save_only_json_fallback();
 
     // SAFETY: `pw` is a validated PlayerWork base; both fields are in-header.
     let (raw_weight, raw_disp) = unsafe {
@@ -176,17 +187,29 @@ pub fn seed(player_side: u8) {
         )
     };
 
-    let weight_seed = if raw_weight == 0 {
-        WEIGHT_DEFAULT_WHEN_UNSET
+    if drive_game && custom_options::value_is_authoritative(OPT_WEIGHT, player_side) {
+        if let Some(v) = custom_options::get_value(player_side, OPT_WEIGHT) {
+            on_weight_changed(player_side, v);
+        }
     } else {
-        raw_weight.clamp(WEIGHT_MIN, WEIGHT_MAX)
-    };
-    let disp_seed = if raw_disp != 0 { 1 } else { 0 };
+        let weight_seed = if raw_weight == 0 {
+            WEIGHT_DEFAULT_WHEN_UNSET
+        } else {
+            raw_weight.clamp(WEIGHT_MIN, WEIGHT_MAX)
+        };
+        custom_options::set_value_silent(OPT_WEIGHT, player_side, weight_seed);
+        log_info!(
+            "profile_fields: seeded weight={weight_seed} (raw={raw_weight}) (side={player_side})"
+        );
+    }
 
-    custom_options::set_value_silent(OPT_WEIGHT, player_side, weight_seed);
-    custom_options::set_value_silent(OPT_IS_DISP, player_side, disp_seed);
-
-    log_info!(
-        "profile_fields: seeded weight={weight_seed} (raw={raw_weight}) is_disp_weight={disp_seed} (side={player_side})"
-    );
+    if drive_game && custom_options::value_is_authoritative(OPT_IS_DISP, player_side) {
+        if let Some(v) = custom_options::get_value(player_side, OPT_IS_DISP) {
+            on_is_disp_changed(player_side, v);
+        }
+    } else {
+        let disp_seed = if raw_disp != 0 { 1 } else { 0 };
+        custom_options::set_value_silent(OPT_IS_DISP, player_side, disp_seed);
+        log_info!("profile_fields: seeded is_disp_weight={disp_seed} (side={player_side})");
+    }
 }

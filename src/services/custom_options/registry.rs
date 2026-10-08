@@ -31,6 +31,15 @@ pub(crate) struct RegisteredOption {
     pub(crate) show_when: ShowWhen,
     /// Per-player current value. `values[0]` = P1, `values[1]` = P2.
     pub(crate) values: [i32; 2],
+    /// Per-player "the value is owned by persistence or the player": set
+    /// when a persistence load lands ([`FrameworkState::set_value`] from
+    /// `resolve_from_load`) or the player edits the row (in-game press /
+    /// facade `set_value`); NOT set by registration (the default) or by a
+    /// silent seed ([`FrameworkState::seed_value`], the game→menu mirror).
+    /// Lets a `SaveOnly` row's owner, under the JSON fallback, tell "the
+    /// cache/player chose this" apart from "nothing has chosen anything yet"
+    /// and keep mirroring the game's own value in the latter case.
+    pub(crate) authoritative: [bool; 2],
     /// The registration-time default, kept so session-scoped options can be
     /// restored to it at card-in (see [`FrameworkState::reset_session_values`]).
     pub(crate) default_value: i32,
@@ -176,6 +185,14 @@ impl FrameworkState {
         self.options.iter().position(|o| o.id == id)
     }
 
+    /// Fire `ordering`'s one-shot unknown-`option_menu_settings`-id WARN with
+    /// every registered id (menu-independent — see
+    /// [`super::ordering::warn_unknown_configured_ids_once`]).
+    pub(crate) fn warn_unknown_configured_ids_once(&self) {
+        let ids: Vec<&str> = self.options.iter().map(|o| o.id.as_str()).collect();
+        super::ordering::warn_unknown_configured_ids_once(&ids);
+    }
+
     /// Core registration logic. Performs all validation and, on success,
     /// appends the new `RegisteredOption` and returns its handle. Does NOT
     /// fire the initial change callback — the caller is responsible for
@@ -244,6 +261,7 @@ impl FrameworkState {
             on_change: spec.on_change,
             show_when: spec.show_when,
             values: [spec.default_value; 2],
+            authoritative: [false; 2],
             default_value: spec.default_value,
             persist: spec.persist,
             save_transform: spec.save_transform,
@@ -271,9 +289,10 @@ impl FrameworkState {
         }
     }
 
-    /// Write a new value into an option's per-player cache. Returns the
-    /// `OnChangeFn` + (side, value) the caller should invoke *after*
-    /// releasing the lock.
+    /// Write a new value into an option's per-player cache and mark the side
+    /// [`authoritative`](RegisteredOption::authoritative) (a persistence load
+    /// or a player edit chose it). Returns the `OnChangeFn` + (side, value)
+    /// the caller should invoke *after* releasing the lock.
     ///
     /// Returns `None` if the id isn't registered or `side >= 2`.
     pub(crate) fn set_value(
@@ -288,7 +307,35 @@ impl FrameworkState {
         let idx = self.index_of(id)?;
         let opt = &mut self.options[idx];
         opt.values[side as usize] = value;
+        opt.authoritative[side as usize] = true;
         Some((opt.on_change, side, value))
+    }
+
+    /// Silent-seed write: same as [`set_value`](Self::set_value) but does NOT
+    /// mark the side authoritative — for mirroring the game's own state into
+    /// the menu (`custom_options::set_value_silent`), which must never count
+    /// as a choice. Returns `false` if the id isn't registered or `side >= 2`.
+    pub(crate) fn seed_value(&mut self, id: &str, side: u8, value: i32) -> bool {
+        if side >= 2 {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        self.options[idx].values[side as usize] = value;
+        true
+    }
+
+    /// Whether a persistence load or a player edit has chosen `(id, side)`'s
+    /// value (see [`RegisteredOption::authoritative`]). `false` for an
+    /// unknown id / `side >= 2`.
+    pub(crate) fn is_authoritative(&self, id: &str, side: u8) -> bool {
+        if side >= 2 {
+            return false;
+        }
+        self.index_of(id)
+            .map(|i| self.options[i].authoritative[side as usize])
+            .unwrap_or(false)
     }
 
     /// Card-in reset: restore every session-scoped option
@@ -411,19 +458,20 @@ impl FrameworkState {
     }
 
     /// Both sides' post-`save_transform` values of every option in the
-    /// offline JSON cache ([`PersistMode::json_cached`] — `Full` + `Local`),
-    /// in registration order. The SAME wire values the network path emits,
-    /// so both load paths share one `load_transform`.
+    /// offline JSON cache ([`PersistMode::json_cached_when`] — `Full` +
+    /// `Local`, plus `SaveOnly` when `save_only_fallback` is raised), in
+    /// registration order. The SAME wire values the network path emits, so
+    /// both load paths share one `load_transform`.
     ///
     /// Deliberately NOT a filter over [`Self::network_save_snapshot`]:
     /// `Local` rows are absent from the network set, so filtering it by
     /// `json_cached` would keep `Full` only (the pre-2026-09-22 JSON writer
     /// did exactly that and never wrote a `Local` row).
-    pub(crate) fn json_cache_snapshot(&self) -> Vec<(String, [i32; 2])> {
-        self.persisted_snapshot(PersistMode::json_cached)
+    pub(crate) fn json_cache_snapshot(&self, save_only_fallback: bool) -> Vec<(String, [i32; 2])> {
+        self.persisted_snapshot(|m| m.json_cached_when(save_only_fallback))
     }
 
-    fn persisted_snapshot(&self, include: fn(PersistMode) -> bool) -> Vec<(String, [i32; 2])> {
+    fn persisted_snapshot(&self, include: impl Fn(PersistMode) -> bool) -> Vec<(String, [i32; 2])> {
         self.options
             .iter()
             .filter(|o| include(o.persist))

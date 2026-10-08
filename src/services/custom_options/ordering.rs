@@ -74,8 +74,9 @@ pub(crate) struct OptionMenuSetting {
 /// as identity/no-overrides.
 static CONFIGURED: OnceCell<Vec<OptionMenuSetting>> = OnceCell::new();
 
-/// Warn-once latch for unknown ids. The builder hook fires on every menu open,
-/// so unlatched logging would spam the same warning repeatedly.
+/// Warn-once latch for unknown ids ([`warn_unknown_configured_ids_once`]).
+/// Both menus fire on every open, so unlatched logging would spam the same
+/// warning repeatedly.
 static UNKNOWN_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Store the operator's configured settings. Called once from
@@ -251,33 +252,71 @@ pub(crate) fn placement_override_for(id: &str) -> (Option<bool>, Option<bool>) {
 ///
 /// Identity fast-path (minus headers) when nothing is configured or the list
 /// is empty, so the unconfigured header-free case is byte-for-byte the
-/// shipped behavior. Emits a single WARN listing any configured ids that
-/// matched no registered option.
+/// shipped behavior. Does NOT warn about configured ids missing from `ids`:
+/// every caller passes a menu-filtered subset (in-game-only rows are absent
+/// from the overlay's snapshot and vice versa), so "not in this list" is not
+/// "not registered". The one-shot unknown-id WARN is
+/// [`warn_unknown_configured_ids_once`], fed the FULL registry.
 pub(crate) fn display_order_for(
     ids: &[&str],
     is_header: &[bool],
     parent: &[Option<usize>],
 ) -> Vec<usize> {
     let configured = CONFIGURED.get().map(|c| c.as_slice());
-    let (order, mut unknown) = compute_order(ids, is_header, parent, configured);
+    compute_order(ids, is_header, parent, configured).0
+}
 
-    if !unknown.is_empty() && !UNKNOWN_WARNED.swap(true, Ordering::AcqRel) {
-        unknown.sort();
-        unknown.dedup();
-        log_warn!(
-            "custom_options/option_menu_settings: ignoring {} id(s) with no registered option: {:?} \
-             (a typo, or a disabled mod / asset not present this boot)",
-            unknown.len(),
-            unknown
-        );
+/// Configured `option_menu_settings` ids (lowercased at store time) that match
+/// none of `registered` — the ids the ordering silently ignores. Sorted,
+/// deduplicated; empty when nothing is configured.
+pub(crate) fn unknown_configured_ids(
+    configured: Option<&[OptionMenuSetting]>,
+    registered: &[&str],
+) -> Vec<String> {
+    let Some(configured) = configured else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = configured
+        .iter()
+        .filter(|s| !registered.iter().any(|id| id.eq_ignore_ascii_case(&s.id)))
+        .map(|s| s.id.clone())
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    unknown
+}
+
+/// Emit the single WARN listing configured ids that matched no registered
+/// option. `registered` must be EVERY registered option id (not a menu's
+/// placement/availability-filtered subset — an in-game-only row that the
+/// overlay never shows is still registered). Latched: the menus open many
+/// times per session, and only the first call after all mods have registered
+/// is informative, so callers fire it from a menu open (well after boot).
+pub(crate) fn warn_unknown_configured_ids_once(registered: &[&str]) {
+    if UNKNOWN_WARNED.load(Ordering::Acquire) {
+        return;
     }
-
-    order
+    let unknown = unknown_configured_ids(CONFIGURED.get().map(|c| c.as_slice()), registered);
+    if unknown.is_empty() {
+        return;
+    }
+    if UNKNOWN_WARNED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    log_warn!(
+        "custom_options/option_menu_settings: ignoring {} id(s) with no registered option: {:?} \
+         (a typo, or a disabled mod / asset not present this boot)",
+        unknown.len(),
+        unknown
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_order, parent_positions, placement_override, OptionMenuSetting};
+    use super::{
+        compute_order, parent_positions, placement_override, unknown_configured_ids,
+        OptionMenuSetting,
+    };
 
     /// Order-only settings (no placement flags) from a list of ids — the
     /// direct analog of the legacy `row_order` array. Ids arrive
@@ -381,6 +420,25 @@ mod tests {
             compute_order(&["a", "b"], NO_HEADERS, NO_PARENTS, Some(&configured));
         assert_eq!(order, vec![0, 1]);
         assert_eq!(unknown, vec!["ghost".to_string()]);
+    }
+
+    /// The unknown-id WARN is computed against the FULL registry, not a menu's
+    /// filtered snapshot: an id registered but absent from one menu's list
+    /// (an in-game-only row seen from the overlay) is not "unknown".
+    /// Regression: the WARN used to ride `display_order_for`, so the first
+    /// mod-menu open listed every in-game-only `customize_*` row as a typo.
+    #[test]
+    fn unknown_configured_ids_match_against_full_registry() {
+        let configured = cfg(&["customize_lane_single", "ghost", "ghost", "a"]);
+        // Overlay snapshot sees only "a"; the registry also holds the
+        // in-game-only "customize_lane_single".
+        let all_registered = ["a", "customize_lane_single", "b"];
+        assert_eq!(
+            unknown_configured_ids(Some(&configured), &all_registered),
+            vec!["ghost".to_string()]
+        );
+        assert!(unknown_configured_ids(None, &all_registered).is_empty());
+        assert!(unknown_configured_ids(Some(&[]), &all_registered).is_empty());
     }
 
     #[test]

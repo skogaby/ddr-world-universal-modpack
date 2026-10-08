@@ -21,21 +21,33 @@
 //!   the overlay). The stored value is the 0-based index into the discovered id list; the
 //!   display is a short prefix plus the 1-based position (`ScalarFormat::PrefixedIndex`, e.g.
 //!   `Character #3`). No per-value textures.
-//! - **Seed**: on every SONG_SELECT (scene 25) entry, `seed_registry_from_game` reads each
+//! - **Sync**: on every SONG_SELECT (scene 25) entry, `sync_registry_with_game` reads each
 //!   side's `Customize` fields, reverse-maps id → index (index 0 when the id isn't present on
-//!   this cabinet) and writes the menu registry with `set_value_silent`. It never writes game
-//!   memory and fires no `on_change`.
-//! - **Apply**: a menu edit (`on_change`) runs `try_apply_all`, the only writer of `Customize`,
-//!   which writes every category's selected asset id for that side.
+//!   this cabinet) and writes the menu registry with `set_value_silent`. With network
+//!   persistence on it never writes game memory and fires no `on_change`; see the JSON
+//!   fallback below for the one case where the direction flips.
+//! - **Apply**: a menu edit (`on_change`) runs `try_apply_all`, which writes every category's
+//!   selected asset id into `Customize` for that side.
 //!
 //! ## Persistence (`PersistMode::SaveOnly`)
 //!
-//! The cosmetic and profile rows are emitted on the network save only (as `mod_<option id>`
-//! wire fields): never read from a network load and never written to or primed from the
-//! mod-config.json cache. The game's own profile load is the single source of truth and the
-//! scene-25 seed mirrors it into the menu. The cosmetic rows' `save_transform`
-//! (`persist_save_transform`) converts the stored index back to the stable asset id, so the
-//! `categories` state must be populated before any row is registered.
+//! With `custom_options.persist_network` on (the default), the cosmetic and profile rows are
+//! emitted on the network save only (as `mod_<option id>` wire fields): never read from a
+//! network load and never written to or primed from the mod-config.json cache. The game's own
+//! profile load is the single source of truth and the scene-25 sync mirrors it into the menu.
+//! The persist transforms (`persist_save_transform` / `persist_load_transform`) convert the
+//! stored index to the stable asset id and back, so the `categories` state must be populated
+//! before any row is registered.
+//!
+//! **JSON fallback (`persist_network=false`).** A server that ignores the injected
+//! `mod_customize_*` fields can never round-trip these rows, so when the operator turns the
+//! network leg off the framework raises `custom_options::save_only_json_fallback()` and every
+//! `SaveOnly` row rides the `custom_options.{p1,p2}` cache like a `Local` row (written on each
+//! save, primed at boot through `load_transform`). The scene-25 sync then DRIVES the game for
+//! any row the cache primed or the player edited (`value_is_authoritative`): the cached asset
+//! id is written into `Customize`, since the game's own load would otherwise overwrite the
+//! pick on every card-in. Rows nobody has chosen yet keep mirroring the game, so a value the
+//! server/web UI set survives until the player first edits that row.
 //!
 //! ## Submodules
 //!
@@ -54,8 +66,12 @@
 //!
 //! ## Invariants
 //!
-//! - Never write `Customize` or `PlayerWork` outside a user edit: the seed must stay read-only
-//!   and silent, or an id the cabinet lacks would overwrite the server-loaded value.
+//! - Never write `Customize` or `PlayerWork` outside a user edit or the JSON-fallback sync of
+//!   an authoritative row: the mirror leg must stay read-only and silent, or an id the cabinet
+//!   lacks would overwrite the server-loaded value.
+//! - Never hold the mod's `STATE` lock while calling into the registry: the registry calls the
+//!   persist transforms (which take `STATE`) under its own lock. `customize_base_and_categories`
+//!   snapshots and releases first.
 //! - Don't hold the `STATE` lock across `register_option` (registration can fire callbacks
 //!   that re-enter it). Every `PlayerWork` walk is null-guarded, so an uncarded side is a
 //!   no-op.
@@ -118,14 +134,11 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
     })
 });
 
-/// Map an in-memory sequential index to its stable asset ID, for server
-/// persistence. Used as the save-side persist transform (these options are
-/// `SaveOnly`: there is no load-side inverse — menu state is seeded by
-/// reading the game's own `Customize` object at SONG_SELECT entry, which
-/// does its own asset-id → index reverse lookup in
-/// [`seed_registry_from_game`]). Returns the input unchanged if the id isn't
-/// registered here or the index is out of range (shouldn't happen in
-/// practice, but keeps the failure mode safe).
+/// Map an in-memory sequential index to its stable asset ID — the wire value
+/// of both the network save and the JSON cache. The save-side persist
+/// transform; [`persist_load_transform`] is its inverse. Returns the input
+/// unchanged if the id isn't registered here or the index is out of range
+/// (shouldn't happen in practice, but keeps the failure mode safe).
 fn persist_save_transform(id: &str, value: i32) -> i32 {
     let state = match STATE.lock() {
         Ok(s) => s,
@@ -139,6 +152,27 @@ fn persist_save_transform(id: &str, value: i32) -> i32 {
         return value;
     }
     cat.asset_ids[value as usize] as i32
+}
+
+/// Inverse of [`persist_save_transform`]: a cached asset id → its menu index.
+/// Only ever consulted by the JSON prime under the `SaveOnly` JSON fallback
+/// (`persist_network=false`); the network load never carries these rows. An
+/// id this cabinet doesn't have maps to index 0 — the same degradation
+/// [`sync_registry_with_game`]'s mirror applies to a server-stored id that
+/// isn't installed.
+fn persist_load_transform(id: &str, asset_id: i32) -> i32 {
+    let state = match STATE.lock() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let cat = match state.categories.iter().find(|c| c.def.option_id == id) {
+        Some(c) => c,
+        None => return 0,
+    };
+    cat.asset_ids
+        .iter()
+        .position(|&a| a as i32 == asset_id)
+        .unwrap_or(0) as i32
 }
 
 /// Accessor for the mod's resolved `player_work_table` base pointer, shared with
@@ -252,14 +286,16 @@ impl Mod for WebUiOptionsMod {
                 continue;
             }
 
-            // Register with a plain default; the menu registry is seeded with
+            // Register with a plain default; the menu registry is synced with
             // the game's current selections at every SONG_SELECT entry by
-            // seed_registry_from_game (reading the Customize object the game
+            // sync_registry_with_game (reading the Customize object the game
             // populated from the server's <customize> load block). These
             // options are SaveOnly: the DLL emits them on network save — the
-            // one direction the game lacks — and never network-loads or
-            // JSON-persists them. Every category uses the index-based value
-            // model, so the shared save transform maps index -> asset id.
+            // one direction the game lacks — and never network-loads them.
+            // With persist_network=false they fall back to the JSON cache
+            // (write + prime), which the same sync then drives INTO the game.
+            // Every category uses the index-based value model, so the shared
+            // persist transforms map index <-> asset id.
             //
             // Generate the base chrome image (the `_TEMPLATE` with its
             // marker boxes cleared) BEFORE registration, so it's on
@@ -288,7 +324,7 @@ impl Mod for WebUiOptionsMod {
             .default_value(0)
             .on_change(on_value_changed)
             .persist_mode(PersistMode::SaveOnly)
-            .save_transform(persist_save_transform);
+            .persist_transform(persist_save_transform, persist_load_transform);
 
             match custom_options::register_option(spec) {
                 Ok(_handle) => {
@@ -311,22 +347,24 @@ impl Mod for WebUiOptionsMod {
         // and never affects the cosmetics above.
         profile_fields::register();
 
-        // Seed the menu registry from the game's own Customize object on
+        // Sync the menu registry with the game's own Customize object on
         // EVERY SONG_SELECT (scene 25) entry — the earliest point the options
         // modal can open, and the point at which PlayerWork/Customize are
-        // fully populated from the server's <customize> load block. The seed
-        // is read-only (silent setter, never writes Customize) and idempotent:
-        // a user edit is written into Customize on-change, so re-seeding reads
-        // back the same value. There is no scene-20 apply — the game's native
-        // load path is the only thing that populates Customize on card-in.
+        // fully populated from the server's <customize> load block. With the
+        // network round-trip on, the sync is a read-only mirror (silent
+        // setter, never writes Customize) and idempotent: a user edit is
+        // written into Customize on-change, so re-reading yields the same
+        // value. Under the SaveOnly JSON fallback the direction flips for
+        // every row the cache primed / the player chose: the game's load
+        // can't bring those back, so the sync writes them into Customize.
         self.scene_cb_id = Some(scene_manager::on_scene_change(Box::new(|_old, new| {
             if new == scene::SONG_SELECT {
-                seed_registry_from_game(0);
-                seed_registry_from_game(1);
-                // Same read-only seed for the workout-profile rows, from
-                // the PlayerWork header the game's <common> load populated.
-                profile_fields::seed(0);
-                profile_fields::seed(1);
+                sync_registry_with_game(0);
+                sync_registry_with_game(1);
+                // Same sync for the workout-profile rows, against the
+                // PlayerWork header the game's <common> load populated.
+                profile_fields::sync(0);
+                profile_fields::sync(1);
             }
         })));
 
@@ -432,97 +470,138 @@ fn on_value_changed(player_side: u8, _new_value: i32) {
     try_apply_all(player_side);
 }
 
-/// Seed the options-menu registry from the game's own `Customize` object for
-/// one player side. Called on every SONG_SELECT (scene 25) entry.
+/// Reconcile the options-menu registry and the game's own `Customize` object
+/// for one player side. Called on every SONG_SELECT (scene 25) entry.
 ///
-/// Strictly READ-ONLY with respect to game memory: each category's field is
-/// read as a raw u32 asset id, reverse-mapped to its menu index (index 0 when
-/// the id isn't in the discovered list — e.g. the server stored an id this
-/// cabinet doesn't have), and written into the registry via
-/// [`custom_options::set_value_silent`], which does NOT fire `on_change` —
-/// so an unknown id can never clobber the game's (server-loaded) value
-/// through `try_apply_all`. Null-guards the player-work chain: a side that
-/// isn't carded in is skipped silently. Panic-free (bounds-checked reads,
-/// `position().unwrap_or(0)`).
-fn seed_registry_from_game(player_side: u8) {
-    let state = match STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return,
+/// Default direction (network persistence on): strictly READ-ONLY with
+/// respect to game memory — each category's field is read as a raw u32 asset
+/// id, reverse-mapped to its menu index (index 0 when the id isn't in the
+/// discovered list — e.g. the server stored an id this cabinet doesn't have),
+/// and written into the registry via [`custom_options::set_value_silent`],
+/// which does NOT fire `on_change` — so an unknown id can never clobber the
+/// game's (server-loaded) value through `try_apply_all`.
+///
+/// Under the `SaveOnly` JSON fallback (`persist_network=false`), a row whose
+/// value the JSON prime or the player has chosen
+/// ([`custom_options::value_is_authoritative`]) flows the OTHER way: its
+/// selected asset id is written into `Customize`, because the game's load
+/// (whatever the server sent) is the stale copy and nothing else would ever
+/// restore the player's pick. Rows nobody has chosen yet (a fresh cache)
+/// still mirror the game, so a server/web-UI value survives until the player
+/// first edits the row — after which the cache owns it.
+///
+/// Null-guards the player-work chain: a side that isn't carded in is skipped
+/// silently. Panic-free (bounds-checked reads, `position().unwrap_or(0)`).
+fn sync_registry_with_game(player_side: u8) {
+    let Some((customize_base, categories)) = customize_base_and_categories(player_side) else {
+        return;
     };
 
-    if state.player_work_table.is_null() || state.customize_offset == 0 {
-        return;
+    let drive_game = custom_options::save_only_json_fallback();
+    let mut mirrored = 0usize;
+    let mut applied = 0usize;
+
+    for (def, asset_ids) in &categories {
+        // SAFETY: `customize_base` is the carded-in side's validated
+        // PlayerWork + customize_offset; every field offset comes from the
+        // static category table and addresses a u32 inside `Customize`.
+        let field_ptr =
+            unsafe { customize_base.add(def.customize_field_offset as usize) } as *mut u32;
+
+        if drive_game && custom_options::value_is_authoritative(def.option_id, player_side) {
+            let seq_value = custom_options::get_value(player_side, def.option_id).unwrap_or(0);
+            if let Some(&asset_id) = usize::try_from(seq_value)
+                .ok()
+                .and_then(|i| asset_ids.get(i))
+            {
+                unsafe { field_ptr.write(asset_id) };
+                applied += 1;
+            }
+            continue;
+        }
+
+        let asset_id = unsafe { field_ptr.read() };
+        let index = asset_ids.iter().position(|&a| a == asset_id).unwrap_or(0);
+        custom_options::set_value_silent(def.option_id, player_side, index as i32);
+        mirrored += 1;
     }
 
-    unsafe {
-        let table = state.player_work_table as *const *const u8;
-        let wrapper = *table.add(player_side as usize);
-        if wrapper.is_null() {
-            return; // side not carded in
-        }
-        let player_work = *(wrapper as *const *const u8);
-        if player_work.is_null() {
-            return;
-        }
-        let customize_base = player_work.add(state.customize_offset);
-
-        for cat in &state.categories {
-            let field_ptr =
-                customize_base.add(cat.def.customize_field_offset as usize) as *const u32;
-            let asset_id = field_ptr.read();
-            let index = cat
-                .asset_ids
-                .iter()
-                .position(|&a| a == asset_id)
-                .unwrap_or(0);
-            custom_options::set_value_silent(cat.def.option_id, player_side, index as i32);
-        }
-
+    if drive_game {
+        log_info!(
+            "WebUiOptions: synced {} option(s) with game Customize (side={}; JSON fallback: {} applied to game, {} mirrored from game)",
+            categories.len(),
+            player_side,
+            applied,
+            mirrored
+        );
+    } else {
         log_info!(
             "WebUiOptions: seeded {} option(s) from game Customize (side={})",
-            state.categories.len(),
+            mirrored,
             player_side
         );
     }
 }
 
-/// Write every category's currently-selected asset id into the game's
-/// `Customize` object for one player side. This is the ONLY writer of
-/// `Customize` in the mod, invoked solely from [`on_value_changed`] (a user
-/// edit in the options menu); the loaded state flows the other way — the
-/// game's native `<customize>` load populates `Customize`, and
-/// [`seed_registry_from_game`] reads it back into the menu registry.
-fn try_apply_all(player_side: u8) -> bool {
-    let state = match STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
+/// Resolve one side's `Customize` base pointer plus a snapshot of the
+/// discovered categories, then RELEASE the mod's `STATE` lock before the
+/// caller touches the registry or game memory. The registry's persist
+/// transforms take `STATE` while the registry lock is held (the save
+/// snapshot, the JSON prime), so holding `STATE` across a registry call
+/// here would invert the lock order. Returns `None` when the signatures are
+/// unresolved or the side isn't carded in (every hop null-guarded).
+fn customize_base_and_categories(
+    player_side: u8,
+) -> Option<(*mut u8, Vec<(&'static CategoryDef, Vec<u32>)>)> {
+    let state = STATE.lock().ok()?;
     if state.player_work_table.is_null() || state.customize_offset == 0 {
-        return false;
+        return None;
     }
-
-    unsafe {
+    // SAFETY: `player_work_table` is the resolved 2-slot per-side table;
+    // each hop is null-checked before it is dereferenced.
+    let customize_base = unsafe {
         let table = state.player_work_table as *const *const u8;
         let wrapper = *table.add(player_side as usize);
         if wrapper.is_null() {
-            return false;
+            return None; // side not carded in
         }
         let player_work = *(wrapper as *const *const u8);
         if player_work.is_null() {
-            return false;
+            return None;
         }
-        let customize_base = player_work.add(state.customize_offset);
+        player_work.add(state.customize_offset) as *mut u8
+    };
+    let categories = state
+        .categories
+        .iter()
+        .map(|c| (c.def, c.asset_ids.clone()))
+        .collect();
+    Some((customize_base, categories))
+}
 
-        for cat in &state.categories {
-            let seq_value = custom_options::get_value(player_side, cat.def.option_id).unwrap_or(0);
-            let asset_id = if seq_value >= 0 && (seq_value as usize) < cat.asset_ids.len() {
-                cat.asset_ids[seq_value as usize]
-            } else {
-                cat.asset_ids.first().copied().unwrap_or(1)
-            };
+/// Write every category's currently-selected asset id into the game's
+/// `Customize` object for one player side. Invoked from [`on_value_changed`]
+/// (a user edit in the options menu, or a persistence load landing); the
+/// other writer is [`sync_registry_with_game`]'s JSON-fallback leg. With
+/// network persistence on, the loaded state flows the other way — the game's
+/// native `<customize>` load populates `Customize`, and the sync reads it
+/// back into the menu registry.
+fn try_apply_all(player_side: u8) -> bool {
+    let Some((customize_base, categories)) = customize_base_and_categories(player_side) else {
+        return false;
+    };
 
-            let field_ptr = customize_base.add(cat.def.customize_field_offset as usize) as *mut u32;
+    for (def, asset_ids) in &categories {
+        let seq_value = custom_options::get_value(player_side, def.option_id).unwrap_or(0);
+        let asset_id = usize::try_from(seq_value)
+            .ok()
+            .and_then(|i| asset_ids.get(i).copied())
+            .unwrap_or_else(|| asset_ids.first().copied().unwrap_or(1));
+
+        // SAFETY: see `sync_registry_with_game` — validated base, table-driven
+        // u32 field offset inside `Customize`.
+        unsafe {
+            let field_ptr = customize_base.add(def.customize_field_offset as usize) as *mut u32;
             field_ptr.write(asset_id);
         }
     }

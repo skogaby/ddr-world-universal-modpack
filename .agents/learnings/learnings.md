@@ -1778,3 +1778,30 @@ The Ironmouse port, a UE5 Fortnite rip, broke three silent assumptions:
   child. `align_chain_bones(fa, next_of)` re-aims the chain in edit mode. Always read the
   conform WARN lines. A clean preview does not show this when the stretch factors happen to be
   near 1.
+
+## A persistence mode that exists for one topology is a hole in every other (2026-10-08)
+
+`PersistMode::SaveOnly` (WebUI cosmetics, VIDEO SIZE, weight/calorie) was designed around a
+server that honours the injected `mod_*` fields: send on save, let the game's own `<customize>`
+load bring it back, mirror game → menu at SONG_SELECT. The JSON cache was deliberately skipped
+to keep that load path the single source of truth. But the JSON leg exists *precisely* for
+servers that don't honour the injected fields — and a user running `persist_network=false`
+had NO persistence path at all for those rows: nothing emitted, nothing cached, and the
+scene-25 mirror faithfully re-copied the server's defaults into the menu every card-in.
+The log looked healthy (`save — wrote 23 option(s)`), it just never wrote the 9 that mattered.
+
+- When a mode opts a row OUT of a persistence leg "because another channel covers it", check
+  what happens when the operator turns that other channel off. The gates are independent
+  config keys; every cell of the (mode × gate) matrix must persist somewhere or be documented
+  as intentionally volatile.
+- Fix shape: the framework raises `custom_options::save_only_json_fallback()` when
+  `persist_network=false && persist_json=true`; `SaveOnly` rows then join the JSON cache in
+  both directions, and the owner's scene-25 sync flips from mirror (game → menu) to drive
+  (menu → game) for rows the cache or player chose (`value_is_authoritative`). Untouched rows
+  keep mirroring so a server/web-UI value isn't clobbered by a stale default on first boot.
+- A `SaveOnly` row with a non-identity wire mapping needs BOTH persist transforms now; a
+  `save_transform` alone leaves the JSON prime writing raw wire values into the registry.
+- Side lesson: the one-shot `option_menu_settings` "no registered option" WARN was computed
+  against a menu's filtered snapshot, so the first mod-menu open listed every in-game-only row
+  as a typo — a decoy that pointed exactly at the rows under investigation. Compute "unknown"
+  against the full registry, never a view.

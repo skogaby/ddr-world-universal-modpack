@@ -129,7 +129,10 @@ custom stage a screen:
   whole square; u runs 0 → 1 left to right as seen by the viewer (unmirrored). In Blender
   (bottom-up v) that is `v_blender = 1 − v_d3d`, i.e. the 16:9 band is also 0.21875 –
   0.78125. Mapping the 16:9 band onto the whole panel makes a 16:9 movie fill it and crops
-  a 4:3 one top and bottom; songs without a movie show a black screen.
+  a 4:3 one top and bottom; songs without a movie show a black screen. A source whose
+  screens were authored against a 2×2 video mosaic (HOTTEST PARTY 4/5 `quarter` stages)
+  must have each quadrant unfolded onto 0..1 first — see
+  `examples/port_stage_hottest2.py::unfold_quadrants`.
 
 ## Porting an existing model (playbook)
 

@@ -65,6 +65,46 @@ use crate::{log_error, log_info, log_warn};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// `SaveOnly` JSON fallback (see [`PersistMode`]): raised by the persistence
+/// service when it runs with `persist_network=false` + `persist_json=true`,
+/// so rows that would otherwise persist only on the (now absent) network
+/// save are written to and primed from `mod-config.json` like `Local` rows.
+/// Process-wide and config-derived, so a plain atomic (no registry lock, no
+/// init-order dependency: the persistence service sets it before any mod
+/// registers a row).
+static SAVE_ONLY_JSON_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+/// Raise/lower the `SaveOnly` JSON fallback (persistence-service only; see
+/// [`save_only_json_fallback`]).
+pub fn set_save_only_json_fallback(enabled: bool) {
+    SAVE_ONLY_JSON_FALLBACK.store(enabled, Ordering::SeqCst);
+}
+
+/// Whether `SaveOnly` rows currently ride the offline JSON cache (the
+/// persistence service runs without network persistence). A `SaveOnly` row's
+/// owner uses this at its game-state sync point: when raised, a value the
+/// cache primed or the player chose ([`value_is_authoritative`]) must be
+/// written INTO the game (the cache is the source of truth, there is no
+/// server round-trip to bring it back); when lowered, the owner keeps
+/// mirroring the game's own loaded value into the menu.
+pub fn save_only_json_fallback() -> bool {
+    SAVE_ONLY_JSON_FALLBACK.load(Ordering::SeqCst)
+}
+
+/// Whether `(option_id, player_side)` holds a value chosen by a persistence
+/// load or a player edit, as opposed to the registration default or a silent
+/// game→menu seed (`set_value_silent`). `false` when the service is
+/// unavailable, the id is unknown or the lock is poisoned.
+pub fn value_is_authoritative(option_id: &str, player_side: u8) -> bool {
+    if !is_available() {
+        return false;
+    }
+    match registry::STATE.lock() {
+        Ok(state) => state.is_authoritative(option_id, player_side),
+        Err(_) => false,
+    }
+}
+
 /// Callback fired when the native options modal opens or closes, for one
 /// player side (`0` = P1, `1` = P2). Plain `fn` pointers (no capture) keep
 /// dispatch allocation- and `Send`-free — subscribers stash any state in
@@ -348,7 +388,10 @@ pub(crate) fn resolve_from_load(option_id: &str, player_side: u8, value: i32, so
             Some(i) => i,
             None => return,
         };
-        if !state.options[idx].persist.accepts_load(source) {
+        if !state.options[idx]
+            .persist
+            .accepts_load_when(source, save_only_json_fallback())
+        {
             return;
         }
         // Apply the option's load_transform (if any) before caching.
@@ -376,7 +419,8 @@ pub(crate) fn resolve_from_load(option_id: &str, player_side: u8, value: i32, so
 /// callback. For non-user-driven state *seeding* — e.g. reading the game's
 /// own loaded state into the menu registry — where firing `on_change` would
 /// cause an unwanted write-back into game memory. Contrast [`set_value`] /
-/// [`resolve_from_load`], which dispatch the callback.
+/// [`resolve_from_load`], which dispatch the callback. A seed is not a
+/// choice: it leaves the side's [`value_is_authoritative`] flag untouched.
 ///
 /// No-ops if the service is uninitialized, the id isn't registered,
 /// `player_side >= 2`, or the registry lock is poisoned (seeding is a
@@ -396,10 +440,10 @@ pub fn set_value_silent(option_id: &str, player_side: u8, value: i32) {
     if state.get_value(option_id, player_side) == Some(value) {
         return;
     }
-    let changed = state.set_value(option_id, player_side, value);
+    let changed = state.seed_value(option_id, player_side, value);
     drop(state);
-    if let Some((_cb, side, v)) = changed {
-        observers::dispatch(option_id, side, v);
+    if changed {
+        observers::dispatch(option_id, player_side, value);
     }
 }
 
@@ -482,6 +526,9 @@ pub fn overlay_snapshot(side: u8) -> Vec<OverlayRowInfo> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
+    // Same one-shot typo WARN the in-game builder emits, against the FULL
+    // registry (this snapshot drops in-game-only rows, which are not typos).
+    state.warn_unknown_configured_ids_once();
     registry::overlay_snapshot_rows(
         &state,
         side,
@@ -583,16 +630,17 @@ pub(crate) fn snapshot_for_save() -> Vec<(String, [i32; 2])> {
 }
 
 /// Snapshot of the current per-player values for every registered option in
-/// the offline JSON cache ([`PersistMode::json_cached`] — `Full` + `Local`),
-/// same shape and post-`save_transform` values as [`snapshot_for_save`].
-/// Used by the persistence service's `mod-config.json` writer. NOT a subset
-/// of [`snapshot_for_save`]: `Local` rows are cache-only.
+/// the offline JSON cache ([`PersistMode::json_cached_when`] — `Full` +
+/// `Local`, plus `SaveOnly` under the [`save_only_json_fallback`]), same
+/// shape and post-`save_transform` values as [`snapshot_for_save`]. Used by
+/// the persistence service's `mod-config.json` writer. NOT a subset of
+/// [`snapshot_for_save`]: `Local` rows are cache-only.
 pub(crate) fn snapshot_for_json_cache() -> Vec<(String, [i32; 2])> {
     if !is_available() {
         return Vec::new();
     }
     match registry::STATE.lock() {
-        Ok(state) => state.json_cache_snapshot(),
+        Ok(state) => state.json_cache_snapshot(save_only_json_fallback()),
         Err(_) => Vec::new(),
     }
 }

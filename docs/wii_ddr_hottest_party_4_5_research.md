@@ -124,7 +124,8 @@ game plays a movie on. Surveyed on all four discs, it is on nothing else. The su
 white or tiny placeholder texture (`monitor01.tga`, `MOV_cap.tga`, `movie_test.tga`). Examples:
 - HP5's `OBJB_Z_pv01_43 / pv02_CE / pv03_WI` PV monitors (the suffixes match the `_43` / `_CE` /
   `_WI` strings in main.dol);
-- STG016's `movieBox` wall of 100 boxes, each with its own window of the picture;
+- STG016's `movieBox` wall of 100 boxes, each face with its own window of a quadrant of the
+  stage's video mosaic (see "Quadrant screens" below);
 - STG015's planets;
 - HP4's STG044 dome, STG001 / 405 / 431 monitors;
 - MUSIC FIT's TV sets.
@@ -137,6 +138,19 @@ the whole picture). It keeps their blend: STG044's dome is alpha-blended at a th
 strength. Additive screens (STG431) get the vertex alpha folded into the colour. This applies to
 `GAME=hp4|hp5` only. The shipped HP3 port predates the rule, so re-porting `GAME=hp3` would give
 MUSIC FIT's TVs screens too (open).
+
+**Quadrant screens on `quarter` stages (fixed 2026-10-07).** On a `_Prm` type-2 stage (§3.2b)
+the group-92 surfaces play the stage's 2×2 video mosaic, not a single picture, and each surface is
+authored to **one quadrant** of it — i.e. one whole loop: HP5 STG016's 100 boxes (fronts
+`u 0..0.5, v 0..0.5`, sides top-right, tops bottom-left; the lower half of the wall is the
+mirror image of the upper), STG015's planets (one loop per planet), STG003 / 012's monitors
+(bottom-left / top-left), STG405's four monitors (one loop each). STG431's additive glow tiles
+the whole mosaic (`u 0..6`). Taking those UVs as "0..1 = the whole picture" put the top-left
+quarter of the BGA over STG016's whole wall. `port_stage_hottest2.py::unfold_quadrants` now
+unshares the vertices per triangle and maps each triangle's quadrant onto 0..1 when every
+triangle of the surface sits in a single quadrant (`triangle_quadrants`); a tiling or straddling
+surface (STG431) is left as the whole picture. HP4 STG044's dome has no `_Prm` and keeps its
+0..1 mapping. Re-ported: HP5 Stage 03 / 15 / 16, HP4 Stage 405 (only the screen parts changed).
 
 ### 3.2b Stage videos = colour group 91, and the stage parameters
 
@@ -199,8 +213,9 @@ out). GAME_DEF_CAM (86 shots in both games) also supplies the `_non` close-ups.
 
 ## 4. Not done / open
 
-- Cabinet test: screens (HP5 STG016's box wall, STG028–030's PV monitors, HP4 STG044's dome),
-  flip-books, the fallback cameras.
+- Cabinet test: screens (STG028–030's PV monitors, HP4 STG044's dome), flip-books, the fallback
+  cameras. HP5 STG016's box wall was tested 2026-10-07 (it showed the BGA's top-left quarter —
+  §3.2 quadrant screens); the re-port is to be re-checked.
 - Sparse by design: HP4 STG008 (a sky dome and a floor) and STG200 (a floor and a signal ring,
   no `_Prm`) are minimal on the disc too. Nothing is missing.
 - Stage videos are a 16-frame, 1.3 fps flip-book of the real THP. A song-chosen video (MUSIC FIT,

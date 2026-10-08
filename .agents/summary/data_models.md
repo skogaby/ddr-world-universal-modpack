@@ -36,7 +36,7 @@ There is one file. It is read once at boot. The DLL's writers rewrite a whole se
 | Section | Owner (writer) |
 |---|---|
 | `mods` | mod-menu toggles → `config::save_mod_states` (persists `requested`) |
-| `custom_options.p1/p2` | persistence JSON cache (`PersistMode::Full`/`Local` values) |
+| `custom_options.p1/p2` | persistence JSON cache (`PersistMode::Full`/`Local` values; `SaveOnly` values too when `persist_network=false`) |
 | `fps_unlock` (`selected`) | fps-unlock row |
 | `timing_offsets` | overlay rows + auto-calibration |
 | `quick_restart` | RESTART DELAY row |
@@ -72,7 +72,7 @@ The authoritative key list is the struct set in `src/mods/config.rs`. The `layer
 | Kind | Behaviour |
 |---|---|
 | `PersistMode::Full` option `x` | Wire field `mod_x` plus the `custom_options.p{1,2}.x` JSON cache. A network load wins over the JSON prime. |
-| `SaveOnly` | Sent on save only. The game's own load path restores it (WebUI cosmetics, VIDEO SIZE, weight/calorie rows). |
+| `SaveOnly` | Sent on save only. The game's own load path restores it (WebUI cosmetics, VIDEO SIZE, weight/calorie rows). With `persist_network=false` (+ `persist_json=true`) the row falls back to the JSON cache (`custom_options::save_only_json_fallback()`), and its owner writes cached/player-chosen values INTO the game at SONG_SELECT instead of mirroring the game. |
 | `Local` | JSON cache only (multiplayer-bot rows, background-dancer choices). |
 | String fields | Registered by `register_string_field` (per-song offsets `mod_judge_offsets`, kbin type 11). |
 | `/data` node producers | Extra subtrees on per-stage saves. Example: S-Marvelous `/data/s_marv`. |
