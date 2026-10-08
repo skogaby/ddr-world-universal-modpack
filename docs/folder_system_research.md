@@ -559,6 +559,68 @@ After layer creation, the game looks for MovieClips by name using the folder's k
 
 ---
 
+## How a Folder Filters the Song List (20260721; verified 20250805 / 20260915)
+
+The `+0x1d8` filter slot is a `std::tr1::function<bool(shared_ptr<ChartMetadata>)>`
+(0x20 bytes: 0x18 small-object buffer + impl ptr at `+0x18`, so the impl ptr sits at
+`FolderProperty+0x1f0`). `folder_filter_functor_ctor` (`FUN_180144a70`) writes a
+`lambda20` impl: `{vftable 0x1803740f0, u32 bit_index @+8, self @+0x18}`. Its
+`_Do_call` (vftable slot 1, `FUN_180146720`) calls the lambda body `FUN_180144f70`
+(`__RTDynamicCast(*sp.obj → music::InfoCommon → music::Info)`, then
+`property = [Info+0x178] ?: [Info+0x174]`, bit test with the bit-8 ⇒ `0x40` quirk)
+**and releases the by-value `shared_ptr` it was handed** (strong-count decrement on the
+control block).
+
+For ALL MUSIC `folder_init` moves an *empty* function into `+0x1d8` (impl ptr 0).
+
+**Applying a folder** — `FUN_1801445e0(ctx, FolderProperty*)` (reached through the
+vtable slot at `0x180373ec8` → `FUN_180145fa0`) runs when the player enters a folder:
+
+1. `FUN_180141890(fp, &fn)` clones the folder's filter function.
+2. `FUN_180147110(*ctx, &out, fp->type_id)` looks up the UI generator; `FUN_1800fdc10`
+   writes `GameWork+0x1c`.
+3. `model+0 = fp->max_difficulty`; `FUN_1800fcf40(model, diff, side)` ×2.
+4. If the function is non-empty: `FUN_180145700` + `FUN_18011f530` wrap it into a
+   song-level `Filter` (0xb0) → `FUN_180101dd0(model+0x2a8, &filter)` sets the **model
+   override filter** (its impl ptr lands at `model+0x2c8`). Empty function ⇒ an empty
+   Filter is stored ⇒ `model+0x2c8 == 0`.
+5. `model+0x3d0 = fp->mode_flag` (`+0x1f8`: 3 genre / 0 allmusic).
+
+**Consuming it** — `FUN_1801007e0(model, &filters)` returns `[override]` when
+`model+0x2c8 != 0`, otherwise the player's Filter-menu selections (`+0x358` tree ×
+`+0x378` map). So a genre folder is *only* its own predicate, and ALL MUSIC is *only*
+the Filter-menu predicates — which is why only ALL MUSIC exposes the filter modal.
+
+**Where the lists come from** — every consumer (`FUN_180100f00` wheel rebuild,
+`FUN_180100cd0` / `FUN_180100d60` song counts) obtains its input from one getter:
+
+```
+FUN_180100770(model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*
+    if !model.+0x1c0 { +0x1c0 = 1; FUN_1801006c0(model, side) }   // hard rebuild
+    return any_filter_active ? &model.+0x248[side] : &model.+0x208[side]
+```
+
+(`+0x1a0 / +0x1e8 / +0x228` on 20250805 — the whole model shifts by 0x20 on builds
+before the 0x1B0 highlight slot.) The getter copies nothing — callers copy-assign the
+returned vector themselves.
+
+**ALL MUSIC exclusion (folder-expansion `exclude_from_all_music`)** hooks
+`FUN_1801445e0` (signature `folder_apply_to_model`) to record `fp->type_id`, and
+`FUN_180100770` (signature `selectmusic_source_list`) to return a shallow, non-owning
+copy of the original vector minus every holder for which one of the excluded folders'
+own `lambda20` functors returns true (invoked via vftable slot 1 after a +1 on the
+holder's strong count, since `_Do_call` consumes its argument). The count paths flow
+through the same getter, so ALL MUSIC's displayed count drops accordingly.
+
+| Symbol | 20250805 | 20260224 | 20260721 | 20260825 | 20260915 |
+|---|---|---|---|---|---|
+| `folder_apply_to_model` | `0x180136c20` | `0x180139580` | `0x1801445e0` | `0x1801442c0` | `0x180144260` |
+| `selectmusic_source_list` | `0x1800f4970` | `0x1800f6a60` | `0x180100770` | `0x180100460` | `0x180100a60` |
+| `folder_filter_functor_ctor` (lambda20) | — | — | `0x180144a70` | — | — |
+| lambda20 `_Do_call` / body | — | — | `0x180146720` / `0x180144f70` | — | — |
+
+---
+
 ## Open Questions
 
 1. **~~Are the count arrays sized for more than 6?~~** YES — confirmed 10 slots each, matching property bits 0-9.

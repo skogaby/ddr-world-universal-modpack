@@ -112,7 +112,7 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `hide-bottom-text` (OFF) | `hide_bottom_text.rs` | Hide bottom status readouts | – | `hex_edit_porting.md` |
 | `split-ssq-auto-discovery` | `split_ssq_auto_discovery/` | Disk-discovered split charts | `split_ssq` | `split_ssq_research.md` |
 | `series-expansion` | `series_expansion.rs` | Custom VERSION filters + flare exclusion | – | `flare_ranking_research.md` |
-| `folder-expansion` | `folder_expansion.rs` | Custom genre folders (late-binding) | – | `folder_system_research.md` |
+| `folder-expansion` | `folder_expansion.rs` | Custom genre folders (late-binding); per-folder `exclude_from_all_music` hides a folder's songs from ALL MUSIC | – | `folder_system_research.md` |
 | `note-types-expansion` | `note_types_expansion/` | Note-type framework; mines | – | `ssq_mine_chunk_format.md`, `mine_render_architecture.md` |
 | `real-speed-fix` | `real_speed_fix/` | Real Speed from Core BPM | – | `binary_modpack_research.md` |
 | `power-user-statistics` | `power_user_statistics/` | Timing-stats widgets, pacemaker→ms-error, CSV, calories | `power_user_statistics` | `pacemaker_display_research.md` |

@@ -1705,6 +1705,32 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 8B 05 ? ? ? ? 48 63 51 08 48 8B 08 48 8B 05 ? ? ? ? 44 8B 41 04 41 83 F8 01",
         description: "Has-songs predicate — reads bit_index from functor+0x8, checks count array. Hook target.",
     },
+    // "Apply folder to song-select model" — `FUN_1801445e0(ctx, FolderProperty*)`
+    // on 20260721. Runs when the player enters a folder: copies the folder's
+    // per-chart filter function (FolderProperty filter_functor_slot) into the
+    // SelectMusicModel override filter, re-derives the UI mode, and stores the
+    // folder's mode flag. RDX = FolderProperty (type id at +0). Prologue-anchored;
+    // the two wildcarded disp32/disp16 are the security-cookie RIP and the
+    // build-dependent `max_difficulty` offset (0xc0 / 0x100). Hook target
+    // (folder-expansion: tracks the current folder type for ALL MUSIC exclusion).
+    SignatureDefinition {
+        name: "folder_apply_to_model",
+        pattern: "48 8B C4 55 57 41 54 48 8D A8 B8 FE FF FF 48 81 EC 30 02 00 00 48 C7 44 24 50 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 20 01 00 00 48 8B FA 48 8B F1 45 33 E4 44 89 64 24 20 8B 9A ? ? 00 00 48 8D 55 A0 48 8B CF E8",
+        description: "SelectMusicModel 'apply folder' — RDX = FolderProperty; copies its filter function into the model override filter and re-derives the UI mode. Hook target (current-folder tracking).",
+    },
+    // `FUN_180100770(model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*`
+    // — the single source-list getter every song-select list consumer calls
+    // (wheel rebuild, both song-count paths). Lazily builds the base lists via
+    // the hard rebuild when the `+0x1c0` 'built' byte is clear, then returns
+    // the per-side song-level list (`+0x208`) or chart-level list (`+0x248`).
+    // The three model offsets shift by 0x20 on older builds (0x1a0/0x1e8/0x228
+    // on 20250805) and are wildcarded. Hook target (folder-expansion: ALL MUSIC
+    // exclusion returns a filtered shallow copy).
+    SignatureDefinition {
+        name: "selectmusic_source_list",
+        pattern: "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 80 B9 ? ? 00 00 00 41 0F B6 F0 48 63 FA 48 8B D9 75 ? 8B D7 C6 81 ? ? 00 00 01 E8",
+        description: "SelectMusicModel source-list getter (model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*. Hook target (ALL MUSIC exclusion).",
+    },
     // ── Gameplay object allocation ───────────────────────────────────
     // The gameplay sequence object has a fixed-size shared_ptr array (one slot per
     // non-ALL_MUSIC folder). Custom folders overflow this. We find the allocation

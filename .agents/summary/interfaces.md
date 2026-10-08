@@ -89,7 +89,7 @@ These have exactly one owner and no consumers:
 - **custom-resolution:** `graphics_init`, letterbox, scissor, debug font/sprite
 - **ddr-selection:** package helper, ShutterActor update, SceneManageActor init, gauge/score/option-icon actors, AFP sound callback
 - **fast-bootup:** `CheckStepDataActor::onUpdate`
-- **folder-expansion:** folder ctor/register/has-songs
+- **folder-expansion:** folder ctor/register/has-songs, `folder_apply_to_model`, `selectmusic_source_list` (ALL MUSIC exclusion)
 - **multiplayer-bot:** extra-stage grant
 - **player-perspective:** `spot_render`, `judge_effect_render`
 - **power-user-statistics:** calorie tick
