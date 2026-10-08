@@ -89,9 +89,15 @@
 //! It then builds cloned atlases (via `avs_layeredfs::atlas_cloner`, cache
 //! under `data_mods/_cache`) from art the operator supplies under
 //! `data_mods/custom_folders/{select_music_folder_v3_ifs,
-//! select_music_folder_lang_eng_v3_ifs}/tex/`, named like the `firststep`
-//! textures with `firststep` replaced by `key` (`mufo_folder_back_<key>_on.png`,
-//! …). The
+//! select_music_folder_lang_eng_v3_ifs, select_music_card_lang_eng_v3_ifs}/tex/`,
+//! named like the `firststep` textures with `firststep` replaced by `key`:
+//! `mufo_folder_back_<key>_{on,off}`, `mufo_txt_folder_title_<key>_{on,off}`
+//! (folder package), `mufo_txt_folder_subtitle_<key>_{on,off}`,
+//! `mufo_txt_folder_info_<key>` (folder lang package) and
+//! `muca_txt_folder_name_<key>` (220×60, header-card lang package — the strip
+//! beside "Change folder" on song select). The game formats every one of these
+//! names from the `FolderProperty` key itself, so nothing is hooked; the
+//! textures just have to exist by name in the package the game loads. The
 //! output lands in `data_mods/custom_folders/` and LayeredFS is rescanned.
 //! `.cache_meta.json` there (hash of the config + source ARC mtime) skips
 //! regeneration on a warm boot. This is the slow part of `enable()`, which is
@@ -217,6 +223,11 @@ const FOLDER_IFS_NAME: &str = "select_music_folder_v3.ifs";
 // ARC containing language-specific textures (info banner, subtitle strip)
 const LANG_ENG_ARC_PATH: &str = "data/arc/bm2d/select_music_folder_lang_eng_v3.arc";
 const LANG_ENG_IFS_NAME: &str = "select_music_folder_lang_eng_v3.ifs";
+// ARC containing the song-select header card's language-specific textures.
+// The folder-name strip next to "Change folder" (`muca_txt_folder_name_<key>`,
+// 220×60) lives here, not in the folder package.
+const CARD_LANG_ENG_ARC_PATH: &str = "data/arc/bm2d/select_music_card_lang_eng_v3.arc";
+const CARD_LANG_ENG_IFS_NAME: &str = "select_music_card_lang_eng_v3.ifs";
 // Source folder key to clone geo files from
 const SOURCE_KEY: &str = "firststep";
 // The 6 shape IDs containing folder-specific texture labels
@@ -228,6 +239,7 @@ const GEO_MOD_FOLDER: &str = "./data_mods/custom_folders";
 // IFS mod path (used for LayeredFS file lookup)
 const IFS_MOD_PATH: &str = "select_music_folder_v3_ifs";
 const LANG_ENG_IFS_MOD_PATH: &str = "select_music_folder_lang_eng_v3_ifs";
+const CARD_LANG_ENG_IFS_MOD_PATH: &str = "select_music_card_lang_eng_v3_ifs";
 
 // ── Config types ────────────────────────────────────────────────────
 
@@ -269,8 +281,12 @@ pub fn get_config() -> Option<&'static FolderConfig> {
 // `enable()`, we compute the current key, compare to the stored one, and
 // skip the generation step on a HIT. On any failure (missing file,
 // parse error, schema mismatch) we treat as a MISS and regenerate.
+//
+// Bump `CACHE_META_VERSION` whenever the set of generated outputs changes
+// (v2: added the `select_music_card_lang_eng_v3` folder-name strip) so
+// existing installs regenerate once instead of serving a stale set.
 
-const CACHE_META_VERSION: u32 = 1;
+const CACHE_META_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct CacheMeta {
@@ -847,6 +863,15 @@ fn generate_custom_assets(config: &FolderConfig) {
         LANG_ENG_IFS_NAME,
     ) {
         generate_cloned_atlases(config, &xml, LANG_ENG_IFS_MOD_PATH);
+    }
+
+    // Extract the header-card lang_eng IFS and clone the folder-name strip
+    // (`muca_txt_folder_name_<key>`) the game formats from the folder key.
+    if let Some(xml) = crate::services::avs_layeredfs::atlas_cloner::load_stock_texturelist(
+        CARD_LANG_ENG_ARC_PATH,
+        CARD_LANG_ENG_IFS_NAME,
+    ) {
+        generate_cloned_atlases(config, &xml, CARD_LANG_ENG_IFS_MOD_PATH);
     }
 }
 
