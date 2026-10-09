@@ -1805,3 +1805,15 @@ The log looked healthy (`save — wrote 23 option(s)`), it just never wrote the 
   against a menu's filtered snapshot, so the first mod-menu open listed every in-game-only row
   as a typo — a decoy that pointed exactly at the rows under investigation. Compute "unknown"
   against the full registry, never a view.
+
+## "Hold the last music count" freezes every animation driven by it (2026-10-08)
+
+- Background Dancers' scene time is a pure function of the music count. `song_reset::
+  first_anchored_frame()` reads false from DPS step 8 (song-end tail) while the music is still
+  playing, and the clock "held the last count" there — intended as "A3 keeps dancing through
+  the tail", it actually posed every dancer/camera at one instant: testers saw the dancers stop
+  just before the song ended.
+- Fix: `clock.rs` extrapolates the last anchored count on wall time at the count/wall slope
+  measured since the latch / last rewind (so song-rate mods stay in step; < 1 s baseline or an
+  out-of-range slope ⇒ 1:1). Any consumer that "holds" a clock across an anchor loss should ask
+  whether it means "frozen" or "still running".

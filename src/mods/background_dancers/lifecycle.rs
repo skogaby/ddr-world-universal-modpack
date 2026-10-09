@@ -16,7 +16,8 @@
 //! - graph disabled (DPS before step 5) ⇒ everything hidden, `t = 0`;
 //! - graph enabled but not anchored ⇒ the scene shows its `t = 0` pose
 //!   (A3: everything appears on the start edge) — or, once a run WAS
-//!   anchored, holds its last `t` (A3: dancers keep going through the tail);
+//!   anchored, keeps its clock running on wall time from the last anchored
+//!   count (A3: dancers keep going through the song-end tail, DPS 8/9);
 //! - anchored ⇒ `t = (count − t0) / 1000`, `t0` latched ONCE on the anchor
 //!   edge; a count jump back (training rewind / loop / in-place restart)
 //!   moves the timeline back — never re-latches (an in-place restart lands
@@ -365,6 +366,8 @@ struct Window {
     generation: u64,
     scene: SceneWindow,
     clock: Clock,
+    /// Last frame's clock was anchored (edge detect for the tail log).
+    clock_anchored: bool,
     /// The live song's tempo map (dance time from the music count) and the
     /// DPS instance / basename it belongs to; `None` ⇒ real time.
     tempo: Option<TempoMap>,
@@ -376,6 +379,7 @@ struct Window {
     visible_logged: bool,
     playing_logged: u32,
     rewind_logged: bool,
+    tail_logged: bool,
     /// The camera source of the last frame (`None` before the first).
     camera_source: Option<CamSource>,
     hide_armed: bool,
@@ -447,6 +451,14 @@ fn in_song_window(s: i32) -> bool {
         s,
         scene::SONG_TO_STAGE_INTERSTITIAL | scene::STAGE_INDICATOR | scene::GAMEPLAY
     )
+}
+
+/// Monotonic milliseconds since the first call (the song clock's tail
+/// extrapolation only uses differences).
+fn wall_ms(now: Instant) -> f64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(|| now);
+    now.saturating_duration_since(epoch).as_secs_f64() * 1000.0
 }
 
 /// Scene callback (game thread, fires before the game's `createNextSequence`).
@@ -1082,6 +1094,7 @@ fn request_load(generation: u64, pick: Pick) {
             ParseOptions::GAMEPLAY,
         ),
         clock: Clock::new(),
+        clock_anchored: false,
         tempo: None,
         tempo_dps: 0,
         tempo_basename: String::new(),
@@ -1090,6 +1103,7 @@ fn request_load(generation: u64, pick: Pick) {
         visible_logged: false,
         playing_logged: 0,
         rewind_logged: false,
+        tail_logged: false,
         camera_source: None,
         hide_armed: false,
         static_published: false,
@@ -1221,7 +1235,23 @@ fn drive_live(w: &mut Window) {
     } else {
         None
     };
-    let (mc, visible, event) = w.clock.step(graph_enabled, anchored, count);
+    let wall = wall_ms(now);
+    let was_anchored = w.clock_anchored;
+    let (mc, visible, event) = w.clock.step(graph_enabled, anchored, count, wall);
+    w.clock_anchored = graph_enabled && anchored && count.is_some();
+    if was_anchored && !w.clock_anchored && graph_enabled && !w.tail_logged {
+        // The song-end tail (DPS 8/9) — or a transient anchor loss. The
+        // dancers keep going on the extrapolated count; log what the live
+        // count does meanwhile so a deploy shows whether it still runs.
+        w.tail_logged = true;
+        log_info!(
+            "BackgroundDancers: anchor lost (dps step {:?}) -- dance clock extrapolated from {:?} ms at rate {:.3} (live count now {:?})",
+            song_reset::dps_step(),
+            mc,
+            w.clock.rate(),
+            song_reset::current_raw_music_count()
+        );
+    }
     // Dance time from the music count (design + RE doc §3.5): the tempo map
     // when it resolved, real time from music 0 otherwise. Pre-song frames
     // pose the scene just before the expected first count.
