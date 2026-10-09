@@ -1817,3 +1817,17 @@ The log looked healthy (`save — wrote 23 option(s)`), it just never wrote the 
   measured since the latch / last rewind (so song-rate mods stay in step; < 1 s baseline or an
   out-of-range slope ⇒ 1:1). Any consumer that "holds" a clock across an anchor loss should ask
   whether it means "frozen" or "still running".
+
+## A "latest result" cell keyed by parse completion is not "the current selection" (2026-10-09)
+
+- `chart_length::latest()` was written only when the worker FINISHED a parse. Cache hits never
+  touched it, so scrolling back to an already-parsed song left `latest` on whatever song was
+  last parsed cold. Training Mode's highlight seeder keys off `latest`, so a revisited song kept
+  the previous song's SONG END TIME max while the wheel (which reads the per-code cache) showed
+  the right length. Testers blamed London EVOLVED because its three A/B/C entries sit adjacent on
+  the wheel — the natural place to bounce back and forth between already-parsed songs.
+- Fix: `latest` tracks the most recently REQUESTED code; a cache hit republishes immediately and
+  a parse landing for a superseded code is dropped. Any "most recent X" cell consumed by a
+  second module must be updated on every consumer-visible event (request), not only on the
+  producer's expensive path (parse) — and the fallback gate that used to read `latest().is_none()`
+  as "service not driven" needs an explicit `is_driven()`.

@@ -173,15 +173,19 @@ fn select_step(generation: usize) {
         //    Tighter AND faster than audio: seed_end lands at the real
         //    playable end, so the row ranges and everything scaled from
         //    the seeded end (section previews, timeline scaling) match
-        //    the chart instead of the audio tail.
+        //    the chart instead of the audio tail. `latest()` describes the
+        //    most recently REQUESTED code (2026-10-09: cache-hit revisits
+        //    republish, so a song scrolled back to re-seeds to ITS length
+        //    instead of the last freshly parsed one's).
         // 2. The wheel-settle audio publication — the original source;
         //    covers chart-parse failures and boots where the wheel mod is
-        //    disabled (no service requests ⇒ `latest()` stays stale and
-        //    the digest gate ignores it).
+        //    disabled (no service requests ⇒ `is_driven()` is false).
         //
         // Both stamp the SAME digest space (`song_code_digest` of the
         // song code), so the gameplay-entry coherence gate is unchanged.
-        let chart = crate::services::chart_length::latest()
+        let latest = crate::services::chart_length::latest();
+        let chart = latest
+            .as_ref()
             .and_then(|l| l.secs.map(|s| (l.code_digest, s)));
         let seeded = match chart {
             Some((digest, secs)) if digest != bounds::rows_digest() => {
@@ -197,19 +201,27 @@ fn select_step(generation: usize) {
             _ => false,
         };
         if !seeded {
-            // Audio fallback ONLY when no chart publication exists at all
-            // (wheel mod disabled ⇒ no requests; or nothing parsed yet).
-            // NEVER when a chart publication is present with a different
-            // digest: the two sources each stamping their own digest turns
-            // a persistent publication skew (stale audio publication vs a
-            // live chart one) into a per-frame seed ping-pong — 2 bound
-            // rewrites + 4 row writes + a pre-shift refresh per frame,
-            // which wedged a live cabinet (2026-08-25, 66k seeds). A
-            // present-but-mismatched chart is transient: the wheel poll
-            // re-requests and the chart arm converges on its own.
-            if chart.is_none() {
+            // Audio fallback ONLY when the chart service is not driven at
+            // all (wheel mod disabled ⇒ no requests ever) or the current
+            // song's parse FAILED. NEVER while a chart result is present or
+            // pending for the highlighted song: the two sources each
+            // stamping their own digest turns a persistent publication
+            // skew (stale audio publication vs a live chart one) into a
+            // per-frame seed ping-pong — 2 bound rewrites + 4 row writes +
+            // a pre-shift refresh per frame, which wedged a live cabinet
+            // (2026-08-25, 66k seeds). A pending chart result is
+            // transient: the chart arm converges on its own. On the failed
+            // path the audio publication is digest-matched to the failed
+            // code, so it can only seed the song the wheel is on.
+            let chart_failed = latest.as_ref().is_some_and(|l| l.secs.is_none());
+            let use_audio = !crate::services::chart_length::is_driven() || chart_failed;
+            if use_audio {
                 if let Some(info) = song_rate::selected_song::selected_song() {
-                    if info.code_digest != bounds::rows_digest() {
+                    let digest_ok = !chart_failed
+                        || latest
+                            .as_ref()
+                            .is_some_and(|l| l.code_digest == info.code_digest);
+                    if digest_ok && info.code_digest != bounds::rows_digest() {
                         super::seed_rows_for_highlight(info.code_digest, info.audio_len_ms);
                         log_info!(
                         "TrainingMode: bounds seeded for the highlighted song -- end {} s (len {} ms)",

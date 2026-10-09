@@ -27,10 +27,17 @@
 //! serves only the newest (wheel scrolling floods requests; only the
 //! resting selection matters). Results land in a code-keyed cache
 //! (revisits answer instantly with no I/O) plus a [`latest`] cell carrying
-//! the most recent COMPLETED parse with its `song_code_digest` — the
-//! digest-keyed consumers (training seeding) match against it without
-//! knowing the code. SSQ files are KBs; a cold parse typically completes
-//! within a frame or two of the request.
+//! the result for the most recently REQUESTED code with its
+//! `song_code_digest` — the digest-keyed consumers (training seeding)
+//! match against it without knowing the code. SSQ files are KBs; a cold
+//! parse typically completes within a frame or two of the request.
+//!
+//! `latest` follows the request order, not the parse order: a request that
+//! hits the cache republishes the cached result immediately (a revisited
+//! song must re-seed training to ITS length — 2026-10-09 bug: revisits
+//! left `latest` on the last freshly parsed song, so the SONG END TIME
+//! row kept a different song's bounds), and a parse that completes for a
+//! code the wheel has since moved past does not overwrite it.
 //!
 //! LayeredFS-aware: custom songs ship SSQs in mod folders, so the
 //! mod-paths lookup runs before the stock `data/mdb_apx/ssq/` path.
@@ -70,7 +77,11 @@ pub struct Latest {
 
 struct Inner {
     cache: HashMap<String, State>,
+    /// Result for `latest_code` (None until that code has a result).
     latest: Option<Latest>,
+    /// The most recently requested code — the one `latest` describes (or
+    /// will describe once its parse lands).
+    latest_code: Option<String>,
 }
 
 static INNER: Mutex<Option<Inner>> = Mutex::new(None);
@@ -81,6 +92,7 @@ fn with_inner<R>(f: impl FnOnce(&mut Inner) -> R) -> R {
     let inner = guard.get_or_insert_with(|| Inner {
         cache: HashMap::new(),
         latest: None,
+        latest_code: None,
     });
     f(inner)
 }
@@ -90,24 +102,66 @@ pub fn get(code: &str) -> State {
     with_inner(|inner| inner.cache.get(code).copied().unwrap_or(State::Unknown))
 }
 
-/// The most recent completed parse, if any.
+/// The result for the most recently requested code, if it has one.
 pub fn latest() -> Option<Latest> {
     with_inner(|inner| inner.latest.clone())
 }
 
-/// Ensure a parse for `code` is cached or in flight. Cheap to call
-/// repeatedly (cache hit = one map lookup). Callers poll [`get`] (or
-/// [`latest`]) afterwards.
+/// Whether any code has ever been requested this boot — false means no
+/// consumer drives the service (the wheel mod is disabled), so
+/// digest-keyed consumers must use their fallback length source.
+pub fn is_driven() -> bool {
+    with_inner(|inner| inner.latest_code.is_some())
+}
+
+/// Ensure a parse for `code` is cached or in flight, and make `code` the
+/// one [`latest`] describes — a cached result republishes immediately.
+/// Cheap to call repeatedly (cache hit = one map lookup). Callers poll
+/// [`get`] (or [`latest`]) afterwards.
 pub fn request(code: &str) {
-    let dispatch = with_inner(|inner| match inner.cache.get(code) {
-        Some(State::Pending) | Some(State::Ready(_)) | Some(State::Failed) => false,
-        _ => {
-            inner.cache.insert(code.to_string(), State::Pending);
-            true
+    let dispatch = with_inner(|inner| {
+        if inner.latest_code.as_deref() != Some(code) {
+            inner.latest_code = Some(code.to_string());
+            inner.latest = None;
+        }
+        match inner.cache.get(code) {
+            Some(State::Ready(secs)) => {
+                publish_latest(inner, code, Some(*secs));
+                false
+            }
+            Some(State::Failed) => {
+                publish_latest(inner, code, None);
+                false
+            }
+            Some(State::Pending) => false,
+            _ => {
+                inner.cache.insert(code.to_string(), State::Pending);
+                true
+            }
         }
     });
     if dispatch {
         let _ = sender().send(code.to_string());
+    }
+}
+
+/// Publish `secs` as the `latest` result if `code` is still the most
+/// recently requested code (a parse landing for a superseded code must not
+/// re-seed consumers to a song the wheel already left).
+fn publish_latest(inner: &mut Inner, code: &str, secs: Option<u32>) {
+    if inner.latest_code.as_deref() != Some(code) {
+        return;
+    }
+    let digest = song_code_digest(code);
+    let unchanged = inner
+        .latest
+        .as_ref()
+        .is_some_and(|l| l.code_digest == digest && l.secs == secs);
+    if !unchanged {
+        inner.latest = Some(Latest {
+            code_digest: digest,
+            secs,
+        });
     }
 }
 
@@ -149,10 +203,7 @@ fn sender() -> &'static mpsc::Sender<String> {
                     };
                     with_inner(|inner| {
                         inner.cache.insert(code.clone(), state);
-                        inner.latest = Some(Latest {
-                            code_digest: song_code_digest(&code),
-                            secs,
-                        });
+                        publish_latest(inner, &code, secs);
                     });
                 }
             })
