@@ -523,11 +523,21 @@ fn apply_movie_mode(has_screens: bool) -> MovieMode {
         stage_records::side_entered(0).unwrap_or(false),
         stage_records::side_entered(1).unwrap_or(false),
     ];
+    // The STAGE SCREENS route is a cabinet-wide DECISION: the Multiplayer
+    // Bot's phantom side is not a player for it — its VIDEO SIZE is the
+    // last real player's cache (the bot mod's governance rule). The
+    // movie-size OVERRIDE below still touches every entered side (the game
+    // reads the governing side's field, which a bot session may govern
+    // through the phantom pad, and the write is restored at exit).
+    let entered_human = [
+        entered[0] && !crate::mods::multiplayer_bot::is_bot_side(0),
+        entered[1] && !crate::mods::multiplayer_bot::is_bot_side(1),
+    ];
     let mut mode = movie_mode::window_mode(effective_movie_mode(requested), has_screens);
     let mut routed = false;
     let mut route_note = "";
     if movie_mode::routes_to_screens(mode) {
-        if !movie_size::any_shows_movie(entered) {
+        if !movie_size::any_shows_movie(entered_human) {
             // Nobody shows a movie: nothing to route (and 20250805 would
             // still build a MovieActor for VIDEO SIZE OFF).
             mode = MovieMode::Thumbnail;
@@ -695,8 +705,17 @@ fn window_entry(scene_id: i32) {
         stage_records::side_entered(0).unwrap_or(false),
         stage_records::side_entered(1).unwrap_or(false),
     ];
+    // Cabinet-wide movie decisions (the STAGE SCREENS route and the
+    // song-has-a-movie read) must not count the Multiplayer Bot's phantom
+    // side — its Customize/row values are the last real player's cache
+    // (the bot mod's governance rule). The per-side DANCER pick keeps the
+    // bot side: FR-3 says the phantom side gets a dancer of its own.
+    let entered_human = [
+        entered[0] && !crate::mods::multiplayer_bot::is_bot_side(0),
+        entered[1] && !crate::mods::multiplayer_bot::is_bot_side(1),
+    ];
     let pool_mode = effective_movie_mode(super::style::movie_mode());
-    let song_movie = super::song_movie::committed_song_movie(entered);
+    let song_movie = super::song_movie::committed_song_movie(entered_human);
     let screen_filter = movie_mode::random_pool_filter(pool_mode, song_movie);
     // Part arcs are probed through the same LayeredFS-aware resolver as the
     // candidates (a missing part is silent — A3 behaviour).
@@ -863,7 +882,13 @@ fn log_random_pool(
 /// The option rows' pick (design §4.3 / FR-6; sources 2026-09-30 §4.7): the
 /// first entered side's stage request (the stage rows are mirrored in
 /// versus, so both sides agree) and each entered side's dancer request for
-/// that side's dancer index. `None` when every element is `Any` (the plain
+/// that side's dancer index. During a Multiplayer Bot song BOTH sides read
+/// as entered but the versus mirror never engaged (it only engages at song
+/// select with both sides entered), so the bot side's rows hold whatever
+/// the last real player on that pad cached — the stage fold (one stage per
+/// cabinet) therefore governs by the first entered side that is NOT the
+/// bot's phantom side (the human; the bot mod's governance rule). `None`
+/// when every element is `Any` (the plain
 /// random path then runs). Per element: an explicit key the tables no longer
 /// hold (data drift between the cached value and the install) ⇒ one WARN
 /// naming it, `Any` for this song; `Within` a source ⇒ that source's pool —
@@ -878,8 +903,10 @@ fn option_pick(
     sides: &[u8],
     arc_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Pick> {
+    let bot_side = crate::mods::multiplayer_bot::is_bot_side;
     let mut stage_req = sides
-        .first()
+        .iter()
+        .find(|&&s| !bot_side(s as usize))
         .map(|&s| super::options::stage_request(s))
         .unwrap_or(Request::Any);
     let mut dancer_reqs: Vec<Request> = sides

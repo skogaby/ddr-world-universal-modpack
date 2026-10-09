@@ -16,8 +16,8 @@
 //! ("P1 governs when both entered", "any entered side ON") MUST treat a side for which
 //! [`is_bot_side`] is `true` as not entered, or a human on P2 plays under the previous P1
 //! player's preferences. Current consumers: premium_free, training_mode, auto-calibration's
-//! census, assist_tick, announcer_mute and ddr_selection. Any new fold must add the same
-//! exclusion.
+//! census, assist_tick, announcer_mute, ddr_selection and background_dancers (the stage fold).
+//! Any new fold must add the same exclusion.
 //!
 //! ## Mechanism
 //!

@@ -28,6 +28,17 @@
 //! the anchor's intro animation and fades with its alpha like the plate).
 //! The glyph sets have no parentheses, so the text is `TARGET BOT`.
 //!
+//! Z-order: the gameplay label does NOT copy the stock plate's glyph group
+//! (1). The plate-adjacent HUD cluster — judge text, fast/slow, pacemaker,
+//! EX-score digits, life gauge — lives in the side's own group
+//! (`side + 2`), which the engine draws AFTER group 1, and in reverse
+//! scroll that cluster sits exactly where the label does; a group-1 label
+//! disappeared behind it (tester-found). The gameplay label therefore
+//! rides the side's cluster group at a priority above every element of
+//! it (see [`Surface::group`] / [`Surface::priority`]); the results label
+//! keeps the stock plate's values (the results layout has no such
+//! overlap).
+//!
 //! Lifecycle: `impersonation` arms the bot side when the plate got a real
 //! name and disarms at restore. An `input_manager::on_frame` callback (game
 //! thread) binds the gameplay label in GAMEPLAY and the results label in
@@ -68,8 +79,16 @@ const SL_BITMAPS_END: usize = 0x10;
 const SL_BITMAP_H: usize = 0x10;
 const SL_PARENT: usize = 0x60;
 const SL_ANCHOR_NAME: usize = 0x68;
-const SL_PRIORITY: usize = 0x94;
-const SL_GROUP: usize = 0x98;
+/// Glyph LAYER GROUP (`afp_layer_set_group`): SetBitmaps applies it to every
+/// glyph CBitmap through CSprite vfunc +0xE8 (which forwards only values
+/// below 0x10 — the group space the game itself uses is 0..=5).
+const SL_GROUP: usize = 0x94;
+/// Glyph LAYER PRIORITY (`afp_layer_set_priority`): the layout applies it to
+/// every glyph through CSprite vfunc +0xE0 every frame. The wrapper mirrors
+/// values ≤ 0x64 to `abs(v − 100)` (the game's own convention: judge text
+/// writes 0xD ⇒ effective 87, the EX-score digits 7 ⇒ 93); values above
+/// 0x64 pass through unchanged.
+const SL_PRIORITY: usize = 0x98;
 const SL_ALIGN_X: usize = 0x9C;
 const SL_ALIGN_Y: usize = 0xA0;
 const SL_OFFSET_X: usize = 0xC0;
@@ -129,18 +148,38 @@ impl Surface {
             Surface::Results => &LABEL_GLYPHS_RESULTS,
         }
     }
-    /// The stock plate's priority / group (its setup writes).
-    fn priority(self) -> i32 {
-        match self {
-            Surface::Gameplay => 1,
-            Surface::Results => 0,
-        }
-    }
     /// Horizontal alignment: gameplay plate left, results plate centred.
     fn align_x(self) -> i32 {
         match self {
             Surface::Gameplay => 0,
             Surface::Results => 1,
+        }
+    }
+    /// The glyph layer GROUP. The results label keeps the stock plate's
+    /// group; the gameplay label rides the side's OWN HUD cluster — the
+    /// judge / fast-slow / pacemaker / EX-score / life-gauge clips all live
+    /// in group `side + 2`, and the engine draws that group AFTER the stock
+    /// plate's group 1 (per-group display jobs walk 0, 4, 5, 1, 2, 3), so a
+    /// group-1 label is covered by the whole cluster wherever they overlap
+    /// (reverse scroll moves both to the top of the screen). The group
+    /// wrapper only forwards values below 0x10 — 2/3 are the game's own
+    /// values here.
+    fn group(self, side: usize) -> i32 {
+        match self {
+            Surface::Gameplay => side as i32 + 2,
+            Surface::Results => 0,
+        }
+    }
+    /// The glyph layer PRIORITY within [`group`] (applied per layout
+    /// through the CSprite wrapper, which mirrors values ≤ 0x64 to
+    /// `abs(v − 100)`: the side's cluster lands at gauge 96, score 93,
+    /// judge 87, receptor effect 83). The results label keeps the stock
+    /// 0x7FFF_FFFF (u16-truncated 0xFFFF); the gameplay label draws above
+    /// every cluster element so it stays legible in reverse scroll.
+    fn priority(self) -> i32 {
+        match self {
+            Surface::Gameplay => 0x100,
+            Surface::Results => 0x7FFF_FFFF,
         }
     }
     fn anchor(self, side: usize) -> &'static str {
@@ -392,8 +431,8 @@ unsafe fn bind(
     }
     let sl = label.sprite;
     write_anchor(sl, label.surface.anchor(side));
+    memory::write_i32(sl.add(SL_GROUP), label.surface.group(side));
     memory::write_i32(sl.add(SL_PRIORITY), label.surface.priority());
-    memory::write_i32(sl.add(SL_GROUP), 0x7FFF_FFFF);
     memory::write_i32(sl.add(SL_ALIGN_X), label.surface.align_x());
     memory::write_i32(sl.add(SL_ALIGN_Y), 0);
     memory::write_u8(sl.add(SL_FIT_TO_ANCHOR), 0);
