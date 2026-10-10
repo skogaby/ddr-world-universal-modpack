@@ -1,3 +1,6 @@
 # DDR SuperNova (PS2) stage020, ported with its layers as parts and its object animation
 # (tools/blender_ddr_addon/examples/port_stage_supernova.py)
-snstage020, 000000, 000000, dec, glo, add, footpanel
+# The stage's only opaque object is its 631 m sky sphere; the port script's SKY_NAMES
+# heuristic left it in `dec`, so it is renamed to `bg:-2` by hand (unlit, no outline hull,
+# lowprio pass) like every other SuperNova sky -- as `dec` the outline shell z-fought it.
+snstage020, 000000, 000000, bg:-2, glo, add, footpanel

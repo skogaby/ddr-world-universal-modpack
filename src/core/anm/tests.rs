@@ -1161,3 +1161,33 @@ fn ktmdl_material_identities_in_file_order() {
         Err(super::FormatError::BadMagic)
     );
 }
+
+#[test]
+fn ktmdl_bbox_extent_is_the_largest_axis_reach() {
+    let sk = synthetic_rig();
+    let mut img = build_ktmdl(&sk);
+    // no info block declared: None, not an error
+    assert_eq!(ktmdl::bbox_extent(&img), Ok(None));
+    let off = img.len() as u32;
+    img[0x58..0x5C].copy_from_slice(&1u32.to_le_bytes());
+    img[0x5C..0x60].copy_from_slice(&off.to_le_bytes());
+    img.resize(img.len() + 0x30, 0);
+    let o = off as usize;
+    // SuperNova stage020's `dec` sky sphere: ±631.567 on every axis, with a
+    // lopsided min to prove both corners are read.
+    for (k, v) in [631.567f32, 12.0, 631.567, 0.0].iter().enumerate() {
+        img[o + 0x10 + k * 4..o + 0x14 + k * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for (k, v) in [-40.0f32, -700.25, -631.567, 0.0].iter().enumerate() {
+        img[o + 0x20 + k * 4..o + 0x24 + k * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(ktmdl::bbox_extent(&img), Ok(Some(700.25)));
+    assert_eq!(
+        ktmdl::bbox_extent(&img[..img.len() - 8]),
+        Err(super::FormatError::Truncated)
+    );
+    assert_eq!(
+        ktmdl::bbox_extent(b"KTMDX\0\0\0"),
+        Err(super::FormatError::BadMagic)
+    );
+}

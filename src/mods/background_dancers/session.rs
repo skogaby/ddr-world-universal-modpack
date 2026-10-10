@@ -101,6 +101,9 @@ pub struct ParsedStagePart {
     pub seed: Vec<Trs>,
     pub loop_clip: Option<Clip>,
     pub material_clip: Option<MaterialClip>,
+    /// Reach from the model origin, metres (`ktmdl::bbox_extent`; 0 =
+    /// unknown) — the outline-twin gate (`instance_plan::HULL_MAX_EXTENT_M`).
+    pub extent_m: f32,
 }
 
 /// One rigid accessory part hung off a body bone.
@@ -361,6 +364,26 @@ fn parse_skeleton(
     }
 }
 
+/// The model's reach from its origin (`ktmdl::bbox_extent`), metres; `0.0`
+/// when the member or its info block is missing (a warning, never a skip —
+/// the value only gates the outline twin, `instance_plan::HULL_MAX_EXTENT_M`).
+fn parse_extent(reader: &ArcReader, member: &str, warnings: &mut Vec<String>) -> f32 {
+    let Some(bytes) = reader.get(member) else {
+        return 0.0;
+    };
+    match ktmdl::bbox_extent(&bytes) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            warnings.push(format!("{member}: no info bbox (hull gate reads 0)"));
+            0.0
+        }
+        Err(e) => {
+            warnings.push(format!("{member}: bbox {e}"));
+            0.0
+        }
+    }
+}
+
 /// Read + parse everything the pick needs. Blocking; no engine calls.
 /// `opts.shadow == false` (previews) never opens `pl_shadow00.arc`; a
 /// `stage: None` pick parses no stage and no camera set (no warning either).
@@ -404,6 +427,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                         None
                     };
                     let seed = seed_local_trs(&skeleton);
+                    let extent_m = parse_extent(&reader, &model_member, &mut warnings);
                     stage_parts.push(ParsedStagePart {
                         part: part.clone(),
                         priority: *priority,
@@ -412,6 +436,7 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
                         seed,
                         loop_clip,
                         material_clip,
+                        extent_m,
                     });
                 }
                 stage_reader = Some(reader);
@@ -1086,6 +1111,7 @@ impl Session {
                     model_name: p.model_name.clone(),
                     priority: p.priority,
                     bone_count: p.skeleton.bone_count(),
+                    extent_m: p.extent_m,
                 })
                 .collect(),
             dancers: parsed

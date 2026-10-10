@@ -168,12 +168,35 @@ pub struct PassMasks {
 }
 
 /// One parsed stage part (`gm_<stage>_<part>`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StagePartSpec {
     pub model_name: String,
     /// The `:N` low-priority rank (⇒ the lowprio pass, sort key = N).
     pub priority: Option<i32>,
     pub bone_count: usize,
+    /// The model's reach from its origin, metres (`ktmdl::bbox_extent`; 0 =
+    /// unknown). Gates the hull twin — see [`HULL_MAX_EXTENT_M`].
+    pub extent_m: f32,
+}
+
+/// No inverted-hull twin for a stage part reaching further than this from
+/// its origin (metres). Such a part is a skydome / backdrop the camera sits
+/// INSIDE or far away from, whatever its layer name: DSU's push is
+/// `0.00308 + 0.000375 · depth` m (`mdl_cel.hlsl`), while the 24-bit depth
+/// quantum at view depth `z` with the 0.1 m near plane is `z² / (0.1 · 2²⁴)`
+/// — the two cross near 630 m, so the black shell z-fights its own body and
+/// the sky dissolves into black hatched blocks (SuperNova stage020's `dec`
+/// sphere, radius 631: the push cleared only ~1 quantum). From ~200 m out the
+/// push is already under a pixel (a 1080p pixel spans ~0.12 m there), so the
+/// outline buys nothing past this line either way. The `_bg` name rule in
+/// [`restyle_allowed`] stays the one that also skips the LIGHTING restyle;
+/// this is the geometric safety net for the outline only.
+pub const HULL_MAX_EXTENT_M: f32 = 150.0;
+
+/// Whether a stage part may take an inverted-hull outline twin: restyle
+/// eligibility ([`restyle_allowed`]) plus the reach gate above.
+pub fn hull_allowed_for_stage_part(model_name: &str, extent_m: f32) -> bool {
+    restyle_allowed(&InstanceKind::StagePart(0), model_name) && extent_m < HULL_MAX_EXTENT_M
 }
 
 /// One parsed accessory part of a dancer (`pl_<key>_<part>`).
@@ -206,7 +229,7 @@ pub struct FxSpec {
 }
 
 /// Everything `plan_instances` needs from a `Parsed` bundle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanInput {
     pub stage_parts: Vec<StagePartSpec>,
     pub dancers: Vec<DancerSpec>,
@@ -353,7 +376,9 @@ pub fn plan_instances(
     // LAYER of the plan, each reading the body's slot. Never for the
     // shadow or the skydome part (their materials stay stock, so program
     // 0 of their container is the body again) — `restyle_allowed` is the
-    // same rule the restyle uses. Layer order within a body does not
+    // same rule the restyle uses — and never for a stage part reaching past
+    // `HULL_MAX_EXTENT_M` (a backdrop by geometry, whatever its name: the
+    // shell would z-fight its body). Layer order within a body does not
     // matter for the look (the z-test stacks them); layers are grouped
     // per body so the build/teardown log reads body-by-body.
     // (Deploy #4 shipped a Dancer|Part-only filter here — a `cargo fmt`
@@ -362,9 +387,17 @@ pub fn plan_instances(
         let n = instances.len();
         for of in 0..n {
             let body = &instances[of];
-            if !restyle_allowed(&body.kind, &body.model_name)
-                || body.status == InstanceStatus::Skipped
-            {
+            if body.status == InstanceStatus::Skipped {
+                continue;
+            }
+            let eligible = match body.kind {
+                InstanceKind::StagePart(i) => hull_allowed_for_stage_part(
+                    &body.model_name,
+                    input.stage_parts.get(i).map_or(0.0, |p| p.extent_m),
+                ),
+                ref kind => restyle_allowed(kind, &body.model_name),
+            };
+            if !eligible {
                 continue;
             }
             let (model_name, pass_mask, sort_key, slot, mirror, bone_count) = (
@@ -413,11 +446,13 @@ mod tests {
                     model_name: "gm_boom00_bg".into(),
                     priority: Some(-2),
                     bone_count: 3,
+                    extent_m: 420.0,
                 },
                 StagePartSpec {
                     model_name: "gm_boom00_stage".into(),
                     priority: None,
                     bone_count: 2,
+                    extent_m: 9.0,
                 },
             ],
             dancers: vec![
@@ -641,6 +676,44 @@ mod tests {
             })
             .collect();
         assert_eq!(hull_of, vec![1, 2, 3]);
+    }
+
+    /// SuperNova stage020 ships its sky sphere as the `dec` layer (radius
+    /// 631 m): no `_bg` name to exempt it, so only the reach gate keeps the
+    /// black shell off it. The restyle (lighting) verdict is untouched.
+    #[test]
+    fn far_reaching_stage_part_takes_no_hull_whatever_its_name() {
+        let mut input = fixture();
+        input.stage_parts.push(StagePartSpec {
+            model_name: "gm_snstage020_dec".into(),
+            priority: None,
+            bone_count: 1,
+            extent_m: 631.567,
+        });
+        let plan = plan_instances(&input, MASKS, 0, 32, 1, None);
+        let hull_of: Vec<usize> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(of),
+                _ => None,
+            })
+            .collect();
+        // Bodies: 0 `_bg` (name-exempt), 1 `_stage`, 2 the far `dec` (reach-
+        // exempt), then dancers 3, 4 and parts 5, 6, 7.
+        assert_eq!(hull_of, vec![1, 3, 4, 5, 6, 7]);
+        assert!(restyle_allowed(
+            &InstanceKind::StagePart(2),
+            "gm_snstage020_dec"
+        ));
+        assert!(!hull_allowed_for_stage_part("gm_snstage020_dec", 631.567));
+        assert!(!hull_allowed_for_stage_part(
+            "gm_snstage020_dec",
+            HULL_MAX_EXTENT_M
+        ));
+        assert!(hull_allowed_for_stage_part("gm_snstage020_glo", 9.0));
+        assert!(hull_allowed_for_stage_part("gm_snstage020_glo", 0.0));
+        assert!(!hull_allowed_for_stage_part("gm_snstage020_bg", 9.0));
     }
 
     #[test]

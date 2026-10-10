@@ -1848,3 +1848,21 @@ Two smaller traps from the same port: a background Blender batch started from a 
 when that shell call is reaped (run it under `nohup … &` and poll the log), and `.data` pointers
 can land in `.bss` — they read 0 at run time, and the raw file bytes there are garbage, so a PE
 reader for compiled-in game data must return zeros past a section's raw size.
+
+## The outline hull z-fights any skydome it is allowed to twin, and only in gameplay (2026-10-10)
+
+SuperNova stage020's sky dissolved into black hatched blocks during play but previewed clean in
+the options box. Not a texture or format problem (the DDS and `.model` were fine); it was the
+DSU inverted-hull outline. The port script's `SKY_NAMES` heuristic had left the sphere in the
+`dec` layer, so `restyle_allowed` (which exempts only `*_bg`) gave it a black hull twin. From
+inside the sphere every fragment reads as back-facing, so the whole sky got a shell pushed
+`0.00308 + 0.000375 · depth` m behind it — 0.24 m at 631 m, which is exactly the 24-bit depth
+quantum there (`z² / (0.1 · 2²⁴)`). Preview never builds hulls (`HullPlan::none()`), hence the
+"only in gameplay" split; the other SN skies are `bg:-2` and were name-exempt by luck.
+Two fixes: the data (part renamed to `bg:-2` like its siblings) and a geometric safety net —
+`instance_plan::HULL_MAX_EXTENT_M` (150 m, from `ktmdl::bbox_extent`) skips the hull for any
+stage part that reaches that far, whatever its layer name; the push is sub-pixel past ~200 m
+anyway. Rules: a visual bug that is gameplay-only but preview-clean is one of the gameplay-only
+layers (hulls, stock pass sort modes, the real camera set, dancers) — diff that table first
+(`.agents/summary` / this file) before suspecting the asset; and never gate a geometric
+mechanism on a naming convention alone when the geometry is available to check.

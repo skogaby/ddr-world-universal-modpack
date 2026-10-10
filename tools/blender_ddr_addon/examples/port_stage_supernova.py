@@ -140,6 +140,10 @@ ADDITIVE = (0x06C1, 4)
 PART_ORDER = ['bg', 'dec', 'glo', 'add', 'sub', 'ble', 'footpanel']
 PART_PRIORITY = {'bg': -2, 'ble': -1}
 SKY_NAMES = {'bg', 'haikei', 'sky', 'sphere'}
+# Known miss: stage020's 631 m sky sphere carries none of these names, so it was ported as
+# `dec` and later renamed to `bg:-2` by hand in the shipped folder (a `dec` sky takes the
+# outline hull and z-fights it at that depth). A re-port should add its object name here —
+# or gate on the object's bbox reach — before trusting the layer split of a new stage.
 FOOTPANEL_TEX = 'snfootpanel'
 # cameras: the ten numbered stage cameras -> the MAIN list, `Camera_neu` + the shared dancer
 # close-ups -> the `_non` cut-aways the DLL shows at dance cuts
