@@ -495,6 +495,47 @@ GAME=pc DANCERS='AFRO(1st),BUS(7th)' /Applications/Blender.app/Contents/MacOS/Bl
   --python tools/blender_ddr_addon/examples/port_character_strike.py      # names as in the table
 ```
 
+### A Dance Dance Revolution for Windows (2002, "DDR PC") dancer (`examples/port_character_ddrpc.py`)
+
+KCEA's Windows port is the System 573 engine on Direct3D 8 with the 573 content **compiled into the
+executables as C data**: 24 built-in characters (the 3rd–5thMIX cast re-dressed) in
+`DanceDanceRevolution.exe` + `data.bin`, and 25 downloadable characters as `character_dll/<name>.dll`
+(exporting one record, `dll_header`) + `<name>.bin` (its BMPs). Meshes are already posed in each
+joint's frame, textures are BMPs, and every routine is baked to per-frame 4×3 joint matrices at 60
+frames per measure — no rotation tracks, no alternates. All 49 ship as
+`data_mods/custom_models/dancers/DDR WINDOWS 2K2/<Name>` (keys `ddrpc<name>00`). Decoders and all
+conversion math are pure numpy in `scripts/ddrpc_dancer_dump.py` (`Game`, `load_dll`,
+`rest_matrices`, `world_binds`, `world_mesh`, `world_atlas`, `routine_worlds`, `retarget_worlds`,
+`worlds_to_anm_spec`); formats and RE in `docs/ddr_pc_dancers_research.md` (§0 has the unpack
+steps: `cabextract` the installer's `Data.Cab`, `unzip` the `ddr_char*.exe` packs).
+
+* **Rig.** 17 bones: `root` + the 16 PC joints in parent-first order under the 573 hierarchy.
+  **Binds are the sex's idle (`M_normal` / `F_normal`) frame-0 joint matrices, rotation included** —
+  the joint-local meshes are authored in those rotated frames; translation-only binds twist every
+  limb (the first attempt did).
+* **Mesh.** One rigid-skinned mesh, the file's normals, two-sided (the game draws dancers
+  `D3DCULL_NONE`). Atlas: every BMP at 2× nearest, colour key (248, 0, 248) → alpha 0, plus a 16 px
+  swatch per untextured material's flat colour (the game shades the vertex diffuse alone there;
+  every shipped one is a single colour) with white COLOR0 — the 573 convention, so Workbench
+  previews are truthful. Blink / mouth texture frames (`t1..t3`) are dropped: frame 0 only.
+* **Space.** D3D is left-handed facing −Z; `diag(1, 1, −1)` + ×0.1 puts it in World. The mirror
+  flips CW → CCW, so the index order is KEPT (the 573 port reverses it).
+* **Clips.** One `.anm` per routine of the dancer's own playlist (8 male / 12 female, from the
+  exe's `id & 7` tables), 120 World frames per measure with one key per PC frame. The bake is in
+  place (hips x/z ≈ 0), so `ROOT_MODE=inplace` is the default; `recentre` is available. Checked
+  against the PC matrices: worst joint error 0.13 mm over 484 clips.
+* **Batch.** `DANCERS=all` (~10 min for 49 without previews; `PREVIEW=1` adds ~15 s each). Labels
+  are the game's select-screen names (`Mr Spanky`, `Ni-Na`, `Robo2000` → key `ddrpcrobo2k00`). The
+  sidecar sex and scale come from `dll_header` (Ni-Na is flagged male there and dances the male
+  pool; the port keeps it).
+
+```bash
+DDRPC_DIR=~/Desktop/ddrpc_work/game DANCERS=Rage,alex PREVIEW=1 \
+  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_ddrpc.py
+./scripts/validate_ddrpc_tools.sh ~/Desktop/ddrpc_work/game ~/Desktop/ddrpc_work/character_dll
+```
+
 ### A DDR SuperNova / SuperNova 2 / X / X2 (PS2) dancer (`examples/port_character_supernova.py`)
 
 SuperNova's eight dancers (AFRO, BABYLON, EMI, GUS, JENNY, RAGE, ROBOZUKIN, RUBY) are a new,

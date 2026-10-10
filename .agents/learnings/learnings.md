@@ -1831,3 +1831,20 @@ The log looked healthy (`save — wrote 23 option(s)`), it just never wrote the 
   second module must be updated on every consumer-visible event (request), not only on the
   producer's expensive path (parse) — and the fallback gate that used to read `latest().is_none()`
   as "service not driven" needs an explicit `is_driven()`.
+
+## Joint-local meshes may live in ROTATED joint frames; a translation-only bind twists them (2026-10-10)
+
+The DDR for Windows (2002) port looked right in the clip check (joint positions within 0.1 mm)
+and wrong on screen: every arm and leg segment pointed the way it was modelled, not the way the
+joint sat. The 573 bakes its meshes in untransformed joint space, so its port could use
+identity-rotation binds at the rest offsets. The PC bake pre-rotated each joint's vertices into
+the joint's `GsCOORDINATE2` frame, so the mesh only reads correctly under that joint's full rest
+MATRIX. Rule: when a format stores one mesh per joint plus per-frame joint matrices, the bind is
+the rest-pose MATRIX of that joint (`rest_matrices`), never just its translation — and a joint
+error metric cannot catch this, because the joints are in the right place either way. Look at
+the rest render before trusting the numbers; a limb sticking out sideways is this bug.
+
+Two smaller traps from the same port: a background Blender batch started from a tool shell dies
+when that shell call is reaped (run it under `nohup … &` and poll the log), and `.data` pointers
+can land in `.bss` — they read 0 at run time, and the raw file bytes there are garbage, so a PE
+reader for compiled-in game data must return zeros past a section's raw size.

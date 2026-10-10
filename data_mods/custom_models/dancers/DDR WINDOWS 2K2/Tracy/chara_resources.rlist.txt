@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) built-in character "Tracy" (id 8), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines hopping1 soul1 n31 thouse3 hiphop2 soul2 hiphop1 mhouse1 jazz1 jazz2 lock1 sino_)
+ddrpctracy00, pl, F, A, 0.95, 0.75, 0.0

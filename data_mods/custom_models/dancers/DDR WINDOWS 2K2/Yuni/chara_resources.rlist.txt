@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) built-in character "Yuni" (id 9), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines hiphop1 hiphop2 thouse3 jazz1 jazz2 sino_ lock1 soul1 hopping1 soul2 mhouse1 n31)
+ddrpcyuni00, pl, F, A, 0.95, 0.75, 0.0

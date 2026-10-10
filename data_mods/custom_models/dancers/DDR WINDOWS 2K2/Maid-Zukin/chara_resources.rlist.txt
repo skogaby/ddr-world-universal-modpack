@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) built-in character "Maid-Zukin" (id 18), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines lock1 mhouse1 soul2 hiphop1 n31 jazz1 jazz2 hopping1 thouse3 sino_ hiphop2 soul1)
+ddrpcmaidzukin00, pl, F, A, 0.999, 0.75, 0.0

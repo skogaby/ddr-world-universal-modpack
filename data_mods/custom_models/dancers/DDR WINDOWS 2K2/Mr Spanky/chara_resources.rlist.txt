@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) downloadable character "mrSpanky" (id 40), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines hopping1 capoera1 y31 y11 thouse3 thouse2 hiphop2 hiphop1)
+ddrpcmrspanky00, pl, M, A, 1.0, 0.8, 0.0

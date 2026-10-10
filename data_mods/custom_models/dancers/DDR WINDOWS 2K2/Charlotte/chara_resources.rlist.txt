@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) downloadable character "charlotte" (id 45), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines jazz1 jazz2 lock1 hopping1 hiphop1 n31 mhouse1 sino_ soul1 soul2 hiphop2 thouse3)
+ddrpccharlotte00, pl, F, A, 1.0, 0.75, 0.0

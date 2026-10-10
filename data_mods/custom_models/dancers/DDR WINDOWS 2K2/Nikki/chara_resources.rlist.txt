@@ -1,0 +1,3 @@
+# Dance Dance Revolution (Windows, KCEA 2002) downloadable character "nikki" (id 42), ported with its own rig and the game's baked choreography
+# (tools/blender_ddr_addon/examples/port_character_ddrpc.py; ROOT_MODE=inplace; routines lock1 mhouse1 soul2 hiphop1 n31 jazz1 jazz2 hopping1 thouse3 sino_ hiphop2 soul1)
+ddrpcnikki00, pl, F, A, 1.0, 0.75, 0.0
