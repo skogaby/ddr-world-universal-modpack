@@ -13,7 +13,7 @@ Usage:
     ultramix_k3d_dump.py vsh <default.xbe>                  # embedded K3D vertex-shader sources
     ultramix_k3d_dump.py obj <file.ddm> <file.ani> <frame> <out.obj>   # CPU-skinned pose
     ultramix_k3d_dump.py hierarchy <file.ani>...            # verify HIERARCHY is rigid in clips
-    ultramix_k3d_dump.py match <dir with .ani> <dir with World mc_*.anm>  # same-take survey
+    ultramix_k3d_dump.py match <dir with .ani> <dir with World mc_*.anm> [factor]  # same-take survey (2 DSU, 4 UMX4)
 
 Import-safe: `from ultramix_k3d_dump import parse_ddm, parse_ani, skin_pose, HIERARCHY`.
 Needs numpy (`ddm`/`ani`/`xpu`/`vsh` do not).
@@ -111,14 +111,76 @@ for _s in ("L", "R"):
     )
 HIERARCHY.update({"L_Knee": "L_Leg", "R_knee": "R_Leg", "L_Ankle": "L_Knee", "R_Ankle": "R_knee"})
 
+# DDR ULTRAMIX 4 rigs use HumanIK-style names (`Hips`, `Spine1`, `leftUpLeg`, ...). `Head` and
+# `Spine` clash with the DSU1 table above, so UMX4 has its own table (models parsed from a
+# revision-4 `.ddm` carry it as `model["hierarchy"]`). Two skeletons share it: the 32-joint male
+# one (every male clip's tracks) and the 57-joint female one (adds breasts, hair tips, wings and
+# three 3-joint skirt chains). Parents were picked by the `hierarchy` metric over all listed
+# clips; the cloth and hair chains are simulated and hang off their nearest rigid segment.
+# UMX4's own joints are not perfectly rigid either (offset std up to ~0.1 units on the limbs:
+# the clips carry per-joint translations), which the port reproduces with translation tracks.
+HIERARCHY_UMX4 = {
+    "Hips": None,
+    "Spine": "Hips",
+    "Spine1": "Spine",
+    "Spine2": "Spine1",
+    "Neck": "Spine2",
+    "Neck1": "Neck",
+    "Head": "Neck1",
+    "M_TieA": "Spine2",
+    "M_TieC": "M_TieA",
+    "M_TieTip": "M_TieC",  # M_TieA where a model has no M_TieC (umx4_hierarchy)
+}
+for _s, _side in (("L", "left"), ("R", "right")):
+    HIERARCHY_UMX4.update(
+        {
+            f"{_s}_SideHairRoot": "Head",
+            f"{_s}_SideHairTip": f"{_s}_SideHairRoot",
+            f"{_s}_Breast": "Spine2",
+            f"{_s}_WingLower1A": "Spine",
+            f"{_s}_WingLower2A": "Spine",
+            f"{_side}Shoulder": "Spine2",
+            f"{_side}Arm": f"{_side}Shoulder",
+            f"{_side}ArmTwistLocked": f"{_side}Arm",
+            f"{_side}ArmHalf": f"{_side}ArmTwistLocked",
+            f"{_side}Forearm": f"{_side}Arm",
+            f"{_side}Hand": f"{_side}Forearm",
+            f"{_side}UpLeg": "Hips",
+            f"{_side}Leg": f"{_side}UpLeg",
+            f"{_side}Foot": f"{_side}Leg",
+            f"{_side}FootIndex1": f"{_side}Foot",
+        }
+    )
+    for _n in (1, 3, 5):
+        HIERARCHY_UMX4.update(
+            {
+                f"{_s}_Skirt{_n}A": "Hips",
+                f"{_s}_Skirt{_n}C": f"{_s}_Skirt{_n}A",
+                f"{_s}_Skirt{_n}Tip": f"{_s}_Skirt{_n}C",
+            }
+        )
+
+
+def umx4_hierarchy(names):
+    """HIERARCHY_UMX4 restricted to `names`, with the one model-dependent parent resolved."""
+    h = {n: HIERARCHY_UMX4[n] for n in names}
+    if "M_TieTip" in h and "M_TieC" not in h:
+        h["M_TieTip"] = "M_TieA"
+    return h
+
 
 # ---------------------------------------------------------------------------
 # .ddm model
 # ---------------------------------------------------------------------------
 DDM3_MATERIAL_SIZE = 0x14C
+# DDR ULTRAMIX 4 `srdd` revision (u32 0x112 at 0x04).
+DDM4_REVISION = 0x112
+DDM4_MATERIAL_SIZE = 0x1D8
+DDM4_PALETTE_SLOTS = 30
+DDM4_VERTEX_FLOATS = 16
 
 
-def _ddm_tail(data, off):
+def _ddm_tail(data, off, vertex_bytes=44):
     """Bones, triangle list and vertices, starting at the bone count. Returns
     (bones, indices, vertex_count, vertex_offset), or None if the file does not end
     exactly after the vertices."""
@@ -142,9 +204,66 @@ def _ddm_tail(data, off):
     off += 4 + 2 * index_count
     (vertex_count,) = struct.unpack_from("<I", data, off)
     vertex_off = off + 4
-    if vertex_off + 44 * vertex_count != len(data):
+    if vertex_off + vertex_bytes * vertex_count != len(data):
         return None
     return bones, indices, vertex_count, vertex_off
+
+
+def _parse_ddm4(data):
+    """DDR ULTRAMIX 4 `srdd` revision: u32 0x112, u32 material count, then per material a
+    0x1D8-byte record:
+        0x000  char[0x40]   Maya shader name (the `SHADERS` key of `<COSTUME>.csv`)
+        0x040  u32, u32     flags (3 / 0x103; 0xA000000x) -- not needed for the port
+        0x048  D3DMATERIAL8 (0x44)
+        0x08C  char[0x100]  texture name (stale: the costume CSV names the real one)
+        0x18C  u32          1
+        0x190  u32          palette size p (<= 30)
+        0x194  u16[30]      bone palette: the model bone index of each local slot
+        0x1D0  u32, u32     first index, triangle count (contiguous ranges, in order)
+    The bone / index tail is the older one; vertices are 64 bytes: position, normal, uv,
+    4 bone slots as floats (index into the OWNING material's palette, -1 = unused) and
+    4 weights (sum 1). No vertex is shared between materials. Bind space is the clip space
+    (Y-up, facing -Z, D3D left-handed), unlike DSU's Z-up bind space."""
+    (count,) = struct.unpack_from("<I", data, 0x08)
+    if not 0 < count < 256:
+        raise ValueError(".ddm revision 4: implausible material count %d" % count)
+    tail = _ddm_tail(data, 0x0C + DDM4_MATERIAL_SIZE * count, 4 * DDM4_VERTEX_FLOATS)
+    if tail is None:
+        raise ValueError(".ddm revision 4: bone / index / vertex tail does not end at EOF")
+    bones, indices, vertex_count, vertex_off = tail
+    materials, at = [], 0
+    for i in range(count):
+        m = 0x0C + DDM4_MATERIAL_SIZE * i
+        (size,) = struct.unpack_from("<I", data, m + 0x190)
+        if size > DDM4_PALETTE_SLOTS:
+            raise ValueError(".ddm revision 4: material %d has a %d-bone palette" % (i, size))
+        palette = struct.unpack_from("<%dH" % size, data, m + 0x194)
+        first, tris = struct.unpack_from("<II", data, m + 0x1D0)
+        if first != at or any(b >= len(bones) for b in palette):
+            raise ValueError(".ddm revision 4: material %d has a bad index range or palette" % i)
+        at += 3 * tris
+        materials.append(dict(name=data[m : m + 0x40].split(b"\0")[0].decode("latin1"),
+                              material=struct.unpack_from("<17f", data, m + 0x48),
+                              texture=data[m + 0x8C : m + 0x18C].split(b"\0")[0].decode("latin1"),
+                              palette=palette, first_index=first, triangles=tris))
+    if at != len(indices):
+        raise ValueError(".ddm revision 4: materials cover %d of %d indices" % (at, len(indices)))
+    if any(b["vs_register"] != b["index"] for b in bones):
+        raise ValueError(".ddm revision 4: bone register is not the bone index")
+    return dict(
+        revision=4,
+        material=materials[0]["material"],
+        texture=materials[0]["texture"],
+        materials=materials,
+        bones=bones,
+        indices=indices,
+        vertex_count=vertex_count,
+        vertex_offset=vertex_off,
+        vertex_floats=DDM4_VERTEX_FLOATS,
+        bind_to_clip=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        hierarchy=umx4_hierarchy([b["name"] for b in bones]),
+        data=data,
+    )
 
 
 def parse_ddm(data: bytes) -> dict:
@@ -155,10 +274,15 @@ def parse_ddm(data: bytes) -> dict:
       * DSU3 (loader FUN_001f52c0): u32 material count at 0x04, then per material a
         0x14C-byte record { D3DMATERIAL8 (0x44), texture name (0x100), u32 first index,
         u32 triangle count }. Each material draws its own contiguous triangle range.
-    Both are returned with `materials` = [{material, texture, first_index, triangles}];
+      * DDR ULTRAMIX 4: u32 0x112 at 0x04, per-material bone palettes, 4-weight vertices
+        (`_parse_ddm4`; the model also carries `palette`, `name`, `vertex_floats`,
+        `bind_to_clip` and its own `hierarchy`).
+    All are returned with `materials` = [{material, texture, first_index, triangles}];
     `texture` / `material` are the first material's (the DSU1/2 single-texture fields)."""
     if data[:4] != DDM_MAGIC:
         raise ValueError("not a .ddm (magic %r)" % data[:4])
+    if struct.unpack_from("<I", data, 0x04)[0] == DDM4_REVISION:
+        return _parse_ddm4(data)
     tail = _ddm_tail(data, 0x148)
     if tail is not None:
         material = struct.unpack_from("<17f", data, 0x04)  # Diffuse, Ambient, Specular, Emissive, Power
@@ -199,10 +323,38 @@ def parse_ddm(data: bytes) -> dict:
 
 
 def ddm_vertices(model):
-    """numpy (n, 11): pos xyz, normal xyz, uv, bone0 reg, bone1 reg, bone0 weight (all f32)."""
+    """numpy (n, 11): pos xyz, normal xyz, uv, bone0 reg, bone1 reg, bone0 weight (all f32);
+    (n, 16) for UMX4: pos, normal, uv, 4 palette slots, 4 weights. Use `vertex_influences`
+    for the bones."""
     import numpy as np
 
-    return np.frombuffer(model["data"], "<f4", model["vertex_count"] * 11, model["vertex_offset"]).reshape(-1, 11)
+    k = model.get("vertex_floats", 11)
+    return np.frombuffer(model["data"], "<f4", model["vertex_count"] * k, model["vertex_offset"]).reshape(-1, k)
+
+
+def vertex_influences(model):
+    """numpy (n, k) bone registers and (n, k) weights per vertex (unused slots: weight 0 and
+    the vertex's first register). DSU: k = 2 (w0, 1 - w0); UMX4: k = 4, palette-resolved."""
+    import numpy as np
+
+    v = ddm_vertices(model)
+    if model.get("revision") != 4:
+        regs = v[:, 8:10].astype(np.int64)
+        return regs, np.c_[v[:, 10], 1.0 - v[:, 10]]
+    slots = v[:, 8:12].astype(np.int64)
+    weights = np.where(slots >= 0, v[:, 12:16], 0.0)
+    regs = np.zeros_like(slots)
+    owner = np.full(len(v), -1)
+    idx = np.array(model["indices"], dtype=np.int64)
+    for mi, mt in enumerate(model["materials"]):
+        vs = np.unique(idx[mt["first_index"] : mt["first_index"] + 3 * mt["triangles"]])
+        if (owner[vs] >= 0).any():
+            raise ValueError("UMX4 vertex shared between materials")
+        owner[vs] = mi
+        pal = np.array(mt["palette"], dtype=np.int64)
+        regs[vs] = pal[np.clip(slots[vs], 0, len(pal) - 1)]
+    regs = np.where(slots >= 0, regs, regs[:, :1])
+    return regs, weights
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +423,15 @@ def skin_pose(model, clip, frame):
         inv = np.array(b["inverse_bind"]).reshape(4, 4)
         mats[b["vs_register"]] = inv @ world_matrix(ani_keys(clip, b["name"])[frame])
     p = np.c_[verts[:, 0:3], np.ones(len(verts))]
-    m0 = np.stack([mats[int(r)] for r in verts[:, 8]])
-    m1 = np.stack([mats[int(r)] for r in verts[:, 9]])
-    w = verts[:, 10:11]
-    pos = w * np.einsum("ni,nij->nj", p, m0)[:, :3] + (1 - w) * np.einsum("ni,nij->nj", p, m1)[:, :3]
     n = verts[:, 3:6]
-    nrm = w * np.einsum("ni,nij->nj", n, m0[:, :3, :3]) + (1 - w) * np.einsum("ni,nij->nj", n, m1[:, :3, :3])
+    regs, weights = vertex_influences(model)
+    pos = np.zeros((len(verts), 3))
+    nrm = np.zeros((len(verts), 3))
+    for k in range(regs.shape[1]):
+        m = np.stack([mats[int(r)] for r in regs[:, k]])
+        w = weights[:, k : k + 1]
+        pos += w * np.einsum("ni,nij->nj", p, m)[:, :3]
+        nrm += w * np.einsum("ni,nij->nj", n, m[:, :3, :3])
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
     return pos, nrm
 
@@ -313,7 +468,7 @@ def game_space(model, scale=GAME_SCALE):
     preserved: v_game · B_game⁻¹ · W_game = (v_bind · B⁻¹ · W) · L."""
     import numpy as np
 
-    lin = np.array(_R_BC) @ np.diag([1.0, 1.0, -1.0]) * scale
+    lin = np.array(model.get("bind_to_clip", _R_BC)) @ np.diag([1.0, 1.0, -1.0]) * scale
     lowest = float((ddm_vertices(model)[:, 0:3] @ lin)[:, 1].min())
     C = _affine(lin, (0.0, -lowest, 0.0))
     L = np.diag([scale, scale, -scale, 1.0])
@@ -338,31 +493,37 @@ def game_mesh(model, scale=GAME_SCALE):
     C, _ = game_space(model, scale)
     v = ddm_vertices(model)
     pos = np.c_[v[:, 0:3], np.ones(len(v))] @ C
-    nrm = v[:, 3:6] @ (np.array(_R_BC) @ np.diag([1.0, 1.0, -1.0]))
+    nrm = v[:, 3:6] @ (np.array(model.get("bind_to_clip", _R_BC)) @ np.diag([1.0, 1.0, -1.0]))
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
     reg = {b["vs_register"]: b["name"] for b in model["bones"]}
+    regs, ws = vertex_influences(model)
     weights = []
-    for row in v:
-        b0, b1, w0 = reg[int(row[8])], reg[int(row[9])], float(row[10])
-        weights.append([(b0, 1.0)] if b0 == b1 else [(b0, w0), (b1, 1.0 - w0)])
+    for rr, ww in zip(regs, ws):
+        acc = {}
+        for r, w in zip(rr, ww):
+            if w > 0:
+                acc[reg[int(r)]] = acc.get(reg[int(r)], 0.0) + float(w)
+        weights.append(list(acc.items()) or [(reg[int(rr[0])], 1.0)])
     tris = np.array(model["indices"], dtype=np.int64).reshape(-1, 3)[:, [0, 2, 1]]
     return pos[:, :3], nrm, v[:, 6:8].copy(), weights, tris
 
 
-def hierarchy_order(names):
+def hierarchy_order(names, hierarchy=None):
     """`names` (a model's bones) parent-first: depth order, ties by name. Every
-    name must be in HIERARCHY and its parent (if any) present."""
+    name must be in `hierarchy` (default HIERARCHY) and its parent (if any) present."""
+    hierarchy = HIERARCHY if hierarchy is None else hierarchy
+
     def depth(n):
         d = 0
-        while HIERARCHY[n] is not None:
-            n = HIERARCHY[n]
+        while hierarchy[n] is not None:
+            n = hierarchy[n]
             d += 1
         return d
 
     for n in names:
-        if n not in HIERARCHY:
+        if n not in hierarchy:
             raise KeyError("bone %r has no HIERARCHY entry" % n)
-        p = HIERARCHY[n]
+        p = hierarchy[n]
         if p is not None and p not in names:
             raise KeyError("bone %r's parent %r is not in the model" % (n, p))
     return sorted(names, key=lambda n: (depth(n), n))
@@ -413,19 +574,26 @@ def clip_game_worlds(model, clip, bone_names, target_binds, scale=GAME_SCALE, lo
     return out, frames
 
 
-def ani_to_anm_spec(model, clip, bone_names, parents, target_binds, scale=GAME_SCALE, loop_in=LOOP_IN):
+# World frames (60 fps) per source key: DSU1-3 clips are 30 Hz (2:1 decimations of World's own
+# takes, section 6), DDR ULTRAMIX 4's are 15 Hz (4:1 decimations of the same takes, section 13).
+FRAME_STEP_DSU = 2
+FRAME_STEP_UMX4 = 4
+
+
+def ani_to_anm_spec(model, clip, bone_names, parents, target_binds, scale=GAME_SCALE, loop_in=LOOP_IN,
+                    frame_step=FRAME_STEP_DSU):
     """A scripts/anm_dump.py::write_anm spec for one DSU clip on the exported
     rig (`bone_names` in file order, `parents` indices, `target_binds` 4x4 row
-    matrices from the exported .model). DSU's 30 Hz keys land every 2nd
-    frame of World's 60 fps timeline (explicit key times — the evaluator
-    slerps between them, as DSU itself interpolates between frames): no
-    resampling. Rotation = kind 0x1C, translation = 0x1D, one key when a
-    channel never changes."""
+    matrices from the exported .model). The source keys land every
+    `frame_step`-th frame of World's 60 fps timeline (2 for DSU's 30 Hz, 4 for
+    UMX4's 15 Hz; explicit key times — the evaluator slerps between them, as
+    DSU itself interpolates between frames): no resampling. Rotation = kind
+    0x1C, translation = 0x1D, one key when a channel never changes."""
     import numpy as np
 
     worlds, frames = clip_game_worlds(model, clip, bone_names, target_binds, scale, loop_in)
     n_f, n_b = worlds.shape[:2]
-    times = [2 * i for i in range(n_f)]
+    times = [frame_step * i for i in range(n_f)]
     tracks = []
     for b in range(n_b):
         p = parents[b]
@@ -536,7 +704,12 @@ def cmd_ddm(path):
     for b in m["bones"]:
         bind = np.linalg.inv(np.array(b["inverse_bind"]).reshape(4, 4))
         print("  %2d %-15s c[%4d]  bind pos (Z-up) %8.3f %8.3f %8.3f" % (b["index"], b["name"], b["vs_register"], *bind[3, :3]))
-    print("bounds", v[:, :3].min(0).round(3), v[:, :3].max(0).round(3), " weight0 range", v[:, 10].min(), v[:, 10].max())
+    if len(m["materials"]) > 1 and "palette" in m["materials"][0]:
+        for mt in m["materials"]:
+            print("  %-24s palette %s" % (mt["name"], list(mt["palette"])))
+    _, ws = vertex_influences(m)
+    print("bounds", v[:, :3].min(0).round(3), v[:, :3].max(0).round(3), " influences/vertex max",
+          int((ws > 0).sum(1).max()), " weight sum", ws.sum(1).min().round(4), ws.sum(1).max().round(4))
 
 
 def cmd_ani(path):
@@ -567,11 +740,12 @@ def cmd_obj(ddm_path, ani_path, frame, out_path):
 def cmd_hierarchy(paths):
     import numpy as np
 
-    worst = {}
+    worst, table = {}, HIERARCHY
     for p in paths:
         c = parse_ani(open(p, "rb").read())
         names = {t["name"] for t in c["tracks"]}
-        for child, parent in HIERARCHY.items():
+        table = umx4_hierarchy(names) if names <= set(HIERARCHY_UMX4) else HIERARCHY
+        for child, parent in table.items():
             if parent is None or child not in names or parent not in names:
                 continue
             kc, kp = ani_keys(c, child), ani_keys(c, parent)
@@ -579,12 +753,13 @@ def cmd_hierarchy(paths):
             dev = float(np.array(local).std(0).max())
             worst[child] = max(worst.get(child, 0.0), dev)
     for child, dev in sorted(worst.items(), key=lambda kv: -kv[1]):
-        print("  %-16s <- %-12s max offset std %.2e" % (child, HIERARCHY[child], dev))
+        print("  %-20s <- %-16s max offset std %.2e" % (child, table[child], dev))
 
 
-def cmd_match(dsu_dir, ddr_dir):
+def cmd_match(dsu_dir, ddr_dir, factor=FRAME_STEP_DSU):
     """Correlate each DSU clip's root height with every World clip's Hips height,
-    DSU upsampled 2x (30 -> 60 Hz). >= 0.9 means the same mocap take."""
+    DSU upsampled `factor`x (2: 30 -> 60 Hz; UMX4 needs 4: 15 -> 60 Hz). >= 0.9 means
+    the same mocap take; running factors 1..4 shows the source key rate."""
     import numpy as np
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -604,8 +779,9 @@ def cmd_match(dsu_dir, ddr_dir):
             ddr[os.path.basename(fn)[:-4]] = np.array([tuple(anm_dump.sample_track(data, hips[0], f))[1] for f in range(n)])
     for fn in sorted(glob.glob(os.path.join(dsu_dir, "*.ani"))):
         c = parse_ani(open(fn, "rb").read())
-        a = ani_keys(c, "root")[:, 5]
-        x = detrend(np.interp(np.arange(2 * len(a)) / 2.0, np.arange(len(a)), a), 41)
+        root = next(n for n in ("root", "M_Root", "Hips") if n in {t["name"] for t in c["tracks"]})
+        a = ani_keys(c, root)[:, 5]
+        x = detrend(np.interp(np.arange(factor * len(a)) / float(factor), np.arange(len(a)), a), 41)
         x = (x - x.mean()) / x.std()
         best = []
         for k, b in ddr.items():
@@ -642,7 +818,7 @@ def main(argv):
     elif cmd == "hierarchy":
         cmd_hierarchy(args)
     elif cmd == "match":
-        cmd_match(args[0], args[1])
+        cmd_match(args[0], args[1], int(args[2]) if len(args) > 2 else FRAME_STEP_DSU)
     else:
         print(__doc__)
         return 1

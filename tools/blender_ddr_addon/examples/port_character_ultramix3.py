@@ -199,12 +199,12 @@ def build_mesh(key, model, arm, tex_stems):
     return ob
 
 
-def check_clip(model, clip, names, parents, binds, anm_bytes):
+def check_clip(model, clip, names, parents, binds, anm_bytes, frame_step=U.FRAME_STEP_DSU):
     worlds, frames = U.clip_game_worlds(model, clip, names, binds, loop_in=PLAY_FROM)
     parsed = A.parse_anm(anm_bytes)
     worst = 0.0
     for k in sorted({0, 1, len(frames) // 2, len(frames) - 1}):
-        pose = A.evaluate_pose(parsed, 2 * k, parents)
+        pose = A.evaluate_pose(parsed, frame_step * k, parents)
         for i in range(len(names)):
             w = np.array(pose[i]['world'], dtype=float).reshape(4, 4)
             worst = max(worst, float(np.abs(w[3, :3] - worlds[k][i][3, :3]).max()))

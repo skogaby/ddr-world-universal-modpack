@@ -402,6 +402,28 @@ Afro` and `Ultramix Lady`. The formats are documented in
     `M_Root` / `M_Chest` / `M_Head` / `L_Ankle` / `R_Ankle`.
   - Separate male (`M_*.ani`) and female (`F_*.ani`) clip sets, picked by the GENDER column.
   - Per-model bind origins. A helper bone's bind is shifted by the offset between the two rigs.
+* **DDR ULTRAMIX 4 (`examples/port_character_ultramix4.py`).** Ten dancers (2026-10-10), shipped
+  with the earlier three in ONE source folder, `data_mods/custom_models/dancers/ULTRAMIX 1-4/`:
+  `Yuni`, `Akira`, `Boldo`, `Charmy`, `Astro` (new characters) and `Lady 4`, `Honey 2`, `B 2`,
+  `Maid-Zukin 3`, `Konsento 2` (returning characters, but new meshes, rigs and textures; keys
+  `umx4<name>00`). Extract with `scripts/extract_ultramix_data.py ultramix4_us`. Differences
+  (RE note §13):
+  - A `.ddm` revision 4 (u32 `0x112` at 0x04): 6–22 materials with their own bone palettes,
+    4-weight 64-byte vertices, bind space = clip space (Y-up). `parse_ddm` reads it.
+  - HumanIK-style joint names (`Hips`, `Spine2`, `leftUpLeg`, …) in their own parent table
+    (`HIERARCHY_UMX4`); every model carries its gender's whole skeleton (male 32, female 57), so
+    there are no helper bones. Toe aliases → `left/rightFootIndex1`.
+  - One `.ddm` holds all four costumes' geometry; `<COSTUME>.csv` hides materials per costume
+    (empty cell or RENDER `hidden`). COSTUME 1 is built, materials sharing a texture are merged,
+    and `sphere` (chrome env-map) materials get rest-pose matcap UVs.
+  - The clips are **15 Hz** (4:1 decimations of World's own takes), so their keys go on every
+    4th World frame (`ani_to_anm_spec(..., frame_step=4)`), not every 2nd like DSU1–3's 30 Hz.
+    `ultramix_k3d_dump.py match <ani dir> <World mc_* dir> <factor>` shows the rate of a new rip.
+
+```bash
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_ultramix4.py   # ~80 s for 10
+```
 
 ### A System 573 polygon dancer (`examples/port_character_sys573.py`)
 

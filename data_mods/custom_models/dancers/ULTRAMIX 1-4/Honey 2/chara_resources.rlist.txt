@@ -1,0 +1,3 @@
+# DDR ULTRAMIX 4 (Xbox) "Honey", ported with its own rig and clips
+# (tools/blender_ddr_addon/examples/port_character_ultramix4.py; costume 1, woman clips, groups unisex, woman)
+umx4honey00, pl, F, A, 1.0, 0.75, 0.0

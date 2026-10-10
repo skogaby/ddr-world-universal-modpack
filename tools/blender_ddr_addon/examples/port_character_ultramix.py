@@ -66,7 +66,10 @@ def clip_rows(dancer):
         return [r['NAME'] for r in csv.DictReader(f) if r['DANCER'].strip() == dancer]
 
 
-def build_armature(key, names, binds):
+def build_armature(key, names, binds, hierarchy=None):
+    """`hierarchy`: the parent table (default ultramix_k3d_dump.HIERARCHY; UMX4 passes the
+    model's own)."""
+    hierarchy = U.HIERARCHY if hierarchy is None else hierarchy
     arm_data = bpy.data.armatures.new(key + '_rig')
     arm = bpy.data.objects.new(key + '_Armature', arm_data)
     bpy.context.scene.collection.objects.link(arm)
@@ -80,7 +83,7 @@ def build_armature(key, names, binds):
         eb.matrix = convert.rowmat_to_blender([float(x) for x in binds[n].reshape(16)])
         ebs[n] = eb
     for n in names:
-        p = U.HIERARCHY[n]
+        p = hierarchy[n]
         if p is not None:
             ebs[n].parent = ebs[p]
     bpy.ops.object.mode_set(mode='OBJECT')

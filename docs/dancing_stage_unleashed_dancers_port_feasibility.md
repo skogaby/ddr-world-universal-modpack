@@ -992,3 +992,125 @@ self-shadow, and the 50/50 group weighting.
 | `0x51D70` | collect clips of one GROUP |
 | `0x15B490` | per-dancer clip pick (gender column, group vs unisex) |
 | `0x1F6040` | play clip (start, loop, crossfade) |
+
+## 13. Addendum (2026-10-10): DDR ULTRAMIX 4 — ported
+
+The ten UMX4 dancers are ported the Path B way, into the shared source folder
+`data_mods/custom_models/dancers/ULTRAMIX 1-4/` (renamed from `ULTRAMIX 1-3`; UMX3's `Honey`, `B` and
+UMX2's `Konsento` became `Honey 1`, `B 1`, `Konsento 1`). Built by
+`tools/blender_ddr_addon/examples/port_character_ultramix4.py`.
+
+**Sources.**
+- Rip: `~/Desktop/DDR ISOs/ultramix_4/` (NTSC-U, `ddr_ultramix_4_default.xbe`), unpacked by
+  `scripts/extract_ultramix_data.py ultramix4_us` into `extracted_full/` (2182 x_data files, 347
+  streams, 299 krc textures, 1449 voice clips).
+- Nothing below needed the XBE: every format was decoded from the data and checked by its own
+  invariants (layouts end exactly at EOF, materials tile the index list, weights sum to 1,
+  clips reproduce through the World `.anm` evaluator).
+
+**Archives.** The DSU3 formats with per-platform names (`x_data_XBOX_US.hbn/.bin`,
+`resource_XBOX_US.krc/.krh`). Two differences:
+- The music is split over four `.sng` archives, `music_XBOX_US_1..4.sng`, each with its own TOC at
+  0x800. Their tags are disjoint; the extractor checks that and records the archive per stream in
+  `sng_manifest.csv`.
+- The voice bank is at the disc root: `VCLIP_M.BKT`.
+
+**Is there anything else to port?** No 3D gameplay stages. The only non-dancer `.ddm`s (magic
+`mrdd`, §12) are the Quest-mode city map — `x_quest_ddrcity` (13 materials, 33.6 k triangles,
+~76 m across) plus its `crossinglights`, `rooflights` and ferris-wheel parts (`wheel`, `wheelbase`,
+`wheelbox`, placed by code) — and `x_panel.ddm`, the dance mat under the dancers (texture
+`x_ddr4_dancemat`). Gameplay draws the dancers over the song movies (`movies/*.xmv`). Neither is
+ported. For reference, `mrdd` is: magic, u32 revision (`0x112` = 32-byte vertices `pos, normal, uv`;
+`0x152` = 36-byte vertices with a D3DCOLOR between normal and uv), u32 material count, 0x194-byte
+material records (name 0x40, two u32 flags, D3DMATERIAL8, texture 0x100, first index, triangle
+count), u32 index count + u16 indices padded to 4 bytes, u32 vertex count + vertices.
+
+**`.ddm` revision 4** (`srdd`; `ultramix_k3d_dump._parse_ddm4`):
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x04` | 4 | revision `0x112` |
+| `0x08` | 4 | material count *m* (6–22) |
+| `0x0C` | 0x1D8·*m* | material records, below |
+| … | | u32 bone count + 0x84-byte bones (inverse bind, name, register = index), u32 index count + u16 indices, u32 vertex count + 64-byte vertices |
+
+Material record: `0x000` Maya shader name (0x40; the costume CSV's `SHADERS` key), `0x040` two u32
+flags, `0x048` D3DMATERIAL8, `0x08C` texture name (0x100, stale), `0x18C` u32 1, `0x190` u32 palette
+size *p* ≤ 30, `0x194` u16[30] bone palette, `0x1D0` u32 first index, u32 triangle count. The
+ranges tile the index list in order.
+
+Vertex: position, normal, uv, 4 bone slots stored as floats (indices into the OWNING material's
+palette, −1 = unused), 4 weights (sum 1, up to 4 used). No vertex is shared between materials.
+The bind space is the clip space (Y-up, facing −Z, left at +X: D3D left-handed), so the port only
+mirrors Z (`bind_to_clip` = identity, where DSU1–3 turned Z-up into Y-up). Skinning is DSU's
+`v · inverseBind · world(key)`, now with 4 influences; posed meshes keep their edge lengths
+(median ratio 1.000).
+
+**Dancer table** `x_default_models.csv`: `TYPE, NAME, HIDDEN, COSTUME, GENDER`. The model file is
+the costume CSV's `<RIG/PLATE>` row. The TYPE ids are recycled slots: `emi` = Yuni, `rage` = Akira,
+`afro` = Boldo.
+
+| TYPE | NAME | model | bones / verts / tris (all costumes) | GENDER | clips | label |
+|---|---|---|---|---|---|---|
+| emi | Yuni | `x_Yuni.ddm` | 57 / 3726 / 5606 | girl | 11 `X_F_*` | `Yuni` |
+| rage | Akira | `x_Akira.ddm` | 32 / 3289 / 4732 | male | 14 `X_M_*` | `Akira` |
+| lady | Lady (hidden) | `x_lady.ddm` | 57 / 3130 / 4066 | woman | 17 `X_F_*` | `Lady 4` |
+| afro | Boldo (hidden) | `x_boldo.ddm` | 32 / 4290 / 4954 | male | 14 | `Boldo` |
+| honey | Honey | `x_honey.ddm` | 57 / 2990 / 4256 | woman | 17 | `Honey 2` |
+| b | B | `x_b.ddm` | 32 / 2971 / 4064 | male | 14 | `B 2` |
+| charmy | Charmy | `x_Charmy.ddm` | 57 / 4230 / 6292 | woman | 17 | `Charmy` |
+| astro | Astro | `x_astro.ddm` | 32 / 2914 / 3864 | male | 14 | `Astro` |
+| zukin | Zukin | `x_Zukin.ddm` | 57 / 3154 / 4754 | woman | 17 | `Maid-Zukin 3` |
+| robo | Robo | `x_robo.ddm` | 32 / 4116 / 4758 | male | 14 | `Konsento 2` |
+
+- Lady, Honey, B', Zukin and Robo return from UMX1–3 but as new models: new rig revision, meshes
+  and textures (compared against the shipped UMX1–3 ports), so they ship as new numbered entries.
+- `X_Akira_Rig*.ddm` / `X_Yuni_Rig_A/B.ddm` are unused older revisions of those two models.
+
+**Costumes.** `<COSTUME>.csv` = `SHADERS, TEXTURES1, RENDER1, … TEXTURES4, RENDER4, FACE`, one row per
+`.ddm` material by name. One `.ddm` carries the geometry of all four costumes: a costume hides a
+material with an empty cell or RENDER `hidden` (Akira's costume 1 hides 5 of 13 materials, Yuni's
+4, Charmy's 4). RENDER is `toon`, `specular`, `specularTrans` (one Charmy sleeve) or `sphere` (an
+env-map ball texture `s_silver`, `x_shine_sv`, `x_sphere_glass`, …). FACE lists the
+`regface` / `clsface` / `smlface` / `wnkface` swaps for the `eye_shader` patch. All textures are
+opaque DXT1 without mips.
+
+The port builds COSTUME 1: hidden materials' triangles are dropped, materials sharing a texture
+become one World material (`umx4<texture>`), and `sphere` materials get rest-pose matcap UVs
+(`u = 0.5 + 0.5·n.x`, `v = 0.5 − 0.5·n.y` from the front) so the env texture reads as metal.
+
+**Skeleton** (`ultramix_k3d_dump.HIERARCHY_UMX4`). HumanIK-style names. The male skeleton has 32
+joints (`Hips`, `Spine..Spine2`, `Neck`, `Neck1`, `Head`, side-hair roots, shoulder / arm /
+`ArmTwistLocked` / `ArmHalf` / forearm / hand, up-leg / leg / foot / `FootIndex1`, and a
+`M_TieA → M_TieC → M_TieTip` chain). The female one has 57: no `M_TieC` but hair tips, breasts,
+`WingLower1A/2A` and three 3-joint skirt chains per side. Every model carries its gender's whole
+skeleton, and every clip of a gender carries every joint, so no helper bones are needed.
+`ultramix_k3d_dump.py hierarchy` over the listed clips: the body joints are rigid to their parents
+to ≤ 2e-5; the twist pair slides along the upper arm (2.7e-2), and the breasts, male hair roots
+and cloth chains are simulated. The port keeps every joint's own translation track, so none of
+that is lost. World role bones: `Hips`, `Spine2`, `Head` exist; Left/RightToeBase alias
+`left/rightFootIndex1`.
+
+**Clips.** `.ani` is unchanged (§3). `animations.csv` is DSU3's with a leading `NUM` column: groups
+male 6, woman 9, girl 3, unisex 8. The port plays the gender's group plus `unisex` (male 14, woman
+17, girl 11), whole, from frame 0 (DSU3's convention; UMX4's play window was not traced in the XBE).
+
+**Frame rate: 15 Hz, not 30.** The first cabinet build placed the keys every 2nd World frame like
+DSU1–3, and the dances ran 2× fast. `ultramix_k3d_dump.py match <ani dir> <World mc_* dir> <factor>`
+(root height against World's own takes, `mc_male` / `mc_female` / `mc_bpm120` arcs) settles it: at
+factor 4, 26 of the 34 listed clips are World takes (r 0.85–0.96: `X_M_hh01` = `mc_male_hh01_exec`,
+`X_M_ht01` = `mc_male_ht01_exec`, `X_F_soul01` = `mc_female_sf01_exec`, …); at factor 2 they score
+0.33–0.75. The other eight (`X_F_hipHop01`, `house01..03`, `jaz03`, `break02`, …) match no World take
+at any factor and are taken at the same rate. A ~300-key clip is therefore ~20 s, like the World
+takes (1270–1400 frames). The port puts the keys every 4th World frame (`FRAME_STEP_UMX4`); the
+exported `.anm` then correlates with the World take at r = 0.99 without resampling. The other 188 `.ani` are not in `animations.csv` and are
+not ported: ~150 `X_F/M_<foot>_<foot>_*` panel-to-panel step moves (`LB_RC`, `LC_RC_LTRN`, …), 36
+short `X_F/M_pr_*` moves, the two `ex_normal` idles, `X_F_break01` and `X_M_lady_hipHop02`.
+
+**Result.** 149 clips (~1100–1300 World frames each), max joint error 0.12 mm; rigs 32 / 57 bones, 5–8 World meshes with palettes
+≤ 33. Lowest skinned vertex over the clips (DSU floor y = 0): median −0.01 to −0.03 m; Charmy −0.08
+and Robo −0.09 (base below the ankles, as DSU3's robo) — kept as the data has them.
+
+**Not ported:** costumes 2–4, the FACE swaps (blink / smile / wink), the toon ramp and outline, the
+sphere maps' view dependence, `specularTrans` translucency, the step-move clips, the 50/50 group
+weighting, and (above) the Quest city map and the dance mat.

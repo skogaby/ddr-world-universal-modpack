@@ -62,6 +62,12 @@ Dancing Stage Unleashed 3 (dsu3_eu) uses the same x_data, krc and BKT formats as
 Only VCLIP_M_e.BKT is in the rip. The XBE also names VCLIP_e and VCLIP_B_e, but those files
 are not on the disc. Every DSU3 clip is kind 1 (PCM16 stereo).
 
+DDR ULTRAMIX 4 (ultramix4_us) is the DSU3 layout again, with the files renamed per platform
+(`*_XBOX_US.*`). Its music is split over four .sng archives (`music_XBOX_US_1..4.sng`), each
+with its own TOC at 0x800; their tags are disjoint, so all streams land in one directory and
+sng_manifest.csv records the source archive per stream. The voice bank sits at the disc root
+(`VCLIP_M.BKT`).
+
 Usage:
     extract_ultramix_data.py <game> <game_dir> <out_dir>
 
@@ -69,6 +75,7 @@ Examples:
     extract_ultramix_data.py ultramix_us ~/Desktop/ultramix ./extracted
     extract_ultramix_data.py dsu2_eu ~/Desktop/dsu2 ./extracted_dsu2
     extract_ultramix_data.py dsu3_eu ~/Desktop/dsu3 ~/Desktop/dsu3/extracted_full
+    extract_ultramix_data.py ultramix4_us ~/Desktop/"DDR ISOs"/ultramix_4 ~/Desktop/"DDR ISOs"/ultramix_4/extracted_full
 """
 
 import argparse
@@ -82,7 +89,7 @@ from pathlib import Path
 #   xdata_toc_offset / xdata_count: [xbe only] TOC file offset and entry count in the XBE
 #   xdata_hbn:                      [hbn only] TOC sidecar filename in game dir
 #   xdata_bin:                      x_data bin filename in game dir
-#   sng:                            music .sng filename in game dir
+#   sng:                            music .sng filename in game dir, or a list of them (one TOC each)
 #   sng_toc_offset:                 file offset of the .sng TOC (u32 count + entries)
 #   magic:                          [optional] header the game checks at offset 0 of the
 #                                   bin and .sng before trusting them
@@ -124,6 +131,16 @@ GAMES = {
         "magic": b"Konami Computer Entertainment Hawaii, Inc.",
         "krc": ("resource_EU.krc", "resource_EU.krh"),
         "voice_banks": ["voice/VCLIP_M_e.BKT"],
+    },
+    "ultramix4_us": {
+        "xdata_toc": "hbn",
+        "xdata_hbn": "x_data_XBOX_US.hbn",
+        "xdata_bin": "x_data_XBOX_US.bin",
+        "sng": [f"music_XBOX_US_{n}.sng" for n in range(1, 5)],
+        "sng_toc_offset": 0x800,
+        "magic": b"Konami Computer Entertainment Hawaii, Inc.",
+        "krc": ("resource_XBOX_US.krc", "resource_XBOX_US.krh"),
+        "voice_banks": ["VCLIP_M.BKT"],
     },
 }
 
@@ -397,20 +414,25 @@ def extract_xdata(entries, bin_path, out_dir):
     return written
 
 
-def extract_sng(entries, sng_path, out_dir):
-    """Extract .sng audio streams as {tag}.wavm and {tag}_loop.wavm. Returns file count."""
+def extract_sng(archives, out_dir):
+    """Extract .sng audio streams as {tag}.wavm and {tag}_loop.wavm. Returns file count.
+
+    `archives` is a list of (sng_path, entries); the manifest names each stream's archive.
+    """
     written = 0
-    with open(sng_path, "rb") as sng_f, open(out_dir / "sng_manifest.csv", "w", newline="") as mf:
+    with open(out_dir / "sng_manifest.csv", "w", newline="") as mf:
         w = csv.writer(mf)
-        w.writerow(["tag", "stream", "size", "offset"])
-        for tag, offset, size, loop_offset, loop_size in entries:
-            for suffix, off, sz in [("", offset, size), ("_loop", loop_offset, loop_size)]:
-                if sz == 0:
-                    continue
-                out_name = f"{tag}{suffix}.wavm"
-                (out_dir / out_name).write_bytes(read_exact(sng_f, off, sz, out_name))
-                w.writerow([tag, suffix.lstrip("_") or "main", sz, f"0x{off:x}"])
-                written += 1
+        w.writerow(["tag", "stream", "size", "offset", "archive"])
+        for sng_path, entries in archives:
+            with open(sng_path, "rb") as sng_f:
+                for tag, offset, size, loop_offset, loop_size in entries:
+                    for suffix, off, sz in [("", offset, size), ("_loop", loop_offset, loop_size)]:
+                        if sz == 0:
+                            continue
+                        out_name = f"{tag}{suffix}.wavm"
+                        (out_dir / out_name).write_bytes(read_exact(sng_f, off, sz, out_name))
+                        w.writerow([tag, suffix.lstrip("_") or "main", sz, f"0x{off:x}", sng_path.name])
+                        written += 1
     return written
 
 
@@ -454,18 +476,19 @@ def extract_voice(banks, out_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("game", choices=sorted(GAMES), help="game identifier")
-    ap.add_argument("game_dir", type=Path, help="game rip directory (default.xbe or x_data .hbn, x_data bin, music .sng, and any per-game extras)")
+    ap.add_argument("game_dir", type=Path, help="game rip directory (default.xbe or x_data .hbn, x_data bin, music .sng(s), and any per-game extras)")
     ap.add_argument("out_dir", type=Path, help="output directory for extracted files")
     args = ap.parse_args()
 
     cfg = GAMES[args.game]
     xbe_path = args.game_dir / "default.xbe"
     bin_path = args.game_dir / cfg["xdata_bin"]
-    sng_path = args.game_dir / cfg["sng"]
+    sng_names = [cfg["sng"]] if isinstance(cfg["sng"], str) else cfg["sng"]
+    sng_paths = [args.game_dir / n for n in sng_names]
     toc_path = xbe_path if cfg["xdata_toc"] == "xbe" else args.game_dir / cfg["xdata_hbn"]
     krc_paths = [args.game_dir / p for p in cfg.get("krc", ())]
     bank_paths = [args.game_dir / p for p in cfg.get("voice_banks", ())]
-    for p in (toc_path, bin_path, sng_path, *krc_paths, *bank_paths):
+    for p in (toc_path, bin_path, *sng_paths, *krc_paths, *bank_paths):
         if not p.is_file():
             sys.exit(f"error: {p} not found")
 
@@ -473,7 +496,7 @@ def main():
         # Parse and validate every TOC up front so a bad config writes nothing.
         magic = cfg.get("magic")
         if magic is not None:
-            for p in (bin_path, sng_path):
+            for p in (bin_path, *sng_paths):
                 with open(p, "rb") as f:
                     if f.read(len(magic)) != magic:
                         raise ArchiveError(f"{p.name} is missing the Konami header; wrong game/region?")
@@ -484,13 +507,20 @@ def main():
         else:
             xdata_entries = list(parse_hbn_toc(toc_path.read_bytes(), magic))
         sng_skipped = []
-        with open(sng_path, "rb") as sng_f:
-            sng_entries = list(parse_sng_toc(sng_f, cfg["sng_toc_offset"], sng_skipped))
-            sng_f.seek(0, 2)
-            sng_size = sng_f.tell()
-        for tag, offset, size, loop_offset, loop_size in sng_entries:
-            if offset + size > sng_size or loop_offset + loop_size > sng_size:
-                raise ArchiveError(f"sng TOC entry {tag!r} points past the end of {sng_path.name}")
+        sng_archives = []
+        sng_tags = {}
+        for sng_path in sng_paths:
+            with open(sng_path, "rb") as sng_f:
+                sng_entries = list(parse_sng_toc(sng_f, cfg["sng_toc_offset"], sng_skipped))
+                sng_f.seek(0, 2)
+                sng_size = sng_f.tell()
+            for tag, offset, size, loop_offset, loop_size in sng_entries:
+                if offset + size > sng_size or loop_offset + loop_size > sng_size:
+                    raise ArchiveError(f"sng TOC entry {tag!r} points past the end of {sng_path.name}")
+                if tag in sng_tags:
+                    raise ArchiveError(f"sng tag {tag!r} is in both {sng_tags[tag]} and {sng_path.name}")
+                sng_tags[tag] = sng_path.name
+            sng_archives.append((sng_path, sng_entries))
         textures = []
         if krc_paths:
             krc_path, krh_path = krc_paths
@@ -503,14 +533,14 @@ def main():
 
         args.out_dir.mkdir(parents=True, exist_ok=True)
         xdata_count = extract_xdata(xdata_entries, bin_path, args.out_dir)
-        sng_count = extract_sng(sng_entries, sng_path, args.out_dir)
+        sng_count = extract_sng(sng_archives, args.out_dir)
         krc_count = extract_krc(textures, args.out_dir) if krc_paths else None
         voice_count = extract_voice(banks, args.out_dir) if banks else None
     except ArchiveError as e:
         sys.exit(f"error: {e}")
 
     print(f"x_data:  {xdata_count} files (manifest: xdata_manifest.csv)")
-    print(f"sng:     {sng_count} files (manifest: sng_manifest.csv)")
+    print(f"sng:     {sng_count} files from {len(sng_archives)} archive(s) (manifest: sng_manifest.csv)")
     for text in sng_skipped:
         print(f"         skipped TOC comment entry {text!r}")
     if krc_count is not None:
