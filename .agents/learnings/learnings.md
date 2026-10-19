@@ -1866,3 +1866,30 @@ anyway. Rules: a visual bug that is gameplay-only but preview-clean is one of th
 layers (hulls, stock pass sort modes, the real camera set, dancers) — diff that table first
 (`.agents/summary` / this file) before suspecting the asset; and never gate a geometric
 mechanism on a naming convention alone when the geometry is available to check.
+
+## "Can not find" for EVERY injected texture means LayeredFS isn't reaching the game — and one loader can't survive that (2026-10-18)
+
+A Windows tester crashed at `gamemdx+0x1ac452` (`bm2d::data::Manager::Update`, null write at
+`+0x308`) whenever a BACKGROUND customize row got focus; the maintainer's identical 20260915
+install never did. The crash itself was the documented class (`docs/bm2d_background_preview_research.md`):
+Update treats a *failed* FileManager load as finished and dereferences the inner-IFS object
+that was never registered. What was new was the diagnosis path: the same logs were full of
+`afpu-render: get_bitmap_info[seop_item_*] can not find` — the Mods tab title, every option
+label, preview images, S-Marvelous and song-length textures — i.e. **nothing LayeredFS
+generates at runtime was being served**, while `avs_fs_lstat` of the alias arcs still
+succeeded (the registry entries had a valid arc index). On a healthy install there are zero
+`seop_item` misses, so any miss is a serving failure, not a label bug. Nothing in our log said
+so, because the redirected `avs_fs_open` failing inside AVS was silent; the tester's 55-char
+install root (`C:\Games\<long name>\contents`) put every served path at 127–140 chars, right
+across libavs's 128-byte `GetLongPathNameA` buffer in its native open (`FUN_1800082c0`, which
+also `strcmp`s the input against the long form — case-sensitive).
+
+Rules: (1) when a report shows "can not find" for assets that are atlas-cloned or cache-served,
+stop debugging the asset and check the serving layer first — the tester's actual complaint
+("I don't see Peter or CJ") was unlabeled rows, not missing dancers. (2) Any game loader we
+feed generated names into must be proven loadable *through the game's own open* before the
+request (`avs_layeredfs::read_mod_file_as_game`), because Konami loaders assume their own data
+and have no failure path. (3) A redirected open that AVS refuses must WARN with the native path
+and its length — install path length and casing are real-world variables CrossOver never
+exercises. (4) The `GetLongPathNameA` fallback must match the mod folder as a path component,
+not as the literal `.\data_mods` prefix: absolute paths are the ones that overrun the buffer.

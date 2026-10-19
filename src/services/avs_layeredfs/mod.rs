@@ -234,6 +234,11 @@ pub fn init() -> bool {
     true
 }
 
+/// Game-path probe (see `file_hooks`): read the mod file the open detour
+/// would serve for a game path, through the game's own AVS open — proves an
+/// asset is loadable before a loader that cannot survive a failed load sees it.
+pub use file_hooks::{read_mod_file_as_game, GameReadError};
+
 /// Check if the LayeredFS service initialized successfully.
 pub fn is_available() -> bool {
     STATE.lock().unwrap().available

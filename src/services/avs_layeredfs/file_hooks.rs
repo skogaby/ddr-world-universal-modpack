@@ -138,7 +138,13 @@ unsafe fn fs_open_body(
             log_info!("LayeredFS: using {}", mod_path);
         }
         match CString::new(mod_path.as_str()) {
-            Ok(cpath) => original.call(cpath.as_ptr(), mode, flags),
+            Ok(cpath) => {
+                let r = original.call(cpath.as_ptr(), mode, flags);
+                if r < 0 {
+                    warn_redirected_open_failed(&path, mod_path, r);
+                }
+                r
+            }
             Err(_) => original.call(name, mode, flags),
         }
     } else {
@@ -425,15 +431,134 @@ fn find_mod_replacement(norm_path: &str, original_path: &str) -> Option<String> 
     None
 }
 
+// ── Serving diagnostics & probes ─────────────────────────────────────
+
+/// Bounded WARN for a redirected `avs_fs_open` that AVS then refused. Our
+/// lookup said "serve this mod file" and the native open of it failed — the
+/// game sees "file missing" with nothing in the log saying why, and some
+/// callers (the BM2D data manager, `docs/bm2d_background_preview_research.md`)
+/// have no survivable failure path at all. Field reports (2026-10, a Windows
+/// install under a 55-char root) showed EVERY generated asset silently
+/// unserved; this line names the first few so the pattern is visible.
+static REDIRECTED_OPEN_FAILURES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+const REDIRECTED_OPEN_FAILURES_LOGGED: u32 = 8;
+
+fn warn_redirected_open_failed(game_path: &str, mod_path: &str, rc: AvsFile) {
+    use std::sync::atomic::Ordering;
+    let n = REDIRECTED_OPEN_FAILURES.fetch_add(1, Ordering::AcqRel);
+    if n < REDIRECTED_OPEN_FAILURES_LOGGED {
+        log_warn!(
+            "LayeredFS: redirected open FAILED: {} -> {} (avs rc {:#x}; {} chars) — the game sees the file as missing. \
+             Check the install path length/casing (AVS normalises native paths through a 128-byte buffer and a case-sensitive compare)",
+            game_path,
+            mod_path,
+            rc as u32,
+            mod_path.len()
+        );
+    } else if n == REDIRECTED_OPEN_FAILURES_LOGGED {
+        log_warn!("LayeredFS: redirected open FAILED again (further failures not logged)");
+    }
+}
+
+/// How many redirected opens AVS has refused this session (for status lines).
+pub fn redirected_open_failures() -> u32 {
+    REDIRECTED_OPEN_FAILURES.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The mod file the `avs_fs_open` detour would hand AVS for `game_path`
+/// (e.g. `data/arc/custom/background/foo.arc`), or None when the game would
+/// get the stock file. Same normalisation + lookup as the hooks.
+pub fn mod_replacement_for(game_path: &str) -> Option<String> {
+    let norm = mod_paths::normalise_path(game_path)?;
+    find_mod_replacement(&norm, game_path)
+}
+
+/// Why [`read_mod_file_as_game`] could not produce bytes.
+#[derive(Debug)]
+pub enum GameReadError {
+    /// LayeredFS has nothing to serve for this game path.
+    NotServed,
+    /// AVS refused the native open of the mod file (return code attached).
+    OpenFailed { mod_path: String, rc: AvsFile },
+    /// Open succeeded but the file is empty.
+    Empty { mod_path: String },
+}
+
+/// Read up to `max_bytes` of the mod file LayeredFS serves for `game_path`,
+/// through the SAME AVS open the game will perform (redirected path, read
+/// mode, original AVS function). Lets a caller prove a generated asset is
+/// actually loadable before handing its name to a game loader that cannot
+/// survive a failed load. Blocking file IO — not for per-frame paths.
+pub fn read_mod_file_as_game(
+    game_path: &str,
+    max_bytes: usize,
+) -> Result<(String, Vec<u8>), GameReadError> {
+    let mod_path = mod_replacement_for(game_path).ok_or(GameReadError::NotServed)?;
+    let cpath = CString::new(mod_path.as_str()).map_err(|_| GameReadError::NotServed)?;
+    let mode = avs_open_mode_read(avs_version());
+    let handle = unsafe { orig_fs_open(cpath.as_ptr(), mode, 420) };
+    if handle < 0 {
+        return Err(GameReadError::OpenFailed {
+            mod_path,
+            rc: handle,
+        });
+    }
+    let mut stat = AvsStat::default();
+    unsafe { orig_fs_fstat(handle, &mut stat) };
+    let size = (stat.filesize as usize).min(max_bytes);
+    if size == 0 {
+        unsafe { orig_fs_close(handle) };
+        return Err(GameReadError::Empty { mod_path });
+    }
+    let mut buf = vec![0u8; size];
+    let got = unsafe { orig_fs_read(handle, buf.as_mut_ptr(), size) };
+    unsafe { orig_fs_close(handle) };
+    buf.truncate(got.min(size));
+    if buf.is_empty() {
+        return Err(GameReadError::Empty { mod_path });
+    }
+    Ok((mod_path, buf))
+}
+
+/// Does `path` (as Win32 sees it — any separator, any case, relative or
+/// absolute) lie under the mod folder? `mod_folder_native` is the configured
+/// folder in backslash form (`.\data_mods`); we match on its leaf name as a
+/// path component, so `C:\Games\…\contents\data_mods\x`, `.\data_mods\x`,
+/// `data_mods/x` and `DATA_MODS\x` all count. Absolute forms are the ones
+/// most likely to overrun AVS's 128-byte path buffer, so a prefix-literal
+/// match would miss exactly the cases the workaround exists for.
+fn is_under_mod_folder(path: &str, mod_folder_native: &str) -> bool {
+    let leaf = mod_folder_native
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if leaf.is_empty() {
+        return false;
+    }
+    let p = path.replace('/', "\\").to_ascii_lowercase();
+    p.split('\\').any(|component| component == leaf)
+}
+
+static LONG_PATH_FALLBACK_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // ── GetLongPathNameA hook ────────────────────────────────────────────
 
 /// Detour for `kernel32!GetLongPathNameA`. AVS calls this with a fixed 128‑byte
-/// buffer when normalizing paths internally; ifs‑in‑arc cache paths (e.g.
-/// `./data_mods/_cache/arc/.../inner_ifs/<md5>`) routinely exceed that. When
-/// the real Win32 call returns "buffer too small" (`ret > cchBuffer`) for one
-/// of *our* mod-cache paths, we lie and return `ERROR_FILE_NOT_FOUND` so AVS
-/// falls through to `CreateFileA` with the original (still valid) path
-/// instead of strcmp-failing and bailing out.
+/// buffer when normalizing paths internally (libavs `FUN_1800082c0`, the native
+/// open: `GetLongPathNameA(path, buf, 0x80)` then a case-sensitive `strcmp`
+/// against the input); ifs‑in‑arc cache paths (e.g.
+/// `./data_mods/_cache/arc/.../inner_ifs/<md5>`) routinely exceed that, and
+/// under a long install root (`C:\Games\<long name>\contents`, 55 chars in a
+/// 2026-10 field report) even plain alias arcs and texturelists do. When the
+/// real Win32 call returns "buffer too small" (`ret > cchBuffer`) for a path
+/// under *our* mod folder — matched as a path component, so absolute, `.\`
+/// and mixed-case forms all count — we lie and return `ERROR_FILE_NOT_FOUND`
+/// so AVS falls through to `CreateFileA` with the original (still valid) path
+/// instead of strcmp-failing and bailing out. Logged once per session.
 unsafe extern "system" fn hook_get_long_path_name_a(
     short_path: *const i8,
     long_path: *mut i8,
@@ -463,8 +588,16 @@ unsafe extern "system" fn hook_get_long_path_name_a(
                 Err(_) => return ret,
             };
             let mod_folder_native = super::mod_folder_native();
-            if !mod_folder_native.is_empty() && path.contains(&mod_folder_native) {
+            if is_under_mod_folder(path, &mod_folder_native) {
+                use std::sync::atomic::Ordering;
                 use windows::Win32::Foundation::{SetLastError, ERROR_FILE_NOT_FOUND};
+                if !LONG_PATH_FALLBACK_LOGGED.swap(true, Ordering::AcqRel) {
+                    log_info!(
+                        "LayeredFS: GetLongPathNameA long-path fallback engaged ({} chars > 128-byte AVS buffer): {}",
+                        ret.saturating_sub(1),
+                        path
+                    );
+                }
                 SetLastError(ERROR_FILE_NOT_FOUND);
                 return 0;
             }
@@ -633,5 +766,32 @@ unsafe fn install_one<F: retour::Function>(
             log_warn!("LayeredFS: failed to create {} hook: {}", name, e);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_under_mod_folder;
+
+    #[test]
+    fn mod_folder_match_is_component_based_and_case_insensitive() {
+        let mf = ".\\data_mods";
+        assert!(is_under_mod_folder(".\\data_mods\\_cache\\x", mf));
+        assert!(is_under_mod_folder("./data_mods/_cache/x", mf));
+        assert!(is_under_mod_folder("data_mods\\bg_preview\\a.arc", mf));
+        assert!(is_under_mod_folder(
+            "C:\\Games\\Dance Dance Revolution World Skogaby\\contents\\data_mods\\bg_preview\\a.arc",
+            mf
+        ));
+        assert!(is_under_mod_folder("C:\\DDR\\contents\\DATA_MODS\\x", mf));
+        assert!(!is_under_mod_folder(
+            "C:\\DDR\\contents\\data\\arc\\shader.arc",
+            mf
+        ));
+        assert!(!is_under_mod_folder(
+            "C:\\DDR\\contents\\data_mods_old\\x",
+            mf
+        ));
+        assert!(!is_under_mod_folder("C:\\DDR\\contents\\data_mods", ""));
     }
 }
