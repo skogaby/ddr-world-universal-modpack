@@ -184,14 +184,17 @@ static DEATH_GATE_STASH_VALID: [AtomicBool; 2] = [AtomicBool::new(false), Atomic
 static DEATH_GATE_STASH: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 /// Arm the loop's death bypass (called at the loop latch, where the live
-/// actor tree is proven): stash each live side's stock `+0x2B7` gate and
-/// set the gate on every actor. With the gate up, a gauge death latches
-/// `m_isDead` but can neither advance the actor to STEP_GAME_OVER nor
-/// finish the DPS (both engine paths are conditioned on the gate —
-/// 20260721 decompile), so the loop driver can detect the death at its
-/// leisure and fire the loop back to A; the reset's own completion block
-/// clears the death flags and restores the gauge. In versus EITHER side's
-/// death revives BOTH into the next pass (one shared grind). Fail-open:
+/// actor tree is proven): stash each live side's stock `+0x2B7` gate, set
+/// the gate on every actor, and hold every gauge out of the death state
+/// ([`song_reset::hold_gauges`], re-run per frame by the driver). This is
+/// the engine's own matching-battle "can't fail" shape: the actor gate
+/// blocks STEP_GAME_OVER and the DPS finish-poll, and the gauge floor
+/// clamps at 1 instead of sending the `0x103A` death, so `m_isDead` never
+/// latches and judging/scoring stay live. The gauge must not be allowed
+/// to die: the gate-up + `m_isDead`-latched combination never occurs in
+/// stock play (matching gauges are floored at ctor), and holding it for
+/// seconds hard-crashed the game on 20260915 (2026-10-20 cabinet test).
+/// The next loop pass or scrub restores the gauge as before. Fail-open:
 /// an unreadable/unwritable gate leaves stock death behavior (the grind
 /// just still fails out on a miss cascade).
 pub(super) fn arm_death_bypass() {
@@ -215,25 +218,29 @@ pub(super) fn arm_death_bypass() {
         return;
     }
     DEATH_GATE_ARMED.store(true, Ordering::Release);
+    let hold = song_reset::hold_gauges();
     log_info!(
-        "TrainingMode: loop death bypass armed (stock gates p1={:?} p2={:?})",
+        "TrainingMode: loop death bypass armed (stock gates p1={:?} p2={:?}; {} gauge(s) floored)",
         DEATH_GATE_STASH_VALID[0]
             .load(Ordering::Acquire)
             .then(|| DEATH_GATE_STASH[0].load(Ordering::Acquire)),
         DEATH_GATE_STASH_VALID[1]
             .load(Ordering::Acquire)
             .then(|| DEATH_GATE_STASH[1].load(Ordering::Acquire)),
+        hold.floored,
     );
 }
 
-/// Restore each stashed side's death gate (loop disarm / session end).
-/// Refusals at song boundaries are harmless — the gate is per-actor state
-/// and dies with the actor tree; fresh actors are stock.
+/// Restore each stashed side's death gate (loop disarm / session end) and
+/// release the gauge hold ([`song_reset::release_gauges`] — a disarmed
+/// loop must be able to fail out again). Refusals at song boundaries are
+/// harmless — the gate is per-actor state and dies with the actor tree;
+/// fresh actors are stock.
 pub(super) fn disarm_death_bypass() {
     if !DEATH_GATE_ARMED.swap(false, Ordering::AcqRel) {
         return;
     }
-    let mut restored = false;
+    let mut restored = song_reset::release_gauges();
     for side in 0..2usize {
         if DEATH_GATE_STASH_VALID[side].load(Ordering::Acquire)
             && song_reset::set_death_gate_for_side(
@@ -245,8 +252,14 @@ pub(super) fn disarm_death_bypass() {
         }
     }
     if restored {
-        log_info!("TrainingMode: loop death bypass disarmed (stock gates restored)");
+        log_info!("TrainingMode: loop death bypass disarmed (stock gates + gauges restored)");
     }
+}
+
+/// Whether the loop's death bypass is armed for this song (the driver's
+/// per-frame gauge-hold gate).
+pub(super) fn death_bypass_armed() -> bool {
+    DEATH_GATE_ARMED.load(Ordering::Acquire)
 }
 
 /// Row change callback target: store one side's LOOP SONG state.
@@ -628,10 +641,9 @@ pub fn try_resolve_row_bounds() -> bool {
         // both digest paths (the latch precedes the coherence gate): even
         // when stale bound rows resolve as defaults, the loop still fires.
         super::taint_entered_sides();
-        // Step-7 amendment (2026-08-15): a loop session bypasses death —
-        // gate the actors' instant-death byte so a gauge empty can never
-        // end the run; the driver detects the latched m_isDead and loops
-        // back to A (the reset revives).
+        // Step-7 amendment (2026-08-15, revised 2026-10-20): a loop
+        // session disables failure — gate the actors' instant-death byte
+        // and floor the gauges so a gauge empty can never end the run.
         arm_death_bypass();
         log_info!("TrainingMode: LOOP SONG latched for this song (side {side})");
     } else {

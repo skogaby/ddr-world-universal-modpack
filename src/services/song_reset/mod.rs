@@ -173,6 +173,16 @@ const GAUGE_D0_OFFSET: usize = 0xD0;
 const GAUGE_D4_OFFSET: usize = 0xD4;
 /// Risky-depleted latch.
 const GAUGE_RISKY_DEPLETED_OFFSET: usize = 0xD9;
+/// The percent family's no-death floor flag (BYTE; ctor param = the
+/// owning GamePlayActor's `+0x2B7` matching-battle flag). The shared
+/// GaugeActor delta apply (`FUN_180075190` on 20260915; Normal /
+/// Immortal / Grade / Flare all route through the one GaugeActor message
+/// handler) clamps the value at 1 and sends `0x103B` once (the `+0xD9`
+/// latch) instead of zeroing it and sending the `0x103A` death while this
+/// is set — the engine's own matching-battle "can't fail" path. Pinned
+/// by the `CMP byte [RBX+0xD8],0` that precedes the `0x103B` send on
+/// every supported x64 build (20250805 .. 20260915).
+const GAUGE_FLOOR_OFFSET: usize = 0xD8;
 /// Fixed-point scale for the percent family (10000.0f in the binary).
 const GAUGE_VALUE_SCALE: f32 = 10000.0;
 /// Sanity bound for a snapshotted percent-gauge value.
@@ -990,8 +1000,9 @@ pub fn set_death_gate(on: bool) -> bool {
 }
 
 /// Whether any live actor has died (`m_isDead@+0x1E8`). With the death
-/// gate set the flag latches without ending the run — this is the training
-/// loop's revive trigger. Quiet `false` when no live run.
+/// gate set the flag latches without ending the run — the training loop's
+/// fallback revive trigger when [`hold_gauges`] missed. Quiet `false`
+/// when no live run.
 pub fn any_actor_dead() -> bool {
     let Some(dps) = live_dps() else {
         return false;
@@ -999,6 +1010,126 @@ pub fn any_actor_dead() -> bool {
     gameplay_actors(dps)
         .iter()
         .any(|actor| unsafe { memory::read_u8(actor.add(GPA_IS_DEAD_OFFSET)) } != 0)
+}
+
+/// Capacity of the gauge-hold bookkeeping (two sides × a handful of gauge
+/// children is the realistic maximum; overflow just leaves a gauge stock).
+const MAX_HELD_GAUGES: usize = 8;
+/// Percent-family gauges whose stock-0 [`GAUGE_FLOOR_OFFSET`] we raised.
+static FLOORED_GAUGES: [AtomicUsize; MAX_HELD_GAUGES] =
+    [const { AtomicUsize::new(0) }; MAX_HELD_GAUGES];
+/// LifeGaugeActors whose dead latch we set to hold the last life.
+static HELD_LIFE_GAUGES: [AtomicUsize; MAX_HELD_GAUGES] =
+    [const { AtomicUsize::new(0) }; MAX_HELD_GAUGES];
+
+/// What one [`hold_gauges`] pass newly applied.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct GaugeHold {
+    /// Percent-family gauges newly floored this pass.
+    pub floored: usize,
+    /// Life gauges newly frozen at their last life this pass.
+    pub lives_held: usize,
+}
+
+fn remember(slots: &[AtomicUsize; MAX_HELD_GAUGES], gauge: usize) -> bool {
+    if slots.iter().any(|s| s.load(Ordering::Acquire) == gauge) {
+        return true;
+    }
+    slots.iter().any(|s| {
+        s.compare_exchange(0, gauge, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    })
+}
+
+fn remembered(slots: &[AtomicUsize; MAX_HELD_GAUGES], gauge: usize) -> bool {
+    slots.iter().any(|s| s.load(Ordering::Acquire) == gauge)
+}
+
+/// Keep every live gauge from ever reaching the engine's death state (the
+/// training loop's no-fail hold; idempotent, cheap enough per frame —
+/// gauges are created in the actors' onSetup and reset completions
+/// rewrite the life-gauge latch, so callers re-run it every frame).
+///
+/// - Percent family (Normal / Immortal / Grade / Flare): raise the
+///   gauge's own [`GAUGE_FLOOR_OFFSET`] flag — the value floors at 1 and
+///   keeps recovering, `0x103A` is never sent, `m_isDead` never latches.
+///   Gauges already floored by the engine are left alone (never recorded,
+///   never released).
+/// - LifeGaugeActor (LIFE4 / RISKY — no floor in its handler): once the
+///   lives count reads 1, set its dead latch, which makes the handler
+///   skip every further decrement (the last life is held). A frame that
+///   misses twice from 2 lives can still reach 0 before this runs.
+///
+/// Only pointers walked from the live actor tree are ever written. Game
+/// thread; panic-free.
+pub fn hold_gauges() -> GaugeHold {
+    let mut out = GaugeHold::default();
+    let Some(dps) = live_dps() else {
+        return out;
+    };
+    for actor in gameplay_actors(dps) {
+        unsafe {
+            let mut child = memory::read_ptr(actor.add(FIRST_CHILD_OFFSET)) as *mut u8;
+            while !child.is_null() {
+                match classify_gauge(child) {
+                    Some(GaugeClass::Percent | GaugeClass::Flare | GaugeClass::Grade) => {
+                        let floor = child.add(GAUGE_FLOOR_OFFSET);
+                        if memory::read_u8(floor) == 0 && remember(&FLOORED_GAUGES, child as usize)
+                        {
+                            memory::write_u8(floor as *mut u8, 1);
+                            out.floored += 1;
+                        }
+                    }
+                    Some(GaugeClass::Lives) => {
+                        let latch = child.add(LIFE_GAUGE_DEAD_LATCH_OFFSET);
+                        let lives = memory::read_i32(child.add(LIFE_GAUGE_LIVES_OFFSET));
+                        if lives == 1
+                            && memory::read_u8(latch) == 0
+                            && remember(&HELD_LIFE_GAUGES, child as usize)
+                        {
+                            memory::write_u8(latch as *mut u8, 1);
+                            out.lives_held += 1;
+                        }
+                    }
+                    None => {}
+                }
+                child = memory::read_ptr(child.add(NEXT_SIBLING_OFFSET)) as *mut u8;
+            }
+        }
+    }
+    out
+}
+
+/// Undo [`hold_gauges`] on the live actor tree: lower the floor flags we
+/// raised and clear the life-gauge latches we set (only while lives > 0 —
+/// a latch on a gauge that genuinely reached 0 is the engine's). Gauges no
+/// longer in the live tree are simply forgotten (they died with their
+/// song). Returns whether anything was written.
+pub fn release_gauges() -> bool {
+    let mut wrote = false;
+    if let Some(dps) = live_dps() {
+        for actor in gameplay_actors(dps) {
+            unsafe {
+                let mut child = memory::read_ptr(actor.add(FIRST_CHILD_OFFSET)) as *mut u8;
+                while !child.is_null() {
+                    if remembered(&FLOORED_GAUGES, child as usize) {
+                        memory::write_u8(child.add(GAUGE_FLOOR_OFFSET) as *mut u8, 0);
+                        wrote = true;
+                    } else if remembered(&HELD_LIFE_GAUGES, child as usize)
+                        && memory::read_i32(child.add(LIFE_GAUGE_LIVES_OFFSET)) > 0
+                    {
+                        memory::write_u8(child.add(LIFE_GAUGE_DEAD_LATCH_OFFSET) as *mut u8, 0);
+                        wrote = true;
+                    }
+                    child = memory::read_ptr(child.add(NEXT_SIBLING_OFFSET)) as *mut u8;
+                }
+            }
+        }
+    }
+    for slot in FLOORED_GAUGES.iter().chain(HELD_LIFE_GAUGES.iter()) {
+        slot.store(0, Ordering::Release);
+    }
+    wrote
 }
 
 /// The decoded note vector of `side`'s live GamePlayActor, or `None`

@@ -20,8 +20,10 @@
 //!   created already shifted and the driver aligns the clock on the first anchored frame,
 //!   behind the `TRAINING_LEAD_MS` silent approach.
 //! - **Looping** — with the loop latched, the end cascade is parked and the driver resets to
-//!   the section start each time the live count reaches the end bound; a gauge death is
-//!   revived the same way. Quick fail / quick restart are the exits.
+//!   the section start each time the live count reaches the end bound. Failure is disabled:
+//!   the gauges are held out of the death state (floored at ≥ 1 / last life held), so the
+//!   run never ends or resets on an empty gauge; the next pass or scrub restores the gauge.
+//!   Quick fail / quick restart are the exits.
 //! - **Gestures** (gameplay only, after `song_reset::run_in_song`): pinpad 4 sets A, 6 sets
 //!   B, 5 restores the row-derived bounds (markers need a latched loop; one hint toast per
 //!   song otherwise); 7 / 9 rewind / fast-forward by `rw_increment_ms` / `ff_increment_ms`

@@ -31,13 +31,20 @@
 //! the shipped `request_reset(a_live, TRAINING_LEAD_MS, Zero, None)`
 //! back to the section start, indefinitely, until
 //! quick-fail/quick-restart or song exit — every pass plays and scores
-//! the full section. The loop also BYPASSES DEATH (Step-7 amendment
-//! 2026-08-15): `bounds` armed the actors' instant-death gate at the
-//! latch, so a gauge empty latches `m_isDead` without ending the run;
-//! this driver detects it per frame and fires the same reset early —
-//! the completion block's flag clear + gauge restore is the revive
-//! (quick-fail/quick-restart remain the deliberate exits, and a
-//! disarm restores stock death). One in-flight reset at a time (a
+//! the full section. The loop also DISABLES FAILURE (Step-7 amendment
+//! 2026-08-15, revised 2026-10-20): `bounds` armed the actors'
+//! instant-death gate at the latch and this driver re-runs
+//! `song_reset::hold_gauges` every frame — the gauges' own floor (the
+//! engine's matching-battle no-death path) keeps them at ≥ 1 and LIFE
+//! gauges hold their last life, so `m_isDead` never latches, judging and
+//! scoring stay live, and nothing jumps back to A (an early death reset
+//! cost players their place while scrubbing for marker positions). The
+//! next section-end iteration or scrub restores the gauge as before. A
+//! death that slips past the hold is revived through the loop reset at
+//! once — the gate-up + dead state hard-crashed the game after a few
+//! seconds on a cabinet (quick-fail/quick-restart remain the deliberate
+//! exits, and a disarm restores stock death). One in-flight reset at a
+//! time (a
 //! cooling latch until the count rewinds below the bound — which also
 //! absorbs the stop/replay prepare window, where the pre-completion
 //! anchor keeps counting); a refused iteration retries once next frame,
@@ -106,6 +113,9 @@ static LOOP_COOLING: AtomicBool = AtomicBool::new(false);
 static LOOP_RETRY_USED: AtomicBool = AtomicBool::new(false);
 /// One-per-song latch for the dropped display-term WARN.
 static LOOP_T94_WARNED: AtomicBool = AtomicBool::new(false);
+/// One WARN per fallback death: set when a death that slipped past the
+/// gauge hold is logged, cleared once the revive clears `m_isDead`.
+static LOOP_DEATH_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// What the loop leg is doing this frame — the driver's requeue/timeout
 /// input. Three-state because the pre-anchor wait must stay under the
@@ -249,6 +259,7 @@ pub(super) fn on_gameplay_entry() {
     LOOP_COOLING.store(false, Ordering::Release);
     LOOP_RETRY_USED.store(false, Ordering::Release);
     LOOP_T94_WARNED.store(false, Ordering::Release);
+    LOOP_DEATH_LOGGED.store(false, Ordering::Release);
     let (shift_ms, _) = song_rate::runtime::initial_content_mapping_ms();
     let resolution_pending = !bounds::try_resolve_row_bounds();
     if shift_ms == 0 && !resolution_pending {
@@ -348,6 +359,17 @@ fn loop_step() -> LoopState {
     if !bounds::loop_latched() || LOOP_DISARMED.load(Ordering::Acquire) {
         return LoopState::Idle;
     }
+    // No-fail hold (2026-10-20): re-floor every frame — gauges appear in
+    // onSetup after the latch, and every reset completion rewrites the
+    // life-gauge latch.
+    if bounds::death_bypass_armed() {
+        let hold = song_reset::hold_gauges();
+        if hold.lives_held > 0 {
+            log_info!(
+                "TrainingMode: LIFE gauge held at its last life (failure disabled under LOOP SONG)"
+            );
+        }
+    }
     // The initial bound compute must wait for the run's FIRST anchored
     // frame with a CREDIBLE count: the resolution completes on the actor
     // tree seconds before DPS state 6 anchors the clock, and until the
@@ -391,16 +413,24 @@ fn loop_step() -> LoopState {
         // transaction total — defer both fire conditions to a later frame.
         return LoopState::Grinding;
     }
-    // Death under the loop (Step-7 amendment 2026-08-15): the loop latch
-    // armed the actors' +0x2B7 gate, so a gauge death latches m_isDead
-    // WITHOUT ending the run (both the STEP_GAME_OVER advance and the
-    // DPS finish-poll are conditioned on the gate) — fire the loop back
-    // to A immediately; the reset's completion block clears the death
-    // flags and restores the gauge from the snapshot (the revive). A
-    // refused fire walks the existing retry/disarm ladder, whose disarm
-    // restores the gate — the still-latched death then fails the song
-    // out naturally (stock behavior as the fallback).
+    // Death under the loop (2026-10-20 revision of the Step-7 amendment):
+    // the gauge hold above keeps every gauge out of the death state, and
+    // a death must never fire the loop either — a player scrubbing for
+    // marker positions drains the gauge, and an early jump back to A lost
+    // their place. A latched m_isDead here means the hold missed (a
+    // LIFE gauge losing two lives in one frame, an unrecognised gauge
+    // class): that gate-up + dead state is the one that hard-crashed the
+    // game after a few seconds on 20260915, so revive at once through the
+    // loop reset (its completion clears the death flags and restores the
+    // gauge) — losing the place beats losing the process.
     let died = song_reset::any_actor_dead();
+    if died && !LOOP_DEATH_LOGGED.swap(true, Ordering::AcqRel) {
+        log_warn!(
+            "TrainingMode: gauge death latched despite the no-fail hold -- reviving via loop reset"
+        );
+    } else if !died {
+        LOOP_DEATH_LOGGED.store(false, Ordering::Release);
+    }
     if !died && count < bound {
         return LoopState::Grinding;
     }
@@ -419,7 +449,7 @@ fn loop_step() -> LoopState {
             LOOP_RETRY_USED.store(false, Ordering::Release);
             log_info!(
                 "TrainingMode: loop iteration ({}) -- reset to {} ms at count {} ms (fire bound {} ms)",
-                if died { "death revive" } else { "section end" },
+                if died { "death fallback revive" } else { "section end" },
                 target,
                 count,
                 bound

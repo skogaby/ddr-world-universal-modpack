@@ -1893,3 +1893,25 @@ and have no failure path. (3) A redirected open that AVS refuses must WARN with 
 and its length — install path length and casing are real-world variables CrossOver never
 exercises. (4) The `GetLongPathNameA` fallback must match the mod folder as a path component,
 not as the literal `.\data_mods` prefix: absolute paths are the ones that overrun the buffer.
+
+## Gating death is not the same as preventing it — `GamePlayActor+0x2B7` is the matching-battle flag (2026-10-20)
+
+The training loop's "death bypass" set `GamePlayActor+0x2B7` mid-song: it does block both
+fail-out paths (`0x103C` → STEP_GAME_OVER and the DPS finish-poll), but it is really the
+**matching-battle** ctor flag. In stock play it is set at construction, where it is also passed
+into every GaugeActor as the gauge's own floor flag (`+0xD8`): the shared delta apply then clamps
+the value at 1 and sends `0x103B` instead of zeroing it and sending the `0x103A` death. Set only
+on the actor, the gauge still dies, `m_isDead` latches, and the run continues in a gate-up + dead
+combination stock never produces. The old loop revived on the same frame, so nobody saw it; once
+the revive was removed, holding that state for a few seconds (around the point stock would have
+failed the player on sustained misses) hard-crashed 20260915 with nothing in
+`ddr_hook_crash.log` or spice2x's dialog. The cause was never pinned down (the engine paths I
+read look benign), so the fix avoids the state entirely: `song_reset::hold_gauges` raises the
+gauge floor per frame (LifeGaugeActor has no floor, so its dead latch `+0xB0` is set at 1 life to
+hold the last life).
+
+Rules: (1) to make a run unfailable, keep the gauge out of the death state; never let `m_isDead`
+latch and keep playing. (2) When a fix removes a same-frame cleanup ("revive immediately"), the
+state it used to clear becomes long-lived and untested — check whether stock ever holds it.
+(3) A hard crash with no SEH log and no spice2x dialog is a fail-fast / process exit class —
+don't expect the crash log to explain it.
