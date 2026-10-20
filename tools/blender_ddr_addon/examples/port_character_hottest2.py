@@ -53,13 +53,26 @@ own dance/DANCE_*_MOT_010.bin (HP4: 77 song choreographies, the `NNNL` ones alte
 song NNN; HP5: 200 choreographies of HP2..HP5 songs, nearly all pieces HP2 / HP3 / HP4 ones
 again), tempo from ssq/ss4 where the file maps to a song (HP4), else the pieces' own length.
 
+GAME=winx ports DanceDanceRevolution Winx Club (Wii, EU 2009, `RW6PA4`; the same zan engine and
+37-bone rig in HP2 / HP3's file layout -- docs/wii_ddr_winx_club_research.md) into `WINX CLUB`:
+the six fairies in their three outfits (character/CHR1n / 2n / 3n: `Bloom`, `Bloom Dance`,
+`Bloom Denim`) and their ENCHANTIX form (CHR0n + accessory/AccSpine1_wing0n: `Bloom Fairy`,
+drawn ENCHANTIX_LIFT higher, as the game does). Heads and wings are skinned to dynamic-bone
+chains the game simulates (zan_dump._fold_weights bakes them rigid at rest); the DBBOX_* collision
+boxes and the additive `kira` sparkle overlays are not drawn. The library is motion/MOT010_SSQ*.bin
+(tempo ssq/MU_WIN_<nnn>.ss9 where it exists). Every dancer also gets the girl's transformation
+(transform_clips: motion/transform/transform.anm + pose.anm, 1:1), and an outfit names its
+Enchantix twin in pl_<key>/transform.txt -- what Background Dancers plays when the player's gauge
+fills (main.dol FUN_800a6d3c).
+
 Inputs (environment):
-  GAME        hp3 (default: the HOTTSTPARTY 1-3 port) | hp4 | hp5
-  HP3_GAME / HP2_GAME / HP4_GAME / HP5_GAME  the dumped disc trees (scripts/extract_wii_ddr_data.py
-              disc ...), default ~/Desktop/DDR Wii ISOs/<title> (HP2 only feeds the hp3 library)
-  DANCERS     comma list of keys (hprena01 .., hp4rena01 ..) or person stems (rena, pia, ...:
-              every costume), default the first dancer, or 'all'
-  OUT_BASE    default data_mods/custom_models/dancers/HOTTSTPARTY 1-3 | 4 | 5 (one folder per dancer)
+  GAME        hp3 (default: the HOTTSTPARTY 1-3 port) | hp4 | hp5 | winx
+  HP3_GAME / HP2_GAME / HP4_GAME / HP5_GAME / WINX_GAME  the dumped disc trees
+              (scripts/extract_wii_ddr_data.py disc ...), default ~/Desktop/DDR Wii ISOs/<title>
+              (Winx Club: ~/Desktop/ddr_wii/Winx Club (Europe)); HP2 only feeds the hp3 library
+  DANCERS     comma list of keys (hprena01 .., hp4rena01 .., winxbloom01 ..) or person stems (rena,
+              pia, bloom, ...: every costume), default the first dancer, or 'all'
+  OUT_BASE    default data_mods/custom_models/dancers/HOTTSTPARTY 1-3 | 4 | 5 | WINX CLUB
   PER_DANCER  clips per dancer (default 12)
   ROOT_MODE   recentre (default) | travel
   PREVIEW     1 = also render Workbench previews of the RE-IMPORTED export into PREVIEW_DIR
@@ -90,16 +103,20 @@ from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 GAME = os.environ.get('GAME', 'hp3').lower()
-assert GAME in ('hp3', 'hp4', 'hp5'), GAME
+assert GAME in ('hp3', 'hp4', 'hp5', 'winx'), GAME
 DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Music Fit (Japan)',
-         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)'}
+         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)',
+         'winx': '~/Desktop/ddr_wii/Winx Club (Europe)'}
 DISC = os.path.expanduser(os.environ.get('%s_GAME' % GAME.upper(), DISCS[GAME]))
 HP2_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
-SOURCE = {'hp3': 'HOTTSTPARTY 1-3', 'hp4': 'HOTTSTPARTY 4', 'hp5': 'HOTTSTPARTY 5'}[GAME]
+SOURCE = {'hp3': 'HOTTSTPARTY 1-3', 'hp4': 'HOTTSTPARTY 4', 'hp5': 'HOTTSTPARTY 5', 'winx': 'WINX CLUB'}[GAME]
 TITLE = {'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
          'hp4': 'DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU)',
-         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)'}[GAME]
-KEY_PREFIX = {'hp3': 'hp', 'hp4': 'hp4', 'hp5': 'hp5'}[GAME]
+         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)',
+         'winx': 'DanceDanceRevolution Winx Club (Wii, EU)'}[GAME]
+KEY_PREFIX = {'hp3': 'hp', 'hp4': 'hp4', 'hp5': 'hp5', 'winx': 'winx'}[GAME]
+# clip-name tag of a song file's game ('h3s001_000', 'wxs001_000')
+CLIP_TAG = {'hp2': 'h2', 'hp3': 'h3', 'hp4': 'h4', 'hp5': 'h5', 'winx': 'wx'}
 OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'dancers', SOURCE)))
 PER_DANCER = int(os.environ.get('PER_DANCER', '12'))
 # FLIGHT stages (Background Dancers: `mapset_<key>/flight.txt`): motion/flight/takeoff.anm + these
@@ -112,7 +129,7 @@ FLIGHT_LIFT = Z.HIPS_UNITS * Z.GAME_SCALE   # flight pieces fly the Hips at the 
 ROOT_MODE = os.environ.get('ROOT_MODE', 'recentre')
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_previews')
-CHR_DIR = os.path.join(DISC, 'sound', 'stream', 'character')
+CHR_DIR = os.path.join(DISC, 'character') if GAME == 'winx' else os.path.join(DISC, 'sound', 'stream', 'character')
 
 SHADER = 'mdl_ch_constant_vc'
 SHADOW = {'F': 0.75, 'M': 0.8}
@@ -200,23 +217,54 @@ CAST_HP5 = {
     'jun': ('jun', 'F', [(208, V2)]),
     'u1': ('U1', 'M', [(209, V2)]),
 }
-CAST = {'hp3': CAST_HP3, 'hp4': CAST_HP4, 'hp5': CAST_HP5}[GAME]
+# DanceDanceRevolution Winx Club (EU, RW6PA4): the six fairies, SYS_TEXT.bin's name order (Bloom,
+# Stella, Musa, Flora, Tecna, Layla = person 1..6; the head textures' hair colours and
+# `wd_02_stella_body` agree). main.dol FUN_8001d760 groups the character ids: CHR1n the default
+# outfit (`wa_0n`), CHR2n "Denim" (`wc_`: the denim set on all six), CHR3n "Dance" (`wd_`), CHR0n
+# the ENCHANTIX fairy form
+# (`wb_`, its own head, wings accessory/AccSpine1_wing0n) every outfit transforms into in game
+# (never picked directly there); one colour variant each. CHR51..54 are Mii bodies. Entries are
+# (nn, variants, label suffix): labels `Bloom` / `Bloom Denim` / `Bloom Dance` / `Bloom Fairy`.
+WINX_OUTFITS = [(10, ''), (20, ' Denim'), (30, ' Dance'), (0, ' Fairy')]
+WINX_PEOPLE = [('bloom', 'Bloom'), ('stella', 'Stella'), ('musa', 'Musa'), ('flora', 'Flora'),
+               ('tecna', 'Tecna'), ('layla', 'Layla')]
+CAST_WINX = {stem: (label, 'F', [(base + n, (1,), suffix) for base, suffix in WINX_OUTFITS])
+             for n, (stem, label) in enumerate(WINX_PEOPLE, 1)}
+ENCHANTIX_LIFT = 0.8 * Z.GAME_SCALE   # main.dol FUN_8003149c: ids 0..5 are drawn 0.8 units up (they float)
+CAST = {'hp3': CAST_HP3, 'hp4': CAST_HP4, 'hp5': CAST_HP5, 'winx': CAST_WINX}[GAME]
 
 
 def dancers():
-    """{key: dict(label, sex, nn, variant, stem, index)} in cast order."""
+    """{key: dict(label, sex, nn, variant, stem, index)} in cast order. A costume entry
+    (nn, variants) numbers its labels (`Rena 1` ..); (nn, variants, suffix) names them
+    (`Bloom Dance`)."""
     out = {}
     for stem, (label, sex, costumes) in CAST.items():
         n = 0
-        for nn, variants in costumes:
+        for costume in costumes:
+            nn, variants = costume[:2]
             for v in variants:
                 n += 1
+                name = label + costume[2] if len(costume) > 2 else '%s %d' % (label, n)
                 out['%s%s%02d' % (KEY_PREFIX, stem, n)] = dict(
-                    label='%s %d' % (label, n), sex=sex, nn=nn, variant=v, stem=stem, index=len(out))
+                    label=name, sex=sex, nn=nn, variant=v, stem=stem, index=len(out))
     return out
 
 
 DANCERS_TABLE = dancers()
+
+
+def is_enchantix(entry):
+    return GAME == 'winx' and entry['nn'] < 10
+
+
+def enchantix_key(entry):
+    """Winx Club: the key of the Enchantix form an outfit transforms into (None for the
+    Enchantix entry itself and outside Winx Club)."""
+    if GAME != 'winx' or is_enchantix(entry):
+        return None
+    person = entry['nn'] % 10
+    return next(k for k, e in DANCERS_TABLE.items() if e['nn'] == person)
 
 
 def bone_name(n):
@@ -224,8 +272,8 @@ def bone_name(n):
 
 
 def chr_path(nn, k):
-    """FuruFuru Party / MUSIC FIT: CHR<nn:02><k>; HOTTEST PARTY 4 / 5: CHR<id><k:02>."""
-    return os.path.join(CHR_DIR, ('CHR%02d%d.bin' if GAME == 'hp3' else 'CHR%d%02d.bin') % (nn, k))
+    """FuruFuru Party / MUSIC FIT / Winx Club: CHR<nn:02><k>; HOTTEST PARTY 4 / 5: CHR<id><k:02>."""
+    return os.path.join(CHR_DIR, ('CHR%02d%d.bin' if GAME in ('hp3', 'winx') else 'CHR%d%02d.bin') % (nn, k))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -243,6 +291,15 @@ def song_files():
     _<E|L|S><nn>_MOT_010.bin (HP<n> = the song's origin game, its numbering, not HP5's ss4 one):
     no SSQ, so library() takes the tempo from the pieces (one bar each)."""
     out = []
+    if GAME == 'winx':
+        # Winx Club: motion/MOT010_SSQ<nnn>.bin, tempo ssq/MU_WIN_<nnn>.ss9 (001..033 only; the
+        # rest -- HOTTEST PARTY choreographies the game re-uses -- take the pieces' own length)
+        mdir = os.path.join(DISC, 'motion')
+        for f in sorted(os.listdir(mdir)):
+            if f.startswith('MOT010_SSQ') and f.endswith('.bin'):
+                tag = f[len('MOT010_SSQ'):-4]
+                out.append((GAME, tag, os.path.join(mdir, f), os.path.join(DISC, 'ssq', 'MU_WIN_%s.ss9' % tag)))
+        return out
     if GAME in ('hp4', 'hp5'):
         ddir = os.path.join(DISC, 'dance')
         for f in sorted(os.listdir(ddir)):
@@ -321,7 +378,7 @@ def library(body, joints):
                     if bars < 3 or key in flight_seen:
                         continue
                     flight_seen.add(key)
-                    flight['clips'].append(dict(name='fly_h%ss%s_%03d' % (game[2], tag.lower(), chain[run[0]]),
+                    flight['clips'].append(dict(name='fly_%ss%s_%03d' % (CLIP_TAG[game], tag.lower(), chain[run[0]]),
                                                 pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm,
                                                 flight=True, lift=True))
             continue
@@ -346,7 +403,7 @@ def library(body, joints):
                 moving = any(np.abs(Z.pose_positions(body, p[0], joints, p[1] * 0.5) - w0).max() > 0.3 for p in ps)
                 if not moving:
                     continue
-                clips.append(dict(name='h%ss%s_%03d' % (game[2], tag.lower(), chain[0] + run[0]),
+                clips.append(dict(name='%ss%s_%03d' % (CLIP_TAG[game], tag.lower(), chain[0] + run[0]),
                                   pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm))
                 total_bars += bars
     print('LIBRARY %s: %d clips (%d FuruFuru Party), %.0f bars from %d song files' % (
@@ -391,6 +448,30 @@ def flight_hand_of(index, body, joints):
     if _FLIGHT_HANDS is None:
         _FLIGHT_HANDS = Z.deal_rotating(range(len(fl['clips'])), len(DANCERS_TABLE), FLIGHT_PER_DANCER, seed=SEED + 1)
     return [fl['takeoff']] + [fl['clips'][i] for i in sorted(_FLIGHT_HANDS[index])]
+
+
+# Winx Club's ENCHANTIX TRANSFORMATION (main.dol FUN_800a6d3c; research notes in
+# docs/wii_ddr_winx_club_research.md): both the outfit and its Enchantix twin play the girl's
+# game/APLMOT/APL_CHARA0<n>.bin /#0/#0 (120 frames: the transformation) then /#0/#1 (40 frames,
+# held until the next choreography piece), at their authored 60 Hz -- written 1:1 as
+# motion/transform/transform.anm + pose.anm. An outfit's body folder also carries
+# TRANSFORM_MARKER naming the Enchantix key it turns into.
+TRANSFORM_DIR = 'transform'
+TRANSFORM_MARKER = 'transform.txt'
+TRANSFORM_CLIPS = ('transform', 'pose')
+
+
+def transform_clips(entry):
+    """[clip dict] of the transformation (Winx Club only, else [])."""
+    if GAME != 'winx':
+        return []
+    blob = open(os.path.join(DISC, 'game', 'APLMOT', 'APL_CHARA%02d.bin' % (entry['nn'] % 10)), 'rb').read()
+    body = [Z.parse_zab(z) for p, _n, z in Z.members(blob, 'zab') if p.startswith('/#0/')]
+    out = []
+    for name, mo in zip(TRANSFORM_CLIPS, body):
+        L = mo['length']
+        out.append(dict(name=name, pieces=[(mo, L, L / 120.0)], bars=L / 120.0, bpm=120.0, transform=True))
+    return out
 
 
 def clip_worlds(body, clip, joints, frames):
@@ -448,6 +529,16 @@ def accessories(body, head, variant):
     in MUSIC FIT) -- rings, fans, a headlamp, rigid on the joint; colour variant k uses the k-th TPL
     (the last when there are fewer). The Wii-Remote props (`*_wii_con`) are left out."""
     import re
+    if GAME == 'winx':
+        # Winx Club: the Enchantix bodies (wb_0n) wear accessory/AccSpine1_wing0n (main.dol's
+        # accessory table: wing01..06; the outfits wear nothing)
+        m = re.search(r'\bwb_0(\d)_body', ' '.join(body['textures']))   # CHR36's Denim body reuses wb_06_ref03
+        if not m:
+            return []
+        f = 'AccSpine1_wing0%s.bin' % m.group(1)
+        blob = open(os.path.join(DISC, 'accessory', f), 'rb').read()
+        zm, tps = Z.members(blob, 'zmb'), Z.members(blob, 'tpl')
+        return [('AccSpine1', Z.parse_zmb(zm[0][2]), Z.tpl_images(tps[min(variant, len(tps)) - 1][2]), f)]
     names = ' '.join(body['textures'] + (head['textures'] if head else []))
     m = re.search(r'(HP\d[A-Z]_\d\d)', names, re.I) or re.search(r'(?:tex_)?([ncsm]_\d\d)', names)
     if not m:
@@ -533,6 +624,8 @@ def costume_pieces(body, head, body_tex, head_tex, names, acc=(), tone=None):
                                                    default_joint=joint), 'a%d' % k))
     for model, tex, pieces, prefix in sources:
         for pc in pieces:
+            if pc['node'].upper().startswith('DBBOX_'):
+                continue                     # Winx Club: a dynamic-bone collision box (dummy.tga), not drawn
             mt = model['materials'][pc['material']]
             if mt['flags'][3] != 0:          # an effect pass (environment map): not drawn as a mesh
                 continue
@@ -703,27 +796,48 @@ def port(key):
     flight = flight_hand_of(entry['index'], body, names)
     if not flight:
         os.rmdir(flight_dir)
+    transform = transform_clips(entry)
+    transform_dir = os.path.join(motion_dir, TRANSFORM_DIR)
+    if os.path.isdir(transform_dir):
+        for stale in os.listdir(transform_dir):
+            os.remove(os.path.join(transform_dir, stale))
+        os.rmdir(transform_dir)
+    if transform:
+        os.makedirs(transform_dir)
+    lift = ENCHANTIX_LIFT if is_enchantix(entry) else 0.0
     total = 0
-    for clip in hand + flight:
+    for clip in hand + flight + transform:
         n_out = int(round(clip['bars'] * 120))
         frames = list(range(0, n_out + 1, 2))
         worlds = clip_worlds(body, clip, names, frames)
         if clip.get('lift'):
             worlds[:, :, 3, 1] += FLIGHT_LIFT
+        worlds[:, :, 3, 1] += lift
         shift = None
-        if ROOT_MODE == 'recentre' and clip['name'] != TAKEOFF_CLIP:
+        if ROOT_MODE == 'recentre' and clip['name'] != TAKEOFF_CLIP and not clip.get('transform'):
             hips = worlds[:, names.index('Hips'), 3]
             shift = ((hips[:, 0].min() + hips[:, 0].max()) / 2, (hips[:, 2].min() + hips[:, 2].max()) / 2)
         spec, wq = H.worlds_to_anm_spec(worlds, names, parents, file_binds, game_binds, frames, frames[-1], shift)
         data = A.write_anm(spec)
         err = check_clip(data, wq, parents, frames)
         assert err < 1e-3, '%s: joint error %.5f m' % (clip['name'], err)
-        open(os.path.join(flight_dir if clip.get('flight') else motion_dir, clip['name'] + '.anm'), 'wb').write(data)
+        out_clip = transform_dir if clip.get('transform') else flight_dir if clip.get('flight') else motion_dir
+        open(os.path.join(out_clip, clip['name'] + '.anm'), 'wb').write(data)
         total += len(data)
         print('CLIP %s %2d piece(s) %5.1f bars (song %3.0f BPM) -> %5d frames @60, %7d bytes, max joint err %.2e m' % (
             clip['name'], len(clip['pieces']), clip['bars'], clip['bpm'], frames[-1], len(data), err))
-    print('CLIPS %s: %d clips, %.1f bars + flight %s, %.2f MB' % (key, len(hand), sum(c['bars'] for c in hand),
-                                                             [c['name'] for c in flight] or 'none', total / 1e6))
+    print('CLIPS %s: %d clips, %.1f bars + flight %s + transform %s, %.2f MB' % (
+        key, len(hand), sum(c['bars'] for c in hand), [c['name'] for c in flight] or 'none',
+        [c['name'] for c in transform] or 'none', total / 1e6))
+    twin = enchantix_key(entry)
+    marker = os.path.join(body_dir, TRANSFORM_MARKER)
+    if twin:
+        with open(marker, 'w') as f:
+            f.write('# Winx Club: this outfit transforms into %s (%s) -- main.dol FUN_800a6d3c\n' % (
+                twin, DANCERS_TABLE[twin]['label']))
+            f.write('%s\n' % twin)
+    elif os.path.exists(marker):
+        os.remove(marker)
 
     sidecar = os.path.join(out_dir, 'chara_resources.rlist.txt')
     with open(sidecar, 'w') as f:
@@ -734,6 +848,9 @@ def port(key):
             ' '.join(c['name'] for c in hand)))
         if flight:
             f.write('# flight stages: motion/%s/ %s\n' % (FLIGHT_DIR, ' '.join(c['name'] for c in flight)))
+        if transform:
+            f.write('# Enchantix transformation: motion/%s/ %s%s\n' % (
+                TRANSFORM_DIR, ' '.join(c['name'] for c in transform), ' -> %s' % twin if twin else ''))
         f.write('%s, pl, %s, A, 1.0, %s, 0.0\n' % (key, sex, export_character.fmt_num(SHADOW[sex])))
     if PREVIEW:
         preview(out_dir, key, max(hand, key=lambda c: c['bars'])['name'] if hand else None)
@@ -757,6 +874,13 @@ def preview(out_dir, key, clip):
         for f in (0, 240, 480, 720):
             bpy.context.scene.frame_set(f)
             P.render_camera(os.path.join(PREVIEW_DIR, '%s_%s_f%04d.png' % (key, clip, f)),
+                            Vector((0.0, -6.0, 1.0)), Vector((0.0, 0.0, 1.0)), scale=4.0, res=(600, 600))
+    transform = os.path.join(out_dir, bname, 'motion', TRANSFORM_DIR, TRANSFORM_CLIPS[0] + '.anm')
+    if os.path.exists(transform):
+        import_anm.load_anm(transform, arm)
+        for f in (0, 40, 80, 120):
+            bpy.context.scene.frame_set(f)
+            P.render_camera(os.path.join(PREVIEW_DIR, '%s_transform_f%04d.png' % (key, f)),
                             Vector((0.0, -6.0, 1.0)), Vector((0.0, 0.0, 1.0)), scale=4.0, res=(600, 600))
 
 

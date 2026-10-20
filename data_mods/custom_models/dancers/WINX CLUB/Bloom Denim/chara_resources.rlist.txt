@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Bloom Denim" (CHR210 + CHR211), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs002_006 wxs002_014 wxs007_008 wxs007_033 wxs010_000 wxs039_037 wxs040_025 wxs041_000 wxs041_070 wxs042_054 wxs044_000 wxs048_056)
+# Enchantix transformation: motion/transform/ transform pose -> winxbloom04
+winxbloom02, pl, F, A, 1.0, 0.75, 0.0

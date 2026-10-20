@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Musa" (CHR130 + CHR131), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs004_012 wxs004_063 wxs007_000 wxs009_046 wxs010_017 wxs010_045 wxs011_043 wxs020_024 wxs023_000 wxs036_008 wxs039_045 wxs041_062)
+# Enchantix transformation: motion/transform/ transform pose -> winxmusa04
+winxmusa01, pl, F, A, 1.0, 0.75, 0.0

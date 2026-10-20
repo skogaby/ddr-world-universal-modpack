@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Layla Dance" (CHR360 + CHR361), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs003_033 wxs003_043 wxs007_017 wxs013_047 wxs016_032 wxs018_040 wxs020_016 wxs023_022 wxs026_016 wxs038_005 wxs045_048 wxs046_048)
+# Enchantix transformation: motion/transform/ transform pose -> winxlayla04
+winxlayla03, pl, F, A, 1.0, 0.75, 0.0

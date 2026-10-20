@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Tecna Fairy" (CHR050 + CHR051), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs004_000 wxs014_038 wxs015_004 wxs017_051 wxs019_032 wxs020_056 wxs025_036 wxs027_008 wxs039_029 wxs043_023 wxs044_061 wxs053_066)
+# Enchantix transformation: motion/transform/ transform pose
+winxtecna04, pl, F, A, 1.0, 0.75, 0.0

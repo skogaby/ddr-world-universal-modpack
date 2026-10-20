@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Layla Denim" (CHR260 + CHR261), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs001_016 wxs002_034 wxs004_079 wxs006_052 wxs009_017 wxs011_019 wxs015_008 wxs017_027 wxs036_056 wxs043_054 wxs043_088 wxs053_040)
+# Enchantix transformation: motion/transform/ transform pose -> winxlayla04
+winxlayla02, pl, F, A, 1.0, 0.75, 0.0

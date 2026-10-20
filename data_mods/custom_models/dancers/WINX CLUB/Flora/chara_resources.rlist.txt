@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Flora" (CHR140 + CHR141), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs003_016 wxs005_027 wxs006_066 wxs009_030 wxs012_047 wxs013_000 wxs024_008 wxs026_032 wxs026_050 wxs027_048 wxs038_029 wxs043_012)
+# Enchantix transformation: motion/transform/ transform pose -> winxflora04
+winxflora01, pl, F, A, 1.0, 0.75, 0.0

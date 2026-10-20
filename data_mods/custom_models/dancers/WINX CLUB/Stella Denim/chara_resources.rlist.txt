@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Stella Denim" (CHR220 + CHR221), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs002_018 wxs011_027 wxs012_051 wxs014_014 wxs021_012 wxs025_024 wxs026_060 wxs027_028 wxs038_021 wxs041_078 wxs048_040 wxs054_000)
+# Enchantix transformation: motion/transform/ transform pose -> winxstella04
+winxstella02, pl, F, A, 1.0, 0.75, 0.0

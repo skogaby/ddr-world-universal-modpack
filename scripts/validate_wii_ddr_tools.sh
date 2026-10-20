@@ -52,19 +52,23 @@ print("  archives: %s" % ", ".join("%d %s" % (n, k) for k, n in sorted(counts.it
 # the costumes: a rig within the frame board's 64 bones. HOTTEST PARTY 4 / 5 (a dance/ dir) name
 # them CHR<id><variant:02> and bake the skin into the textures: no skin material, no tone table
 hp45 = os.path.isdir(os.path.join(root, "dance"))
+# Winx Club: HP2 / HP3's layout with the costumes in character/ and, like HP4 / HP5, no skin tone
+winx = os.path.isdir(os.path.join(root, "character"))
+baked = hp45 or winx
 mots = sorted(glob.glob(os.path.join(root, "dance", "DANCE_*_MOT_010.bin") if hp45 else
                         os.path.join(root, "motion", "MOT010_SSQ*.bin")))
 keep = Z.parse_zab(Z.members(open(mots[0], "rb").read(), "zab")[0][2])["order"] if mots else []
 rigs = 0
 dols = sorted(glob.glob(os.path.join(root, "sys", "*.dol")))
 tones = None
-if not hp45:
+if not baked:
     try:
         tones = Z.skin_tone_table(open(dols[0], "rb").read()) if dols else None
     except ValueError as e:
         problems.append((dols[0], repr(e)))
 pattern = "CHR*00.bin" if hp45 else "CHR??0.bin"
-for path in sorted(glob.glob(os.path.join(root, "sound", "stream", "character", pattern))):
+chr_dir = os.path.join(root, "character") if winx else os.path.join(root, "sound", "stream", "character")
+for path in sorted(glob.glob(os.path.join(chr_dir, pattern))):
     zm = Z.members(open(path, "rb").read(), "zmb")
     if len(zm) < 2:
         continue                                  # a Mii body: no head, not ported
@@ -74,7 +78,7 @@ for path in sorted(glob.glob(os.path.join(root, "sound", "stream", "character", 
         rigs += 1
         if n > 64:
             problems.append((path, "%d rig joints (> 64)" % n))
-        if hp45:
+        if baked:
             continue
         nn = int(os.path.basename(path)[3:5])
         if tones is not None and nn not in tones:
@@ -84,7 +88,7 @@ for path in sorted(glob.glob(os.path.join(root, "sound", "stream", "character", 
     except (ValueError, IndexError, KeyError) as e:
         problems.append((path, repr(e)))
 print("  costumes: %d rigs <= 64 joints, %s" % (
-    rigs, "skin in the textures (HP4 / HP5)" if hp45 else "%s skin tones from main.dol" % (
+    rigs, "skin in the textures (HP4 / HP5 / Winx Club)" if baked else "%s skin tones from main.dol" % (
         len(tones) if tones is not None else "no")))
 # the stages: layout nodes, flip-books, UV keys
 stages = sorted(p for p in glob.glob(os.path.join(root, "stage", "STG*.bin")) if Z.STAGE_FILE.match(os.path.basename(p)))
@@ -134,7 +138,7 @@ PYEOF
 }
 
 for dir in "$@"; do
-  if [ -d "$dir/stage" ] && [ -d "$dir/sound/stream" ]; then
+  if [ -d "$dir/stage" ] && { [ -d "$dir/sound/stream" ] || [ -d "$dir/character" ]; }; then
     note "zan survey of ${dir/#$HOME/~}"
     zan_survey "$dir"
     continue

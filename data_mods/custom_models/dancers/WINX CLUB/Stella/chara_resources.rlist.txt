@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Stella" (CHR120 + CHR121), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs002_038 wxs005_001 wxs006_023 wxs006_031 wxs011_003 wxs013_064 wxs016_000 wxs017_000 wxs019_024 wxs034_040 wxs043_096 wxs044_050)
+# Enchantix transformation: motion/transform/ transform pose -> winxstella04
+winxstella01, pl, F, A, 1.0, 0.75, 0.0

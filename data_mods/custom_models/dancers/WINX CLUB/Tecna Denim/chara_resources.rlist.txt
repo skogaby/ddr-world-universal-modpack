@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Tecna Denim" (CHR250 + CHR251), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs001_008 wxs001_035 wxs012_001 wxs017_019 wxs018_032 wxs019_008 wxs024_067 wxs036_048 wxs041_034 wxs048_072 wxs053_016 wxs053_048)
+# Enchantix transformation: motion/transform/ transform pose -> winxtecna04
+winxtecna02, pl, F, A, 1.0, 0.75, 0.0

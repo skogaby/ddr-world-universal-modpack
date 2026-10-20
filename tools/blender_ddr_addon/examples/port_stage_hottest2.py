@@ -54,14 +54,17 @@ STG<nnn>_S.bin (the split-screen copies) are not ported, nor MUSIC FIT's STG000 
 port what zan_dump.plan_stage_ports leaves (planned_stages) less NEAR_DUPLICATES: HP4 26 stages, HP5 14 -- not their
 re-shipped HP2 / HP3 / HP4 stages, their in-disc duplicates, the COL-only STG4xx, STG<nnn>_P (HP4's
 copies of HP2's STG042 / 046) or HP4 / HP5's props no OBJSET node places (unused, at the origin).
+GAME=winx ports DanceDanceRevolution Winx Club's own six sets (WINX_STAGES: STG001..006, labelled
+from its stage-select plates) into `WINX CLUB`; its STG007..055 / 101..103 are FuruFuru Party's.
 
 Inputs (environment):
-  GAME        hp2 | hp3 | hp4 | hp5 (default hp2); HP2_GAME .. HP5_GAME the dumped disc trees
-              (scripts/extract_wii_ddr_data.py disc ...; default ~/Desktop/DDR Wii ISOs/<title>;
-              hp4 / hp5 read the earlier discs too, to skip what those already ship)
+  GAME        hp2 | hp3 | hp4 | hp5 | winx (default hp2); HP2_GAME .. HP5_GAME / WINX_GAME the dumped
+              disc trees (scripts/extract_wii_ddr_data.py disc ...; default ~/Desktop/DDR Wii ISOs/
+              <title>, Winx Club ~/Desktop/ddr_wii/Winx Club (Europe); hp4 / hp5 read the earlier
+              discs too, to skip what those already ship)
   STAGES      comma list (STG027, 27, ...), default the first stage, or 'all'
-  OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 2|3|4|5 (one folder per stage,
-              `Stage 27` ..; keys hp2stage027 .. hp5stage030)
+  OUT_BASE    default data_mods/custom_models/stages/HOTTEST PARTY 2|3|4|5 | WINX CLUB (one folder
+              per stage, `Stage 27` / `Alfea` ..; keys hp2stage027 .. hp5stage030, winxstage001 ..)
   PREVIEW     1 = render Workbench / EEVEE previews of the RE-IMPORTED parts into PREVIEW_DIR (a
               test card on the screens), plus a ported dancer through two of the written .camanm
 Run: GAME=hp2 STAGES=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
@@ -92,9 +95,10 @@ from blender_ddr_addon.codec import anm as A  # noqa: E402
 from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
 
 GAME = os.environ.get('GAME', 'hp2').lower()
-assert GAME in ('hp2', 'hp3', 'hp4', 'hp5'), GAME
+assert GAME in ('hp2', 'hp3', 'hp4', 'hp5', 'winx'), GAME
 DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Music Fit (Japan)',
-         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)'}
+         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)',
+         'winx': '~/Desktop/ddr_wii/Winx Club (Europe)'}
 
 
 def disc_dir(game):
@@ -103,12 +107,14 @@ def disc_dir(game):
 
 DISC = disc_dir(GAME)
 OTHER_DISC = disc_dir('hp2')
-SOURCES = {g: 'HOTTEST PARTY %s' % g[2] for g in DISCS}
+SOURCES = {g: 'HOTTEST PARTY %s' % g[2] for g in DISCS if g.startswith('hp')}
+SOURCES['winx'] = 'WINX CLUB'
 SOURCE = SOURCES[GAME]
 TITLE = {'hp2': 'DanceDanceRevolution FuruFuru Party (Wii, JP) = HOTTEST PARTY 2',
          'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
          'hp4': 'DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU)',
-         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)'}[GAME]
+         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)',
+         'winx': 'DanceDanceRevolution Winx Club (Wii, EU)'}[GAME]
 OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(REPO, 'data_mods', 'custom_models', 'stages', SOURCE)))
 PREVIEW = os.environ.get('PREVIEW', '0') == '1'
 PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_%s_stage_previews' % GAME)
@@ -130,6 +136,8 @@ NEAR, FAR = 0.1, 32768.0
 def stage_list():
     if GAME in ('hp4', 'hp5'):
         return planned_stages(GAME)
+    if GAME == 'winx':
+        return list(WINX_STAGES)
     out = []
     for f in sorted(os.listdir(STAGE_DIR)):
         if not (f.startswith('STG') and f.endswith('.bin')) or '_S' in f or '_EFF' in f:
@@ -143,6 +151,15 @@ def stage_list():
 # MUSIC FIT's shipped stages (stage_list(hp3) -- its STG202 is FuruFuru Party's STG101 again,
 # shipped twice since the HP2 / HP3 port)
 HP3_SHIPPED = ['STG%03d' % n for n in list(range(101, 112)) + list(range(201, 207))]
+
+# DanceDanceRevolution Winx Club: STG001..006 are its own sets (labels from select/_ENG/
+# stage_select.bin's name plates, matched through the thumbnails); STG007..055 / 101..103 are
+# FuruFuru Party's again (every single-texture material byte-identical to the shipped
+# HOTTEST PARTY 2 stage of the same number but STG009's backdrop tile and STG035's EU graffiti),
+# STG000 is empty -- not ported (maintainer, 2026-10-20).
+WINX_STAGES = {'STG001': 'Alfea', 'STG002': 'Entrance Hall', 'STG003': 'Redfountain',
+               'STG004': 'School Library', 'STG005': 'Forest Village', 'STG006': 'City of Magix'}
+# (STG005, a forest village, has no stage-select plate -- a story-mode set; the label is descriptive)
 
 
 # planned_stages' result with all four discs present (2026-10-04); used when the older dumps are
@@ -256,6 +273,8 @@ def stage_number(stage):
 
 
 def stage_label(stage):
+    if GAME == 'winx':
+        return WINX_STAGES[stage]
     return 'Stage %02d' % stage_number(stage)
 
 

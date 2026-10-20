@@ -572,5 +572,29 @@ class TestHottestParty45(unittest.TestCase):
         self.assertEqual(sorted(sigs.values()), ['duplicate of STG002', 'same as OLD STG101'])
 
 
+class TestWinxClub(unittest.TestCase):
+    def test_third_camera_signature(self):
+        # Winx Club's GAME_DEF_CAM shots (/#1 .. /#3, incl. the transformation camera /#3/#0)
+        blob = cam(1.5333, [(0, 1, 9), (0, 1, 9)], [(0, 1, 0), (0, 1, 0)], signature=Z.CAM_SIGNATURES[2])
+        self.assertEqual(Z.CAM_SIGNATURES[2], bytes.fromhex('28f813007cf713005cf71300'))
+        self.assertEqual(Z.kind_of(blob), 'cam')
+        self.assertAlmostEqual(Z.cam_length(Z.parse_cam(blob)), 1.5333, places=4)
+
+    def test_dynamic_bone_weights_fold(self):
+        # a head skinned to its own chain (bone_head -> DB_hair01): folded onto the attach joint;
+        # a weight on a rig joint stays; several folded joints merge
+        nodes = [dict(name='root', parent=-1), dict(name='bone_head', parent=0, local=trs((0, 1, 0))),
+                 dict(name='DB_hair01', parent=1, local=trs((0, 1, 0))), dict(name='Neck', parent=0)]
+        m = Z.parse_zmb(zmb(nodes, [dict(flags=(1, 0, 0, 0), tex=[0])]))
+        self.assertEqual(Z._fold_weights(m, [('bone_head', 0.25), ('DB_hair01', 0.75)], {'mii_head'}, 'mii_head'),
+                         [('mii_head', 1.0)])
+        self.assertEqual(Z._fold_weights(m, [('Neck', 0.5), ('DB_hair01', 0.5)], {'Neck'}, 'mii_head'),
+                         [('Neck', 0.5), ('mii_head', 0.5)])      # no rig ancestor -> the default joint
+        self.assertEqual(Z._fold_weights(m, [('Neck', 1.0)], {'Neck'}, None), [('Neck', 1.0)])   # untouched
+        m2 = Z.parse_zmb(zmb([dict(name='root', parent=-1), dict(name='Spine1', parent=0),
+                              dict(name='DB_himo01', parent=1)], [dict(flags=(1, 0, 0, 0), tex=[0])]))
+        self.assertEqual(Z._fold_weights(m2, [('DB_himo01', 1.0)], {'Spine1'}, 'Hips'), [('Spine1', 1.0)])
+
+
 if __name__ == '__main__':
     unittest.main()

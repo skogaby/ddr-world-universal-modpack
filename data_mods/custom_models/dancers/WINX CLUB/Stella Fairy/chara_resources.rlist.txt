@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Stella Fairy" (CHR020 + CHR021), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs004_016 wxs004_032 wxs008_028 wxs008_042 wxs011_051 wxs012_024 wxs016_024 wxs027_024 wxs035_016 wxs046_000 wxs046_016 wxs054_032)
+# Enchantix transformation: motion/transform/ transform pose
+winxstella04, pl, F, A, 1.0, 0.75, 0.0

@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Musa Denim" (CHR230 + CHR231), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs001_000 wxs003_008 wxs003_059 wxs007_055 wxs017_008 wxs019_040 wxs021_050 wxs025_032 wxs026_024 wxs035_040 wxs042_032 wxs054_064)
+# Enchantix transformation: motion/transform/ transform pose -> winxmusa04
+winxmusa02, pl, F, A, 1.0, 0.75, 0.0

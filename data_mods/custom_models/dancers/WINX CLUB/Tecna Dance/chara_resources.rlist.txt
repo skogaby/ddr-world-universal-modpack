@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Tecna Dance" (CHR350 + CHR351), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs012_030 wxs016_016 wxs019_016 wxs021_070 wxs021_074 wxs035_024 wxs036_072 wxs044_041 wxs053_056 wxs054_040 wxs054_048 wxs054_056)
+# Enchantix transformation: motion/transform/ transform pose -> winxtecna04
+winxtecna03, pl, F, A, 1.0, 0.75, 0.0

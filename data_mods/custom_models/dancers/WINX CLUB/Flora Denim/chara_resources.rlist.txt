@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Flora Denim" (CHR240 + CHR241), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs003_051 wxs006_058 wxs007_025 wxs014_030 wxs035_000 wxs037_032 wxs037_040 wxs040_008 wxs042_024 wxs046_008 wxs053_122 wxs054_008)
+# Enchantix transformation: motion/transform/ transform pose -> winxflora04
+winxflora02, pl, F, A, 1.0, 0.75, 0.0

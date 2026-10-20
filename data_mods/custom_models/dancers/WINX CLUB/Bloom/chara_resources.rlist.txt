@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Bloom" (CHR110 + CHR111), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs002_022 wxs005_017 wxs008_008 wxs014_022 wxs014_046 wxs018_024 wxs018_048 wxs024_051 wxs034_016 wxs034_032 wxs047_025 wxs053_114)
+# Enchantix transformation: motion/transform/ transform pose -> winxbloom04
+winxbloom01, pl, F, A, 1.0, 0.75, 0.0

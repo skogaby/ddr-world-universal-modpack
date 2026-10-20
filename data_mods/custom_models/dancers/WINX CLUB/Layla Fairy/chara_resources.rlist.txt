@@ -1,0 +1,4 @@
+# DanceDanceRevolution Winx Club (Wii, EU) "Layla Fairy" (CHR060 + CHR061), ported with its own rig and choreography
+# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips wxs002_010 wxs004_048 wxs005_043 wxs007_043 wxs016_058 wxs017_035 wxs021_000 wxs025_060 wxs036_024 wxs036_032 wxs048_032 wxs048_064)
+# Enchantix transformation: motion/transform/ transform pose
+winxlayla04, pl, F, A, 1.0, 0.75, 0.0

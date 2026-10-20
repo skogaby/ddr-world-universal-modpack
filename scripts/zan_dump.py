@@ -5,7 +5,8 @@ FuruFuru Party (Wii, JP 2008 = HOTTEST PARTY 2, `RD4JA4`) and DanceDanceRevoluti
 2010 / 2011, `SDYPA4` / `SURPA4`): the polygon dancers, their dance clips, the stages and the
 cameras, plus the conversion math the DDR World ports use
 (tools/blender_ddr_addon/examples/port_character_hottest2.py, port_stage_hottest2.py).
-Formats and RE: docs/wii_ddr_hottest_party_2_3_research.md, docs/wii_ddr_hottest_party_4_5_research.md.
+Formats and RE: docs/wii_ddr_hottest_party_2_3_research.md, docs/wii_ddr_hottest_party_4_5_research.md,
+docs/wii_ddr_winx_club_research.md.
 All values are big-endian.
 
 Unlike HOTTEST PARTY 1 (Hudson's Mario Party engine, scripts/hsf_dump.py) these games run on
@@ -86,8 +87,10 @@ ZMB_MAGIC = b'ZMB GC\0\0'
 ZAB_MAGIC = b'ZAB GC\0\0'
 CAM_SIGNATURE = bytes.fromhex('28f812007cf712005cf71200')   # at 0x34 of every camera (HP2 / HP3)
 # HOTTEST PARTY 4 / 5 write other bytes there (runtime scratch the exporter leaves behind); the
-# layout before them is the same
-CAM_SIGNATURES = (CAM_SIGNATURE, bytes.fromhex('5a005b005c005d005e005f00'))
+# layout before them is the same. DanceDanceRevolution Winx Club's GAME_DEF_CAM shots (not its
+# stage cameras, which carry HP2's) have a third variant.
+CAM_SIGNATURES = (CAM_SIGNATURE, bytes.fromhex('5a005b005c005d005e005f00'),
+                  bytes.fromhex('28f813007cf713005cf71300'))
 NODE_SIZE = 0xA0
 SUBMESH_SIZE = 0x40
 MATERIAL_SIZE = {1.0: 0x38, 3.0: 0x50}
@@ -535,6 +538,23 @@ def _nearest_joint(model, i, joint_names):
     return model['nodes'][i]['name'] if i >= 0 else None
 
 
+def _fold_weights(model, weights, joint_names, default_joint):
+    """Skin weights on joints outside `joint_names` moved to the joint's nearest rig ancestor in
+    the same model (`default_joint` when none), merged per joint. Winx Club's heads and wings
+    are skinned to their own dynamic-bone chains (DB_hair*, DB_side*, DB_Lwing* ...; the game
+    simulates them): baked at rest, rigid on the attach joint. HOTTEST PARTY weights only name
+    rig joints, so they pass through unchanged."""
+    if all(jn in joint_names for jn, _w in weights):
+        return weights
+    out = {}
+    for jn, w in weights:
+        if jn not in joint_names:
+            i = model['by_name'].get(jn)
+            jn = (_nearest_joint(model, i, joint_names) if i is not None else None) or default_joint
+        out[jn] = out.get(jn, 0.0) + w
+    return list(out.items())
+
+
 def _row_apply(v, m):
     return v @ m[:3, :3] + m[3, :3]
 
@@ -562,7 +582,8 @@ def model_pieces(model, joint_names, frame=None, default_joint=None):
             pos = _row_apply(sm['pos'], m)
             nrm = _normal_apply(sm['nrm'], m) if len(sm['nrm']) else np.zeros((0, 3))
             if sm['skin'] is not None:
-                weights = [[(jn, w) for jn, w in ws if w > 0] for ws in sm['skin']]
+                weights = [_fold_weights(model, [(jn, w) for jn, w in ws if w > 0], joint_names, default_joint)
+                           for ws in sm['skin']]
             else:
                 jn = _nearest_joint(model, nd['index'], joint_names) or default_joint
                 weights = [[(jn, 1.0)] for _ in range(len(pos))]
