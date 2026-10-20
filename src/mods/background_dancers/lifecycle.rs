@@ -838,6 +838,31 @@ fn window_entry(scene_id: i32) {
             "BackgroundDancers: flight stage, but no installed dancer has flight clips (motion/flight/) -- they dance on the platform"
         ),
     }
+    // Winx Club: a transform-capable outfit on a HUMAN side loads its
+    // Enchantix twin beside it (the combo trigger, `transform_trigger_tick`).
+    let all: Vec<DancerCandidate> = if pick.dancers.iter().any(|d| d.twin.is_some()) {
+        TABLES
+            .lock()
+            .ok()
+            .and_then(|t| t.as_ref().map(|t| t.dancers.clone()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let human = |side: u8| -> bool {
+        entered.get(side as usize).copied().unwrap_or(false)
+            && !crate::mods::multiplayer_bot::is_bot_side(side as usize)
+    };
+    let (twinned, missing) = super::pick::transform_pick(pick, &all, &sides, human);
+    pick = twinned;
+    for (i, key) in missing {
+        log_warn!(
+            "BackgroundDancers: dancer {} ({}) transforms into {} -- not installed, no transformation",
+            i + 1,
+            pick.dancers.get(i).map_or("?", |d| d.key.as_str()),
+            key
+        );
+    }
     let has_screens = pick
         .stage
         .as_ref()
@@ -1267,6 +1292,8 @@ fn drive_live(w: &mut Window) {
             if let Some(sess) = w.scene.session_mut() {
                 sess.reset_shadow();
                 sess.reset_camera();
+                // Winx Club: hair at rest, every transformation re-armed.
+                sess.reset_winx(true);
             }
             if w.playing_logged < 3 {
                 w.playing_logged += 1;
@@ -1290,6 +1317,11 @@ fn drive_live(w: &mut Window) {
             // to that position; in-place restart ⇒ the song-start count ⇒
             // the start). Dance/camera/stage loops are pure functions of the
             // dance time; the camera director re-simulates on t < prev.
+            // Winx Club: the dynamic bones restart at rest; a transformation
+            // whose trigger now lies ahead is dropped by the director.
+            if let Some(sess) = w.scene.session_mut() {
+                sess.reset_winx(false);
+            }
             if !w.rewind_logged {
                 w.rewind_logged = true;
                 log_info!(
@@ -1415,6 +1447,16 @@ fn drive_live(w: &mut Window) {
         }
         None => t,
     };
+    // Winx Club: the Enchantix transformation's trigger (read-only: the
+    // side's combo and the chart's song-over, never the clock).
+    if anchored && visible {
+        if let Some(sess) = w.scene.session_mut() {
+            transform_trigger_tick(sess, mc_ms as i64, real_s);
+        }
+    }
+    if let Some(sess) = w.scene.session_mut() {
+        sess.real_now = real_s;
+    }
     // The camera first: the flight effects' billboards face THIS frame's
     // camera (`Session::fx_camera`, read by the publish).
     camera_tick(w, t, mask);
@@ -1603,6 +1645,66 @@ pub fn stop_flight_sound(sess: &Session) {
     }
 }
 
+/// Winx Club (maintainer 2026-10-20): arm dancer `i`'s ENCHANTIX
+/// transformation when its side still holds a full combo of any kind as the
+/// song reaches 80 % (`transform_logic::should_trigger`) — once per side per
+/// play, one transformation at a time (the Wii's sequencer), human sides
+/// only (the pick gave the bot's phantom side no twin). Reads the judge
+/// counts and the chart end; writes nothing to the game.
+fn transform_trigger_tick(sess: &mut Session, mc_ms: i64, real_s: f32) {
+    if sess.transform_in_progress() {
+        return;
+    }
+    for i in 0..sess.winx.len() {
+        if !sess.can_transform(i) || sess.winx.get(i).is_some_and(|r| r.transform.is_some()) {
+            continue;
+        }
+        let Some(&side) = sess.pick.sides.get(i) else {
+            continue;
+        };
+        if crate::mods::multiplayer_bot::is_bot_side(side as usize) {
+            continue;
+        }
+        let end = song_reset::chart_end_raw(side as i32);
+        // Cheap gate first: the judge counts are read only from 80 % on.
+        if !end.is_some_and(|e| super::transform_logic::past_trigger_point(mc_ms, e)) {
+            continue;
+        }
+        let diag = song_reset::judge_diag(side as i32);
+        let grades = diag.as_ref().map(|j| j.grades);
+        if !super::transform_logic::should_trigger(grades, mc_ms, end) {
+            continue;
+        }
+        let combo = diag.map(|j| j.combo);
+        if let Some(r) = sess.winx.get_mut(i) {
+            r.transform = Some(super::session::TransformRun {
+                r0: real_s,
+                switch_dance: None,
+                switch_real: None,
+            });
+        }
+        log_info!(
+            "BackgroundDancers: Enchantix transformation -- P{} full combo ({:?}) at {} ms (80 % of the song, over at {:?} ms): {} -> {} ({})",
+            side + 1,
+            combo,
+            mc_ms,
+            end,
+            sess.parsed.dancers.get(i).map_or("?", |d| d.key.as_str()),
+            sess.parsed
+                .dancers
+                .get(i)
+                .and_then(|d| d.twin.as_ref())
+                .map_or("?", |t| t.body.key.as_str()),
+            if sess.wipe_ok {
+                "wipe"
+            } else {
+                "crossfade -- wipe containers not served"
+            }
+        );
+        return;
+    }
+}
+
 /// Which camera films a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CamSource {
@@ -1660,6 +1762,19 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
             p.movie_camera_non.clone(),
         )
     };
+    // Winx Club: the transformation's event camera (GAME_DEF_CAM /#3/#0)
+    // films while it runs; the set below takes over again after the switch
+    // (`camera_source` reset so even the fixed camera is rewritten then).
+    let event = w.scene.session_mut().and_then(|sess| {
+        let cam = director::transform_camera(sess, sess.real_now)?;
+        sess.fx_camera = Some(cam);
+        Some(cam)
+    });
+    if let Some(cam) = event {
+        let _ = scene_graph::write_camera0(&cam);
+        w.camera_source = None;
+        return;
+    }
     let Some(sess) = w.scene.session_mut() else {
         return;
     };

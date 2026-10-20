@@ -105,6 +105,15 @@ BLOBS=(
   "mdl_cel:vs_3_0:vs_outline_ch_main:mdl_ch_outline.vs.d3dbc"
   "mdl_cel:ps_3_0:ps_outline_main:mdl_outline.ps.d3dbc"
   "mdl_cel:ps_3_0:ps_outline_main:mdl_outline_notex.ps.d3dbc:NOTEX"
+  # Winx Club transformation WIPE (2026-10-20): `<name>_wipe` / `_lit_wipe` /
+  # `_cel_wipe` containers for the dancers' `mdl_ch_constant_vc` (shader_layout::
+  # WIPE_VARIANTS) — our own VS in every style (the stock one has no clip
+  # interpolator), TEXCOORD6 = clip (y, w), the PS discards against c2.w.
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_unlit_uv3_vc_wipe.vs.d3dbc:UV3 VCOLOR UNLIT WIPE"
+  "mdl_lambert:vs_3_0:vs_ch_main:mdl_ch_lit_uv3_vc_wipe.vs.d3dbc:UV3 VCOLOR WIPE"
+  "mdl_lambert:ps_3_0:ps_uv3_wipe_main:mdl_uv3_wipe.ps.d3dbc:UV3 VCOLOR WIPE"
+  "mdl_cel:vs_3_0:vs_cel_ch_main:mdl_ch_cel_vc_wipe.vs.d3dbc:VCOLOR WIPE"
+  "mdl_cel:ps_3_0:ps_cel_main:mdl_cel_wipe.ps.d3dbc:WIPE"
 )
 
 die() { echo "error: $*" >&2; exit 1; }

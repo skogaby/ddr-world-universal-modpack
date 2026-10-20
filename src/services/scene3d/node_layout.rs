@@ -41,6 +41,11 @@ pub const PASS_COLLECT: i32 = 4;
 pub const PASS_CULL: i32 = 5;
 
 pub const NODE_SIZE: usize = 0x100;
+/// A board node whose item takes the slot's AUX word as `ModelParameters.w`.
+pub const AUX_ROLE_BODY: u8 = 0;
+/// A hull twin: its `ModelParameters.w` is the outline push scale, so a
+/// non-zero AUX word HIDES it instead (the outline PS has no wipe).
+pub const AUX_ROLE_HULL: u8 = 1;
 /// The engine-read offsets (cross-checked against the derivation).
 pub const NODE_ITEM_OFF: usize = 0x78;
 pub const NODE_SORT_KEY_OFF: usize = 0xE8;
@@ -74,7 +79,10 @@ pub struct SceneNode {
     pub destroyed: AtomicU8,
     /// `+0x81` copied into the item's hidden bit on every pass 4.
     pub hidden: AtomicU8,
-    _pad0: [u8; 2],
+    /// `+0x82` what `visit(2)` does with the slot's AUX word
+    /// ([`AUX_ROLE_BODY`] / [`AUX_ROLE_HULL`]).
+    pub aux_role: AtomicU8,
+    _pad0: [u8; 1],
     /// `+0x84` the item pass mask `visit(4)` writes (2 / 4 / 0x10).
     pub item_pass_mask: AtomicU32,
     /// `+0x88` the item's bone-texture handles (released by the dtor).
@@ -101,7 +109,8 @@ impl SceneNode {
             item: AtomicPtr::new(std::ptr::null_mut()),
             destroyed: AtomicU8::new(0),
             hidden: AtomicU8::new(0),
-            _pad0: [0; 2],
+            aux_role: AtomicU8::new(AUX_ROLE_BODY),
+            _pad0: [0; 1],
             item_pass_mask: AtomicU32::new(0),
             bone_tex: [0; 2],
             instance: 0,
@@ -159,6 +168,7 @@ mod tests {
     fn private_offsets() {
         assert_eq!(offset_of!(SceneNode, destroyed), 0x80);
         assert_eq!(offset_of!(SceneNode, hidden), 0x81);
+        assert_eq!(offset_of!(SceneNode, aux_role), 0x82);
         assert_eq!(offset_of!(SceneNode, item_pass_mask), 0x84);
         assert_eq!(offset_of!(SceneNode, bone_tex), 0x88);
         assert_eq!(offset_of!(SceneNode, instance), 0x90);

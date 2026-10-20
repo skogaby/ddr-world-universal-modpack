@@ -53,6 +53,28 @@
 //! shots, with the sky burst at the tunnel mouth (`StageFx`) and its sound
 //! (a one-shot XACT bank); the tunnel scrolls on the real clock too.
 //!
+//! **Winx Club** (custom content `WINX CLUB`, research
+//! `docs/wii_ddr_winx_club_research.md`): DYNAMIC BONES — a body arc's
+//! `dynbones.txt` drives its hair / side locks / ribbons / wings with the
+//! Wii's own lag-spring solver (`dynbones_logic.rs`, 60 Hz steps on the real
+//! clock, solved after the clip and before Big Head; reset at every song
+//! (re)start and rewind, a clip cut is a teleport); the additive `kira`
+//! overlays scroll through the body's `pl_<key>_play_loop.sanm` (sampled
+//! on the real clock like a stage part's); a Fairy body's wing sparkles
+//! (`winx_fx/wing.*`, `chara_fx.rs`) ride both `DB_*wing_02` joints. The
+//! ENCHANTIX TRANSFORMATION (`transform_logic.rs`): an outfit whose arc
+//! names a twin (`transform/<twin>.txt`) on a human side gets that Fairy
+//! loaded beside it (`pick::transform_pick`, `InstanceKind::Twin`); a full
+//! combo of any kind held to 80 % of the song (`lifecycle::
+//! transform_trigger_tick`, read-only judge counts) runs the Wii's sequence
+//! on the real clock — scene fade, both bodies' `transform.anm` under the
+//! outfit's event camera with `chenge_effect` riding a screen-space WIPE
+//! (the `_wipe` shader containers read the line in ModelParameters.w — the
+//! frame board's AUX word; a crossfade when they are not served), the pose
+//! until the next choreography piece, then the twin dances the outfit's
+//! playlist (retargeted by bone name) for the rest of the song. Never in
+//! previews, never on flight stages, never the Multiplayer Bot's side.
+//!
 //! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
 //! Outlines** (one black inverted-hull twin per mesh; CEL + outline are
 //! Dancing Stage Unleashed's toon shading and ink since 2026-09-28): applied
@@ -130,6 +152,9 @@
 //!   [`scene_window`] (load / build / teardown, shared with previews),
 //!   [`director`] + [`director_math`]†, [`schedule`]†, [`clock`]†,
 //!   [`tempo`]† + [`tempo_source`], [`background_hide`].
+//! - Winx Club: [`dynbones_logic`]† (the dynamic bones), [`transform_logic`]†
+//!   (the transformation's trigger / sequence / wipe), [`chara_fx`]†
+//!   (joint-bound effects over the flight runtime).
 //! - Flight stages: [`flight_fx`]† (the zan particle runtime),
 //!   [`flight_hold_logic`]† + [`flight_hold`] (the READY hold: the take-off
 //!   before the song).
@@ -142,11 +167,13 @@
 
 pub mod background_hide;
 pub mod catalog;
+pub mod chara_fx;
 pub mod clock;
 pub mod custom_content;
 pub mod custom_scan;
 pub mod director;
 pub mod director_math;
+pub mod dynbones_logic;
 pub mod flight_fx;
 pub mod flight_hold;
 pub mod flight_hold_logic;
@@ -173,6 +200,7 @@ pub mod style;
 pub mod tempo;
 pub mod tempo_source;
 pub mod texture_wrap;
+pub mod transform_logic;
 pub mod viewport_smoke;
 
 use std::sync::atomic::{AtomicBool, Ordering};

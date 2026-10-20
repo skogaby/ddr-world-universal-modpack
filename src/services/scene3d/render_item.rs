@@ -325,6 +325,53 @@ impl RenderItem {
         st
     }
 
+    /// Re-point EVERY private material copy (blended ones included — the
+    /// Winx Club transformation WIPE must clip the additive overlays too):
+    /// `target(stock_hash, opaque)` returns the replacement `gs::Shader*`
+    /// for a material whose object hashes to `stock_hash` (`opaque` = every
+    /// record using it is blend group 0, i.e. it may take the scene style),
+    /// `None` = leave it. Materials sampling `keep_stock_texture` are left
+    /// alone. Returns `(re-pointed, kept)`.
+    /// # Safety
+    /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
+    pub unsafe fn repoint_all_materials(
+        &self,
+        keep_stock_texture: u32,
+        target: &dyn Fn(u32, bool) -> Option<*mut u8>,
+    ) -> (usize, usize) {
+        let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS)) as *mut u8;
+        if mats.is_null() {
+            return (0, 0);
+        }
+        let (rec_mat, rec_flags) = self.record_material_map();
+        let opaque =
+            layout::restyle_eligible_materials(self.counts.materials, &rec_mat, &rec_flags, true);
+        let screens = self.materials_sampling(keep_stock_texture);
+        let (mut done, mut kept) = (0usize, 0usize);
+        for (mi, op) in opaque.iter().enumerate() {
+            let obj_slot = mats
+                .add(mi * layout::MATERIAL_SIZE)
+                .add(layout::MAT_SHADER_OBJ);
+            let obj = memory::read_ptr(obj_slot);
+            if screens.get(mi).copied().unwrap_or(false)
+                || obj.is_null()
+                || !memory::is_readable(obj, layout::SHADER_PROGRAMS + 8)
+            {
+                kept += 1;
+                continue;
+            }
+            let hash = memory::read_u32(obj.add(layout::SHADER_NAME_HASH));
+            match target(hash, *op) {
+                Some(v) if !v.is_null() => {
+                    memory::write_ptr(obj_slot, v);
+                    done += 1;
+                }
+                _ => kept += 1,
+            }
+        }
+        (done, kept)
+    }
+
     /// Turn this item into an inverted-hull twin: every draw record gets
     /// [`layout::REC_HULL_BIT`] (the model pass then binds PROGRAM 0 of the
     /// material's container — the synthesized outline pair); alpha-blended
@@ -454,6 +501,14 @@ pub unsafe fn record_colours_raw(item: *mut u8) -> Option<(*mut f32, usize, usiz
         count,
     ))
 }
+/// `ModelParameters.w` (`item+0x4C`, VS c22.w / PS c2.w) of a non-hull item
+/// — the frame board's AUX word (`visit(2)`; stock shaders never read it).
+/// # Safety
+/// `item` is a live render item.
+pub unsafe fn set_model_param_w_raw(item: *mut u8, w: f32) {
+    memory::write_f32(item.add(layout::ITEM_OUTLINE_PX), w);
+}
+
 /// # Safety
 /// As [`set_world_raw`].
 pub unsafe fn set_hidden_raw(item: *mut u8, hidden: bool) {

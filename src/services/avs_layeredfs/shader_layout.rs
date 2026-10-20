@@ -263,6 +263,77 @@ pub fn variant_blob_names() -> Vec<&'static str> {
     v
 }
 
+/// A model shader NAME whose materials can take the Winx Club
+/// transformation WIPE (Background Dancers, `docs/wii_ddr_winx_club_research.md`
+/// §7.3): `<name>_wipe` (stock look), `<name>_lit_wipe`, `<name>_cel_wipe`.
+/// Every one pairs OUR VS (the stock VS has no clip-position interpolator;
+/// the `_wipe` one IS the stock `mdl_ch_constant_vc` math, `mdl_lambert.hlsl`
+/// `UNLIT`) with a PS that discards on one side of the line in PS c2.w. No
+/// outline pair (hull items never point at a wipe container).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WipeVariant {
+    pub material_name: &'static str,
+    pub stock_vs: &'static str,
+    pub lit_vs: &'static str,
+    pub cel_vs: &'static str,
+    /// The PS of the stock and lit wipes (`mdl_*_vc`'s `tex · COLOR0`).
+    pub uv3_ps: &'static str,
+    pub cel_ps: &'static str,
+}
+
+/// The ported dancers' (Winx Club) only body shader.
+pub const WIPE_VARIANTS: [WipeVariant; 1] = [WipeVariant {
+    material_name: "mdl_ch_constant_vc",
+    stock_vs: "mdl_ch_unlit_uv3_vc_wipe.vs.d3dbc",
+    lit_vs: "mdl_ch_lit_uv3_vc_wipe.vs.d3dbc",
+    cel_vs: "mdl_ch_cel_vc_wipe.vs.d3dbc",
+    uv3_ps: "mdl_uv3_wipe.ps.d3dbc",
+    cel_ps: "mdl_cel_wipe.ps.d3dbc",
+}];
+
+/// Suffix of a wipe container: `_wipe` / `_lit_wipe` / `_cel_wipe`.
+pub fn wipe_suffix(style: DancerStyle) -> &'static str {
+    match style {
+        DancerStyle::Stock => "_wipe",
+        DancerStyle::Lit => "_lit_wipe",
+        DancerStyle::Cel => "_cel_wipe",
+    }
+}
+
+pub fn wipe_container_name(variant: &WipeVariant, style: DancerStyle) -> String {
+    format!("{}{}", variant.material_name, wipe_suffix(style))
+}
+
+/// The wipe variant for a material whose (STOCK) shader object hashes to
+/// `stock_hash`.
+pub fn wipe_variant_for_stock_hash(stock_hash: u32) -> Option<&'static WipeVariant> {
+    WIPE_VARIANTS
+        .iter()
+        .find(|v| fnv1_32(v.material_name) == stock_hash)
+}
+
+/// The `(VS, PS)` blobs of a wipe container.
+pub fn wipe_blobs(variant: &WipeVariant, style: DancerStyle) -> (&'static str, &'static str) {
+    match style {
+        DancerStyle::Stock => (variant.stock_vs, variant.uv3_ps),
+        DancerStyle::Lit => (variant.lit_vs, variant.uv3_ps),
+        DancerStyle::Cel => (variant.cel_vs, variant.cel_ps),
+    }
+}
+
+/// Every distinct blob the wipe set references.
+pub fn wipe_blob_names() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = Vec::new();
+    for w in WIPE_VARIANTS.iter() {
+        for b in [w.stock_vs, w.lit_vs, w.cel_vs, w.uv3_ps, w.cel_ps] {
+            if !v.contains(&b) {
+                v.push(b);
+            }
+        }
+    }
+    v
+}
+
 /// Which containers a configuration synthesizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannedContainers {
@@ -620,6 +691,35 @@ mod tests {
             for w in idx.windows(2) {
                 assert_eq!(w[1], w[0] + 1);
             }
+        }
+    }
+
+    #[test]
+    fn wipe_variants_cover_the_dancer_shader() {
+        let v = wipe_variant_for_stock_hash(fnv1_32("mdl_ch_constant_vc")).unwrap();
+        assert_eq!(
+            wipe_container_name(v, SceneStyle::Stock),
+            "mdl_ch_constant_vc_wipe"
+        );
+        assert_eq!(
+            wipe_container_name(v, SceneStyle::Lit),
+            "mdl_ch_constant_vc_lit_wipe"
+        );
+        assert_eq!(
+            wipe_container_name(v, SceneStyle::Cel),
+            "mdl_ch_constant_vc_cel_wipe"
+        );
+        assert!(wipe_variant_for_stock_hash(fnv1_32("mdl_bg_constant")).is_none());
+        assert_eq!(wipe_blobs(v, SceneStyle::Cel), (v.cel_vs, v.cel_ps));
+        assert_eq!(
+            wipe_blobs(v, SceneStyle::Stock).1,
+            wipe_blobs(v, SceneStyle::Lit).1
+        );
+        let names = wipe_blob_names();
+        assert_eq!(names.len(), 5);
+        // never a name the style variants already carry
+        for n in &names {
+            assert!(!variant_blob_names().contains(n), "{n}");
         }
     }
 

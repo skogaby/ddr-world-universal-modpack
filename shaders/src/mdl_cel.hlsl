@@ -59,6 +59,8 @@
 //   CCOLOR  (PS) `rgb = rgb·c4.rgb + c5.rgb` — the `_c` shapes (PS c3..c5 =
 //                the material params: c4 vConstatntColor, c5 vOffsetColor)
 //   NOTEX   (PS) no texture: colour = COLOR0 (+ CCOLOR); alpha = COLOR0.a
+//   WIPE    (VS + PS) the Winx Club transformation wipe: TEXCOORD6 = clip
+//                (y, w), the PS discards against c2.w (mdl_common.hlsli::wipe_clip)
 //
 // Build: scripts/build_shaders.sh (fxc golden path) — entries
 //   vs_cel_bg_main / vs_cel_ch_main (vs_3_0) [+VCOLOR] -> mdl_{bg,ch}_cel[_vc].vs
@@ -90,6 +92,9 @@ struct CelVSOut
     float2 uv  : TEXCOORD0;
     float4 col : COLOR0;    // per-draw tint (unlit)
     float  ndl : TEXCOORD1; // DSU oT1: N·L per vertex (skinned normal, not renormalised)
+#if defined(WIPE)
+    float2 wp  : TEXCOORD6; // clip (y, w): the transformation wipe
+#endif
 };
 
 CelVSOut cel_out(float3 ps, float3 ns, float2 uv, float4 vcol)
@@ -103,6 +108,9 @@ CelVSOut cel_out(float3 ps, float3 ns, float2 uv, float4 vcol)
     o.uv  = anim_uv(uv);
     o.col = Tint * vcol;
     o.ndl = dot(to_world_normal(ns) / s, normalize(TOON_LIGHT_DIR));
+#if defined(WIPE)
+    o.wp = float2(o.pos.y, o.pos.w);
+#endif
     return o;
 }
 
@@ -173,6 +181,9 @@ float4 ps_cel_main(CelVSOut i, float2 vpos : VPOS) : COLOR
     // Stock stipple dissolve, verbatim.
     float stipple = tex2D(StippleMaskPattern, frac(vpos * (1.0 / 32.0))).y;
     clip(PsModelParameters.y - stipple);
+#if defined(WIPE)
+    wipe_clip(i.wp, PsModelParameters.w);
+#endif
 
 #if defined(NOTEX)
     float4 tex = float4(1.0, 1.0, 1.0, 1.0);

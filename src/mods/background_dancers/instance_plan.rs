@@ -47,7 +47,25 @@ pub enum InstanceKind {
     /// A pool model of the flight intro's stage effect (the sky burst;
     /// index into `flight_fx::StageFx::pools`).
     StageFx(usize),
+    /// Winx Club: the ENCHANTIX twin body of dancer `n` (hidden until the
+    /// transformation; `ParsedDancer::twin`).
+    Twin(usize),
+    /// Winx Club: a pool model of a joint-bound effect (`chara_fx.rs`) of
+    /// dancer `dancer` — on its twin when `twin` — of bank `bank`
+    /// ([`CHARA_BANK_CHENGE`] / [`CHARA_BANK_WING`]), pool `pool` of that
+    /// bank's `JointFx::pools`.
+    CharaFx {
+        dancer: usize,
+        twin: bool,
+        bank: u8,
+        pool: usize,
+    },
 }
+
+/// `InstanceKind::CharaFx::bank`: the transformation effect.
+pub const CHARA_BANK_CHENGE: u8 = 0;
+/// `InstanceKind::CharaFx::bank`: the wing-tip sparkles.
+pub const CHARA_BANK_WING: u8 = 1;
 
 impl InstanceKind {
     /// Short tag for the built/skipped log lines.
@@ -60,6 +78,8 @@ impl InstanceKind {
             InstanceKind::Hull { .. } => "hull",
             InstanceKind::Fx { .. } => "fx",
             InstanceKind::StageFx(_) => "stage fx",
+            InstanceKind::Twin(_) => "twin",
+            InstanceKind::CharaFx { .. } => "chara fx",
         }
     }
 
@@ -79,9 +99,12 @@ pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
     match kind {
         // The effect pools keep their unlit additive materials (no style,
         // no outline).
-        InstanceKind::Shadow(_) | InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => false,
+        InstanceKind::Shadow(_)
+        | InstanceKind::Fx { .. }
+        | InstanceKind::StageFx(_)
+        | InstanceKind::CharaFx { .. } => false,
         InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
-        InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
+        InstanceKind::Dancer(_) | InstanceKind::Part { .. } | InstanceKind::Twin(_) => true,
         // The twin's model_name is the body's; a Hull of a Hull never exists.
         InstanceKind::Hull { .. } => !model_name.ends_with("_bg") && model_name != SHADOW_MODEL,
     }
@@ -219,6 +242,19 @@ pub struct DancerSpec {
     pub has_ground: bool,
     /// Flight-effect pool models of this dancer (empty off a flight).
     pub fx_pools: Vec<FxSpec>,
+    /// Winx Club: this body's own joint-bound effect pools `(bank, pool)`
+    /// (a standalone Fairy's wing sparkles).
+    pub chara_pools: Vec<(u8, FxSpec)>,
+    /// Winx Club: the Enchantix twin loaded beside it.
+    pub twin: Option<TwinSpec>,
+}
+
+/// The twin body + its effect pools `(bank, pool)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwinSpec {
+    pub model_name: String,
+    pub bone_count: usize,
+    pub chara_pools: Vec<(u8, FxSpec)>,
 }
 
 /// One flight-effect pool model (`fx_<stage>_<s|r><player><k>`).
@@ -302,8 +338,25 @@ pub fn plan_instances(
             d.bone_count,
         ));
     }
-    // Build order (design §4.3.5): stage parts, dancers, parts, shadows.
+    // Build order (design §4.3.5): stage parts, dancers, (Winx twins),
+    // parts, shadows.
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); input.dancers.len()];
+    for (i, d) in input.dancers.iter().enumerate() {
+        let Some(t) = d.twin.as_ref() else {
+            continue;
+        };
+        max_bones = max_bones.max(t.bone_count);
+        children[i].push(instances.len());
+        instances.push(Instance::pending(
+            InstanceKind::Twin(i),
+            t.model_name.clone(),
+            mask_of(masks.dancer),
+            0,
+            slot_for(instances.len()),
+            false,
+            t.bone_count,
+        ));
+    }
     for (i, d) in input.dancers.iter().enumerate() {
         for (k, p) in d.parts.iter().enumerate() {
             children[i].push(instances.len());
@@ -341,6 +394,37 @@ pub fn plan_instances(
             children[i].push(instances.len());
             instances.push(Instance::pending(
                 InstanceKind::Fx { dancer: i, pool: k },
+                f.model_name.clone(),
+                mask_of(masks.dancer),
+                0,
+                slot_for(instances.len()),
+                false,
+                f.bone_count,
+            ));
+        }
+    }
+    // Winx Club joint-bound effect pools: the body's own, then its twin's.
+    for (i, d) in input.dancers.iter().enumerate() {
+        let own = d.chara_pools.iter().map(|p| (false, p));
+        let twin = d
+            .twin
+            .iter()
+            .flat_map(|t| t.chara_pools.iter())
+            .map(|p| (true, p));
+        let mut per_bank: [[usize; 2]; 2] = [[0; 2]; 2];
+        for (is_twin, (bank, f)) in own.chain(twin) {
+            let b = (*bank as usize).min(1);
+            let pool = per_bank[is_twin as usize][b];
+            per_bank[is_twin as usize][b] += 1;
+            max_bones = max_bones.max(f.bone_count);
+            children[i].push(instances.len());
+            instances.push(Instance::pending(
+                InstanceKind::CharaFx {
+                    dancer: i,
+                    twin: is_twin,
+                    bank: *bank,
+                    pool,
+                },
                 f.model_name.clone(),
                 mask_of(masks.dancer),
                 0,
@@ -473,6 +557,8 @@ mod tests {
                     ],
                     has_ground: true,
                     fx_pools: Vec::new(),
+                    chara_pools: Vec::new(),
+                    twin: None,
                 },
                 DancerSpec {
                     model_name: "pl_rage00".into(),
@@ -484,6 +570,8 @@ mod tests {
                     }],
                     has_ground: true,
                     fx_pools: Vec::new(),
+                    chara_pools: Vec::new(),
+                    twin: None,
                 },
             ],
             shadow_bone_count: Some(1),
@@ -782,5 +870,73 @@ mod tests {
         );
         assert!(plan.instances.iter().all(|i| i.pass_mask == 0x20));
         assert_eq!(plan.children, vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn winx_twin_and_chara_pools() {
+        let mut input = fixture();
+        let fx = |n: &str, b: usize| FxSpec {
+            model_name: n.into(),
+            bone_count: b,
+        };
+        input.dancers[0].twin = Some(TwinSpec {
+            model_name: "pl_winxbloom04".into(),
+            bone_count: 55,
+            chara_pools: vec![
+                (CHARA_BANK_CHENGE, fx("fx_c_caa", 124)),
+                (CHARA_BANK_CHENGE, fx("fx_c_car", 240)),
+                (CHARA_BANK_WING, fx("fx_c_waa", 70)),
+            ],
+        });
+        input.dancers[1].chara_pools = vec![(CHARA_BANK_WING, fx("fx_w_waa", 70))];
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, None);
+        use InstanceKind::*;
+        let k = kinds(&plan);
+        let twin_at = k.iter().position(|x| *x == Twin(0)).unwrap();
+        assert_eq!(twin_at, 4, "right after the dancer bodies");
+        assert!(plan.children[0].contains(&twin_at));
+        let pools: Vec<InstanceKind> = k
+            .iter()
+            .copied()
+            .filter(|x| matches!(x, CharaFx { .. }))
+            .collect();
+        assert_eq!(
+            pools,
+            vec![
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_CHENGE,
+                    pool: 0
+                },
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_CHENGE,
+                    pool: 1
+                },
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_WING,
+                    pool: 0
+                },
+                CharaFx {
+                    dancer: 1,
+                    twin: false,
+                    bank: CHARA_BANK_WING,
+                    pool: 0
+                },
+            ]
+        );
+        assert_eq!(plan.max_bones, 240);
+        // the twin takes a hull (restyle-eligible), the pools never
+        assert!(k.contains(&Hull {
+            of: twin_at,
+            layer: 0
+        }));
+        assert!(!restyle_allowed(&pools[0], "fx_c_caa"));
+        assert!(restyle_allowed(&Twin(0), "pl_winxbloom04"));
+        assert_eq!(Twin(0).tag(), "twin");
     }
 }

@@ -555,6 +555,249 @@ def _fold_weights(model, weights, joint_names, default_joint):
     return list(out.items())
 
 
+# ---------------------------------------------------------------------------
+# Winx Club DYNAMIC BONES (hair, side locks, ribbons, wings) -- research
+# docs/wii_ddr_winx_club_research.md §7.1; decompiles in
+# .agents/scratchpad/2026-10-20-winx-club-port/dynbones_decomp.c.
+#
+# A `DB_` node (ZMB node flags 0x0100, no submesh) points its "mesh" offset at a 0x70-byte
+# CONFIG; main.dol's solver step FUN_8010d430 is an angle-space LAG SPRING per bone, root first:
+# the bone (local +x, `length` long) is aimed along the lag of its origin (previous - current
+# position, + gravity), the two angles (yaw about y, pitch about z, in the bone's rest frame)
+# clamped to the config's limits, a hit DBBOX collider pushes it out, then the current angles move
+# toward the target by a speed-scaled gain and decay toward rest. This is the reference the DLL's
+# `background_dancers/dynbones_logic.rs` follows number for number (row-vector matrices, model
+# space in METRES; the lag is measured in zan units through `units_per_metre`).
+# ---------------------------------------------------------------------------
+DB_NODE_FLAG = 0x0100        # node +0x98 (FUN_800d5114's test)
+DB_GRAVITY_UNIT = 0.1        # r13-0x78a8: the gravity / speed unit
+DB_GRAVITY_MUL = 3.0         # r2-0x5e7c
+DB_FRAME = 1.0 / 60.0        # r2-0x5e70: dt normaliser (the Wii steps at 60 Hz)
+DB_GAIN = 0.06               # r2-0x5e74: spring gain without the damping flag
+DB_SPEED_DIV = 20.0          # r2-0x5e68
+DB_GAIN_CAP = 0.99           # r2-0x5e64
+DB_DECAY = 1.1               # r2-0x5e44: decay toward rest, x stiffness x |angle|
+DB_COLLIDE_GAIN = 1.5        # r2-0x5e78: a hit scales the speed by 1.5 x depth
+DB_TELEPORT_M = 0.5          # PORT assumption: a root jump this large (metres / step) = a teleport
+
+
+def is_dynamic_bone(node):
+    return bool(node['flags'] & DB_NODE_FLAG) and bool(node['mesh_offset']) and not node['nsub']
+
+
+def dbbox_id(name):
+    """The collider id of a `DBBOX_<nn>` node (DBBOX_12 -> 12; FUN_800d5020 stores it at node +0x2b), else None."""
+    m = re.match(r'^DBBOX_(\d+)', name, re.I)
+    return int(m.group(1)) if m else None
+
+
+def dynbone_config(blob, node):
+    """The 0x70-byte config of a dynamic bone: dict(gravity, f04, exclude [DBBOX ids], x / z / y
+    axis blocks {enable, limit, damp (u8 flags at +0 / +1 / +2), min +4, max +8, stiffness +0x10,
+    damping +0x14}) at blocks 0x10 / 0x30 / 0x50. The z limits apply NEGATED (FUN_8010e224)."""
+    o = node['mesh_offset']
+    n = min(blob[o + 8], 7)
+    out = dict(gravity=_u32(blob, o) == 1, f04=_f32(blob, o + 4), exclude=list(blob[o + 9:o + 9 + n]))
+    for name, a in (('x', 0x10), ('z', 0x30), ('y', 0x50)):
+        mn, mx, _c, st, dp = struct.unpack_from('>5f', blob, o + a + 4)
+        out[name] = dict(enable=blob[o + a] == 1, limit=blob[o + a + 1] == 1, damp=blob[o + a + 2] == 1,
+                         min=float(mn), max=float(mx), stiffness=float(st), damping=float(dp))
+    return out
+
+
+def db_rot(yaw, pitch):
+    """3x3 ROW-vector rotation of the bone in its rest frame: RotY(yaw) . RotZ(pitch) (GX column
+    order, FUN_8010e494), rows = the images of the local axes; row 0 = the aim direction."""
+    cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
+    return np.array([[cp * cy, sp, -cp * sy], [-sp * cy, cp, sp * sy], [sy, 0.0, cy]])
+
+
+def db_angles(F, d):
+    """(yaw, pitch) that aim the bone (local +x) of rest frame F (4x4 row, model space) along the
+    model-space direction d (FUN_8010e30c: yaw = atan2(-z, x) of the rest-frame vector, pitch =
+    atan2(y, |xz|)); (0, 0) for d = 0."""
+    x, y, z = np.asarray(d, dtype=np.float64) @ np.linalg.inv(F[:3, :3])
+    h = math.hypot(x, z)
+    return (math.atan2(-z, x) if h > 0.0 else 0.0), math.atan2(y, h)
+
+
+def db_direction(F, a):
+    """Unit model-space aim of angles a = (yaw, pitch) in rest frame F."""
+    v = db_rot(*a)[0] @ F[:3, :3]
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0.0 else v
+
+
+def db_clamp(a, cfg):
+    """FUN_8010e224: yaw by the y block [min, max], pitch by the z block [-max, -min]; a disabled
+    axis reads 0."""
+    yaw, pitch = a
+    y, z = cfg['y'], cfg['z']
+    if not y['enable']:
+        yaw = 0.0
+    elif y['limit']:
+        yaw = min(max(yaw, y['min']), y['max'])
+    if not z['enable']:
+        pitch = 0.0
+    elif z['limit']:
+        pitch = min(max(pitch, -z['max']), -z['min'])
+    return yaw, pitch
+
+
+def db_gain(axis, speed, dt=DB_FRAME):
+    """The spring gain of one axis block (FUN_8010d430): 0.06 . dt/(1/60), or dt/(1/60) . (1 -
+    damping) with the block's damping flag; x speed / 20, capped 0.99."""
+    k = DB_GAIN * dt / DB_FRAME
+    if axis['enable'] and axis['damp']:
+        k = dt / DB_FRAME * (1.0 - axis['damping'])
+    return min(k * speed / DB_SPEED_DIV, DB_GAIN_CAP)
+
+
+def db_decay(v, axis):
+    """FUN_8010e138: move toward 0 by 1.1 x stiffness x |v|."""
+    f = DB_DECAY * axis['stiffness'] * abs(v)
+    return v - f if v > 0.0 else v + f if v < 0.0 else v
+
+
+def db_collide(origin, d, length, boxes, exclude, units_per_metre):
+    """APPROXIMATION of FUN_8010da98 / FUN_8010dcd4 / FUN_8010e67c: the bone's tip tested against
+    each DBBOX (`boxes` [(id, joint world 4x4, min, max)] joint-local metres) not in `exclude`; a tip
+    strictly inside is pushed to the nearest face. Returns (new unit direction, depth in zan units)
+    of the deepest hit, or None."""
+    tip = origin + np.asarray(d) * length
+    best = None
+    for bid, J, mn, mx in boxes:
+        if bid in exclude:
+            continue
+        lt = (tip - J[3, :3]) @ np.linalg.inv(J[:3, :3])
+        if not (np.all(lt > mn) and np.all(lt < mx)):
+            continue
+        pen = np.concatenate([lt - mn, np.asarray(mx) - lt])
+        k = int(np.argmin(pen))
+        out = lt.copy()
+        out[k % 3] = mn[k % 3] if k < 3 else mx[k % 3]
+        if best is None or pen[k] > best[1]:
+            best = (out @ J[:3, :3] + J[3, :3], float(pen[k]))
+    if best is None:
+        return None
+    nd = best[0] - origin
+    n = float(np.linalg.norm(nd))
+    if n <= 0.0:
+        return None
+    return nd / n, best[1] * units_per_metre
+
+
+class DynBoneState:
+    """FUN_8010ec9c's state, reduced to what the step reads: the aim direction (model space,
+    None = rest) and the previous origin (None = first frame)."""
+
+    def __init__(self):
+        self.dir = None
+        self.prev = None
+
+
+def dynbone_step(state, F, length, cfg, boxes=(), units_per_metre=1.0 / GAME_SCALE, dt=DB_FRAME, teleport=False):
+    """One FUN_8010d430 step of a bone whose rest frame this frame is F (= rest local . parent
+    world, 4x4 row, metres). Updates `state`."""
+    origin = F[3, :3].copy()
+    lag = np.zeros(3)
+    if state.prev is not None and not teleport:
+        delta = state.prev - origin
+        if float(np.linalg.norm(delta)) <= DB_TELEPORT_M:
+            lag = delta * units_per_metre
+    if cfg['gravity']:
+        lag[1] -= DB_GRAVITY_MUL * DB_GRAVITY_UNIT
+    n = float(np.linalg.norm(lag))
+    speed = n / DB_GRAVITY_UNIT
+    lag_n = lag / n if n > 0.0 else lag
+    aim = db_direction(F, db_clamp(db_angles(F, lag_n), cfg))
+    hit = db_collide(origin, aim, length, boxes, cfg['exclude'], units_per_metre)
+    if hit is not None:
+        aim, depth = hit
+        speed *= DB_COLLIDE_GAIN * abs(depth)
+    tgt = db_angles(F, aim)
+    cur = db_angles(F, state.dir) if state.dir is not None else (0.0, 0.0)
+    # the Wii crosses the gains: the y block's damping drives the PITCH, the z block's the YAW
+    k_pitch, k_yaw = db_gain(cfg['y'], speed, dt), db_gain(cfg['z'], speed, dt)
+    yaw = cur[0] + k_yaw * (tgt[0] - cur[0])
+    pitch = cur[1] + k_pitch * (tgt[1] - cur[1])
+    if hit is None:
+        if cfg['y']['enable']:
+            yaw = db_decay(yaw, cfg['y'])
+        if cfg['z']['enable']:
+            pitch = db_decay(pitch, cfg['z'])
+    state.dir = db_direction(F, db_clamp((yaw, pitch), cfg))
+    state.prev = origin
+
+
+def dynbone_world(state, L, P, cfg):
+    """The bone's solved world (4x4 row): RotY.RotZ of the state's aim (clamped) . L . P."""
+    F = L @ P
+    a = db_clamp(db_angles(F, state.dir), cfg) if state.dir is not None else (0.0, 0.0)
+    R = np.eye(4)
+    R[:3, :3] = db_rot(*a)
+    return R @ L @ P
+
+
+DYNBONES_VERSION = 1
+
+
+def _axis_field(a):
+    return '%d,%d,%d,%.6f,%.6f,%.6f,%.6f' % (a['enable'], a['limit'], a['damp'], a['min'], a['max'],
+                                             a['stiffness'], a['damping'])
+
+
+def format_dynbones(bones, boxes, units_per_metre=1.0 / GAME_SCALE, header=()):
+    """The `pl_<key>/dynbones.txt` sidecar (Background Dancers, `dynbones_logic::parse`):
+        dynbones 1
+        units_per_metre <f>
+        bone <name> parent=<joint> len=<m> gravity=<0|1> z=<en,lim,damp,min,max,stiff,damping>
+             y=<...> exclude=<id,id|-> rest=<12 floats: the rest local's 3x4, informational>
+        box <id> joint=<joint> min=<x,y,z> max=<x,y,z>          (joint-local metres)
+    `bones` [dict(name, parent, length (m), cfg, rest (4x4))] in solve order (parents first);
+    `boxes` [(id, joint, min, max)]."""
+    out = ['# %s' % h for h in header]
+    out += ['dynbones %d' % DYNBONES_VERSION, 'units_per_metre %.6f' % units_per_metre]
+    for b in bones:
+        c = b['cfg']
+        rest = np.asarray(b['rest'])[:, :3].reshape(-1)
+        out.append('bone %s parent=%s len=%.6f gravity=%d z=%s y=%s exclude=%s rest=%s' % (
+            b['name'], b['parent'], b['length'], c['gravity'], _axis_field(c['z']), _axis_field(c['y']),
+            ','.join(str(i) for i in c['exclude']) or '-', ','.join('%.6f' % v for v in rest)))
+    for bid, joint, mn, mx in boxes:
+        out.append('box %d joint=%s min=%s max=%s' % (bid, joint, ','.join('%.6f' % v for v in mn),
+                                                     ','.join('%.6f' % v for v in mx)))
+    return '\n'.join(out) + '\n'
+
+
+def parse_dynbones(text):
+    """(units_per_metre, bones [dict(name, parent, length, cfg)], boxes [(id, joint, min, max)])."""
+    upm, bones, boxes = None, [], []
+
+    def axis(s):
+        v = s.split(',')
+        return dict(enable=v[0] == '1', limit=v[1] == '1', damp=v[2] == '1', min=float(v[3]), max=float(v[4]),
+                    stiffness=float(v[5]), damping=float(v[6]))
+    for line in text.splitlines():
+        f = line.split('#')[0].split()
+        if not f:
+            continue
+        if f[0] == 'dynbones':
+            assert int(f[1]) == DYNBONES_VERSION
+        elif f[0] == 'units_per_metre':
+            upm = float(f[1])
+        elif f[0] == 'bone':
+            kv = dict(x.split('=', 1) for x in f[2:])
+            ex = [] if kv['exclude'] == '-' else [int(i) for i in kv['exclude'].split(',')]
+            bones.append(dict(name=f[1], parent=kv['parent'], length=float(kv['len']),
+                              cfg=dict(gravity=kv['gravity'] == '1', exclude=ex, z=axis(kv['z']), y=axis(kv['y']))))
+        elif f[0] == 'box':
+            kv = dict(x.split('=', 1) for x in f[2:])
+            boxes.append((int(f[1]), kv['joint'], [float(v) for v in kv['min'].split(',')],
+                          [float(v) for v in kv['max'].split(',')]))
+    return upm, bones, boxes
+
+
 def _row_apply(v, m):
     return v @ m[:3, :3] + m[3, :3]
 

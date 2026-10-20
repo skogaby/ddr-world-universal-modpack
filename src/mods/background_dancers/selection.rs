@@ -192,6 +192,10 @@ pub struct DancerCandidate {
     /// rest flight loops. Never part of [`motion`](Self::motion) (direct
     /// children only), so they play on flight stages alone.
     pub flight: Vec<String>,
+    /// Winx Club: the ENCHANTIX twin this outfit transforms into mid-song
+    /// ([`own_twin_from_members`]; `None` = never transforms — every stock
+    /// dancer and the Fairy forms themselves).
+    pub twin: Option<String>,
 }
 
 /// The body-folder subdirectory holding a dancer's own clips.
@@ -450,6 +454,7 @@ pub fn dancer_candidates(
             shadow_scale,
             motion: Vec::new(),
             flight: Vec::new(),
+            twin: None,
         });
     }
     out
@@ -575,6 +580,55 @@ pub fn own_flight_from_members(key: &str, members: &[String]) -> Vec<String> {
 /// A stage arc's members carry the FLIGHT marker.
 pub fn stage_flight_from_members(members: &[String]) -> bool {
     members.iter().any(|m| m == STAGE_FLIGHT_MARKER)
+}
+
+/// Winx Club ENCHANTIX twins (`transform_logic.rs`): an outfit's body arc
+/// names the dancer it transforms into by a member
+/// `data/chara/pl_<key>/transform/<twin key>.txt` (the planner sees member
+/// NAMES only — the file's own text, `transform_logic::parse_marker`, adds
+/// the twin's lift at parse time).
+pub const TRANSFORM_MARKER_DIR: &str = "transform";
+/// The transformation clips: `motion/transform/{transform,pose}.anm` (a
+/// subdirectory of [`OWN_MOTION_DIR`]: never a dance clip).
+pub const TRANSFORM_MOTION_DIR: &str = "transform";
+pub const TRANSFORM_CLIP: &str = "transform";
+pub const POSE_CLIP: &str = "pose";
+
+/// The twin key an outfit's arc members name (the first, sorted), if any.
+pub fn own_twin_from_members(key: &str, members: &[String]) -> Option<String> {
+    let prefix = format!("data/chara/pl_{key}/{TRANSFORM_MARKER_DIR}/");
+    let mut keys: Vec<&str> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".txt"))
+        .filter(|stem| !stem.is_empty() && *stem != key)
+        .collect();
+    keys.sort();
+    keys.first().map(|s| s.to_string())
+}
+
+/// Member paths inside a dancer's body arc (Winx Club content).
+pub fn transform_marker_member(key: &str, twin: &str) -> String {
+    format!("data/chara/pl_{key}/{TRANSFORM_MARKER_DIR}/{twin}.txt")
+}
+pub fn transform_clip_member(key: &str, clip: &str) -> String {
+    format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{TRANSFORM_MOTION_DIR}/{clip}.anm")
+}
+pub fn dynbones_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/dynbones.txt")
+}
+/// The body's material loop (the kira overlays' UV scroll).
+pub fn body_sanm_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/pl_{key}_play_loop.sanm")
+}
+pub fn transform_camera_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/camera/transform.camanm")
+}
+/// `winx_fx/<bank>.teb` / `.txt` (`port_winx_fx.py`): `chenge` (the
+/// transformation effect) and `wing` (the wing-tip sparkles).
+pub fn winx_fx_member(key: &str, bank: &str, ext: &str) -> String {
+    format!("data/chara/pl_{key}/winx_fx/{bank}.{ext}")
 }
 
 /// A FLIGHT stage's take-off camera shots carry this in their name
@@ -1298,7 +1352,47 @@ mod tests {
             shadow_scale: 0.8,
             motion: motion.iter().map(|s| s.to_string()).collect(),
             flight: Vec::new(),
+            twin: None,
         }
+    }
+
+    #[test]
+    fn transform_twin_comes_from_the_marker_member_name() {
+        let members: Vec<String> = [
+            "data/chara/pl_winxbloom01/pl_winxbloom01.model",
+            "data/chara/pl_winxbloom01/transform/winxbloom04.txt",
+            "data/chara/pl_winxbloom01/motion/transform/transform.anm",
+            "data/chara/pl_winxbloom01/motion/transform/pose.anm",
+            "data/chara/pl_winxbloom01/motion/wxs001_000.anm",
+            "data/chara/pl_other01/transform/x.txt",
+            "data/chara/pl_winxbloom01/transform/deeper/y.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            own_twin_from_members("winxbloom01", &members).as_deref(),
+            Some("winxbloom04")
+        );
+        // the transformation clips never join the dance playlist
+        assert_eq!(
+            own_motion_from_members("winxbloom01", &members),
+            vec!["wxs001_000".to_string()]
+        );
+        assert!(own_twin_from_members("winxbloom04", &members).is_none());
+        // its own key is no twin
+        let selfish = vec!["data/chara/pl_a/transform/a.txt".to_string()];
+        assert!(own_twin_from_members("a", &selfish).is_none());
+        assert_eq!(
+            transform_marker_member("winxbloom01", "winxbloom04"),
+            members[1]
+        );
+        assert_eq!(transform_clip_member("winxbloom01", POSE_CLIP), members[3]);
+        assert_eq!(
+            winx_fx_member("k", "wing", "teb"),
+            "data/chara/pl_k/winx_fx/wing.teb"
+        );
+        assert_eq!(body_sanm_member("k"), "data/chara/pl_k/pl_k_play_loop.sanm");
     }
 
     #[test]

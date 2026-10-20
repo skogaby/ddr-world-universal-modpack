@@ -24,6 +24,11 @@
 //!         motion/*.anm                     optional own choreography (the dance playlist)
 //!         motion/flight/takeoff*.anm, motion/flight/*.anm   optional take-off + flight loops:
 //!                                          what a FLIGHT stage plays (never a dance clip)
+//!         transform/<twin key>.txt, motion/transform/{transform,pose}.anm, camera/transform.camanm
+//!                                          optional (Winx Club): the ENCHANTIX twin this outfit
+//!                                          transforms into mid-song + its clips / event camera
+//!         dynbones.txt, pl_<key>_play_loop.sanm, winx_fx/…   optional: dynamic bones, the body's
+//!                                          material loop, joint-bound effects (`transform_logic.rs`)
 //!         — or —  data/chara/pl_<key>/…             (a literally unpacked arc)
 //!     <Friendly>/pl_<key>_<part>/…     optional accessory parts (same folder as the body)
 //!     <Friendly>/chara_resources.rlist optional sidecar (or .rlist.txt) for that folder
@@ -67,9 +72,9 @@
 
 use super::catalog::{label_for, split_key, MAX_LABEL_BYTES};
 use super::selection::{
-    dancer_candidates, own_flight_from_members, own_motion_from_members, stage_candidates,
-    stage_flight_from_members, DancerCandidate, StageCandidate, FLIGHT_MOTION_DIR, OWN_MOTION_DIR,
-    PART_NAMES,
+    dancer_candidates, own_flight_from_members, own_motion_from_members, own_twin_from_members,
+    stage_candidates, stage_flight_from_members, DancerCandidate, StageCandidate,
+    FLIGHT_MOTION_DIR, OWN_MOTION_DIR, PART_NAMES,
 };
 use super::sources::{resolve_source, CustomEntry, SourceRef};
 
@@ -619,6 +624,9 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
             let motion = own_motion_from_members(&key, members);
             // Flight clips (`motion/flight/*.anm`): what a flight stage plays.
             let flight = own_flight_from_members(&key, members);
+            // Winx Club: the Enchantix twin it transforms into
+            // (`transform/<twin>.txt`; resolved against the tables at pick).
+            let twin = own_twin_from_members(&key, members);
             let label = match dir.folder.as_deref().and_then(label_from_folder) {
                 Some(l) => Some(l),
                 None => {
@@ -658,6 +666,9 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                         ", flight: {} clip(s) in {OWN_MOTION_DIR}/{FLIGHT_MOTION_DIR}/",
                         flight.len()
                     )
+                } + &match &twin {
+                    Some(t) => format!(", transforms into {t}"),
+                    None => String::new(),
                 }
             ));
             if let Some(l) = label {
@@ -671,6 +682,7 @@ pub fn plan(dancer_dirs: &[PackDir], stage_dirs: &[PackDir], stock: &StockContex
                 row,
                 motion,
                 flight,
+                twin,
                 ..cand
             });
             dancer_keys.push(key.clone());

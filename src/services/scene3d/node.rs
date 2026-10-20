@@ -40,8 +40,8 @@ use crate::services::song_reset;
 
 use super::frame_board::{self, ItemDst, MatParam, MAX_MAT_PARAMS, NO_SLOT};
 use super::node_layout::{
-    push_visible, SceneNode, VisibleVec, NODE_FLAG_ENABLED, NODE_ITEM_OFF, NODE_PASS_MASK,
-    NODE_SIZE, NODE_SORT_KEY_OFF, PASS_COLLECT, PASS_UPDATE,
+    push_visible, SceneNode, VisibleVec, AUX_ROLE_HULL, NODE_FLAG_ENABLED, NODE_ITEM_OFF,
+    NODE_PASS_MASK, NODE_SIZE, NODE_SORT_KEY_OFF, PASS_COLLECT, PASS_UPDATE,
 };
 use super::render_item::{self, RenderItem};
 use super::sites;
@@ -137,7 +137,16 @@ unsafe extern "C" fn node_visit(this: *mut SceneNode, pass: i32, ctx: *mut u8) -
                     if r.mats > 0 {
                         render_item::set_material_params_raw(item, &mats[..r.mats]);
                     }
-                    render_item::set_hidden_raw(item, r.hidden);
+                    // The AUX word (frame_board module doc): a body item
+                    // takes it as ModelParameters.w (the transformation
+                    // wipe's line, PS c2.w); a hull twin — whose .w is its
+                    // outline push — hides while it is set.
+                    if node.aux_role.load(Ordering::Relaxed) == AUX_ROLE_HULL {
+                        render_item::set_hidden_raw(item, r.hidden || r.aux != 0.0);
+                    } else {
+                        render_item::set_model_param_w_raw(item, r.aux);
+                        render_item::set_hidden_raw(item, r.hidden);
+                    }
                 }
             }
             return 0;
@@ -247,6 +256,17 @@ pub unsafe fn set_enabled(node: *mut SceneNode, enabled: bool) {
     } else {
         n.flags.fetch_and(!NODE_FLAG_ENABLED, Ordering::Release);
     }
+}
+
+/// Mark a node as an inverted-hull twin for the slot's AUX word (see
+/// `frame_board`): set before the node is attached.
+/// # Safety
+/// As [`set_enabled`].
+pub unsafe fn set_aux_role_hull(node: *mut SceneNode) {
+    if node.is_null() {
+        return;
+    }
+    (*node).aux_role.store(AUX_ROLE_HULL, Ordering::Relaxed);
 }
 
 /// Hide/show the item (applied by the next `visit(4)`).

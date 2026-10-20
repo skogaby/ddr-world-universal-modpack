@@ -18,7 +18,11 @@
 //! into the tint by the collector → VS c23): the flight effects' particle
 //! pools colour each quad / ribbon this way (`background_dancers::flight_fx`).
 //! An empty list leaves the records alone (hull twins keep their build-time
-//! layer colours).
+//! layer colours). And one AUX word (`f32`, 0 = none): `visit(2)` copies it
+//! into a BODY item's `ModelParameters.w` (PS c2.w — the Winx Club
+//! transformation wipe's line, `background_dancers`), while a HULL item
+//! reading the same slot hides itself whenever it is non-zero (the outline
+//! PS has no wipe; `node.rs`).
 //!
 //! The board is deliberately std-only (no `crate::`): the host harness
 //! mounts it. Copying the payload INTO a render item happens in `node.rs`
@@ -88,6 +92,7 @@ struct Slot {
     mat_values: [AtomicU32; MAX_MAT_PARAMS],
     colour_count: AtomicU32,
     colours: [AtomicU32; MAX_RECORD_COLOURS * 4],
+    aux: AtomicU32,
 }
 
 const ZERO: AtomicU32 = AtomicU32::new(0);
@@ -103,6 +108,7 @@ const EMPTY_SLOT: Slot = Slot {
     mat_values: [ZERO; MAX_MAT_PARAMS],
     colour_count: ZERO,
     colours: [ZERO; MAX_RECORD_COLOURS * 4],
+    aux: ZERO,
 };
 
 static BOARD: [Slot; MAX_INSTANCES] = [EMPTY_SLOT; MAX_INSTANCES];
@@ -120,6 +126,7 @@ pub struct SlotRead {
     pub mats: [MatParam; MAX_MAT_PARAMS],
     pub colour_count: usize,
     pub colours: [[f32; 4]; MAX_RECORD_COLOURS],
+    pub aux: f32,
 }
 
 impl SlotRead {
@@ -134,6 +141,7 @@ impl SlotRead {
             mats: [MatParam::ZERO; MAX_MAT_PARAMS],
             colour_count: 0,
             colours: [[0.0; 4]; MAX_RECORD_COLOURS],
+            aux: 0.0,
         }
     }
 }
@@ -174,6 +182,21 @@ pub fn publish_full(
     mats: &[MatParam],
     colours: &[[f32; 4]],
 ) {
+    publish_aux(slot_idx, world, tint, hidden, bones, mats, colours, 0.0);
+}
+
+/// [`publish_full`] plus the slot's AUX word (see the module doc; 0 = none).
+#[allow(clippy::too_many_arguments)]
+pub fn publish_aux(
+    slot_idx: u32,
+    world: &Mat4,
+    tint: [f32; 4],
+    hidden: bool,
+    bones: &[Mat4],
+    mats: &[MatParam],
+    colours: &[[f32; 4]],
+    aux: f32,
+) {
     let Some(s) = slot(slot_idx) else { return };
     let n = bones.len().min(MAX_BONES);
     let nm = mats.len().min(MAX_MAT_PARAMS);
@@ -212,6 +235,10 @@ pub fn publish_full(
             s.colours[i * 4 + k].store(v.to_bits(), Ordering::Relaxed);
         }
     }
+    s.aux.store(
+        if aux.is_finite() { aux } else { 0.0 }.to_bits(),
+        Ordering::Relaxed,
+    );
     // Leave the write: seq becomes even and ≥ 2 (never 0 again).
     let mut even = odd.wrapping_add(1);
     if even == 0 {
@@ -311,12 +338,14 @@ pub struct ItemDst {
 }
 
 /// What [`read_slot_into_item_raw`] copied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemRead {
     pub hidden: bool,
     pub bones: usize,
     pub mats: usize,
     pub colours: usize,
+    /// The slot's AUX word.
+    pub aux: f32,
 }
 
 /// Job thread (`visit(2)`): copy a consistent snapshot STRAIGHT into a
@@ -380,6 +409,7 @@ pub unsafe fn read_slot_into_item_raw(
                 *d.add(k) = f32::from_bits(s.colours[i * 4 + k].load(Ordering::Relaxed));
             }
         }
+        let aux = f32::from_bits(s.aux.load(Ordering::Relaxed));
         fence(Ordering::Acquire);
         let s2 = s.seq.load(Ordering::Acquire);
         if s1 == s2 {
@@ -388,6 +418,7 @@ pub unsafe fn read_slot_into_item_raw(
                 bones: n,
                 mats: nm,
                 colours: nc,
+                aux,
             });
         }
     }
@@ -437,6 +468,7 @@ pub fn read_slot_into(slot_idx: u32, out: &mut SlotRead) -> bool {
                 out.colours[i][k] = f32::from_bits(s.colours[i * 4 + k].load(Ordering::Relaxed));
             }
         }
+        let aux = f32::from_bits(s.aux.load(Ordering::Relaxed));
         fence(Ordering::Acquire);
         let s2 = s.seq.load(Ordering::Acquire);
         if s1 == s2 {
@@ -444,6 +476,7 @@ pub fn read_slot_into(slot_idx: u32, out: &mut SlotRead) -> bool {
             out.bone_count = n;
             out.mat_count = nm;
             out.colour_count = nc;
+            out.aux = aux;
             return true;
         }
     }
@@ -678,7 +711,8 @@ mod tests {
                 hidden: false,
                 bones: 150,
                 mats: 1,
-                colours: 3
+                colours: 3,
+                aux: 0.0
             }
         );
         assert_eq!(world, mat(4.0));
@@ -719,6 +753,21 @@ mod tests {
             0
         );
         clear(19);
+    }
+
+    #[test]
+    fn aux_word_rides_the_slot_and_resets() {
+        publish_aux(21, &mat(1.0), [1.0; 4], false, &[], &[], &[], -3.25);
+        let mut out = SlotRead::zeroed();
+        assert!(read_slot_into(21, &mut out));
+        assert_eq!(out.aux, -3.25);
+        publish(21, &mat(1.0), [1.0; 4], false, &[]);
+        assert!(read_slot_into(21, &mut out));
+        assert_eq!(out.aux, 0.0, "every other publish carries none");
+        publish_aux(21, &mat(1.0), [1.0; 4], false, &[], &[], &[], f32::NAN);
+        assert!(read_slot_into(21, &mut out));
+        assert_eq!(out.aux, 0.0, "never a NaN into a shader constant");
+        clear(21);
     }
 
     #[test]

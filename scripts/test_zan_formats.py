@@ -595,6 +595,115 @@ class TestWinxClub(unittest.TestCase):
                               dict(name='DB_himo01', parent=1)], [dict(flags=(1, 0, 0, 0), tex=[0])]))
         self.assertEqual(Z._fold_weights(m2, [('DB_himo01', 1.0)], {'Spine1'}, 'Hips'), [('Spine1', 1.0)])
 
+    @staticmethod
+    def db_cfg(gravity=True, z=(1, 1, 1, -0.7, 0.7, 0.1, 0.3), y=(1, 1, 1, -0.3, 1.2, 0.1, 0.3), exclude=()):
+        ax = lambda a: dict(enable=bool(a[0]), limit=bool(a[1]), damp=bool(a[2]), min=a[3], max=a[4],
+                            stiffness=a[5], damping=a[6])
+        return dict(gravity=gravity, exclude=list(exclude), z=ax(z), y=ax(y))
+
+    def test_dynamic_bone_config_block(self):
+        # the 0x70 config behind a DB_ node's "mesh" offset (research §7.1)
+        o = 0x20
+        b = bytearray(o + 0x70)
+        struct.pack_into('>If', b, o, 1, 8.0)
+        b[o + 8:o + 11] = bytes((2, 11, 12))
+        for a, vals in ((0x30, (1, 1, 1, -0.698, 0.698, 0.0, 0.1, 0.4)), (0x50, (1, 1, 0, -0.262, 1.222, 0.0, 0.1, 0.3))):
+            b[o + a:o + a + 3] = bytes(vals[:3])
+            struct.pack_into('>5f', b, o + a + 4, *vals[3:])
+        node = dict(flags=Z.DB_NODE_FLAG, mesh_offset=o, nsub=0)
+        self.assertTrue(Z.is_dynamic_bone(node))
+        self.assertFalse(Z.is_dynamic_bone(dict(flags=0, mesh_offset=o, nsub=0)))
+        c = Z.dynbone_config(bytes(b), node)
+        self.assertTrue(c['gravity'])
+        self.assertEqual(c['exclude'], [11, 12])
+        self.assertAlmostEqual(c['z']['min'], -0.698, places=5)
+        self.assertAlmostEqual(c['y']['damping'], 0.3, places=5)
+        self.assertTrue(c['z']['damp'] and not c['y']['damp'] and not c['x']['enable'])
+        self.assertEqual(Z.dbbox_id('DBBOX_12'), 12)
+        self.assertIsNone(Z.dbbox_id('Spine'))
+
+    def test_dynamic_bone_angles_round_trip(self):
+        F = np.eye(4)
+        F[:3, :3] = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], float)    # a rotated rest frame
+        F[3, :3] = (0.3, 1.2, -0.1)
+        for a in ((0.0, 0.0), (0.4, -0.3), (-1.1, 0.8)):
+            d = Z.db_direction(F, a)
+            self.assertAlmostEqual(float(np.linalg.norm(d)), 1.0, places=9)
+            back = Z.db_angles(F, d)
+            self.assertAlmostEqual(back[0], a[0], places=9)
+            self.assertAlmostEqual(back[1], a[1], places=9)
+        self.assertEqual(Z.db_angles(F, np.zeros(3)), (0.0, 0.0))
+        # rest = local +x
+        np.testing.assert_allclose(Z.db_direction(F, (0.0, 0.0)), F[0, :3], atol=1e-12)
+        # clamp: yaw by y [min, max], pitch by z [-max, -min], disabled axes 0
+        c = self.db_cfg(z=(1, 1, 1, -0.2, 0.5, 0, 0), y=(1, 1, 1, -0.1, 0.3, 0, 0))
+        self.assertEqual(Z.db_clamp((1.0, 1.0), c), (0.3, 0.2))
+        self.assertEqual(Z.db_clamp((-1.0, -1.0), c), (-0.1, -0.5))
+        c2 = self.db_cfg(y=(0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(Z.db_clamp((1.0, 0.1), c2)[0], 0.0)
+
+    def chain(self, frames, motion, cfgs, boxes=(), teleport_at=None):
+        """A two-bone chain hanging off a moving parent; returns the tip positions per frame."""
+        L = [np.eye(4), np.eye(4)]
+        L[1][3, :3] = (0.2, 0.0, 0.0)
+        lens = (0.2, 0.15)
+        st = [Z.DynBoneState(), Z.DynBoneState()]
+        tips = []
+        for f in range(frames):
+            P = np.eye(4)
+            P[3, :3] = motion(f)
+            parent = P
+            for k in range(2):
+                F = L[k] @ parent
+                bx = [(bid, J if J is not None else P, mn, mx) for bid, J, mn, mx in boxes]
+                Z.dynbone_step(st[k], F, lens[k], cfgs[k], bx, teleport=(f == teleport_at))
+                parent = Z.dynbone_world(st[k], L[k], parent, cfgs[k])
+            tips.append(np.array([lens[1], 0, 0]) @ parent[:3, :3] + parent[3, :3])
+        return np.array(tips), st
+
+    def test_dynamic_bone_chain_hangs_and_follows(self):
+        still = lambda f: (0.0, 1.0, 0.0)
+        c = [self.db_cfg(), self.db_cfg()]
+        tips, _ = self.chain(240, still, c)
+        # gravity bends the horizontal chain down within the pitch limit (-max(z) = -0.7)
+        self.assertLess(tips[-1][1], 1.0 - 0.05)
+        self.assertLess(abs(tips[-1][1] - tips[-2][1]), 1e-6)            # settled
+        # no gravity, no motion: exactly at rest
+        c0 = [self.db_cfg(gravity=False), self.db_cfg(gravity=False)]
+        tips0, _ = self.chain(30, still, c0)
+        np.testing.assert_allclose(tips0[-1], (0.35, 1.0, 0.0), atol=1e-12)
+        # a parent moving along +x drags the chain behind it (yaw toward -x: tip z off 0)
+        move = lambda f: (0.01 * f, 1.0, 0.0)
+        tm, _ = self.chain(60, move, c0)
+        self.assertGreater(abs(tm[-1][2]) + abs(tm[-1][1] - 1.0), 1e-3)
+        # a teleport does not fling the chain: the jump frame sees no lag
+        jump = lambda f: (0.0 if f < 20 else 3.0, 1.0, 0.0)
+        tj, _ = self.chain(21, jump, c0, teleport_at=20)
+        np.testing.assert_allclose(tj[-1], (3.35, 1.0, 0.0), atol=1e-9)
+
+    def test_dynamic_bone_collision_pushes_out(self):
+        # a box under the chain's hanging end: the solved tip never ends inside it
+        still = lambda f: (0.0, 1.0, 0.0)
+        c = [self.db_cfg(), self.db_cfg()]
+        free, _ = self.chain(120, still, c)
+        box = (1, None, np.array([0.0, -0.5, -0.5]), np.array([0.6, -0.05, 0.5]))   # parent-local
+        hit, _ = self.chain(120, still, c, boxes=[box])
+        self.assertGreater(hit[-1][1], free[-1][1])
+        c_ex = [self.db_cfg(exclude=[1]), self.db_cfg(exclude=[1])]
+        excl, _ = self.chain(120, still, c_ex, boxes=[box])
+        np.testing.assert_allclose(excl[-1], free[-1], atol=1e-12)        # an excluded id is ignored
+
+    def test_dynbones_sidecar_round_trip(self):
+        c = self.db_cfg(exclude=[1, 12])
+        text = Z.format_dynbones([dict(name='DB_hair01', parent='rot_DBbone', length=0.12, cfg=c, rest=np.eye(4))],
+                                 [(1, 'Spine', [-0.2, 0.0, -0.1], [0.2, 0.47, 0.1])], header=['test'])
+        upm, bones, boxes = Z.parse_dynbones(text)
+        self.assertAlmostEqual(upm, 1.0 / Z.GAME_SCALE, places=5)
+        self.assertEqual(bones[0]['name'], 'DB_hair01')
+        self.assertEqual(bones[0]['cfg']['exclude'], [1, 12])
+        self.assertAlmostEqual(bones[0]['cfg']['y']['max'], 1.2, places=6)
+        self.assertEqual(boxes[0][:2], (1, 'Spine'))
+
 
 if __name__ == '__main__':
     unittest.main()

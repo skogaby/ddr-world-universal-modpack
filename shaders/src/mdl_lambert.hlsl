@@ -86,6 +86,13 @@
 // NOTEX       the `_notex` shape: no uv; COLOR0 = (tint·vc·lit)·c25 + c26
 //             (the stock `mdl_*_notex` VS applies vConstatntColor /
 //             vOffsetColor in the VERTEX shader; its PS is `oC0 = v0`)
+// UNLIT       lit factor 1: with UV3 VCOLOR this IS the stock `mdl_ch_constant_vc`
+//             VS (COLOR0 = c23·v_color, uv3 = uv / c24.xy + c24.zw, the fog) — the
+//             STOCK style of the `_wipe` containers, which need our own VS for:
+// WIPE        + TEXCOORD6 = the clip position's (y, w) for the transformation
+//             wipe (`mdl_common.hlsli::wipe_clip`), paired with `ps_uv3_wipe_main`
+//             below (the stock `mdl_*_vc` PS `oC0 = tex2D(s0, uv3)·COLOR0` + the
+//             wipe discard).
 
 struct VSOut
 {
@@ -100,10 +107,16 @@ struct VSOut
     float2 uv  : TEXCOORD0;
     float4 col : COLOR0;
 #endif
+#if defined(WIPE)
+    float2 wp  : TEXCOORD6;
+#endif
 };
 
 float lit_factor(float3 n_world)
 {
+#if defined(UNLIT)
+    return 1.0;
+#endif
     float3 L = normalize(LIT_KEY_DIR);
     float ndl = dot(normalize(n_world), L);
     float wrapped = saturate(ndl * (1.0 - LIT_WRAP) + LIT_WRAP);
@@ -129,6 +142,9 @@ VSOut lit_out(float4 clip, float3 ns, float2 uv, float4 vcol)
 #endif
 #if defined(UV3) && !defined(NOTEX)
     o.fog = clip.w * ConstParams1.x - ConstParams1.y;
+#endif
+#if defined(WIPE)
+    o.wp = float2(clip.y, clip.w);
 #endif
     return o;
 }
@@ -197,3 +213,17 @@ VSOut vs_ch_main(VSInCh i)
 #endif
     return lit_out(to_clip(ps), ns, uv, vc);
 }
+
+// ── The wipe PS (`_wipe` containers, UV3 + VCOLOR + WIPE VS above) ───────
+// The stock `mdl_*_constant_vc` PS (2 instructions: `oC0 = tex2D(s0, v0.xy)
+// · COLOR0`, no stipple — RE §4.3) plus the transformation wipe's discard.
+#if defined(UV3) && defined(WIPE)
+sampler2D WipeMaterial      : register(s0);
+float4    WipeModelParams   : register(c2); // .w = the wipe word (mdl_common.hlsli)
+
+float4 ps_uv3_wipe_main(VSOut i) : COLOR
+{
+    wipe_clip(i.wp, WipeModelParams.w);
+    return tex2D(WipeMaterial, i.uv) * i.col;
+}
+#endif

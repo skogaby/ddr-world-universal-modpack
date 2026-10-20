@@ -1,0 +1,3 @@
+# Winx Club: this outfit transforms into winxtecna04 (Tecna Fairy) -- main.dol FUN_800a6d3c
+winxtecna04
+lift 0.090306

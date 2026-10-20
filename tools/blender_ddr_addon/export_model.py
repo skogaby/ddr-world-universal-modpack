@@ -120,6 +120,10 @@ def _material_info(mat, skinned, has_color=True):
 def _mesh_flags(obj, mat):
     if "ddr_flags" in obj:
         return int(obj["ddr_flags"]), int(obj.get("ddr_flags2", 0))
+    # A material may carry its own (one additive slot of a skinned body: the Winx Club port's
+    # `kira` overlays) -- an object-level override still wins.
+    if mat is not None and "ddr_flags" in mat:
+        return int(mat["ddr_flags"]), int(mat.get("ddr_flags2", 0))
     flags, flags2 = 0, 0
     if mat is not None:
         if not mat.use_backface_culling:

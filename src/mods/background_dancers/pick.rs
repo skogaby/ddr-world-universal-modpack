@@ -66,6 +66,13 @@ pub struct Pick {
     /// Provenance of the stage / of each dancer (summary INFO only).
     pub source_stage: PickSource,
     pub source_dancers: Vec<PickSource>,
+    /// Winx Club ([`transform_pick`]): per dancer, the ENCHANTIX twin
+    /// loaded beside it (gameplay, human sides, transform-capable outfits
+    /// only; empty / `None` elsewhere).
+    pub twins: Vec<Option<DancerCandidate>>,
+    /// Per dancer: the player side it stands for (gameplay; empty in the
+    /// previews) — the transformation's combo trigger reads that side.
+    pub sides: Vec<u8>,
 }
 
 impl Pick {
@@ -100,6 +107,14 @@ impl Pick {
             out.push(format!("data/arc/{}", stage.arc_name()));
         }
         for d in &self.dancers {
+            let a = format!("data/arc/{}", d.body_arc_name());
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        // Winx Club: the Enchantix twins' body arcs (loaded beside their
+        // outfits; their own clips live inside).
+        for d in self.twins.iter().flatten() {
             let a = format!("data/arc/{}", d.body_arc_name());
             if !out.contains(&a) {
                 out.push(a);
@@ -220,6 +235,19 @@ impl Pick {
             self.seed,
             if self.pinned { " (PINNED)" } else { "" }
         ) + if self.flight { " FLIGHT" } else { "" }
+            + &{
+                let t: Vec<String> = self
+                    .twins
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, t)| t.as_ref().map(|t| format!("{}->{}", i + 1, t.key)))
+                    .collect();
+                if t.is_empty() {
+                    String::new()
+                } else {
+                    format!(" TRANSFORM[{}]", t.join(" "))
+                }
+            }
     }
 }
 
@@ -306,7 +334,43 @@ pub fn assemble_pick_opt(
         flight: false,
         source_stage: PickSource::Random,
         source_dancers: vec![PickSource::Random; n],
+        twins: Vec::new(),
+        sides: Vec::new(),
     }
+}
+
+/// Winx Club (maintainer 2026-10-20): give every dancer of a GAMEPLAY pick
+/// that can transform ([`DancerCandidate::twin`]) and stands for a HUMAN
+/// side (`human(side)`: entered and not the Multiplayer Bot's phantom side)
+/// its Enchantix twin from `all`, loaded beside it. `sides[i]` = dancer
+/// `i`'s player side. Flight picks never transform. Returns the pick and
+/// the `(dancer index, twin key)` of every twin key the tables lack (one
+/// WARN each at the caller). Pure; draws nothing from any rng.
+pub fn transform_pick(
+    mut pick: Pick,
+    all: &[DancerCandidate],
+    sides: &[u8],
+    human: impl Fn(u8) -> bool,
+) -> (Pick, Vec<(usize, String)>) {
+    pick.sides = sides.iter().copied().take(pick.dancers.len()).collect();
+    pick.twins = vec![None; pick.dancers.len()];
+    let mut missing = Vec::new();
+    if pick.flight {
+        return (pick, missing);
+    }
+    for (i, d) in pick.dancers.iter().enumerate() {
+        let Some(key) = d.twin.as_ref() else {
+            continue;
+        };
+        if !sides.get(i).is_some_and(|&s| human(s)) {
+            continue;
+        }
+        match all.iter().find(|c| c.key == *key && c.key != d.key) {
+            Some(t) => pick.twins[i] = Some(t.clone()),
+            None => missing.push((i, key.clone())),
+        }
+    }
+    (pick, missing)
 }
 
 /// What [`fly_pick`] did to a pick.
@@ -744,6 +808,7 @@ mod tests {
             shadow_scale: 0.8,
             motion: vec!["hh01_m".into(), "ht01_m".into(), "sfd01_m".into()],
             flight: Vec::new(),
+            twin: None,
         };
         let picked = vec![umx.clone(), dancer(&dancers, "rage00")];
         let pick = assemble_pick(
@@ -780,5 +845,72 @@ mod tests {
             solo.arcs_for(&ParseOptions::PREVIEW),
             vec!["data/arc/pl_umxafro00.arc".to_string()]
         );
+    }
+
+    #[test]
+    fn transform_pick_twins_human_outfits_only() {
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let outfit = DancerCandidate {
+            key: "winxbloom01".into(),
+            twin: Some("winxbloom04".into()),
+            ..dancers[0].clone()
+        };
+        let fairy = DancerCandidate {
+            key: "winxbloom04".into(),
+            ..dancers[0].clone()
+        };
+        let mut all = dancers.clone();
+        all.push(outfit.clone());
+        all.push(fairy.clone());
+        let picked = vec![outfit.clone(), outfit.clone()];
+        let pick = assemble_pick(
+            &mut Rng::new(5),
+            stages[0].clone(),
+            &[],
+            picked,
+            false,
+            |_| false,
+        );
+        // side 1 is the bot's phantom side: only side 0 transforms
+        let (p, missing) = transform_pick(pick.clone(), &all, &[0, 1], |s| s == 0);
+        assert!(missing.is_empty());
+        assert_eq!(
+            p.twins[0].as_ref().map(|t| t.key.as_str()),
+            Some("winxbloom04")
+        );
+        assert!(p.twins[1].is_none());
+        assert_eq!(p.sides, vec![0, 1]);
+        assert!(p
+            .arcs()
+            .contains(&"data/arc/pl_winxbloom04.arc".to_string()));
+        assert!(p.summary().contains("TRANSFORM[1->winxbloom04]"));
+        // a twin the tables lack is reported, never invented
+        let (p2, missing) = transform_pick(pick.clone(), &dancers, &[0, 1], |_| true);
+        assert!(p2.twins.iter().all(Option::is_none));
+        assert_eq!(
+            missing,
+            vec![
+                (0, "winxbloom04".to_string()),
+                (1, "winxbloom04".to_string())
+            ]
+        );
+        // a standalone Fairy (no twin key) and flight picks never transform
+        let solo = assemble_pick(
+            &mut Rng::new(5),
+            stages[0].clone(),
+            &[],
+            vec![fairy],
+            false,
+            |_| false,
+        );
+        assert!(transform_pick(solo, &all, &[0], |_| true).0.twins[0].is_none());
+        let mut fl = pick;
+        fl.flight = true;
+        assert!(transform_pick(fl, &all, &[0, 1], |_| true)
+            .0
+            .twins
+            .iter()
+            .all(Option::is_none));
     }
 }

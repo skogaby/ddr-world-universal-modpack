@@ -1,0 +1,3 @@
+# Winx Club: this outfit transforms into winxbloom04 (Bloom Fairy) -- main.dol FUN_800a6d3c
+winxbloom04
+lift 0.090306

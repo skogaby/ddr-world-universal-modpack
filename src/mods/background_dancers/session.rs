@@ -40,14 +40,22 @@ use super::director_math::{
 };
 use super::flight_fx::{self, DancerFx, FxLayout, StageFx, Teb};
 use super::instance_plan::{
-    plan_instances, DancerSpec, FxSpec, PartSpec, PassMasks, PlanInput, StagePartSpec,
+    plan_instances, DancerSpec, FxSpec, PartSpec, PassMasks, PlanInput, StagePartSpec, TwinSpec,
+    CHARA_BANK_CHENGE, CHARA_BANK_WING,
 };
 use super::outline::{self, HullPlan};
 use super::schedule::{CameraSchedule, CameraState, ClipRef, DanceSchedule};
 use super::selection::{
-    camanm_member_path, part_attach_bone, Sex, GROUND_BONES, HEAD_BONE, HIPS_BONE,
-    MIRROR_ATTACH_BONE, MIRROR_PART, SHADOW_ARC, SHADOW_MODEL,
+    body_sanm_member, camanm_member_path, dynbones_member, part_attach_bone,
+    transform_camera_member, transform_clip_member, transform_marker_member, winx_fx_member,
+    DancerCandidate, Sex, GROUND_BONES, HEAD_BONE, HIPS_BONE, MIRROR_ATTACH_BONE, MIRROR_PART,
+    POSE_CLIP, SHADOW_ARC, SHADOW_MODEL, TRANSFORM_CLIP,
 };
+use super::{chara_fx, dynbones_logic, transform_logic};
+
+/// The wing-tip joints the sparkle trail rides (`CtsCharaAtc`
+/// `FUN_80037ccc` resolves exactly these two).
+pub const WING_TIP_BONES: [&str; 2] = ["DB_Lwing_02", "DB_Rwing_02"];
 use super::tempo::{TempoOptions, BEAT_TAU};
 
 /// The stage camera sets (read by OUR parser only — the engine needs nothing
@@ -143,6 +151,55 @@ pub struct ParsedDancer {
     /// The flight effects' attach joints (`flight_fx::JOINT_NAMES`: Hips,
     /// hands, feet); `None` when the `.b2it` lacks one — no effects then.
     pub fx_joints: Option<[usize; 5]>,
+    /// The body's `.b2it` (name → bone index, file order; empty without one).
+    pub names: Vec<(String, u32)>,
+    /// Winx Club extras of this body's arc (all optional).
+    pub winx: WinxBody,
+    /// Winx Club: the ENCHANTIX twin loaded beside this outfit (a gameplay
+    /// pick with `Pick::twins[i]`, both bodies' transformation clips parsed).
+    pub twin: Option<Box<ParsedTwin>>,
+}
+
+/// One effect bank of a Winx Club body arc (`winx_fx/<bank>.{teb,txt}`).
+pub struct WinxFx {
+    pub teb: Teb,
+    pub layout: FxLayout,
+    /// Per layout pool: its model's bone count (`None` = the pool skipped).
+    pub pool_bones: Vec<Option<usize>>,
+}
+
+/// What a Winx Club body arc may carry beyond the stock layout
+/// (`port_character_hottest2.py` / `port_winx_fx.py`, `GAME=winx`).
+#[derive(Default)]
+pub struct WinxBody {
+    /// `dynbones.txt` resolved against the body's rig (`dynbones_logic`).
+    pub dyn_rig: Option<dynbones_logic::Rig>,
+    /// `pl_<key>_play_loop.sanm`: the kira overlays' UV scroll.
+    pub material_clip: Option<MaterialClip>,
+    /// `motion/transform/{transform,pose}.anm`.
+    pub transform: Option<Clip>,
+    pub pose: Option<Clip>,
+    /// `camera/transform.camanm` (an outfit's event camera).
+    pub camera: Option<Clip>,
+    /// The wing tips: `(DB_Lwing_02 | DB_Rwing_02 bone, bone length m)`.
+    pub wing_tips: Option<[(usize, f32); 2]>,
+    /// `winx_fx/chenge.*` (the transformation effect, the Fairy forms).
+    pub chenge: Option<Arc<WinxFx>>,
+    /// `winx_fx/wing.*` (the wing-tip sparkles).
+    pub wing: Option<Arc<WinxFx>>,
+}
+
+/// The Enchantix twin of an outfit: its body (own skeleton, transform
+/// clips, extras) plus the OUTFIT's playlist clips retargeted onto it by
+/// bone name (`transform_logic::retarget_map`) — what it dances after the
+/// switch, at the outfit's schedule position — and its lift.
+pub struct ParsedTwin {
+    pub body: ParsedDancer,
+    /// Parallel to the outfit's `clips`.
+    pub clips: Vec<Clip>,
+    /// Metres the twin's own clips fly higher (`transform.txt` `lift`):
+    /// added to the retargeted outfit clips.
+    pub lift: f32,
 }
 
 /// A flight stage's effect bank + pool layout (`data/map/flight_fx/`,
@@ -614,7 +671,9 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             }
             ok.then_some(j)
         };
-        dancers.push(ParsedDancer {
+        let names = names.unwrap_or_default();
+        let winx = parse_winx_body(&body, &d.key, &model_name, &names, &skeleton, &mut warnings);
+        let mut dancer = ParsedDancer {
             key: d.key.clone(),
             sex: d.sex,
             model_name,
@@ -628,7 +687,14 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
             hips,
             head_subtree,
             fx_joints,
-        });
+            names,
+            winx,
+            twin: None,
+        };
+        if let Some(Some(tw)) = pick.twins.get(i) {
+            dancer.twin = parse_twin(&dancer, &body, tw, &mut warnings).map(Box::new);
+        }
+        dancers.push(dancer);
     }
 
     // The shared floor-shadow quad (rigid, one bone) — gameplay only.
@@ -778,6 +844,245 @@ pub fn parse_pick(pick: &Pick, opts: &ParseOptions) -> Parsed {
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
     }
+}
+
+/// The Winx Club extras of a body arc (every one optional; a member that
+/// is present but unreadable warns once and is skipped).
+fn parse_winx_body(
+    reader: &ArcReader,
+    key: &str,
+    model_name: &str,
+    names: &[(String, u32)],
+    skeleton: &Skeleton,
+    warnings: &mut Vec<String>,
+) -> WinxBody {
+    let has = |m: &str| reader.entries.iter().any(|e| e.path == m);
+    let index_of = |name: &str| -> Option<usize> {
+        let idx = b2it::index_of(names, name)? as usize;
+        (idx < skeleton.bone_count()).then_some(idx)
+    };
+    let mut out = WinxBody::default();
+    let dyn_member = dynbones_member(key);
+    if has(&dyn_member) {
+        match reader
+            .get(&dyn_member)
+            .map(|b| dynbones_logic::parse(&String::from_utf8_lossy(&b)))
+        {
+            Some(Ok(file)) => {
+                let (rig, notes) = dynbones_logic::resolve(
+                    &file,
+                    index_of,
+                    &skeleton.bind_world,
+                    &skeleton.parents,
+                );
+                warnings.extend(notes.into_iter().map(|n| format!("{dyn_member}: {n}")));
+                if !rig.bones.is_empty() {
+                    out.wing_tips = {
+                        let tip = |name: &str| -> Option<(usize, f32)> {
+                            let i = index_of(name)?;
+                            let b = rig.bones.iter().find(|b| b.index == i)?;
+                            Some((i, b.len_m))
+                        };
+                        match (tip(WING_TIP_BONES[0]), tip(WING_TIP_BONES[1])) {
+                            (Some(l), Some(r)) => Some([l, r]),
+                            _ => None,
+                        }
+                    };
+                    out.dyn_rig = Some(rig);
+                }
+            }
+            Some(Err(e)) => warnings.push(format!("{dyn_member}: {e} -- no dynamic bones")),
+            None => warnings.push(format!("{dyn_member}: unreadable -- no dynamic bones")),
+        }
+    }
+    let sanm = body_sanm_member(key);
+    if has(&sanm) {
+        let model_member = format!("data/chara/{model_name}/{model_name}.model");
+        out.material_clip = parse_material_clip(reader, &sanm, &model_member, warnings);
+    }
+    for (clip, slot) in [(TRANSFORM_CLIP, 0usize), (POSE_CLIP, 1)] {
+        let member = transform_clip_member(key, clip);
+        if has(&member) {
+            let c = parse_clip(reader, &member, &format!("transform/{clip}"), warnings);
+            if slot == 0 {
+                out.transform = c;
+            } else {
+                out.pose = c;
+            }
+        }
+    }
+    let cam = transform_camera_member(key);
+    if has(&cam) {
+        out.camera = parse_clip(reader, &cam, "transform", warnings)
+            .filter(|c| c.anm.camera_slots.iter().any(Option::is_some));
+    }
+    out.chenge = parse_winx_fx(reader, key, "chenge", warnings);
+    out.wing = parse_winx_fx(reader, key, "wing", warnings);
+    out
+}
+
+/// A `winx_fx/<bank>.{teb,txt}` pair + its pools' bone counts.
+fn parse_winx_fx(
+    reader: &ArcReader,
+    key: &str,
+    bank: &str,
+    warnings: &mut Vec<String>,
+) -> Option<Arc<WinxFx>> {
+    let (tm, lm) = (
+        winx_fx_member(key, bank, "teb"),
+        winx_fx_member(key, bank, "txt"),
+    );
+    let (teb, text) = match (reader.get(&tm), reader.get(&lm)) {
+        (None, None) => return None,
+        (Some(t), Some(l)) => (t, l),
+        _ => {
+            warnings.push(format!("{tm} / {lm}: only one present -- no {bank} effect"));
+            return None;
+        }
+    };
+    let Some(teb) = flight_fx::parse_teb(&teb) else {
+        warnings.push(format!("{tm}: not a readable TEB -- no {bank} effect"));
+        return None;
+    };
+    let layout = match FxLayout::parse(&String::from_utf8_lossy(&text)) {
+        Ok(l) => l,
+        Err(e) => {
+            warnings.push(format!("{lm}: {e} -- no {bank} effect"));
+            return None;
+        }
+    };
+    let pool_bones = layout
+        .pools
+        .iter()
+        .map(|p| {
+            let member = format!("data/chara/pl_{key}/{0}/{0}.model", p.model);
+            let n = parse_skeleton(reader, &member, warnings)?.bone_count();
+            (n == p.bones()).then_some(n)
+        })
+        .collect();
+    Some(Arc::new(WinxFx {
+        teb,
+        layout,
+        pool_bones,
+    }))
+}
+
+/// The outfit's Enchantix twin: its arc (skeleton, `.b2it`, its own
+/// transformation clips + extras), the outfit's clips retargeted onto it,
+/// the lift from the outfit's marker. `None` (one warning) when either
+/// body lacks its transformation clips or the twin's arc is unreadable.
+fn parse_twin(
+    outfit: &ParsedDancer,
+    outfit_reader: &ArcReader,
+    tw: &DancerCandidate,
+    warnings: &mut Vec<String>,
+) -> Option<ParsedTwin> {
+    if outfit.winx.transform.is_none() || outfit.winx.pose.is_none() {
+        warnings.push(format!(
+            "dancer {}: no motion/transform/ clips -- no transformation into {}",
+            outfit.key, tw.key
+        ));
+        return None;
+    }
+    let arc = format!("data/arc/{}", tw.body_arc_name());
+    let Some(reader) = ArcReader::open(&arc) else {
+        warnings.push(format!(
+            "{arc}: unreadable -- no transformation for {}",
+            outfit.key
+        ));
+        return None;
+    };
+    let model_name = tw.body_model_name();
+    let skeleton = parse_skeleton(
+        &reader,
+        &format!("data/chara/{model_name}/{model_name}.model"),
+        warnings,
+    )?;
+    let names = match reader
+        .get(&format!("data/chara/{model_name}/{model_name}.b2it"))
+        .map(|b| b2it::parse(&b))
+    {
+        Some(Ok(t)) => t,
+        _ => {
+            warnings.push(format!(
+                "{model_name}.b2it unreadable -- no transformation for {}",
+                outfit.key
+            ));
+            return None;
+        }
+    };
+    let winx = parse_winx_body(&reader, &tw.key, &model_name, &names, &skeleton, warnings);
+    if winx.transform.is_none() || winx.pose.is_none() {
+        warnings.push(format!(
+            "twin {}: no motion/transform/ clips -- no transformation for {}",
+            tw.key, outfit.key
+        ));
+        return None;
+    }
+    let bone_index = |name: &str| -> Option<usize> {
+        let idx = b2it::index_of(&names, name)? as usize;
+        (idx < skeleton.bone_count()).then_some(idx)
+    };
+    let as_usize = |t: &[(String, u32)]| -> Vec<(String, usize)> {
+        t.iter().map(|(n, i)| (n.clone(), *i as usize)).collect()
+    };
+    let map = transform_logic::retarget_map(
+        &as_usize(&outfit.names),
+        &as_usize(&names),
+        outfit.skeleton.bone_count(),
+    );
+    let clips: Vec<Clip> = outfit
+        .clips
+        .iter()
+        .map(|c| {
+            let mut anm = c.anm.clone();
+            anm.bone_tracks = anm
+                .bone_tracks
+                .into_iter()
+                .filter_map(|mut t| {
+                    t.target = (*map.get(t.target as usize)?)?;
+                    Some(t)
+                })
+                .collect();
+            Clip {
+                name: c.name.clone(),
+                bytes: c.bytes.clone(),
+                anm,
+            }
+        })
+        .collect();
+    let lift = outfit_reader
+        .get(&transform_marker_member(&outfit.key, &tw.key))
+        .and_then(|b| transform_logic::parse_marker(&String::from_utf8_lossy(&b)))
+        .map_or(0.0, |(_, lift)| lift);
+    let seed = seed_local_trs(&skeleton);
+    let ground: Vec<usize> = GROUND_BONES.iter().filter_map(|n| bone_index(n)).collect();
+    let hips = bone_index(HIPS_BONE);
+    let head_subtree = bone_index(HEAD_BONE)
+        .map(|h| subtree_of(&skeleton.parents, h))
+        .unwrap_or_default();
+    Some(ParsedTwin {
+        body: ParsedDancer {
+            key: tw.key.clone(),
+            sex: tw.sex,
+            model_name,
+            model_scale: tw.model_scale,
+            shadow_scale: tw.shadow_scale,
+            skeleton,
+            seed,
+            clips: Vec::new(),
+            parts: Vec::new(),
+            ground,
+            hips,
+            head_subtree,
+            fx_joints: None,
+            names,
+            winx,
+            twin: None,
+        },
+        clips,
+        lift,
+    })
 }
 
 /// The stage arc's flight effects: the TEB bank, the pool layout and every
@@ -1031,10 +1336,57 @@ pub struct Session {
     pub bones: Vec<Mat4>,
     /// Per-frame `.sanm` samples of the stage part being published.
     pub mat_params: Vec<MatParam>,
+    /// Winx Club, per dancer: dynamic bones, the transformation, the
+    /// joint-bound effects (`director::produce`).
+    pub winx: Vec<WinxRun>,
+    /// The twin's evaluation buffer (sized once, like `bones`).
+    pub twin_bones: Vec<Mat4>,
+    /// The real clock of the last produce (the dynamic bones' dt).
+    pub winx_last_real: Option<f32>,
+    /// The transformation wipe's shader containers are served (else the
+    /// crossfade; checked at build).
+    pub wipe_ok: bool,
+    pub wipe_warned: bool,
+    /// This frame's real clock (set by the lifecycle before the camera
+    /// director — the transformation's event camera reads it).
+    pub real_now: f32,
     pub requested_at: Instant,
     pub built_at: Option<Instant>,
 }
 
+/// One dancer's Winx Club runtime.
+#[derive(Default)]
+pub struct WinxRun {
+    pub dyn_body: Option<dynbones_logic::State>,
+    pub dyn_twin: Option<dynbones_logic::State>,
+    /// The body's own wing sparkles (a Fairy dancer).
+    pub wing_body: Option<chara_fx::JointFx>,
+    /// The twin's wing sparkles and its transformation effect.
+    pub wing_twin: Option<chara_fx::JointFx>,
+    pub chenge: Option<chara_fx::JointFx>,
+    /// The armed transformation (once per side per play; cleared by a
+    /// rewind before its trigger and at every song (re)start).
+    pub transform: Option<TransformRun>,
+    /// This frame's look (`director::winx_prepass`).
+    pub look: Option<transform_logic::Look>,
+    /// Teleport detection for the solver: the last schedule segment and
+    /// what each body played.
+    pub last_segment: Option<usize>,
+    pub last_play_body: Option<u8>,
+    pub last_play_twin: Option<u8>,
+}
+
+/// An armed transformation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformRun {
+    /// The trigger, real seconds.
+    pub r0: f32,
+    /// The choreography piece boundary that ends the pose (dance time),
+    /// computed at the pose's first frame.
+    pub switch_dance: Option<f32>,
+    /// The switch, real seconds (once reached).
+    pub switch_real: Option<f32>,
+}
 impl Session {
     /// `style`: the scene style applied at item build (materials re-pointed
     /// at the `<name>_<style>` variant containers, RE §4.7). `hulls`: the
@@ -1131,6 +1483,12 @@ impl Session {
                         .collect(),
                     has_ground: !d.ground.is_empty(),
                     fx_pools: Vec::new(),
+                    chara_pools: winx_pool_specs(&d.winx, false),
+                    twin: d.twin.as_ref().map(|t| TwinSpec {
+                        model_name: t.body.model_name.clone(),
+                        bone_count: t.body.skeleton.bone_count(),
+                        chara_pools: winx_pool_specs(&t.body.winx, true),
+                    }),
                 })
                 .collect(),
             shadow_bone_count: parsed.shadow.as_ref().map(|s| s.bone_count()),
@@ -1241,6 +1599,23 @@ impl Session {
             );
         }
         let shadow_size = parsed.dancers.iter().map(|d| d.shadow_scale).collect();
+        let winx: Vec<WinxRun> = parsed
+            .dancers
+            .iter()
+            .enumerate()
+            .map(|(i, d)| winx_run(d, i, pick.seed as u32))
+            .collect();
+        let twin_bones_n = parsed
+            .dancers
+            .iter()
+            .filter_map(|d| d.twin.as_ref())
+            .map(|t| t.body.skeleton.bone_count())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        if let Some(line) = winx_summary(&parsed) {
+            log_info!("BackgroundDancers: {}", line);
+        }
         Session {
             pick,
             parsed,
@@ -1266,6 +1641,12 @@ impl Session {
             scratch: vec![Trs::IDENTITY; plan.max_bones],
             bones: vec![IDENTITY; plan.max_bones],
             mat_params: Vec::with_capacity(frame_board::MAX_MAT_PARAMS),
+            winx,
+            twin_bones: vec![IDENTITY; twin_bones_n],
+            winx_last_real: None,
+            wipe_ok: true,
+            wipe_warned: false,
+            real_now: 0.0,
             requested_at,
             built_at: None,
         }
@@ -1316,6 +1697,44 @@ impl Session {
         self.movie_camera_state = None;
     }
 
+    /// Song (re)start / rewind: the dynamic bones back to rest; on a
+    /// (re)start (`all`) also every transformation and joint-bound effect
+    /// (a rewind keeps a transformation armed before the rewind target —
+    /// `director::winx_prepass` drops one whose trigger now lies ahead).
+    pub fn reset_winx(&mut self, all: bool) {
+        for r in self.winx.iter_mut() {
+            if let Some(s) = r.dyn_body.as_mut() {
+                s.reset();
+            }
+            if let Some(s) = r.dyn_twin.as_mut() {
+                s.reset();
+            }
+            r.last_segment = None;
+            r.last_play_body = None;
+            r.last_play_twin = None;
+            if all {
+                r.transform = None;
+                r.look = None;
+            }
+        }
+        self.winx_last_real = None;
+    }
+
+    /// Whether dancer `i` can transform (its twin parsed).
+    pub fn can_transform(&self, i: usize) -> bool {
+        self.parsed.dancers.get(i).is_some_and(|d| d.twin.is_some())
+    }
+
+    /// A transformation is between its trigger and its switch (the Wii
+    /// runs one at a time).
+    pub fn transform_in_progress(&self) -> bool {
+        self.winx.iter().any(|r| {
+            r.transform
+                .as_ref()
+                .is_some_and(|t| t.switch_real.is_none())
+        })
+    }
+
     /// A3 resets the shadow low-pass at song start: back to the rlist scale.
     pub fn reset_shadow(&mut self) {
         for (i, d) in self.parsed.dancers.iter().enumerate() {
@@ -1337,7 +1756,10 @@ impl Session {
                 InstanceKind::Part { .. } => c.2 += 1,
                 InstanceKind::Shadow(_) => c.3 += 1,
                 InstanceKind::Hull { .. } => c.4 += 1,
-                InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => c.5 += 1,
+                InstanceKind::Fx { .. }
+                | InstanceKind::StageFx(_)
+                | InstanceKind::CharaFx { .. } => c.5 += 1,
+                InstanceKind::Twin(_) => c.1 += 1,
             }
         }
         c
@@ -1373,10 +1795,11 @@ impl Session {
                 _ => IDENTITY,
             },
             // Effect pools: bones carry world positions (identity bind).
-            InstanceKind::StagePart(_) | InstanceKind::Fx { .. } | InstanceKind::StageFx(_) => {
-                IDENTITY
-            }
-            InstanceKind::Dancer(i) => self.dancer_body_world(i),
+            InstanceKind::StagePart(_)
+            | InstanceKind::Fx { .. }
+            | InstanceKind::StageFx(_)
+            | InstanceKind::CharaFx { .. } => IDENTITY,
+            InstanceKind::Dancer(i) | InstanceKind::Twin(i) => self.dancer_body_world(i),
             InstanceKind::Part { dancer, part } => {
                 // Rest pose: the part on its bind bone.
                 let body = self.dancer_body_world(dancer);
@@ -1476,6 +1899,13 @@ impl Session {
                 );
             }
             let world = self.initial_world(&self.instances[idx]);
+            // Winx Club: both bodies of a transforming dancer draw through
+            // the WIPE containers (the line rides ModelParameters.w).
+            let wipe = match self.instances[idx].kind {
+                InstanceKind::Twin(_) => true,
+                InstanceKind::Dancer(i) => self.can_transform(i),
+                _ => false,
+            };
             match build_one(
                 &mut self.instances[idx],
                 &view,
@@ -1483,9 +1913,22 @@ impl Session {
                 since_request_ms,
                 self.style,
                 &self.hulls,
+                wipe,
             ) {
-                true => progress.built_now += 1,
-                false => progress.skipped_now += 1,
+                (true, w) => {
+                    progress.built_now += 1;
+                    if wipe && !w {
+                        self.wipe_ok = false;
+                        if !self.wipe_warned {
+                            self.wipe_warned = true;
+                            log_warn!(
+                                "BackgroundDancers: {} -- the transformation wipe's shader containers are not served (shader-fixes off or blobs missing) -- the Enchantix transformation crossfades instead",
+                                self.instances[idx].model_name
+                            );
+                        }
+                    }
+                }
+                (false, _) => progress.skipped_now += 1,
             }
         }
         progress
@@ -1502,7 +1945,8 @@ fn build_one(
     since_request_ms: u64,
     style: SceneStyle,
     hulls: &HullPlan,
-) -> bool {
+    wipe: bool,
+) -> (bool, bool) {
     let item = match render_item::build(view, inst.pass_mask) {
         Ok(i) => i,
         Err(e) => {
@@ -1512,7 +1956,7 @@ fn build_one(
                 e
             );
             inst.status = InstanceStatus::Skipped;
-            return false;
+            return (false, false);
         }
     };
     let ts = item.textures;
@@ -1551,12 +1995,42 @@ fn build_one(
             );
         }
     }
+    // Winx Club transformation WIPE: every material of both twins' bodies
+    // re-pointed at `<name>[_<style>]_wipe` (opaque ones in the scene style,
+    // blended ones — the kira overlays — in the stock look); nothing found
+    // ⇒ the ordinary restyle below and the director crossfades.
+    let allows = restyle_allowed(&inst.kind, &inst.model_name);
+    let mut wiped = false;
+    if wipe && !matches!(inst.kind, InstanceKind::Hull { .. }) {
+        let target = |stock_hash: u32, opaque: bool| -> Option<*mut u8> {
+            let v = shader_layout::wipe_variant_for_stock_hash(stock_hash)?;
+            let st = if opaque && allows {
+                style
+            } else {
+                SceneStyle::Stock
+            };
+            let name = shader_layout::wipe_container_name(v, st);
+            texture::lookup_shader(shader_layout::fnv1_32(&name))
+        };
+        // SAFETY: our own fresh block, not yet attached.
+        let (done, kept) = unsafe { item.repoint_all_materials(screen_hash, &target) };
+        wiped = done > 0;
+        log_info!(
+            "BackgroundDancers: {} [{}] transformation wipe -- {} material(s) on the wipe containers ({} style), {} kept",
+            inst.model_name,
+            inst.kind.tag(),
+            done,
+            style.key(),
+            kept
+        );
+    }
     // Whole-scene restyle (RE §4.7): re-point eligible material copies at the
     // `<name>_<style>` variant objects. Hull twins ALWAYS restyle (their
     // program 0 is the outline pair) and then hide every record whose
     // material stayed stock.
-    let allows = restyle_allowed(&inst.kind, &inst.model_name);
-    if style != SceneStyle::Stock && allows {
+    if wiped {
+        // (done above)
+    } else if style != SceneStyle::Stock && allows {
         let variant_for = |stock_hash: u32| -> Option<*mut u8> {
             let v = shader_layout::variant_for_stock_hash(stock_hash)?;
             let name = shader_layout::variant_container_name(v, style)?;
@@ -1579,7 +2053,7 @@ fn build_one(
                 );
                 render_item::free(item);
                 inst.status = InstanceStatus::Skipped;
-                return false;
+                return (false, false);
             };
             // SAFETY: as above.
             let (marked, hidden) = unsafe {
@@ -1683,12 +2157,18 @@ fn build_one(
                 inst.model_name
             );
             inst.status = InstanceStatus::Skipped;
-            return false;
+            return (false, false);
         }
     };
     // Hidden until the director shows it (pass 4 honours the node flag).
     // SAFETY: fresh node, not yet attached.
     unsafe { node::set_hidden(n, true) };
+    if matches!(inst.kind, InstanceKind::Hull { .. }) {
+        // Its ModelParameters.w is the outline push: the slot's AUX word
+        // (the wipe line) hides it instead (frame_board module doc).
+        // SAFETY: fresh node, not yet attached.
+        unsafe { node::set_aux_role_hull(n) };
+    }
     if !scene_graph::attach_under_root(n) {
         // SAFETY: never attached — our own dtor path is the only owner.
         unsafe { node::destroy_unattached(n) };
@@ -1697,7 +2177,7 @@ fn build_one(
             inst.model_name
         );
         inst.status = InstanceStatus::Skipped;
-        return false;
+        return (false, false);
     }
     inst.node = n as usize;
     inst.item = item_ptr;
@@ -1705,7 +2185,132 @@ fn build_one(
     inst.textures_pending = ts.still_default;
     inst.attached_at = Some(Instant::now());
     inst.status = InstanceStatus::Built;
-    true
+    (true, wiped)
+}
+
+/// A Winx body's joint-bound effect pools `(bank, spec)`: the wing
+/// sparkles (with both wing tips), and — on a twin — the transformation
+/// effect.
+fn winx_pool_specs(w: &WinxBody, twin: bool) -> Vec<(u8, FxSpec)> {
+    let mut out = Vec::new();
+    let mut add = |bank: u8, fx: Option<&Arc<WinxFx>>| {
+        let Some(fx) = fx else {
+            return;
+        };
+        for k in fx
+            .layout
+            .pools_of(chara_fx::PLAYER)
+            .into_iter()
+            .take(flight_fx::MAX_POOLS)
+        {
+            let (Some(p), Some(Some(bones))) = (fx.layout.pools.get(k), fx.pool_bones.get(k))
+            else {
+                continue;
+            };
+            out.push((
+                bank,
+                FxSpec {
+                    model_name: p.model.clone(),
+                    bone_count: *bones,
+                },
+            ));
+        }
+    };
+    if twin {
+        add(CHARA_BANK_CHENGE, w.chenge.as_ref());
+    }
+    if w.wing_tips.is_some() {
+        add(CHARA_BANK_WING, w.wing.as_ref());
+    }
+    out
+}
+
+/// The `JointFx` of one bank over exactly the pools `winx_pool_specs` kept
+/// (the layout's pool order; a skipped pool is dropped from both).
+fn winx_joint_fx(fx: &WinxFx, instances: usize, seed: u32) -> Option<chara_fx::JointFx> {
+    let mut j = chara_fx::JointFx::new(&fx.teb, &fx.layout, 0, instances, seed)?;
+    let keep: Vec<bool> = j
+        .pools
+        .iter()
+        .map(|&k| matches!(fx.pool_bones.get(k), Some(Some(_))))
+        .collect();
+    let frames = std::mem::take(&mut j.frames);
+    let (pools, frames): (Vec<usize>, Vec<_>) = j
+        .pools
+        .iter()
+        .copied()
+        .zip(frames)
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(pf, _)| pf)
+        .unzip();
+    j.pools = pools;
+    j.frames = frames;
+    (!j.pools.is_empty()).then_some(j)
+}
+
+/// Dancer `i`'s Winx runtime at session build.
+fn winx_run(d: &ParsedDancer, i: usize, seed: u32) -> WinxRun {
+    let s = seed ^ (i as u32).wrapping_mul(0x27D4_EB2F);
+    let wing = |w: &WinxBody, salt: u32| {
+        w.wing_tips?;
+        winx_joint_fx(w.wing.as_deref()?, 2, s ^ salt)
+    };
+    WinxRun {
+        dyn_body: d.winx.dyn_rig.as_ref().map(dynbones_logic::State::new),
+        dyn_twin: d
+            .twin
+            .as_ref()
+            .and_then(|t| t.body.winx.dyn_rig.as_ref())
+            .map(dynbones_logic::State::new),
+        wing_body: wing(&d.winx, 0x5749_4E47),
+        wing_twin: d
+            .twin
+            .as_ref()
+            .and_then(|t| wing(&t.body.winx, 0x5457_494E)),
+        chenge: d
+            .twin
+            .as_ref()
+            .and_then(|t| winx_joint_fx(t.body.winx.chenge.as_deref()?, 1, s ^ 0x4348_4E47)),
+        ..WinxRun::default()
+    }
+}
+
+/// One INFO line describing what the Winx extras of a scene carry (`None`
+/// when there are none).
+fn winx_summary(parsed: &Parsed) -> Option<String> {
+    let mut parts = Vec::new();
+    for (i, d) in parsed.dancers.iter().enumerate() {
+        let w = &d.winx;
+        let mut f = Vec::new();
+        if let Some(r) = w.dyn_rig.as_ref() {
+            f.push(format!(
+                "{} dynamic bone(s) / {} collider(s)",
+                r.bones.len(),
+                r.boxes.len()
+            ));
+        }
+        if w.material_clip.is_some() {
+            f.push("kira loop".to_string());
+        }
+        if w.wing_tips.is_some() && w.wing.is_some() {
+            f.push("wing sparkles".to_string());
+        }
+        if let Some(t) = d.twin.as_ref() {
+            f.push(format!(
+                "twin {} ({} dynamic bone(s), lift {:.3} m, {} clip(s) retargeted, event camera {})",
+                t.body.key,
+                t.body.winx.dyn_rig.as_ref().map_or(0, |r| r.bones.len()),
+                t.lift,
+                t.clips.len(),
+                if w.camera.is_some() { "yes" } else { "no" }
+            ));
+        }
+        if !f.is_empty() {
+            parts.push(format!("dancer {} {}: {}", i + 1, d.key, f.join(", ")));
+        }
+    }
+    (!parts.is_empty()).then(|| format!("winx -- {}", parts.join(" | ")))
 }
 
 /// The take-off's length when its clip did not parse (the leap then lands
