@@ -7,12 +7,20 @@
 //! Also hooks `kernel32!GetLongPathNameA` to work around a hard-coded 128‑byte
 //! buffer AVS uses internally; long ifs‑in‑arc cache paths can blow past it
 //! and AVS doesn't fall through to `CreateFileA`. See `hook_get_long_path_name_a`.
+//!
+//! The open/read pair also carries the StepMania progressive-bank reads
+//! (fd → watermark handle; see "In-flight (progressive) reads" below).
 
 use retour::GenericDetour;
 use std::ffi::{CStr, CString};
 use std::panic::AssertUnwindSafe;
 use std::ptr::addr_of;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use crate::services::stepmania::progressive::{self as sm_progressive, ProgressiveFile};
+use crate::services::stepmania::progressive_logic::{self, FdCursor, Poll};
 use crate::{log_info, log_warn};
 
 use super::arc_handler;
@@ -22,6 +30,294 @@ use super::mod_paths;
 use super::ramfs_demangler;
 use super::xml_merger;
 use super::{avs_version, config};
+
+// ── Open/read thread diagnostics (`layeredfs.verbose` only) ──────────
+//
+// Which thread the FileManager uses to open and read per-song assets decides
+// whether a provider may ever block inside the open hook (StepMania packs
+// E2). Latched from the config at hook install so the read hot path pays one
+// atomic load when the diagnostics are off.
+static DIAG_THREADS: AtomicBool = AtomicBool::new(false);
+/// fds whose first read is still awaited → asset family label.
+static DIAG_PENDING_READS: Mutex<Vec<(AvsFile, &'static str)>> = Mutex::new(Vec::new());
+
+/// Asset families whose open/read threads are of interest.
+fn diag_family(norm: &str) -> Option<&'static str> {
+    let lower = norm.to_ascii_lowercase();
+    if lower.starts_with("mdb_apx/ssq/") {
+        Some("ssq")
+    } else if lower.starts_with("sound/win/dance/") {
+        Some("dance-bank")
+    } else if lower.starts_with("arc/jacket/") {
+        Some("jacket")
+    } else if lower.starts_with("arc/thumbnail/") {
+        Some("thumbnail")
+    } else {
+        None
+    }
+}
+
+fn diag_thread_tag() -> String {
+    let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let render = crate::services::widget_renderer::render_thread_id();
+    format!(
+        "tid={} render={}",
+        tid,
+        match render {
+            Some(r) if r == tid => "yes",
+            Some(_) => "no",
+            None => "unknown",
+        }
+    )
+}
+
+fn diag_note_open(norm: &str, fd: AvsFile) {
+    if !DIAG_THREADS.load(Ordering::Relaxed) || fd < 0 {
+        return;
+    }
+    let Some(family) = diag_family(norm) else {
+        return;
+    };
+    log_info!(
+        "LayeredFS[diag]: open {} family={} fd={} {}",
+        norm,
+        family,
+        fd,
+        diag_thread_tag()
+    );
+    if let Ok(mut pending) = DIAG_PENDING_READS.lock() {
+        pending.retain(|(f, _)| *f != fd);
+        if pending.len() < 64 {
+            pending.push((fd, family));
+        }
+    }
+}
+
+fn diag_note_first_read(fd: AvsFile, nbytes: usize) {
+    if !DIAG_THREADS.load(Ordering::Relaxed) {
+        return;
+    }
+    let family = match DIAG_PENDING_READS.lock() {
+        Ok(mut pending) => match pending.iter().position(|(f, _)| *f == fd) {
+            Some(i) => pending.swap_remove(i).1,
+            None => return,
+        },
+        Err(_) => return,
+    };
+    log_info!(
+        "LayeredFS[diag]: first read family={} fd={} nbytes={} {}",
+        family,
+        fd,
+        nbytes,
+        diag_thread_tag()
+    );
+}
+
+// ── In-flight (progressive) reads ────────────────────────────────────
+//
+// StepMania's gameplay bank is served while it is still being written
+// (`stepmania::progressive`, design §4.8 item 3): the open hook records
+// `fd → handle` when the redirected path is a registered progressive file,
+// and the read hook holds a read of `[cursor, cursor + n)` until the
+// writer's watermark covers it (or the writer is done), bounded at 5 s —
+// then the read passes through (zeros from the pre-sized file = brief
+// silence, never a hang). No new detours: open and read are already hooked;
+// lseek / close / fstat stay unhooked — the per-fd cursor is advanced by what
+// each read returned, which matches the one reader this exists for (the
+// FileManager's single I/O worker streams the XWB sequentially in 1 MiB
+// chunks, cabinet fact E2), and an entry is dropped when the file is done
+// and fully read, or when the same fd value is opened again (closed and
+// reused). The quiet path costs one relaxed atomic load per read.
+
+struct ProgressiveFd {
+    file: Arc<ProgressiveFile>,
+    cursor: FdCursor,
+    warned: bool,
+}
+
+static PROGRESSIVE_FDS: Mutex<Vec<(AvsFile, ProgressiveFd)>> = Mutex::new(Vec::new());
+/// `PROGRESSIVE_FDS.len()` mirror — the read hook's fast path.
+static PROGRESSIVE_LIVE: AtomicUsize = AtomicUsize::new(0);
+static PROGRESSIVE_OPEN_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+/// Longest a single read waits for the writer.
+const PROGRESSIVE_READ_BOUND_MS: u64 = 5_000;
+const PROGRESSIVE_POLL: Duration = Duration::from_millis(2);
+/// Longest the open-failure fallback waits for the writer to finish.
+const PROGRESSIVE_OPEN_FALLBACK: Duration = Duration::from_secs(10);
+
+fn progressive_summary(fd: AvsFile, e: &ProgressiveFd, why: &str) {
+    log_info!(
+        "LayeredFS[progressive]: '{}' fd {} {} -- {} wait(s), {} ms total, {} KiB read{}",
+        e.file.basename,
+        fd,
+        why,
+        e.cursor.waits,
+        e.cursor.waited_ms,
+        e.cursor.pos / 1024,
+        if e.cursor.timed_out {
+            ", PASSED THROUGH at least once"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Open hook: record the fd when `mod_path` is a registered progressive
+/// file; drop a stale entry when its fd value is reused.
+fn progressive_note_open(mod_path: Option<&str>, fd: AvsFile) {
+    if fd < 0 {
+        return;
+    }
+    let registered = mod_path.and_then(sm_progressive::lookup_path);
+    if registered.is_none() && PROGRESSIVE_LIVE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    if let Some(i) = table.iter().position(|(f, _)| *f == fd) {
+        let (_, old) = table.swap_remove(i);
+        progressive_summary(fd, &old, "fd reused");
+    }
+    if let Some(file) = registered {
+        // Done files are inert for waits; the game streams one bank at a
+        // time, so an older done entry is a closed fd we never saw close.
+        let mut i = 0;
+        while i < table.len() {
+            if table[i].1.file.is_done() {
+                let (f, old) = table.swap_remove(i);
+                progressive_summary(f, &old, "superseded");
+            } else {
+                i += 1;
+            }
+        }
+        let p = file.progress();
+        log_info!(
+            "LayeredFS[progressive]: fd {} -> '{}' {} (watermark {} KiB of {} KiB, tail {}) {}",
+            fd,
+            file.basename,
+            if p.done { "complete" } else { "in progress" },
+            p.watermark / 1024,
+            p.planned_len / 1024,
+            if p.tail_ready { "ready" } else { "pending" },
+            diag_thread_tag()
+        );
+        table.push((
+            fd,
+            ProgressiveFd {
+                file,
+                cursor: FdCursor::new(),
+                warned: false,
+            },
+        ));
+    }
+    PROGRESSIVE_LIVE.store(table.len(), Ordering::Release);
+}
+
+/// Read hook, before the original: hold the read until the writer covers
+/// it. Never holds the table lock while sleeping.
+fn progressive_before_read(fd: AvsFile, nbytes: usize) {
+    let (file, cursor) = {
+        let Ok(table) = PROGRESSIVE_FDS.lock() else {
+            return;
+        };
+        match table.iter().find(|(f, _)| *f == fd) {
+            Some((_, e)) => (e.file.clone(), e.cursor.pos),
+            None => return,
+        }
+    };
+    let started = Instant::now();
+    let mut waited = false;
+    let timed_out = loop {
+        let progress = file.progress();
+        match progressive_logic::poll(
+            cursor,
+            nbytes,
+            &progress,
+            started.elapsed().as_millis() as u64,
+            PROGRESSIVE_READ_BOUND_MS,
+        ) {
+            Poll::Ready => break false,
+            Poll::TimedOut => break true,
+            Poll::Wait => {
+                waited = true;
+                std::thread::sleep(PROGRESSIVE_POLL);
+            }
+        }
+    };
+    if !waited {
+        return;
+    }
+    let ms = started.elapsed().as_millis() as u64;
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    if let Some((_, e)) = table.iter_mut().find(|(f, _)| *f == fd) {
+        e.cursor.note_wait(ms, timed_out);
+        if timed_out && !e.warned {
+            e.warned = true;
+            log_warn!(
+                "LayeredFS[progressive]: '{}' fd {} read of {} KiB at {} KiB waited {} ms for the writer (watermark {} KiB) -- passing through; expect brief silence (further timeouts on this fd silent)",
+                e.file.basename,
+                fd,
+                nbytes / 1024,
+                cursor / 1024,
+                ms,
+                file.watermark.load(Ordering::Acquire) / 1024
+            );
+        }
+    }
+}
+
+/// Read hook, after the original: advance the cursor; drop the entry once
+/// the file is done and fully read.
+fn progressive_after_read(fd: AvsFile, returned: usize, requested: usize) {
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    let Some(i) = table.iter().position(|(f, _)| *f == fd) else {
+        return;
+    };
+    let e = &mut table[i].1;
+    e.cursor.advance(returned, requested);
+    if progressive_logic::entry_finished(&e.cursor, &e.file.progress()) {
+        let (f, old) = table.swap_remove(i);
+        progressive_summary(f, &old, "finished");
+        PROGRESSIVE_LIVE.store(table.len(), Ordering::Release);
+    }
+}
+
+/// AVS refused to open a progressive `.part` (most plausibly a share-mode
+/// conflict with our writer's handle). Fall back to Step 6's behaviour:
+/// wait for the writer to finish (bounded; never on the render thread),
+/// move the file into place and open that.
+unsafe fn progressive_open_fallback(
+    original: &GenericDetour<FnAvsFsOpen>,
+    file: &ProgressiveFile,
+    mode: u16,
+    flags: i32,
+) -> AvsFile {
+    if !PROGRESSIVE_OPEN_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+        log_warn!(
+            "LayeredFS[progressive]: open of '{}' in progress was refused -- waiting for the encode to finish instead (stage-load stall; report this)",
+            file.basename
+        );
+    }
+    if !crate::services::widget_renderer::is_render_thread() {
+        let deadline = Instant::now() + PROGRESSIVE_OPEN_FALLBACK;
+        while !file.is_done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if !file.is_done() {
+        return -1;
+    }
+    let _ = sm_progressive::try_rename(file);
+    match CString::new(file.serve_path()) {
+        Ok(cpath) => original.call(cpath.as_ptr(), mode, flags),
+        Err(_) => -1,
+    }
+}
 
 // ── Static detours ───────────────────────────────────────────────────
 
@@ -74,6 +370,26 @@ pub unsafe fn orig_fs_close(handle: AvsFile) {
 pub unsafe fn orig_fs_fstat(handle: AvsFile, st: *mut AvsStat) -> i32 {
     let avs = super::get_avs_fns();
     (avs.avs_fs_fstat)(handle, st)
+}
+pub unsafe fn orig_fs_lstat(name: *const i8, st: *mut AvsStat) -> i32 {
+    match get_hook!(HOOK_FS_LSTAT) {
+        Some(hook) => hook.call(name, st),
+        None => (super::get_avs_fns().avs_fs_lstat)(name, st),
+    }
+}
+
+/// Size + mtime of an AVS path (no read), for cache fingerprints of game
+/// files that host `std::fs::metadata` cannot see. `None` if AVS has no such
+/// file.
+pub fn avs_stat(path: &str) -> Option<(u64, i64)> {
+    let cpath = CString::new(path).ok()?;
+    let mut st = AvsStat::default();
+    let rc = unsafe { orig_fs_lstat(cpath.as_ptr(), &mut st) };
+    if rc < 0 {
+        return None;
+    }
+    let size = (u64::from(st.hi_filesize) << 32) | u64::from(st.filesize);
+    Some((size, st.st_mtime))
 }
 
 // ── Hook callback implementations ───────────────────────────────────
@@ -139,9 +455,12 @@ unsafe fn fs_open_body(
         }
         match CString::new(mod_path.as_str()) {
             Ok(cpath) => {
-                let r = original.call(cpath.as_ptr(), mode, flags);
+                let mut r = original.call(cpath.as_ptr(), mode, flags);
                 if r < 0 {
                     warn_redirected_open_failed(&path, mod_path, r);
+                    if let Some(pf) = sm_progressive::lookup_path(mod_path) {
+                        r = progressive_open_fallback(original, &pf, mode, flags);
+                    }
                 }
                 r
             }
@@ -153,6 +472,8 @@ unsafe fn fs_open_body(
 
     // Feed demangler for .ifs files
     ramfs_demangler::on_fs_open(&path, result);
+    diag_note_open(&norm, result);
+    progressive_note_open(replacement.as_deref(), result);
 
     // Per-song SSQ-open observer (Per-Song Judgement Offsets, D21): every
     // stage load — normal, course/dan, training — opens the song's chart as
@@ -271,9 +592,19 @@ unsafe extern "C" fn hook_avs_fs_read(context: AvsFile, bytes: *mut u8, nbytes: 
         return 0;
     };
     std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Progressive-bank fds first: one relaxed load when none is open.
+        let progressive = PROGRESSIVE_LIVE.load(Ordering::Relaxed) != 0;
+        if progressive {
+            progressive_before_read(context, nbytes);
+        }
         // Feed demangler with buffer address
         ramfs_demangler::on_fs_read(context, bytes as usize);
-        original.call(context, bytes, nbytes)
+        diag_note_first_read(context, nbytes);
+        let got = original.call(context, bytes, nbytes);
+        if progressive {
+            progressive_after_read(context, got, nbytes);
+        }
+        got
     }))
     .unwrap_or_else(|_| {
         log_warn!("LayeredFS: panic in avs_fs_read hook — serving original read");
@@ -664,6 +995,7 @@ fn install_get_long_path_name_a() -> bool {
 /// Install all AVS filesystem hooks plus the GetLongPathNameA workaround.
 /// Call after AVS resolution and mod path scanning.
 pub fn install_hooks() -> bool {
+    DIAG_THREADS.store(config().verbose, Ordering::Relaxed);
     let avs = super::get_avs_fns();
     let success = crate::core::hook_transaction::install_all_or_rollback(
         5,

@@ -40,10 +40,10 @@
 //!
 //! Hence three tiers of state:
 //!   * Per-song taint (`AUTOPLAY_TAINT`, `QUICK_FAIL_TAINT`,
-//!     `TRAINING_TAINT`, `ASSIST_TICK_TAINT`) — gates the per-stage save;
-//!     reset at each gameplay entry / quick restart (the level-written
-//!     mirrors — autoplay and assist-tick — are refreshed by their own mods
-//!     instead of cleared here).
+//!     `TRAINING_TAINT`, `ASSIST_TICK_TAINT`, `INJECTED_SONG_TAINT`) — gates
+//!     the per-stage save; reset at each gameplay entry / quick restart (the
+//!     level-written mirrors — autoplay, assist-tick and the injected-song
+//!     flag — are refreshed by their own owners instead of cleared here).
 //!   * Session-sticky taint (`SESSION_TAINTED`, read via [`logout_taint`]) —
 //!     marks the side's logout save as needing sanitisation; reset only at
 //!     card-in / new session.
@@ -121,6 +121,17 @@ static AUTOPLAY_TAINT: [AtomicBool; SIDES] = [AtomicBool::new(false), AtomicBool
 /// sides at once, so this single flag forces suppression of the per-stage save
 /// for *both* sides. Set when the gesture fires; cleared at gameplay (re)entry.
 static QUICK_FAIL_TAINT: AtomicBool = AtomicBool::new(false);
+
+/// Injected-song (StepMania pack) taint for the current song. Level-written
+/// by `services::stepmania::taint` from the dance-bank request stream: the
+/// game opens `sound/win/dance/<b>.xwb` for gameplay exactly once per stage
+/// (`DancePlaySequence::onSetup`), so an injected basename sets this and a
+/// stock basename clears it. Global (both sides play the same song). NOT
+/// cleared by [`reset_song_taint`]: that reset also fires on an in-place
+/// quick restart, which never re-opens the bank — a per-song clear would
+/// launder the taint on a restart of an injected song. Cleared by
+/// [`reset_session`] like the other mirrors.
+static INJECTED_SONG_TAINT: AtomicBool = AtomicBool::new(false);
 
 /// Per-side Training Mode taint for the current song (design R5). One-way and
 /// idempotent: set by the training mod whenever the session alters the played
@@ -714,6 +725,19 @@ pub fn set_training_taint(side: usize) {
     TRAINING_TAINT[side].store(true, Ordering::Release);
 }
 
+/// Level-write the injected-song taint (see [`INJECTED_SONG_TAINT`]): `true`
+/// when the song being loaded for gameplay is a StepMania-pack injection,
+/// `false` when it is stock. Called by the pack loader's bank resolver.
+pub fn set_injected_song_taint(on: bool) {
+    INJECTED_SONG_TAINT.store(on, Ordering::Release);
+}
+
+/// Whether the current song is a StepMania-pack injection (per the last
+/// gameplay bank request).
+pub fn is_injected_song_tainted() -> bool {
+    INJECTED_SONG_TAINT.load(Ordering::Acquire)
+}
+
 /// Mirror Assist Tick's per-side per-song enable latch (the autoplay model —
 /// level-written true or false for both sides at every GAMEPLAY entry; see
 /// [`ASSIST_TICK_TAINT`] for why [`reset_song_taint`] must not touch it).
@@ -795,14 +819,16 @@ pub fn reset_session() {
     for side in ASSIST_TICK_TAINT.iter() {
         side.store(false, Ordering::Release);
     }
+    INJECTED_SONG_TAINT.store(false, Ordering::Release);
 }
 
 // ── Taint readers (called by the ess save_sender trampoline) ─────────
 
 /// Per-stage save (`savekind == STAGE`): is this side's just-played song
-/// tainted? True if a quick-fail fired this song, this side had Autoplay
-/// enabled, a training session altered the song for this side, this side
-/// played with Assist Tick claps enabled, or this side has outstanding
+/// tainted? True if a quick-fail fired this song, the song is a StepMania-pack
+/// injection, this side had Autoplay enabled, a training session altered the
+/// song for this side, this side played with Assist Tick claps enabled, or
+/// this side has outstanding
 /// rate-tainted stage saves (pending ledger entries or the overflow
 /// fail-closed flag — the blanket backstop that keeps a mis-decoded rate
 /// save from slipping through while any rate state is unresolved).
@@ -814,6 +840,7 @@ pub fn is_stage_suppressed(side: usize) -> bool {
         return false;
     }
     QUICK_FAIL_TAINT.load(Ordering::Acquire)
+        || INJECTED_SONG_TAINT.load(Ordering::Acquire)
         || autoplay_taint_effective(side)
         || TRAINING_TAINT[side].load(Ordering::Acquire)
         || ASSIST_TICK_TAINT[side].load(Ordering::Acquire)

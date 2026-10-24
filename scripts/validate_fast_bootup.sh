@@ -26,7 +26,7 @@ note() { echo "[*] $*"; }
 MOD_SRC="$REPO_ROOT/src/mods/fast_bootup"
 MODULES=(cache.rs)
 # Later Step 1 tasks mount here as they land.
-for optional in replay.rs plan.rs; do
+for optional in replay.rs plan.rs quarantine.rs; do
   if [[ -r "$MOD_SRC/$optional" ]]; then
     MODULES+=("$optional")
   fi

@@ -66,6 +66,19 @@ pub fn resolve(game_path: &str) -> Identity {
     cache::resolve_identity(mod_hit, stock_hit)
 }
 
+/// The host path backing a registered game path — the same precedence as
+/// [`resolve`] (mod folder / LayeredFS resolvers, then stock) — or `None`.
+pub fn resolve_path(game_path: &str) -> Option<String> {
+    let rel = cache::normalize_ssq_rel(game_path)?;
+    if let Some(p) = mod_paths::find_first_modfile(&rel) {
+        if stat_file(&p).is_some() {
+            return Some(p);
+        }
+    }
+    let stock_path = format!("data/{}", rel);
+    stat_file(&stock_path).map(|_| stock_path)
+}
+
 /// `(size, mtime_secs)` for a host path, or `None` if it can't be stat'd.
 fn stat_file(path: &str) -> Option<(u64, u64)> {
     let md = std::fs::metadata(path).ok()?;

@@ -67,7 +67,7 @@
 //! - `avslz` — AVSLZ compression; `cache_hasher` — cache invalidation hashes.
 
 pub(crate) mod afplist_ext;
-pub(super) mod arc_handler;
+pub(crate) mod arc_handler;
 pub(crate) mod atlas_cloner;
 pub(super) mod avs_resolver;
 pub(crate) mod avslz;

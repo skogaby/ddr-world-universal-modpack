@@ -1,0 +1,24 @@
+[package]
+name = "sm-pack-check"
+version = "0.1.0"
+edition = "2021"
+description = "Dry-run StepMania → DDR World conversion: mounts the hook DLL's pure core/sm, core/ssq, core/audio, core/sync and core/xact code, converts a song or pack folder to SSQ + XSB + XWB in a scratch directory and prints a per-song verdict."
+publish = false
+
+# Not a member of the root package's build — a plain native crate (like
+# `tools/bot_sim` and `updater/`) so `cargo run` / `cargo test` work on the
+# maintainer's host without the DLL's Windows-only dependencies.
+[workspace]
+
+[[bin]]
+name = "sm-pack-check"
+path = "src/main.rs"
+
+[dependencies]
+encoding_rs = "0.8"
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "vorbis", "wav", "pcm", "ogg"] }
+# core/sync (auto-sync onset analysis), as the DLL.
+rustfft = "6"
+
+[profile.release]
+opt-level = 3

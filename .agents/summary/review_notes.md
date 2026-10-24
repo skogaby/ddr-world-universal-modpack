@@ -10,6 +10,7 @@ The generated documents were cross-checked against each other and against the so
 - **Hook ownership** in `interfaces.md` matches a crate-wide grep of `GenericDetour` / `install_enabled`. The crate uses no `RawDetour` or `static_detour`.
 - **Config sections** in `data_models.md` match the structs in `src/mods/config.rs` and the section writers found by grepping `save_json_key` callers.
 - **Host-test claims** were verified on an arm64 host: plain `cargo test` of the DLL crate fails compiling `retour`. The previous AGENTS.md said `cargo test` ran host tests; that holds only on x86_64 hosts, and it was not verified there.
+- **StepMania loader (targeted refresh, 2026-10-24):** the module `//!` headers of `services/stepmania/*`, `core/{sm,ssq,audio,sync,art}`, `services/{ssq_path,wheel_cards,scroll_remap}.rs` and the `avs_layeredfs` extension points were taken as authoritative over the planning design where they differ. Differences recorded here rather than in the design: the auto-sync is measure-only (the design's SSQ `shift_seconds` rewrite was built and then superseded — the delta is applied through the judgement offset and frozen per session); the injected taint is level-written from the full-bank request stream and cleared by `reset_session`, not `reset_song_taint`; `exclude_from_all_music` defaults `true` (design text said `false`); the `startup.arc` fingerprint callback also performs the folder/series registration; `injected_entries()` falls back to the fingerprint snapshot on a warm boot whose arc cache skipped the transform; no per-mod splash line ships.
 
 No contradictions remain between the generated files.
 
@@ -21,6 +22,7 @@ The stale and thin module docs from the previous pass have been rewritten. Every
 - **Mod crate files:** `src/mods/mod.rs`, `src/mods/config.rs`.
 - **Services:** input_manager, scene_manager, series_filter_scroll, widget_renderer, audio_sync_diag, avs_layeredfs, song_rate (+ clock_patch, wavebank_hook, xact_runtime).
 - **Stale comments:** `src/lib.rs` (the step-8 config comment, the duplicate "10" label, the signature count) and the pattern count in `resolve_all`'s docstring.
+- **StepMania pass (2026-10-24):** `//!` headers for every file under `services/stepmania/`, `core/{sm,ssq/writer,ssq/check,audio,sync,art}`, `core/xact/{song_bank,xsb}.rs`, `services/{ssq_path,wheel_cards,scroll_remap}.rs`, `mods/stepmania_packs/mod.rs`, `mods/fast_bootup/mod.rs` (quarantine, preflight, E8) and `mods/per_song_judgement_offsets/compose.rs` were written with the feature and checked against the source for this refresh; `docs/stepmania_runtime_packs_feasibility.md` carries a "What shipped" section → module map.
 
 ## Codebase Issues Observed (not fixed — code changes, left to the maintainer)
 
@@ -36,6 +38,17 @@ The stale and thin module docs from the previous pass have been rewritten. Every
 | `skip_intros` | Never checks `scene_manager::redirect_repair_available()`; whether the title timeout needs it is unverified. |
 | power_user_statistics / webui_options | Re-enabling either at runtime re-registers its option ids (probable `Duplicate` WARNs). |
 | LayeredFS | `GetLongPathNameA` is installed best-effort, outside the all-or-nothing libavs transaction. The `_cache` path is hardcoded to `./data_mods/_cache` regardless of `layeredfs.mod_folder`. |
+| `fast_bootup` cache verifier | Loses its race against the boot pass under host load (observed on three cabinet runs): the verifier has not published its replay index when the plan is built, so the boot falls back to a full stock pass. Not a StepMania defect — a follow-up candidate: a cheaper stat sweep or an earlier start. |
+
+**Accepted limitations recorded for the StepMania loader** (maintainer decisions, not bugs)
+
+- `<lastplay><mcode>` carries the injected mcode and `mod_judge_offsets` lists tuned basenames; both are non-score profile fields and are left alone.
+- `auto_sync: false` has nothing to undo — measurement never writes a song file; it only stops the sweep, the on-decide thread and the provider.
+- E8 (an extreme injected chart shrinking stock radars through the boot-computed maxima) was refuted on the 20260721 build — the maxima are reset to constants at scene 7 and every new game; the radar exclusion ships anyway as cheap insurance.
+- The estimator refuses roughly a quarter of ITG1-style charts with `halves_disagree`; those songs play as authored.
+- With split discovery active, an unknown basename resolves to `Choice::Base`, not the stock original (the discovery mod's documented behaviour); `chart_length` opens only `<b>.ssq`, so split-timing injected songs show no wheel LENGTH.
+- Per-chart `#SCROLLS`/`#SPEEDS` that differ between declared charts fall back to the song-level tables (the renderer seam has no difficulty context); a negative scroll factor drops later notes from the draw because the collector breaks at the first note past the bound.
+- An unclosed hold head or orphan tail rejects the chart (StepMania keeps the head as a tap); `Expert` as a simfile difficulty name maps to Challenge.
 
 **Stale user-facing strings and item docs**
 
@@ -81,3 +94,4 @@ The stale and thin module docs from the previous pass have been rewritten. Every
 2. Sweep the remaining step-journal wording in submodule/item docs.
 3. Consider a short `docs/README.md` index; the theme buckets in the analysis are a ready starting point.
 4. Keep feature-specific detail out of AGENTS.md. Cross-cutting rules belong there, mechanisms belong in module docs, and investigations belong in `docs/`.
+5. Follow up on the fast-bootup verifier race (see the issues table) — it costs a full stock boot pass on loaded hosts independent of the StepMania loader.

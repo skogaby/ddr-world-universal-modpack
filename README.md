@@ -153,6 +153,9 @@ All the cosmetic customizations normally locked behind Konami's web portal — a
 ### Fast Bootup
 **DDR A3-style instant bootup mod for DDR World**. This is accomplished by caching all of the data that DDR World normally analyzes from all charts during every bootup cycle. If a chart changes, the cache is updated, so the chart metadata never goes stale from an update.
 
+### StepMania Packs
+Drop StepMania packs into `stepmania/Songs/<Pack>/<Song>/` and play them on the cabinet — no conversion tools, no repacking. At boot the modpack converts every `.sm`/`.ssc` chart to the game's own chart format, the OGG/MP3/WAV audio to the game's streaming bank format and the jacket/banner/background art to wheel thumbnails and jackets, all into a cache the game reads like stock content. The songs appear in a **STEPMANIA** folder (and VERSION filter entry), with proper jackets, previews, difficulty panels, BPM readouts and native titles where the game's fonts can draw them. Mines and ITG-style `#SPEEDS`/`#SCROLLS` gimmicks are reproduced; charts with warps or negative BPMs are left out rather than mis-played. Each song is auto-measured against its own audio and brought onto DDR World's timing convention through the game's per-song judgement offset (ITG packs are authored ~9 ms off DDR's), so they feel right at ×1.0 without hand tuning. Scores for these songs are **never submitted** to a server. See `stepmania/Songs/README.txt` in the release for the details and limits.
+
 ### StepManiaX Cabinet Support
 Native support for running on StepManiaX cabinets, with no configuration needed. Stage inputs and lights, as well as emulation of DDR Gold cabinet lights, are fully supported. There's even a touchscreen overlay to give you access to menu buttons, pinpads, and a card-in button.
 
@@ -204,6 +207,7 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **WebUI Options** | Web-portal cosmetics in-game with live previews, plus weight/calorie profile settings. |
 | **Split SSQ Auto-Discovery** | Finds split chart files (`<song>_N.ssq`) on disk instead of trusting the game's hardcoded per-version list — newer chart data loads correctly on older game builds. |
 | **Note Types Expansion** | New note types for custom charts — ITG-style **mines** are fully supported. |
+| **StepMania Packs** | Plays StepMania packs from `stepmania/Songs/` as native songs: charts, audio and art converted at boot into a cache, a STEPMANIA folder/series, mines and scroll gimmicks, auto-sync through the per-song judgement offset, score submission always suppressed. See above. |
 | **Series Expansion** | Custom VERSION filter categories for custom song packs (config-driven). |
 | **Improved Song Title Sorting** | The song-select FILTER menu's MUSIC TITLE list gets one entry per letter — A to Z five per row, then OTHER — instead of three-letter groups, ahead of the unchanged kana lines. Pick one letter to see only the songs that start with it. On by default. |
 | **Folder Expansion** | Custom genre folders in the song wheel (config-driven). A folder can be marked `exclude_from_all_music` so its songs (e.g. long versions) stay out of ALL MUSIC and only appear in their own folder. |
@@ -214,7 +218,7 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 
 ## Your Scores Are Safe
 
-The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. In a Versus Bot session the bot's side carries the same mark (it never reaches the server) while your own side is saved exactly as in any stock play. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
+The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. In a Versus Bot session the bot's side carries the same mark (it never reaches the server) while your own side is saved exactly as in any stock play. StepMania-pack songs are always marked: the server never learns they exist. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
 
 ## The Game Identifies Itself as a Modded Build
 
@@ -243,6 +247,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
+| `stepmania_packs` | StepMania Packs: `exclude_from_all_music` (default `true` — songs only in the STEPMANIA folder), `audio_cache_mb` (converted-bank cache budget, default 1024), `auto_sync` (default `true`), `index_timeout_s` (how long the first boot waits for conversion before injecting what finished, default 30 — roughly 1,200 songs), `gimmick_policy` (`hide_chart`), `scroll_gimmicks` (default `true`). The mod toggle applies at the next launch |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
 | `background_dancers` | Background Dancers: `style` (`stock` / `lit` / `cel` — LIGHTING STYLE), `outlines` (SCENE OUTLINES), `bpm_sync` (default `true` — dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats), `stop_slow` (default `true` — 1/12 speed through a chart STOP, as in DDR A3), `movie_mode` (`off` / `thumbnail` / `stage_screens` / `fullscreen` / `movie_only` — BACKGROUND MOVIES, default `stage_screens`, see above), `custom_content` (default `true` — also load the dancers/stages under `data_mods/custom_models/`, see above) and `big_head` (default `false` — BIG HEAD, every dancer's head at 3×). All seven are also rows under BACKGROUND DANCERS in the mod menu; the first five apply from the next song, `custom_content` at the next launch, `big_head` immediately. The former `outline_px` / `outline_px_stage` / `outline_style` / `outline_layer_colors` keys are ignored (the outline is Dancing Stage Unleashed's own) |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |

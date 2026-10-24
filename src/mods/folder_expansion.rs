@@ -16,6 +16,18 @@
 //! A missing section or a failed validation makes `init` return false, so the
 //! mod is not registered.
 //!
+//! ## Runtime registration
+//!
+//! Code may add folders before `init` with [`register_runtime_folder`]
+//! (`lib.rs` step 0' — the StepMania loader registers its STEPMANIA folder at
+//! [`lowest_free_bit`]). `load_config` appends the runtime entries after the
+//! operator's, so configured type ids stay stable, and synthesises a config
+//! when the section is absent; the merged list is validated as one. Runtime
+//! folders' art is looked up like any folder's, first under
+//! `data_mods/custom_folders/`, then in any LayeredFS mod folder
+//! (`<ifs>_ifs/tex/<name>.png`) — the StepMania set ships in
+//! `data_mods/stepmania_packs/`.
+//!
 //! ## Hooks and patches (all owned here)
 //!
 //! - **`folder_register`** detour — when the stock `folder_init` pass reaches
@@ -267,6 +279,142 @@ pub struct CustomFolderEntry {
 
 pub fn get_config() -> Option<&'static FolderConfig> {
     unsafe { (*std::ptr::addr_of!(FOLDER_CONFIG)).as_ref() }
+}
+
+// ── Runtime registration ────────────────────────────────────────────
+
+/// Lowest `bit_index` a runtime folder may take (bits 0–9 are the native
+/// genre folders).
+const FIRST_CUSTOM_BIT: u32 = 10;
+/// `<property>` is a u32 bitmask.
+const LAST_CUSTOM_BIT: u32 = 31;
+
+/// Folders registered by code before `init`, merged by `load_config`.
+static RUNTIME_FOLDERS: std::sync::Mutex<Vec<CustomFolderEntry>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn runtime_folders() -> Vec<CustomFolderEntry> {
+    RUNTIME_FOLDERS
+        .lock()
+        .map(|r| r.clone())
+        .unwrap_or_default()
+}
+
+/// `bit_index`es of the operator's `folder_expansion.custom_folders` (empty
+/// when the config store or the section is absent).
+fn configured_bits() -> Vec<u32> {
+    super::config::get()
+        .and_then(|cfg| cfg.folder_expansion.as_ref())
+        .map(|c| c.custom_folders.iter().map(|f| f.bit_index).collect())
+        .unwrap_or_default()
+}
+
+/// Register a custom folder from code. Call before the mod's `init` (the
+/// registry is read once, at `load_config`). Fails when the entry would not
+/// validate or its `bit_index` is already taken by the operator's config or
+/// an earlier registration.
+pub fn register_runtime_folder(entry: CustomFolderEntry) -> Result<(), String> {
+    validate_entry(&entry).map_err(|e| format!("runtime folder: {}", e))?;
+    if entry.key.is_empty() {
+        return Err("runtime folder: key is empty".to_string());
+    }
+    if entry.bit_index < FIRST_CUSTOM_BIT {
+        return Err(format!(
+            "runtime folder '{}': bit_index {} is a native genre bit",
+            entry.key, entry.bit_index
+        ));
+    }
+    let mut reg = RUNTIME_FOLDERS
+        .lock()
+        .map_err(|_| "runtime folder registry poisoned".to_string())?;
+    if configured_bits().contains(&entry.bit_index)
+        || reg.iter().any(|f| f.bit_index == entry.bit_index)
+    {
+        return Err(format!(
+            "runtime folder '{}': bit_index {} already in use",
+            entry.key, entry.bit_index
+        ));
+    }
+    if reg.iter().any(|f| f.key == entry.key) {
+        return Err(format!(
+            "runtime folder '{}': key already registered",
+            entry.key
+        ));
+    }
+    log_info!(
+        "FolderExpansion: runtime folder '{}' registered (bit_index={})",
+        entry.key,
+        entry.bit_index
+    );
+    reg.push(entry);
+    Ok(())
+}
+
+/// Lowest `bit_index` in 10..=31 used by neither the operator's config nor an
+/// already-registered runtime folder; `None` when all are taken.
+pub fn lowest_free_bit() -> Option<u32> {
+    let mut used = configured_bits();
+    used.extend(runtime_folders().iter().map(|f| f.bit_index));
+    lowest_free_bit_in(&used)
+}
+
+/// Pure core of [`lowest_free_bit`].
+fn lowest_free_bit_in(used: &[u32]) -> Option<u32> {
+    (FIRST_CUSTOM_BIT..=LAST_CUSTOM_BIT).find(|b| !used.contains(b))
+}
+
+/// The HIGHEST custom `<property>` bit (31 downwards to 10) used by neither
+/// the operator's config nor an already-registered runtime folder. Runtime
+/// features that must stay out of the way of operator-chosen folders (which
+/// conventionally start at bit 10) take their slot from this end.
+pub fn highest_free_bit() -> Option<u32> {
+    let mut used = configured_bits();
+    used.extend(runtime_folders().iter().map(|f| f.bit_index));
+    highest_free_bit_in(&used)
+}
+
+/// Pure core of [`highest_free_bit`].
+fn highest_free_bit_in(used: &[u32]) -> Option<u32> {
+    (FIRST_CUSTOM_BIT..=LAST_CUSTOM_BIT)
+        .rev()
+        .find(|b| !used.contains(b))
+}
+
+/// The config `init` works from: the operator's section with the runtime
+/// folders appended, or a section of just the runtime folders when the
+/// operator has none. `None` when there is nothing at all.
+fn merge_runtime_folders(
+    section: Option<FolderConfig>,
+    runtime: Vec<CustomFolderEntry>,
+) -> Option<FolderConfig> {
+    match section {
+        Some(mut config) => {
+            config.custom_folders.extend(runtime);
+            Some(config)
+        }
+        None if runtime.is_empty() => None,
+        None => Some(FolderConfig {
+            custom_folders: runtime,
+            hide_difficulty_pane: false,
+        }),
+    }
+}
+
+/// Per-entry validation shared by the config and runtime paths.
+fn validate_entry(entry: &CustomFolderEntry) -> Result<(), String> {
+    if entry.key.len() > SSO_MAX_LEN {
+        return Err(format!("key '{}' exceeds {} chars", entry.key, SSO_MAX_LEN));
+    }
+    if entry.voice_key.len() > SSO_MAX_LEN {
+        return Err(format!("voice_key exceeds {} chars", SSO_MAX_LEN));
+    }
+    if entry.bit_index > LAST_CUSTOM_BIT {
+        return Err(format!(
+            "bit_index {} > {}",
+            entry.bit_index, LAST_CUSTOM_BIT
+        ));
+    }
+    Ok(())
 }
 
 // ── Asset-generation cache ──────────────────────────────────────────
@@ -939,7 +1087,7 @@ fn generate_cloned_atlases(config: &FolderConfig, texlist_xml: &str, ifs_mod_pat
             .iter()
             .map(|donor| {
                 let new_name = donor.replace(SOURCE_KEY, &folder.key);
-                let png_path = format!("{}/{}.png", tex_dir, new_name);
+                let png_path = folder_art_path(&tex_dir, ifs_mod_path, &new_name);
                 (new_name, png_path)
             })
             .collect();
@@ -968,6 +1116,18 @@ fn generate_cloned_atlases(config: &FolderConfig, texlist_xml: &str, ifs_mod_pat
     if !combined_xml.is_empty() {
         write_merged_texturelist(ifs_mod_path, GEO_MOD_FOLDER, &combined_xml);
     }
+}
+
+/// Source PNG for folder texture `name`: the operator's
+/// `data_mods/custom_folders/<ifs>/tex/` copy when present, else the first
+/// LayeredFS mod folder shipping `<ifs>/tex/<name>.png` (runtime folders'
+/// art), else the `custom_folders` path (the cloner logs the miss).
+fn folder_art_path(tex_dir: &str, ifs_mod_path: &str, name: &str) -> String {
+    let local = format!("{}/{}.png", tex_dir, name);
+    if std::path::Path::new(&local).is_file() {
+        return local;
+    }
+    mod_paths::find_first_modfile(&format!("{}/tex/{}.png", ifs_mod_path, name)).unwrap_or(local)
 }
 
 /// Return every `<image name>` in `xml` whose name contains `substring`,
@@ -1088,26 +1248,30 @@ impl FolderExpansionMod {
     }
 
     fn load_config() -> Option<FolderConfig> {
-        match super::config::get() {
-            Some(cfg) => match cfg.folder_expansion.clone() {
-                Some(config) => {
-                    if let Some(err) = Self::validate_config(&config) {
-                        log_warn!("FolderExpansion: config validation failed — {}", err);
-                        return None;
-                    }
-                    log_info!(
-                        "FolderExpansion: loaded {} custom folder(s)",
-                        config.custom_folders.len()
-                    );
-                    Some(config)
-                }
-                None => {
-                    log_warn!("FolderExpansion: no folder_expansion config — mod disabled");
-                    None
-                }
-            },
+        let section = match super::config::get() {
+            Some(cfg) => cfg.folder_expansion.clone(),
             None => {
                 log_warn!("FolderExpansion: config store not available — mod disabled");
+                return None;
+            }
+        };
+        let runtime = runtime_folders();
+        let n_runtime = runtime.len();
+        match merge_runtime_folders(section, runtime) {
+            Some(config) => {
+                if let Some(err) = Self::validate_config(&config) {
+                    log_warn!("FolderExpansion: config validation failed — {}", err);
+                    return None;
+                }
+                log_info!(
+                    "FolderExpansion: loaded {} custom folder(s) ({} runtime)",
+                    config.custom_folders.len(),
+                    n_runtime
+                );
+                Some(config)
+            }
+            None => {
+                log_warn!("FolderExpansion: no folder_expansion config — mod disabled");
                 None
             }
         }
@@ -1115,20 +1279,8 @@ impl FolderExpansionMod {
 
     fn validate_config(config: &FolderConfig) -> Option<String> {
         for (i, entry) in config.custom_folders.iter().enumerate() {
-            if entry.key.len() > SSO_MAX_LEN {
-                return Some(format!(
-                    "entry[{}].key '{}' exceeds {} chars",
-                    i, entry.key, SSO_MAX_LEN
-                ));
-            }
-            if entry.voice_key.len() > SSO_MAX_LEN {
-                return Some(format!(
-                    "entry[{}].voice_key exceeds {} chars",
-                    i, SSO_MAX_LEN
-                ));
-            }
-            if entry.bit_index > 31 {
-                return Some(format!("entry[{}].bit_index {} > 31", i, entry.bit_index));
+            if let Err(e) = validate_entry(entry) {
+                return Some(format!("entry[{}].{}", i, e));
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -1919,4 +2071,86 @@ fn estimate_function_size(addr: *const u8, max_search: usize) -> usize {
         }
     }
     max_search
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(bit_index: u32, key: &str) -> CustomFolderEntry {
+        CustomFolderEntry {
+            bit_index,
+            key: key.to_string(),
+            voice_key: String::new(),
+            exclude_from_all_music: false,
+        }
+    }
+
+    #[test]
+    fn lowest_free_bit_skips_used_bits() {
+        assert_eq!(lowest_free_bit_in(&[]), Some(10));
+        assert_eq!(lowest_free_bit_in(&[11]), Some(10));
+        assert_eq!(lowest_free_bit_in(&[10, 11, 13]), Some(12));
+        assert_eq!(lowest_free_bit_in(&[3, 10]), Some(11));
+        let all: Vec<u32> = (10..=31).collect();
+        assert_eq!(lowest_free_bit_in(&all), None);
+        assert_eq!(lowest_free_bit_in(&all[..all.len() - 1]), Some(31));
+    }
+
+    #[test]
+    fn highest_free_bit_skips_used_bits() {
+        assert_eq!(highest_free_bit_in(&[]), Some(31));
+        assert_eq!(highest_free_bit_in(&[31]), Some(30));
+        assert_eq!(highest_free_bit_in(&[11, 30, 31]), Some(29));
+        let all: Vec<u32> = (10..=31).collect();
+        assert_eq!(highest_free_bit_in(&all), None);
+        assert_eq!(highest_free_bit_in(&all[1..]), Some(10));
+    }
+
+    #[test]
+    fn merge_appends_runtime_entries_after_configured_ones() {
+        let section = FolderConfig {
+            custom_folders: vec![entry(11, "dogs")],
+            hide_difficulty_pane: true,
+        };
+        let merged = merge_runtime_folders(Some(section), vec![entry(10, "stepmania")]).unwrap();
+        let keys: Vec<&str> = merged
+            .custom_folders
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+        assert_eq!(keys, ["dogs", "stepmania"]);
+        assert!(merged.hide_difficulty_pane);
+        assert!(FolderExpansionMod::validate_config(&merged).is_none());
+    }
+
+    #[test]
+    fn merge_synthesises_a_section_for_runtime_only() {
+        let merged = merge_runtime_folders(None, vec![entry(12, "stepmania")]).unwrap();
+        assert_eq!(merged.custom_folders.len(), 1);
+        assert_eq!(merged.custom_folders[0].bit_index, 12);
+        assert!(!merged.hide_difficulty_pane);
+        assert!(merge_runtime_folders(None, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn merged_duplicates_still_fail_validation() {
+        let section = FolderConfig {
+            custom_folders: vec![entry(12, "dogs")],
+            hide_difficulty_pane: false,
+        };
+        let merged = merge_runtime_folders(Some(section), vec![entry(12, "stepmania")]).unwrap();
+        let err = FolderExpansionMod::validate_config(&merged).expect("duplicate bit");
+        assert!(err.contains("duplicate bit_index 12"), "{err}");
+    }
+
+    #[test]
+    fn entry_validation_matches_the_config_rules() {
+        assert!(validate_entry(&entry(31, "fifteen_chars__")).is_ok());
+        assert!(validate_entry(&entry(32, "x")).is_err());
+        assert!(validate_entry(&entry(10, "sixteen_chars___")).is_err());
+        let mut voiced = entry(10, "x");
+        voiced.voice_key = "sixteen_chars___".to_string();
+        assert!(validate_entry(&voiced).is_err());
+    }
 }

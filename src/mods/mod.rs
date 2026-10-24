@@ -60,6 +60,7 @@ pub mod smx_hardware;
 pub mod song_limit_expansion;
 pub mod song_playback_speed;
 pub mod split_ssq_auto_discovery;
+pub mod stepmania_packs;
 pub mod timer_freeze;
 pub mod timing_offsets;
 pub mod training_mode;

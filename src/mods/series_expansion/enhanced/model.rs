@@ -339,6 +339,14 @@ pub fn legacy_thumbnail_bound(max_series: u8) -> u8 {
     max_series.min(THUMBNAIL_MAX_BOUND)
 }
 
+/// Lowest raw series value in 22..=127 (the thumbnail-loadable custom range)
+/// that is neither in `used` (configured and runtime `series_value`s) nor
+/// inside any inclusive `ranges` entry (enhanced-mode cells), or `None`.
+pub fn lowest_free_series_value(used: &[u8], ranges: &[(u8, u8)]) -> Option<u8> {
+    (FIRST_CUSTOM_SERIES..=THUMBNAIL_MAX_BOUND)
+        .find(|v| !used.contains(v) && !ranges.iter().any(|&(start, end)| start <= *v && *v <= end))
+}
+
 /// Stock label texture whose atlas slot has the width's canvas size (the
 /// clone donor; all five live in the stock IFS's `tex001` atlas).
 pub fn label_donor(columns: u8) -> &'static str {
@@ -739,6 +747,46 @@ impl EnhancedPlan {
             Slot::Cell(_) => (template_width(self.columns), CELL_HEIGHT),
             Slot::Break(t) => (GRID_WIDTH, t as f64),
         }
+    }
+
+    /// Append cells registered by code (one per runtime series) after the
+    /// configured ones, under the same flow and limits as `parse`: at most
+    /// [`MAX_CELLS`] cells, none starting below [`MAX_CELL_TOP`] (`parse` has
+    /// already separated the tab lines from the cells). Returns one warning
+    /// per dropped cell. The appended cells have no stock-tab `group` (custom
+    /// values lie outside every stock span); config tabs select them by range
+    /// as usual.
+    pub fn append_cells(&mut self, extra: Vec<Cell>) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut flow = Flow::default();
+        for &slot in &self.slots {
+            let (w, h) = self.slot_size(slot);
+            flow.place(w, h);
+        }
+        let cell_width = template_width(self.columns);
+        for cell in extra {
+            if self.cells.len() >= MAX_CELLS {
+                warnings.push(format!(
+                    "runtime series '{}' exceeds the saved-filter limit of {} cells — dropped",
+                    cell.label, MAX_CELLS
+                ));
+                continue;
+            }
+            if flow.peek(cell_width) > MAX_CELL_TOP {
+                warnings.push(format!(
+                    "runtime series '{}' would start below {} px, past the lowest row the game draws — dropped",
+                    cell.label, MAX_CELL_TOP
+                ));
+                continue;
+            }
+            flow.place(cell_width, CELL_HEIGHT);
+            self.slots.push(Slot::Cell(self.cells.len()));
+            self.cells.push(Cell {
+                group: None,
+                ..cell
+            });
+        }
+        warnings
     }
 
     /// Grid-relative top of every slot, as the game's flow layout places it.
@@ -1735,5 +1783,105 @@ mod tests {
                 "sefi_version_a3_2col".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn lowest_free_series_value_skips_used_values_and_cell_ranges() {
+        assert_eq!(lowest_free_series_value(&[], &[]), Some(22));
+        assert_eq!(lowest_free_series_value(&[30, 31], &[]), Some(22));
+        assert_eq!(lowest_free_series_value(&[22, 23], &[]), Some(24));
+        assert_eq!(lowest_free_series_value(&[21], &[(1, 21)]), Some(22));
+        assert_eq!(lowest_free_series_value(&[], &[(22, 40)]), Some(41));
+        assert_eq!(
+            lowest_free_series_value(&[41], &[(22, 40), (42, 42)]),
+            Some(43)
+        );
+        assert_eq!(lowest_free_series_value(&[], &[(22, 255)]), None);
+        let all: Vec<u8> = (22..=127).collect();
+        assert_eq!(lowest_free_series_value(&all, &[]), None);
+        assert_eq!(
+            lowest_free_series_value(&all[..all.len() - 1], &[]),
+            Some(127)
+        );
+    }
+
+    fn runtime_cell(label: &str, value: u8, texture: &str) -> Cell {
+        Cell {
+            label: label.into(),
+            start: value,
+            end: value,
+            texture: texture.into(),
+            group: Some(Group::Gold), // cleared on append
+        }
+    }
+
+    #[test]
+    fn append_cells_adds_a_runtime_cell_after_the_configured_ones() {
+        let (mut plan, _) = plan_of(block(json!(3), vec![cell("WORLD", 21, "world")]));
+        let warnings = plan.append_cells(vec![runtime_cell("STEPMANIA", 30, "stepmania")]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(plan.cells.len(), 2);
+        assert_eq!(
+            plan.cells[1],
+            Cell {
+                label: "STEPMANIA".into(),
+                start: 30,
+                end: 30,
+                texture: "stepmania".into(),
+                group: None,
+            }
+        );
+        assert_eq!(plan.slots.last(), Some(&Slot::Cell(1)));
+        // Same line as the configured cell (3 columns).
+        assert_eq!(rows(&plan), vec![(0, 0.0), (0, 0.0)]);
+        assert_eq!(plan.custom_names(), vec![(30, "STEPMANIA")]);
+        assert_eq!(plan.label_key(1), "version_stepmania_3col");
+        assert_eq!(plan.table_rows()[1].start, 30);
+        assert_eq!(plan.table_rows()[1].end_excl, 31);
+        // Not a stock-tab member; a config tab covering it selects it.
+        assert_eq!(plan.members(2), vec![0]);
+    }
+
+    #[test]
+    fn append_cells_wraps_lines_and_joins_config_tabs_by_range() {
+        let v = json!({
+            "num_columns": 2,
+            "groups": [tab("no_flare", 22, 255)],
+            "filters": [cell("WORLD", 21, "world"), cell("A3", 20, "a3")]
+        });
+        let (mut plan, _) = plan_of(v);
+        let warnings = plan.append_cells(vec![runtime_cell("STEPMANIA", 30, "stepmania")]);
+        assert!(warnings.is_empty());
+        assert_eq!(rows(&plan), vec![(0, 0.0), (0, 0.0), (1, CELL_HEIGHT)]);
+        assert_eq!(plan.members(CUSTOM_TAB_ID_BASE), vec![2]);
+    }
+
+    #[test]
+    fn append_cells_enforces_the_cell_limits() {
+        let filters: Vec<_> = (0..MAX_CELLS)
+            .map(|i| cell("X", 21, &format!("x{i}")))
+            .collect();
+        let (mut plan, warnings) = plan_of(block(json!(5), filters));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let warnings = plan.append_cells(vec![runtime_cell("STEPMANIA", 30, "stepmania")]);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("saved-filter limit"),
+            "{}",
+            warnings[0]
+        );
+        assert_eq!(plan.cells.len(), MAX_CELLS);
+
+        // One column: 24 drawable rows below the tabs, so the 24th cell is
+        // past MAX_CELL_TOP.
+        let filters: Vec<_> = (0..23).map(|i| cell("X", 21, &format!("x{i}"))).collect();
+        let (mut plan, warnings) = plan_of(block(json!(1), filters));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let warnings =
+            plan.append_cells(vec![runtime_cell("A", 30, "a"), runtime_cell("B", 31, "b")]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("'B'"), "{}", warnings[0]);
+        assert_eq!(plan.cells.len(), 24);
+        assert_eq!(rows(&plan).last(), Some(&(23, 23.0 * CELL_HEIGHT)));
     }
 }

@@ -3124,7 +3124,7 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "build_ssq_path",
         pattern: "48 89 74 24 08 57 48 83 EC 30 4C 8B D1 48 8D 3D ?? ?? ?? ?? 48 8B F2 B9 05 00 00 00 F3 A6 0F 84",
-        description: "SSQ path builder entry (basename + difficulty → data/mdb_apx/ssq/<basename>[_N].ssq via a hardcoded split-song table). Detoured by split-ssq-auto-discovery (full replacement).",
+        description: "SSQ path builder entry (basename + difficulty → data/mdb_apx/ssq/<basename>[_N].ssq via a hardcoded split-song table). Detoured by services::ssq_path (resolver chain: StepMania provider, split-ssq-auto-discovery, stock) (full replacement).",
     },
     // ── Song playback speed: identity-only runtime transaction ────────
     // Byte-level evidence and per-build addresses live in

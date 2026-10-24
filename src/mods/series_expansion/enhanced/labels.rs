@@ -8,7 +8,8 @@
 //! per-image blob LayeredFS serves for it (`_cache/<ifs>/md5(name)`, written
 //! here with `ifs_textures::prebuild_texture`). Source PNGs live in
 //! `data_mods/custom_series/series_labels/` — outside every `_ifs` folder, so
-//! LayeredFS never auto-injects the unused widths.
+//! LayeredFS never auto-injects the unused widths. Runtime-registered series
+//! (`register_runtime_series`) name their own art directory, searched after it.
 //!
 //! Resolution per texture and width: `sefi_version_<texture>_<N>col.png`,
 //! then `sefi_version_<texture>.png`; a source that isn't exactly the width's
@@ -41,11 +42,23 @@ const CANVAS_H: u32 = 20;
 /// What `write_merged_texturelist(.., "")` writes.
 const EMPTY_MERGED: &str = "<texturelist>\n</texturelist>\n";
 
-fn find_source(texture: &str, columns: u8) -> Option<PathBuf> {
-    source_candidates(texture, columns)
-        .into_iter()
-        .map(|name| Path::new(SOURCE_DIR).join(name))
-        .find(|p| p.is_file())
+fn find_source(texture: &str, columns: u8, extra_dirs: &[(String, String)]) -> Option<PathBuf> {
+    let dirs = std::iter::once(SOURCE_DIR).chain(
+        extra_dirs
+            .iter()
+            .filter(|(tex, _)| tex == texture)
+            .map(|(_, dir)| dir.as_str()),
+    );
+    for dir in dirs {
+        let found = source_candidates(texture, columns)
+            .into_iter()
+            .map(|name| Path::new(dir).join(name))
+            .find(|p| p.is_file());
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 fn is_newer(a: &Path, b: &Path) -> bool {
@@ -127,14 +140,16 @@ fn merged_declares(stems: &[String]) -> bool {
 }
 
 /// Resolve, convert and declare the active widths' labels. Call from
-/// `enable()`, before the options IFS mounts.
-pub fn prepare(plan: &EnhancedPlan) {
+/// `enable()`, before the options IFS mounts. `extra_dirs` are `(texture,
+/// directory)` pairs for textures whose art lives outside `SOURCE_DIR`
+/// (runtime-registered series); `SOURCE_DIR` still wins when it has the file.
+pub fn prepare(plan: &EnhancedPlan, extra_dirs: &[(String, String)]) {
     let mut specs = Vec::new();
     let mut widths: Vec<u32> = Vec::new();
     for (texture, columns) in plan.label_textures() {
         let width = canvas_width(columns);
         let stem = texture_name(&texture, columns);
-        let Some(source) = find_source(&texture, columns) else {
+        let Some(source) = find_source(&texture, columns, extra_dirs) else {
             log_warn!(
                 "SeriesExpansion[enhanced]: no label art for '{}' in {} ({} or sefi_version_{}.png) — button has no label",
                 texture,

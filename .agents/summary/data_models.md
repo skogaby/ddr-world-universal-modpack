@@ -58,6 +58,8 @@ A one-time migration also moves a legacy `webui_options` block into `custom_opti
 - `custom_options`: persist gates, `lane_gamma_correction`, `preview_window`, `animate_backgrounds`, `option_menu_settings` (placement + order)
 - `diagnostics`: profiling, audio_sync
 - `player_perspective`, `training_mode`, `music_wheel_song_length`, `per_song_judgement_offsets` (`mirror_players`), `non_native_os_support` (`movie_mode`), `gameplay_timing_fixes` (`audio_clock.*`, `assist_tick_alignment`)
+- `stepmania_packs`: `exclude_from_all_music` (`true`), `audio_cache_mb` (`1024`), `auto_sync` (`true`), `index_timeout_s` (`30`), `gimmick_policy` (`"hide_chart"`), `scroll_gimmicks` (`true`). Absent section = defaults. The mod toggle itself lives in `mods` and applies at the next launch.
+- `diagnostics.musicdb_fragment`: developer aid — a fragment file appended before `</mdb>` through the member-transform API
 - Retired keys, parsed and ignored: `assist_tick.offset_ms`, `song_playback_speed.diagnostic`, `s_marvelous.marvelous_shimmer`, legacy `shader_fixes.dancer_*`
 
 The authoritative key list is the struct set in `src/mods/config.rs`. The `layeredfs` struct lives in `src/services/avs_layeredfs/mod.rs`.
@@ -65,7 +67,28 @@ The authoritative key list is the struct set in `src/mods/config.rs`. The `layer
 **Sidecar data:**
 
 - `judgement_offsets.csv` holds `code,p1_offset,p2_offset` (blank means unset). It ships with a community pre-seed that stores the compensation, i.e. the negated sync error. The boot crawl appends a blank row for each new song.
-- `data_mods/_cache/` holds machine-owned, hash-guarded caches: the step-data `v1.bin`, shader synthesis output, preview art, cloned atlases and packed custom-model arcs. All of it is safe to delete. It is created on the install and is not in the repo.
+- `data_mods/_cache/` holds machine-owned, hash-guarded caches: the step-data `v1.bin`, shader synthesis output, preview art, cloned atlases, packed custom-model arcs and the StepMania cache below. All of it is safe to delete. It is created on the install and is not in the repo.
+- `stepmania/Songs/<Pack>/<Song>/` is the operator's pack drop-in (simfile `.ssc` over `.sm`, audio `#MUSIC` else the folder's ogg/mp3/wav ≤ 256 MiB / ≤ 60 min, art). Release-shipped `README.txt` only; never pruned by the updater.
+
+**StepMania cache** (`data_mods/_cache/stepmania/`, owner `services/stepmania/cache.rs`; every artefact is written `<path>.tmp` → rename, so a file at its final path is complete — except the progressive `.part`):
+
+| Path | Content |
+|---|---|
+| `index.bin` | `DDRSMIX1` + `model::FORMAT_VERSION` (5): every `SongEntry` with its fingerprint over `(path, size, mtime)` of simfile + audio + art, plus fingerprinted rejections. Bump `FORMAT_VERSION` on any change to a gamemdx-independent conversion parameter (writer rules, lead-in, bank layout, art, display text) — every song re-converts next boot. |
+| `sync.bin` | `DDRSMSY2` auto-sync ledger: per song `{source fingerprint, Measured{delta_ms: i8} | Refused{reason}}`; stale (fingerprint mismatch) records dropped at load; malformed file = empty |
+| `ssq/<b>.ssq`, `ssq/<b>_N.ssq` | Converted charts, as written at index time (auto-sync never rewrites them); `_N` = level + 1 per-chart-timing split files |
+| `xsb/<b>.xsb` | Song-profile sound bank |
+| `tn/<b>.dds` | 192² BC1 thumbnail blob, re-packed into the series arc |
+| `thumbnail/<S>.arc` (+ `.digest`) | ONE arc for the STEPMANIA series S, served for both `jacket_thumbnails_ja_S` and `_ua_S` |
+| `jacket/<b>_jk.arc` (+ `.ph`) | Jacket arc, LRU; `.ph` marks a placeholder awaiting upgrade |
+| `xwb/<b>.xwb` / `xwb/<b>.xwb.part` | Full gameplay bank, LRU; `.part` = being written progressively (pre-sized, header first, preview tail, then main in order behind a watermark) |
+| `xwb/<b>.p.xwb` | Preview variant (1-block silent main + real preview), LRU |
+| `xwb/_silent/<b>.xwb` | Tiny silent fallback for a preview that is not ready |
+| `lru.bin` | Touch order + sizes over `xwb/` + `jacket/` against `audio_cache_mb`; reconciled with the files present at boot |
+
+**Injected-song identity** (`services/stepmania/identity.rs`, pure): `key = casefold(pack) + "/" + casefold(song)`, `h = fnv1a64(key)`, `basename = "z" + base36(h)[0..5]` (6 chars — stock codes are 4–5, the `music::Info` ctor truncates at 6), `mcode = 9_000_000 + (h >> 40) % 1_000_000` (stays below `0x8000_0000`). In-index collisions probe `key + "#" + i` in sorted-key order; collisions with the base musicdb are dropped with a WARN, never renumbered. Clearing `_cache` never renumbers a song.
+
+**Injected `<music>` element** (`services/stepmania/musicdb.rs`): `mcode` (u32), `basename`, `title`, `title_yomi`, `artist` (each ≤ 127 UTF-8 bytes, clipped at a character boundary), `bpmmax`/`bpmmin` (u16), `series` (u8, the registered STEPMANIA value), `property` (u32, `1 << folder bit`), `diffLv` (u8 × 10, slot = difficulty + 5·double, slot 5 never declared, never 255 / all-zero), `limited_ary` (s32 × 10: 0 where a chart exists, −1 elsewhere). `region`, `movie*`, `eventno*`, `voice`, `bgstage`, `genreflag`, `bemaniflag` are omitted. Inserted before the final `</mdb>` of the post-overlay document.
 
 ## Persistence Wire Model
 
@@ -82,7 +105,10 @@ The authoritative key list is the struct set in `src/mods/config.rs`. The `layer
 - A per-stage save (`savekind == 2`) from a tainted side is suppressed.
 - The card-out logout save (`savekind == 3`) is sanitised: records get `mcode = -1` and `<data><league>` is removed.
 - If sanitisation is unavailable, the logout save is fully suppressed.
-- Taint sources: autoplay, bot, quick-fail skip, training alterations, assist tick, non-100 % song rate.
+- Taint sources: autoplay, bot, quick-fail skip, training alterations, assist tick, non-100 % song rate, injected StepMania song (level-written from the full-bank request — set for an injected basename, cleared for a stock one — plus session taint for the entered non-bot sides; cleared by `reset_session`).
+- Accepted leaks: `<lastplay><mcode>` carries the injected mcode and `mod_judge_offsets` lists tuned basenames — both non-score profile fields.
+
+**Judgement-offset composition** (`per_song_judgement_offsets/compose.rs`): what a side's `Option+0x24` (`timing_music`, positive = judged later) is set to for a song is `clamp(player's per-song entry (else stock) + song delta (else 0), ±100)`; with neither an entry nor a delta nothing is written. The song delta is the StepMania auto-sync measurement (`sync_apply::delta_provider`), decided once per song per session (freeze rule) and never persisted with the player's data.
 
 ## File Formats Handled In-Process
 
@@ -94,8 +120,13 @@ The authoritative key list is the struct set in `src/mods/config.rs`. The `layer
 | kbin, AVSLZ | `src/services/avs_layeredfs/kbin/`, `avslz.rs` |
 | Game textures (PNG → ARGB8888REV / DXT5) | `src/services/avs_layeredfs/ifs_textures.rs`, `atlas_cloner.rs` |
 | GSPW shader containers | `src/services/avs_layeredfs/shader_synthesis.rs` (offline twin: `scripts/gsp_pack.py`) |
-| SSQ charts | `src/core/ssq/` |
-| XWB / XSB, MS-ADPCM | `src/core/xact/`, `src/services/se_bank_synth/` |
+| SSQ charts | `src/core/ssq/` (read: chunk walker, tempo converter; write: `writer.rs` from the `core::sm` model, `check.rs` self-check) |
+| StepMania `.sm` / `.ssc` simfiles | `src/core/sm/` (MSD tokenizer, encoding detection, chart bodies, `#SCROLLS`/`#SPEEDS`) |
+| Pack audio (OGG/Vorbis, MP3, WAV) | `src/core/audio/` over `symphonia`; `tools/sm_pack_check` is the offline twin |
+| XWB / XSB, MS-ADPCM | `src/core/xact/` (incl. `song_bank.rs` / `xsb.rs` writers), `src/services/se_bank_synth/` |
+| Jacket PNG arcs, thumbnail DDS arcs | `src/core/art/` (jacket member stored uncompressed — a compressed PNG member renders as a flat square) |
+| KBF bitmap-font glyph tables | `scripts/gen_title_glyph_table.py` → generated `src/core/sm/title_glyphs.rs` (`docs/kbf_font_format.md`) |
+| StepMania cache tables (`index.bin`, `sync.bin`, `lru.bin`) | `src/services/stepmania/{model,sync_state}.rs` (hand-rolled little-endian, fail-to-`None`) |
 | ANM / CAMANM / B2IT / MRL0 rlist / KTMDL | `src/core/anm/` (Python twins: `scripts/anm_dump.py`, `scripts/ktmdl_dump.py`) |
 
 ## Runtime State Worth Knowing
@@ -106,3 +137,7 @@ The authoritative key list is the struct set in `src/mods/config.rs`. The `layer
 | Score taint | `score_guard.rs` | Lock-free per-song / session / ledger atomics |
 | Option registry | `custom_options/registry.rs` | Indices and handles never move; display order is a view-time permutation |
 | Frame board | `scene3d/frame_board.rs` | Seqlocked per-instance pose slots, written on the game thread and read by the worker `visit` |
+| StepMania index snapshot | `stepmania/index.rs` | Process-wide `basename → Arc<SongEntry>` map filled as workers finish; final for this boot at the `startup.arc` open (later songs are cached for the next boot) |
+| Auto-sync live map | `stepmania/sync_state.rs::LiveMap` | `basename → {delta, frozen}`; the first play decision freezes the song for the session, late measurements reach only `sync.bin` |
+| Scroll gimmick tables | `scroll_remap.rs` | `AtomicPtr` to a boxed record (current + previous retained), published at gameplay load, nulled on leaving scene 28 |
+| Progressive bank handles | `stepmania/progressive.rs` + `file_hooks::PROGRESSIVE_FDS` | Watermark/done atomics shared between the scheduler writer and the LayeredFS read hook |

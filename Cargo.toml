@@ -44,6 +44,15 @@ image = "0.25"
 texpresso = "2"
 md5 = "0.7"
 aho-corasick = "1"
+encoding_rs = "0.8"
+# StepMania pack audio (core/audio): pure-Rust OGG/Vorbis, MP3 and WAV
+# decoding. No default features: no FLAC/MKV/ADPCM/metadata readers and no
+# SIMD (`opt-simd` would pull rustfft). `ogg` is the container the Vorbis
+# codec needs.
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "vorbis", "wav", "pcm", "ogg"] }
+# StepMania auto-sync onset analysis (core/sync, ported from ddr-chart-tools):
+# 512-point FFTs. Only the x86 SIMD paths (runtime-detected); no NEON/WASM.
+rustfft = { version = "6", default-features = false, features = ["sse", "avx"] }
 
 [profile.release]
 opt-level = 2

@@ -1915,3 +1915,47 @@ latch and keep playing. (2) When a fix removes a same-frame cleanup ("revive imm
 state it used to clear becomes long-lived and untested — check whether stock ever holds it.
 (3) A hard crash with no SEH log and no spice2x dialog is a fail-fast / process exit class —
 don't expect the crash log to explain it.
+
+## StepMania pack loader traps (2026-10-24)
+
+**An LZ77-compressed PNG arc member renders as a flat coloured square.** The first injected
+jacket (`data/jacket/<b>_jk.png` packed by `arc_tool.py pack`, which compresses by default)
+drew purple on the stage panel and red on results — no error, no crash, just
+`afp_mc_load_bitmap no <b>_jk`. All 266 sampled stock PNG jackets are stored raw; DDS
+thumbnail members may be compressed. `core/arc.rs` writes uncompressed, so the DLL path is
+safe; any offline packer must store PNG members raw.
+
+**The guideline (beat-line) drawer loops on `get_offset_y` until the offset passes 720 px.**
+It is the only `get_offset_y` caller bounded by distance rather than by note count. A
+display remap that returns 0 (StepMania `#SPEEDS` to 0) or a decreasing offset (negative
+`#SCROLLS`) hangs the whole game thread (cabinet run #9: dancers frozen, test menu dead,
+keepalive still logging). `scroll_remap` therefore routes that call site to the trampoline
+(stock math) and refuses to publish any table if the bypass did not land; the speed
+multiplier is floored at 1/64 as a second guard. Rule: before remapping a position function,
+find every caller that iterates "until position > bound" and keep it on stock values.
+
+**Warm boots trust cached artefacts AND cached rejections.** Changing a conversion parameter
+(duration cap, lead-in rule, title choice) silently does nothing for songs already indexed:
+"Cheper" stayed rejected after the 60-min cap landed. Bump
+`services/stepmania/model.rs::FORMAT_VERSION` with every change to conversion output or
+`index.bin`; the cost is one re-index (~25 ms/song).
+
+**Cold index ≈ 25 ms/song on 6 workers; `index_timeout_s` (default 30) covers ≈ 1,200
+songs.** Past the deadline the `startup.arc` open injects the songs that finished and the
+rest arrive next boot (one WARN) — by design, but surprising on a first boot with a huge
+library. The index thread keeps converting past the deadline and writes `index.bin` when it
+finishes, so the next boot is warm.
+
+**Injected songs are the LAST boot work items.** Their mcodes (9,000,000+) and their
+position in `musicdb.xml` (appended) put them at the end of `CheckStepDataActor`'s work list,
+so the fast-bootup invariant "the final item is always Stock" lands exactly on an injected
+song. Anything that wants to keep the game's own analysis away from an injected file must
+handle the final item specially (fast_bootup: entry vptr on a vtable copy whose `hasChart`
+answers "no"; record flipped so the bad file never loads). Also, the boot's groove-radar
+maxima are dead data on 20260721 (reset to constants at scene 7 and every new game), so
+"an extreme custom chart shrinks stock radars" does not happen there.
+
+**Early DLL log lines never reach spice2x's `log.txt`.** Anything logged before the
+debughook attaches (LayeredFS install, index spawn, a fast cabinet's `startup.arc`
+transform) is invisible on the cabinet; prove early-boot behaviour with a later summary line
+or a marker file, not with an early INFO.

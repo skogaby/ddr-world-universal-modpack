@@ -32,10 +32,19 @@
     "decorative-option-headers": true,
     "s-marvelous": true,
     "split-ssq-auto-discovery": true,
+    "stepmania-packs": true,
     "custom-resolution": false,
     "gameplay-timing-fixes": true,
     "background-dancers": false,
     "ddr-selection": true
+  },
+  "stepmania_packs": {
+    "exclude_from_all_music": true,
+    "audio_cache_mb": 1024,
+    "auto_sync": true,
+    "index_timeout_s": 30,
+    "gimmick_policy": "hide_chart",
+    "scroll_gimmicks": true
   },
   "diagnostics": {
     "profiling": false,

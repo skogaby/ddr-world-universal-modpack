@@ -29,6 +29,10 @@ MODULES=(csv.rs musicdb_scan.rs)
 if [[ -r "$MOD_SRC/store.rs" ]]; then
   MODULES+=(store.rs)
 fi
+# compose.rs: the applied-value rule (entry / stock / auto-sync delta, ±100).
+if [[ -r "$MOD_SRC/compose.rs" ]]; then
+  MODULES+=(compose.rs)
+fi
 for f in "${MODULES[@]}"; do
   [[ -r "$MOD_SRC/$f" ]] || die "module source missing: src/mods/per_song_judgement_offsets/$f"
 done

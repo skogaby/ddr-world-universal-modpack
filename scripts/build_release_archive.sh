@@ -180,6 +180,14 @@ cp scripts/ddr_selection/import_a3_assets.sh scripts/ddr_selection/a3_assets.man
 sed 's/$/\r/' scripts/ddr_selection/import_a3_assets.bat \
     > "$STAGE/ddr_selection_import/import_a3_assets.bat"
 
+# StepMania packs: the empty songs root with the operator note the DLL would
+# otherwise write on first boot (same bytes — `include_str!` of this file —
+# so the updater never sees it as locally modified). Operator packs dropped
+# next to it are in neither the release nor a previous manifest, so the
+# updater's plan never touches them (updater/src/plan.rs).
+mkdir -p "$STAGE/stepmania/Songs"
+cp src/services/stepmania/songs_readme.txt "$STAGE/stepmania/Songs/README.txt"
+
 echo "==> Creating $ARCHIVE"
 mkdir -p "$RELEASE_DIR"
 rm -f "$ARCHIVE" "$INSTALL_BAT"

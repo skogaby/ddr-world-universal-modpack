@@ -17,13 +17,20 @@
 //!    belt-and-braces only; value resolution is deferred because the
 //!    stage's SSQ may not be open yet at `createNextSequence(28)` time).
 //! 3. **Write** — the side's FIRST judge dispatch consumes PENDING: resolve
-//!    the offset from `LOCKED_CODE` via the store (no entry ⇒ nothing to
-//!    do), read the stock value from `Option+0x24`
+//!    the player's entry for `LOCKED_CODE` via the store and the song's
+//!    auto-sync delta via the registered provider
+//!    ([`set_song_delta_provider`]; none ⇒ no delta). Neither ⇒ nothing to
+//!    do. Otherwise read the stock value from `Option+0x24`
 //!    (`*(*(player_option_table + side*8)) + 0xE0 + 0x24`), sanity-refuse
-//!    outside ±100, cache it, write the override, set `ACTIVE`.
-//!    Re-armed on EVERY scene-28 entry, so each course stage re-resolves
-//!    against its own SSQ-published code; the restore between stages
-//!    (layer 4) has already returned the previous song's stock value.
+//!    outside ±100, cache it, write `compose(entry, stock, delta)` =
+//!    `(entry else stock) + delta` clamped to ±100 (`compose.rs`), set
+//!    `ACTIVE`. Re-armed on EVERY scene-28 entry, so each course stage
+//!    re-resolves against its own SSQ-published code; the restore between
+//!    stages (layer 4) has already returned the previous song's stock value.
+//!    The provider call is the ONE place this callback may block: for an
+//!    injected StepMania song whose measurement is still running it waits
+//!    (bounded, ≤ 3 s) so both sides and every replay in the session get the
+//!    same value; for everything else it returns at once.
 //! 4. **Restore** — the scene change with `prev == GAMEPLAY` (fires
 //!    synchronously inside `createNextSequence`, an entire loader scene
 //!    before the savekind-2 marshal; covers every exit shape including the
@@ -38,8 +45,9 @@
 //! correctly persists across them (same song).
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
+use super::compose::{self, TIMING_LIMIT};
 use super::store;
 use crate::mods::mod_trait::ModContext;
 use crate::services::judge_hook::{self, Priority};
@@ -54,11 +62,16 @@ use crate::{log_info, log_warn};
 const OPTION_TIMING_MUSIC: usize = 0x24;
 /// GamePlayActor's play-side field (same read real_speed/judge consumers use).
 const ACTOR_PLAY_SIDE_OFFSET: usize = 0x84;
-/// The stock option domain; a read outside it means the chain is wrong.
-const TIMING_LIMIT: i32 = 100;
+
+/// A cabinet-wide per-song judgement delta source (`code` = musicdb
+/// basename): `Some(ms)` is ADDED to the player's entry (or the stock
+/// value), positive = judged later. May block briefly (bounded by the
+/// provider) — see the module docs.
+pub type SongDeltaProvider = fn(&str) -> Option<i8>;
 
 static PLAYER_OPTION_TABLE: AtomicUsize = AtomicUsize::new(0);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
+static SONG_DELTA_PROVIDER: OnceLock<SongDeltaProvider> = OnceLock::new();
 
 /// Armed at every scene-28 entry per entered side; the VALUE is resolved
 /// lazily at the side's first judge dispatch from the freshest LOCKED_CODE
@@ -106,6 +119,19 @@ pub fn on_mod_disable() {
     restore_all("mod disable");
     PENDING[0].store(false, Ordering::Release);
     PENDING[1].store(false, Ordering::Release);
+}
+
+/// Register the per-song delta source (first caller wins; one exists:
+/// StepMania auto-sync). The provider is consulted once per side per play,
+/// on the game thread, at the first judge dispatch.
+pub fn set_song_delta_provider(f: SongDeltaProvider) {
+    if SONG_DELTA_PROVIDER.set(f).is_err() {
+        log_warn!("judgement_offsets: song delta provider already registered -- ignored");
+    }
+}
+
+fn song_delta(code: &str) -> Option<i8> {
+    SONG_DELTA_PROVIDER.get().and_then(|f| f(code))
 }
 
 /// Dance-bank create observer (D21, the course fix): the game creates one
@@ -237,8 +263,8 @@ fn arm_sides() {
 // ── Judge-dispatch write ─────────────────────────────────────────────────
 
 /// O(1) steady state (one consumed-latch check); the once-per-song work is
-/// one short LOCKED_CODE lock + store lookup + a handful of guarded
-/// reads/stores. No allocation on the steady path.
+/// one short LOCKED_CODE lock + store lookup + the delta provider call + a
+/// handful of guarded reads/stores. No allocation on the steady path.
 fn on_judge(actor: *mut u8, _music_count: i32) {
     if actor.is_null() || !super::is_active() {
         return;
@@ -256,10 +282,13 @@ fn on_judge(actor: *mut u8, _music_count: i32) {
     let Some(code) = code else {
         return; // no identity — stock applies silently
     };
-    let Some(offset) = store::with_store(|s| s.lookup(side, &code)) else {
-        return; // no entry for this song — stock applies (the normal case)
-    };
-    let offset = offset as i32;
+    let entry = store::with_store(|s| s.lookup(side, &code));
+    // The only call here that may block (bounded): an injected song whose
+    // measurement is still running.
+    let delta = song_delta(&code);
+    if entry.is_none() && delta.is_none() {
+        return; // nothing for this song — stock applies (the normal case)
+    }
 
     let Some(field) = timing_field_ptr(side) else {
         warn_once(
@@ -277,13 +306,19 @@ fn on_judge(actor: *mut u8, _music_count: i32) {
             );
             return;
         }
+        let Some(value) = compose::compose(entry, stock, delta) else {
+            return;
+        };
         STOCK_CACHE[side].store(stock, Ordering::Release);
-        *(field as *mut i32) = offset;
+        *(field as *mut i32) = value;
         ACTIVE[side].store(true, Ordering::Release);
         log_info!(
-            "judgement_offsets: P{} override applied ({}ms for '{}', stock {}ms cached)",
+            "judgement_offsets: P{} override applied ({} ms = {} {} {:+} for '{}', stock {}ms cached)",
             side + 1,
-            offset,
+            value,
+            if entry.is_some() { "entry" } else { "stock" },
+            entry.map(i32::from).unwrap_or(stock),
+            delta.unwrap_or(0),
             code,
             stock
         );

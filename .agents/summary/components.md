@@ -22,8 +22,12 @@
 | `module_resolver.rs` | Locate gamemdx / ark / libavs modules |
 | `logger.rs`, `crash_handler.rs`, `profiling.rs`, `platform.rs` | `log_*!` macros (OutputDebugString), panic hook, SEH → `ddr_hook_crash.log`, init timing, Wine detection |
 | `arc.rs`, `ifs.rs`, `afp.rs`, `ap2/`, `geo.rs` | Konami containers and AFP: ARC parse/write, IFS extract, AFP descramble/patch, AP2 byte-identical parse/edit/write, GE2D geo labels |
-| `ssq/` | Chart chunk walker + engine-exact tempo converter |
-| `xact/` | Pure XACT2 layer: MS-ADPCM, WSOLA stretch, resampler, XWB, virtual bank planning, rate math, MD5 |
+| `ssq/` | Chart chunk walker + engine-exact tempo converter; `writer.rs` (SM model → SSQ: tempo/event/step/mine chunks, quad split, delays, per-chart-timing split files `<b>_N.ssq`, lead-in) and `check.rs` (re-parse self-check before any slot is declared) |
+| `sm/` | StepMania simfile parsing, pure: `text` (UTF-8 → Shift-JIS → Windows-1252), `msd`, `simfile`/`notes` (per-chart isolation, `#DELAYS`/`#WARPS`/`#FAKES`), `scroll` (`#SCROLLS`/`#SPEEDS` display math), `title_glyphs` (GENERATED codepoint table of the song-title KBF fonts) |
+| `audio/` | Pure pack-audio decode via `symphonia`: exact `probe`, `Decoder` → 128-frame stereo blocks (stereo/rate normalisation, lead-in, pad/truncate), preview window + fades, `choose_lead_in`; StepMania parity rules for MP3/Vorbis |
+| `sync/` | Auto-sync estimator ported from `ddr-chart-tools`: onset envelope, time map, weighted chart events, `estimate`, `measure` over a materialised SSQ; `rustfft` |
+| `art/` | Jacket composition (512², source priority + fit-on-blur), 192² BC1 thumbnail DDS, the jacket/thumbnail arc containers (jacket PNG stored uncompressed), embedded placeholder |
+| `xact/` | Pure XACT2 layer: MS-ADPCM, WSOLA stretch, resampler, XWB, virtual bank planning, rate math, MD5; `song_bank.rs` (from-scratch streaming XWB, layout-first so a progressive writer can pre-size and publish a watermark; main = 0, preview = 1) and `xsb.rs` (song-profile XSB writer, CRC-16) |
 | `anm/` | Pure ANM/CAMANM/B2IT/MRL0/KTMDL codecs, pose + camera sampling (background dancers) |
 
 ## src/services/ — game-system integrations
@@ -38,15 +42,17 @@ Each service exposes `init()` / `is_available()` and degrades gracefully.
 | `input_manager.rs` | Ark IO polling and button events, `on_frame` callbacks, exclusive consumer, panel polling, pinpad/card/menu injection |
 | `judge_hook.rs` | `judgeNotes` dispatcher (pre/post, `Priority::{Early, Normal, Late}`) |
 | `render_notes_hook.rs` | `ArrowRenderer::render_notes` dispatcher + command-list access |
-| `analyze_hook.rs` | `IStepReader::Analyze` post-subscriber dispatcher |
-| `widget_renderer.rs` | Native widget lifecycle, `run_on_render_thread`, `bring_to_front`, `dispatch_frame` |
+| `analyze_hook.rs` | `IStepReader::Analyze` post-subscriber dispatcher (registration order: fast-bootup's injected-radar exclusion first, then its capture) |
+| `widget_renderer.rs` | Native widget lifecycle, `run_on_render_thread`, `bring_to_front`, `dispatch_frame`, `is_render_thread` |
 | `overlay_draw/` | Layer-dispatcher detour (the frame seam), DLL-owned command-list quads (menu backgrounds, SMX topmost) |
+| `wheel_cards.rs` | Single owner of the song-select card refresh (`selectmusic_card_refresh`); `on_card_bound` "song became visible" events (scene 25 only) for the S-Marvelous lamp badge and the StepMania prefetch |
+| `scroll_remap.rs` | Single owner of the renderer's per-note `get_offset_y`; remaps StepMania `#SCROLLS`/`#SPEEDS` into the stock scroll math behind an `AtomicPtr` (idle = one load); the collector's cull sees the same remapped value |
 
 **Rendering, UI and assets**
 
 | Service | Role |
 |---|---|
-| `avs_layeredfs/` | File replacement hooks + texture/arc/xml/atlas pipelines + `shader_synthesis` / `shader_layout` |
+| `avs_layeredfs/` | File replacement hooks + texture/arc/xml/atlas pipelines + `shader_synthesis` / `shader_layout`; `mod_paths` resolver registry (virtual assets consulted after the mod folders), `arc_handler` member transforms / pre-repack hooks / arc fingerprints, `file_hooks` progressive-read holds |
 | `texture_resolver.rs`, `asset_loader.rs` | Texture name → id/UV; on-demand arc texture loads |
 | `bm2d_api.rs`, `bm2d_package.rs`, `afp_patcher.rs` | MovieClip/AFP-layer wrappers; package load/lookup/release; AFP template patching at stream create |
 | `custom_options/` | Option-row framework (see `interfaces.md`) incl. label-atlas generation (eng/jpn/kor) |
@@ -71,6 +77,7 @@ Each service exposes `init()` / `is_available()` and degrades gracefully.
 | `audio_clock/` | DAC-authority clock: pure `fit`/`onset`/`seqpub`, engine observers, game tick pairing |
 | `audio_sync_diag/` | Boot-gated timing diagnostics + owner of the XACT engine detours |
 | `chart_length.rs` | SSQ-derived song lengths (background worker + cache) |
+| `ssq_path.rs` (+ pure `ssq_path_logic.rs`) | Single owner of the game's `build_ssq_path` chooser (`<b>.ssq` vs `<b>_N.ssq`): priority resolver chain, installed on the first `register`; stock table as the terminal fallback; divergence oracle |
 | `movie_policy.rs`, `movie_sync.rs`, `mfplat_vih_fix.rs` | BuildGraph suppress/fallback policy; movie position/rate sync (clock proxy); Wine VC-1 fix |
 
 **Gameplay state and policy**
@@ -78,7 +85,7 @@ Each service exposes `init()` / `is_available()` and degrades gracefully.
 | Service | Role |
 |---|---|
 | `stage_records.rs` | Fail-closed decode of GameWork/PlayerWork/record layout |
-| `score_guard.rs` | Score taint state + rate-save ledger |
+| `score_guard.rs` | Score taint state + rate-save ledger (per-song taints incl. the level-written `INJECTED_SONG_TAINT`, session taint, sanitised flag) |
 | `custom_options_persistence.rs` | ess save/load bridge, string fields, `/data` node producers, score-policy enforcement |
 | `song_reset/` | In-place restart/seek + DPS/GamePlayActor probes |
 | `foot_panel_swap/` | Single owner of the judge-time foot-panel slot swap (`Off/Perfect/Bot`) |
@@ -86,6 +93,26 @@ Each service exposes `init()` / `is_available()` and degrades gracefully.
 | `ident_override.rs` | Soft-id revision override at `ea3_boot` |
 | `smx/` | StepManiaX HID layer (protocol, maps, device discovery, transport threads) |
 | `ntdll_state_shim.rs` | Retained but uncalled (pattern reference) |
+
+**StepMania pack loader** (`src/services/stepmania/`; RE note `docs/stepmania_runtime_packs_feasibility.md`, whose "What shipped" header maps each section to a module)
+
+| Module | Role |
+|---|---|
+| `mod.rs` | `early_init` (step 0': config gate, songs root `./stepmania/Songs`, spawn the index, register resolver + `startup.arc` musicdb transform + fingerprint), `ensure_registration` (idempotent STEPMANIA folder bit + series value + thumbnail arc, from whichever of the `startup.arc` open / mod `init` comes first), `init_runtime`, `start_sync_sweep`, queries (`is_injected`, `is_injected_basename`, `injected_song`, `injected_entries`, `status`, `scroll_tables_for`) |
+| `index.rs` | Cold path per song (simfile → parse → audio probe → trial write → lead-in → `write_song` → `check_ssq` on every file → `ssq/`, `xsb/`, `tn/`) on a worker pool; warm path reuses entries whose fingerprint + artefacts match; `wait_ready` for the transform |
+| `identity.rs` | Pure basename/mcode derivation (`z` + base36, 9,000,000 window) with deterministic collision probing |
+| `musicdb.rs` | Pure `<music>` element synthesis (psmap limits, no `region`) and the `startup.arc` member-transform body (collision drop, insert before `</mdb>`) |
+| `convert.rs` | Pure glue shared with `tools/sm_pack_check`: simfile/audio discovery, chart timings, display title/artist (native when every glyph is drawable, else translit), `title_sort`, art-source order |
+| `model.rs` | `SongEntry`, `index.bin` (`FORMAT_VERSION`), `lru.bin` — hand-rolled little-endian, fail-to-`None` |
+| `cache.rs` | `data_mods/_cache/stepmania/` layout, tmp+rename atomic writes, byte-budgeted LRU over `xwb/` + `jacket/`, boot sweep of stale `.tmp`/`.part` |
+| `providers.rs` | The LayeredFS resolver: five per-song game paths → cache files; preview vs full bank by scene; bounded waits on the FileManager I/O worker only; creates the progressive `.part`; reports every full-bank request to `taint` |
+| `scheduler.rs` (+ pure `scheduler_logic.rs`) | Below-normal worker pool fed by `wheel_cards` binds and the highlight: preview + jacket per visible card, speculative full bank after a 1.5 s dwell, gameplay-load at head, 25→26 on-decide sync request |
+| `progressive.rs` (+ pure `progressive_logic.rs`) | Registry of in-flight full banks (`.part`, pre-sized, watermark/tail_ready/done) consulted by `file_hooks`; rename retry when Windows refuses |
+| `ssq_split.rs` | `ssq_path` consumer (priority 10): `<b>.ssq` or `<b>_N.ssq` from the index's split table |
+| `sync_sweep.rs`, `sync_apply.rs`, `sync_state.rs` (pure) | Measure-only auto-sync: below-normal sweep + normal-priority on-decide thread → one delta per song in `sync.bin` (`DDRSMSY2`) and a live map with the per-session freeze rule; stage-load (≤ 5 s) and first-judge (≤ 3 s) holds; the delta provider for `per_song_judgement_offsets` |
+| `taint.rs` | Full-bank request stream → level-write `INJECTED_SONG_TAINT` + session taint; same edge publishes/clears `scroll_remap` tables and is the on-decide fallback |
+| `hide.rs` | Fail-closed hiding at enable: no sanitiser → corruption flag (`+0x1B0`) on every injected entry via `find_music_by_mcode` |
+| `songs_readme.txt` | Shipped as `stepmania/Songs/README.txt` by the release script |
 
 ## src/mods/ — features
 
@@ -95,10 +122,10 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 
 | id | Entry | Purpose | Harness | RE note |
 |---|---|---|---|---|
-| `song-limit-expansion` | `song_limit_expansion.rs` | XML read buffers 1 MB → 8 MB (`early_apply`) | – | `omnimix_song_limit_research.md` |
+| `song-limit-expansion` | `song_limit_expansion.rs` | XML read buffers 1 MB → 8 MB; the arena patch is applied from inside the game's `startup.arc` open (pre-repack hook) or `early_apply`, whichever comes first (idempotent) | – | `omnimix_song_limit_research.md` |
 | `fps-unlock` | `fps_unlock.rs` | Boot-time refresh target override | – | – |
 | `custom-resolution` | `custom_resolution/` | Native 16:9 output sizes or 4:3 SD output; next launch | `custom_resolution` | `custom_resolution.md` |
-| `fast-bootup` | `fast_bootup/` | Loader pacing + boot-analysis cache | `fast_bootup` | `ultrafast_boot_research.md` |
+| `fast-bootup` | `fast_bootup/` | Loader pacing + boot-analysis cache; injected-song quarantine (`preflight.rs` background re-check + `quarantine.rs` pure plan: failing files → release, record flip, `+0x1B0`, final-item `hasChart` neuter) and radar-maxima exclusion for injected items | `fast_bootup` | `ultrafast_boot_research.md`, `stepmania_runtime_packs_feasibility.md` §8.5 |
 | `skip-intros` | `skip_intros.rs` | Redirect WARNING → TITLE | – | – |
 | `timer-freeze` | `timer_freeze.rs` | Freeze + hide countdown timers | – | – |
 | `premium-free` | `premium_free/` | Frozen stage counter + ghost cache | – | `premium_free_stale_record_bug.md` |
@@ -110,9 +137,10 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `announcer-mute` | `announcer_mute.rs` | Silence the announcer | – | `hex_edit_porting.md` |
 | `anytime-speedmod` | `anytime_speedmod.rs` | Remove the in-song speed-mod window | – | `anytime_speedmod_research.md` |
 | `hide-bottom-text` (OFF) | `hide_bottom_text.rs` | Hide bottom status readouts | – | `hex_edit_porting.md` |
-| `split-ssq-auto-discovery` | `split_ssq_auto_discovery/` | Disk-discovered split charts | `split_ssq` | `split_ssq_research.md` |
-| `series-expansion` | `series_expansion.rs` | Custom VERSION filters + flare exclusion | – | `flare_ranking_research.md` |
-| `folder-expansion` | `folder_expansion.rs` | Custom genre folders (late-binding); per-folder `exclude_from_all_music` hides a folder's songs from ALL MUSIC | – | `folder_system_research.md` |
+| `split-ssq-auto-discovery` | `split_ssq_auto_discovery/` | Disk-discovered split charts (consumer of `ssq_path` at priority 20) | `split_ssq` | `split_ssq_research.md` |
+| `stepmania-packs` | `stepmania_packs/` | Thin `Mod` over `services/stepmania`: StepMania packs in `stepmania/Songs/` play as native songs (STEPMANIA folder + VERSION entry, previews, jackets, mines, scroll gimmicks, auto-sync via the judgement offset; scores never submitted). Boot-only toggle (`early_init` is config-gated); `enable` applies the fail-closed visibility guards and starts the sync sweep | `stepmania`, `sm_pack_check` (+ `tools/sm_pack_check`) | `stepmania_runtime_packs_feasibility.md`, `split_ssq_research.md`, `kbf_font_format.md` |
+| `series-expansion` | `series_expansion.rs` | Custom VERSION filters + flare exclusion; `register_runtime_series` for code-registered entries (STEPMANIA) | – | `flare_ranking_research.md` |
+| `folder-expansion` | `folder_expansion.rs` | Custom genre folders (late-binding); per-folder `exclude_from_all_music` hides a folder's songs from ALL MUSIC; `register_runtime_folder` for code-registered folders (STEPMANIA) | – | `folder_system_research.md` |
 | `note-types-expansion` | `note_types_expansion/` | Note-type framework; mines | – | `ssq_mine_chunk_format.md`, `mine_render_architecture.md` |
 | `real-speed-fix` | `real_speed_fix/` | Real Speed from Core BPM | – | `binary_modpack_research.md` |
 | `power-user-statistics` | `power_user_statistics/` | Timing-stats widgets, pacemaker→ms-error, CSV, calories | `power_user_statistics` | `pacemaker_display_research.md` |
@@ -131,7 +159,7 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `training-mode` | `training_mode/` | Loop, A/B markers, scrub, timeline HUD | `training_mode` | `training_mode_research.md` |
 | `decorative-option-headers` | `decorative_option_headers.rs` | Heading rows in the options MODS tab | `custom_options` | `option_header_rows_research.md` |
 | `music-wheel-song-length` | `music_wheel_song_length.rs` | LENGTH M:SS in the song-select header | – | – |
-| `per-song-judgement-offsets` | `per_song_judgement_offsets/` | Per-song per-player offsets (CSV + profile) | `judgement_offsets` | `per_song_judgement_offsets.md` |
+| `per-song-judgement-offsets` | `per_song_judgement_offsets/` | Per-song per-player offsets (CSV + profile); `compose.rs` folds a cabinet-wide song delta (StepMania auto-sync) into the one `Option+0x24` write | `judgement_offsets` | `per_song_judgement_offsets.md` |
 | `s-marvelous` | `s_marvelous/` | Display-layer judgement above Marvelous (+ server upload, lamps; per-era art on DDR SELECTION's legacy skins) | `s_marvelous` | `s_marvelous_judgement_research.md` |
 | `two-player-bpl-mode` | `two_player_bpl_mode/` | In-shop battle HUD in local versus | `two_player_bpl` | `in_shop_battle_local_versus_research.md` |
 | `background-dancers` (OFF) | `background_dancers/` | A3 3D stage + dancers, custom models, previews | `background_dancers` | `background_dancers_research.md`, `3d_model_format_research.md` |
@@ -155,6 +183,8 @@ The trait is in `src/mods/mod_trait.rs` and registration order is in `src/lib.rs
 | `updater/` | Standalone auto-updater. It resolves the game dir, downloads the GitHub release, verifies sha256, extracts to a stage, merges user-owned files, and applies a journaled transaction with rollback. It self-updates. Separate crate; see `workflows.md`. |
 | `tools/blender_ddr_addon/` | Blender import/export for KTMDL/B2IT/ANM/CAMANM, characters and stages; porting examples |
 | `tools/bot_sim/` | Offline bot simulator mounting the DLL's pure bot files; HTML report |
+| `tools/sm_pack_check/` | Native dry-run StepMania → DDR converter mounting the DLL's pure `core::{sm,ssq,audio,sync,xact}` and `services::stepmania::{identity,convert,musicdb,model}`: converts a song or pack folder to `<code>.ssq`/`_N.ssq`, `.xsb`, `.xwb`, prints per-chart verdicts, the `<music>` element and (`--auto-sync`) the measured correction. Separate crate; `scripts/validate_sm_pack_check.sh` |
 | `tools/fxc/` | Pinned fxc 9.29 + D3DCompiler_43 (run under CrossOver) |
 | `shaders/src/` | Lane shaders (`gs_screencommand_*`), model style shaders (`mdl_*`), menu themes (`themes/`) |
-| `data_mods/` | Shipped runtime assets: option label sets, series/folder textures, shader blobs, clap PCM, custom models, dancer cameras/badges, SMX atlas, training icons, S-Marvelous art (World's in `s_marvelous/`, the legacy skins' in `ddr_selection/s_marvelous/`) |
+| `data_mods/` | Shipped runtime assets: option label sets, series/folder textures, shader blobs, clap PCM, custom models, dancer cameras/badges, SMX atlas, training icons, S-Marvelous art (World's in `s_marvelous/`, the legacy skins' in `ddr_selection/s_marvelous/`), StepMania folder/series art + placeholder jacket (`stepmania_packs/`, generated by `scripts/gen_stepmania_folder_art.py` / `gen_stepmania_placeholder.py`) |
+| `stepmania/Songs/` | Runtime input, not in the repo: operator-dropped `<Pack>/<Song>/` folders indexed at boot. The release ships only its `README.txt`; the updater never prunes it. |

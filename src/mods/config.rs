@@ -110,6 +110,11 @@ pub struct DiagnosticsConfig {
     /// Boot-only, bounded audio/game-clock observation. Does not change timing.
     #[serde(default)]
     pub audio_sync: bool,
+    /// Developer aid: path (relative to the game dir) of an XML fragment of
+    /// `<music>` elements appended to `musicdb.xml` inside the `startup.arc`
+    /// repack through the LayeredFS member-transform API. Empty/absent = off.
+    #[serde(default)]
+    pub musicdb_fragment: String,
 }
 
 /// Global timing-offset values for the `timing-offsets` mod. These are
@@ -853,6 +858,65 @@ fn default_audio_clock_window() -> u32 {
     10
 }
 
+/// `stepmania_packs` — the StepMania pack loader (`services::stepmania`).
+/// Operator-only: read once at `stepmania::early_init`, never written. An
+/// absent section means every default below.
+#[derive(Deserialize, Clone, Debug)]
+pub struct StepmaniaPacksConfig {
+    /// Hide injected songs from ALL MUSIC (they stay in the STEPMANIA folder).
+    /// Default true: the folder is the only entry point; the VERSION filter
+    /// (ALL MUSIC only) then has nothing of ours to show.
+    #[serde(default = "default_true")]
+    pub exclude_from_all_music: bool,
+    /// Byte budget (MiB) of the on-demand bank + jacket cache under
+    /// `data_mods/_cache/stepmania/`.
+    #[serde(default = "default_stepmania_audio_cache_mb")]
+    pub audio_cache_mb: u32,
+    /// Auto-sync (`services::stepmania::sync_sweep` / `sync_apply`): measure
+    /// each injected song against its audio once per source fingerprint and
+    /// apply the correction at play time through the game's JUDGEMENT
+    /// OFFSET (never by changing a file). When false nothing is measured or
+    /// applied.
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
+    /// How long the `startup.arc` open waits for the index before injecting
+    /// whatever finished.
+    #[serde(default = "default_stepmania_index_timeout_s")]
+    pub index_timeout_s: u32,
+    /// `hide_chart` (the only policy today): charts with warps / negative
+    /// BPMs / negative stops are not declared.
+    #[serde(default = "default_stepmania_gimmick_policy")]
+    pub gimmick_policy: String,
+    /// Reproduce `#SPEEDS` / `#SCROLLS` display gimmicks for injected songs
+    /// (`services::scroll_remap`). Display-only; judgement is untouched
+    /// either way. When false the tables are never published.
+    #[serde(default = "default_true")]
+    pub scroll_gimmicks: bool,
+}
+
+impl Default for StepmaniaPacksConfig {
+    fn default() -> Self {
+        Self {
+            exclude_from_all_music: true,
+            audio_cache_mb: default_stepmania_audio_cache_mb(),
+            auto_sync: true,
+            index_timeout_s: default_stepmania_index_timeout_s(),
+            gimmick_policy: default_stepmania_gimmick_policy(),
+            scroll_gimmicks: true,
+        }
+    }
+}
+
+fn default_stepmania_audio_cache_mb() -> u32 {
+    1024
+}
+fn default_stepmania_index_timeout_s() -> u32 {
+    30
+}
+fn default_stepmania_gimmick_policy() -> String {
+    "hide_chart".to_string()
+}
+
 static CONFIG: OnceCell<ConfigFile> = OnceCell::new();
 
 #[derive(Deserialize)]
@@ -907,6 +971,8 @@ pub struct ConfigFile {
     pub background_dancers: Option<BackgroundDancersConfig>,
     #[serde(default)]
     pub ddr_selection: Option<DdrSelectionConfig>,
+    #[serde(default)]
+    pub stepmania_packs: Option<StepmaniaPacksConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -949,6 +1015,7 @@ pub fn init() {
                     gameplay_timing_fixes: None,
                     background_dancers: None,
                     ddr_selection: None,
+                    stepmania_packs: None,
                 }
             }
         },
@@ -980,6 +1047,7 @@ pub fn init() {
                 gameplay_timing_fixes: None,
                 background_dancers: None,
                 ddr_selection: None,
+                stepmania_packs: None,
             }
         }
     };

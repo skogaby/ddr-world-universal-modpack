@@ -51,7 +51,7 @@
 
 use once_cell::sync::Lazy;
 use retour::GenericDetour;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use crate::core::memory;
@@ -128,11 +128,35 @@ unsafe extern "C" fn render_function_hook(widget: *mut u8) {
 static mut WRAPPER_HOOK: Option<GenericDetour<RenderFn>> = None;
 static FRAME_PUMP: crate::core::frame_pump::FramePump = crate::core::frame_pump::FramePump::new();
 static FRAME_PANIC_WARNED: AtomicBool = AtomicBool::new(false);
+/// Win32 thread id of the engine's render thread, latched on the first frame
+/// dispatch (0 = no frame yet). Lets hook bodies on other threads decide
+/// whether a bounded wait is permissible (never on the render thread).
+static RENDER_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+/// The render thread's id once a frame has been dispatched.
+pub fn render_thread_id() -> Option<u32> {
+    match RENDER_THREAD_ID.load(Ordering::Acquire) {
+        0 => None,
+        id => Some(id),
+    }
+}
+
+/// Whether the calling thread is the engine's render thread. `false` before
+/// the first frame (callers must treat "unknown" as "do not block" themselves
+/// if that matters to them).
+pub fn is_render_thread() -> bool {
+    let id = RENDER_THREAD_ID.load(Ordering::Acquire);
+    id != 0 && id == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
+}
 
 /// Called only by the existing layer-dispatcher detour, once per engine frame.
 /// Original rendering stays inside the guard against synchronous reentry.
 pub fn dispatch_frame(render: impl FnOnce()) {
     use crate::services::audio_sync_diag::{self as diag, spans::Scope};
+    if RENDER_THREAD_ID.load(Ordering::Relaxed) == 0 {
+        let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        RENDER_THREAD_ID.store(tid, Ordering::Release);
+    }
     let frame = diag::span(Scope::Frame, 0);
     let entry = frame.event();
     let observer = diag::frame_observer();

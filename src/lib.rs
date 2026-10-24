@@ -92,6 +92,17 @@ fn init() {
     services::audio_clock::configure_from_config();
     profiling::tick("config_store");
 
+    // 0'. StepMania pack loader — config-gated. Spawns the pack index on
+    // worker threads and registers its LayeredFS resolver plus the
+    // `startup.arc` musicdb.xml member transform. Must sit AFTER the config
+    // store (it is gated on the `stepmania-packs` toggle and reads its own
+    // section) and BEFORE `avs_layeredfs::init` below: the game drains
+    // `startup.arc` within ms of gamemdx loading, and a transform registered
+    // after the hooks go live could miss that one open. Nothing here waits;
+    // the bounded wait for the index happens inside the game's own open.
+    services::stepmania::early_init();
+    profiling::tick("stepmania_early_init");
+
     // 0b. AVS LayeredFS — file replacement service. RACE-CRITICAL: this
     // must run BEFORE the gamemdx wait + signature scan. The game's
     // `Application::onBoot` synchronously drains `data/arc/startup.arc`,
@@ -106,6 +117,16 @@ fn init() {
     // depends only on libavs exports (loaded long before gamemdx — it
     // waits for it) and `./data_mods`; its hook bodies are safe before any
     // signature resolves.
+    // The XML-arena patch's race-free application point is the game's own
+    // startup.arc open (see song_limit_expansion); register it before the
+    // hooks go live so the first open already carries it.
+    mods::song_limit_expansion::register_startup_arc_hook();
+    if let Some(fragment) = mods::config::get()
+        .and_then(|c| c.diagnostics.as_ref())
+        .map(|d| d.musicdb_fragment.as_str())
+    {
+        avs_layeredfs::arc_handler::register_diagnostic_musicdb_fragment(fragment);
+    }
     let layeredfs_ok = avs_layeredfs::init();
     if layeredfs_ok {
         log_info!("AVS LayeredFS started");
@@ -174,6 +195,11 @@ fn init() {
         Box::new(mods::anytime_speedmod::AnytimeSpeedmodMod::new()),
         Box::new(mods::hide_bottom_text::HideBottomTextMod::new()),
         Box::new(mods::split_ssq_auto_discovery::SplitSsqAutoDiscoveryMod::new()),
+        // BEFORE series_expansion / folder_expansion: its `init` registers the
+        // STEPMANIA series value + folder bit (bounded wait on the pack index)
+        // when the game's startup.arc open has not done so yet, and those two
+        // mods read the runtime registries in their own `init`.
+        Box::new(mods::stepmania_packs::StepmaniaPacksMod::new()),
         Box::new(mods::series_expansion::SeriesExpansionMod::new()),
         Box::new(mods::improved_song_title_sorting::ImprovedSongTitleSortingMod::new()),
         Box::new(mods::folder_expansion::FolderExpansionMod::new()),
@@ -248,6 +274,16 @@ fn init() {
         log_warn!("Shared movie policy unavailable");
     }
     profiling::tick("movie_policy");
+
+    // 3a. SSQ path-builder service — owner of the `build_ssq_path` detour
+    // (installed lazily by the first consumer: the StepMania loader at mod
+    // init, split-ssq-auto-discovery at enable). Records the address only.
+    if !services::ssq_path::init(&signatures) {
+        log_warn!(
+            "SsqPath service unavailable -- split-chart resolution stays on the game's own table"
+        );
+    }
+    profiling::tick("ssq_path");
 
     // 3b. Permanent song-rate clock patch, installed at exact identity;
     // non-100% factors publish only through the wave-bank commit.
@@ -412,10 +448,18 @@ fn init() {
     profiling::tick("stage_records");
 
     // 4h3. Song-select highlight reader (the wheel model's highlighted
-    // music::Info → mcode) — consumed by the S-Marvelous S-MFC lamp badge.
-    // Fail-open: unavailable ⇒ the badge stays inert.
+    // music::Info → mcode) — consumed by the S-Marvelous S-MFC lamp badge
+    // and the StepMania prefetch scheduler. Fail-open: unavailable ⇒ the
+    // badge stays inert and the wheel-card events are off.
     if !services::selectmusic_highlight::init(&signatures, &game_module) {
         log_warn!("selectmusic_highlight unavailable -- S-MFC song-select lamps stay stock");
+    }
+    // 4h4. Wheel-card events — the ONE detour on the song-select card
+    // refresh (S-MFC lamp badge, StepMania preview/jacket prefetch).
+    if !services::wheel_cards::init(&signatures) {
+        log_warn!(
+            "wheel_cards unavailable -- S-MFC card lamps stay stock, StepMania previews build on open"
+        );
     }
 
     // 4i. Custom options persistence — ess.dll save/load bridge.
@@ -569,6 +613,21 @@ fn init() {
         );
     }
     profiling::tick("render_notes_hook");
+
+    // 6c1. Scroll-remap service — the single detour on the renderer's
+    // per-note scroll-Y function, for StepMania `#SCROLLS`/`#SPEEDS` display
+    // gimmicks. Subscribes to the render_notes dispatcher (6c); installed
+    // only when the StepMania loader is armed and the operator left
+    // `stepmania_packs.scroll_gimmicks` on. Passthrough until a song's
+    // tables are published; fail-open.
+    if services::stepmania::is_armed() && services::stepmania::scroll_gimmicks_enabled() {
+        if services::scroll_remap::init(&signatures) {
+            log_info!("ScrollRemap started");
+        } else {
+            log_warn!("ScrollRemap unavailable -- StepMania scroll gimmicks will not render");
+        }
+    }
+    profiling::tick("scroll_remap");
 
     // 6b3. Deterministic audio clock, game side: the (T,QPC) pairing detour on
     // the input tick, the song_reset content-origin feed and scene gating.

@@ -37,7 +37,9 @@ pub unsafe fn build_table(module_base: *const u8, plan: &EnhancedPlan) -> Option
 }
 
 /// Whether `jacket_thumbnails_<ja|ua>_<n>.arc` exists in the install's
-/// `data/arc/thumbnail/` or in a LayeredFS mod folder.
+/// `data/arc/thumbnail/`, in a LayeredFS mod folder, or is served by a
+/// registered virtual-asset resolver (`find_first_modfile` falls through to
+/// them — a runtime series' resolver-built arc counts).
 pub fn thumbnail_arc_exists(n: u8) -> bool {
     ["ja", "ua"].iter().any(|region| {
         let rel = format!("arc/thumbnail/jacket_thumbnails_{}_{}.arc", region, n);

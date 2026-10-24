@@ -11,8 +11,10 @@ pub mod adpcm;
 pub mod digest;
 pub mod rate;
 pub mod resample;
+pub mod song_bank;
 pub mod stretch;
 pub mod virtual_bank;
+pub mod xsb;
 pub mod xwb;
 
 /// Packed XACT2 `WAVEBANKMINIWAVEFORMAT` descriptor.

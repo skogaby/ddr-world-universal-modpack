@@ -61,6 +61,30 @@ static STATE: Lazy<Mutex<ModPathState>> = Lazy::new(|| {
     })
 });
 
+/// A virtual-asset resolver: normalised game path → host path of the bytes
+/// to serve, or `None` when the resolver has nothing for that path. Consulted
+/// by [`find_first_modfile`] AFTER the mod folders (an operator's mod file
+/// always wins), in registration order. Must be cheap for non-matching paths
+/// (a prefix test) — it runs on every intercepted open.
+pub type Resolver = fn(&str) -> Option<String>;
+
+static RESOLVERS: Mutex<Vec<Resolver>> = Mutex::new(Vec::new());
+
+/// Register a virtual-asset resolver. Safe to call before `init_mod_paths`.
+pub fn register_resolver(resolver: Resolver) {
+    if let Ok(mut r) = RESOLVERS.lock() {
+        r.push(resolver);
+    }
+}
+
+fn resolve_virtual(norm_path: &str) -> Option<String> {
+    let resolvers = RESOLVERS.lock().ok()?;
+    if resolvers.is_empty() {
+        return None;
+    }
+    resolvers.iter().find_map(|r| r(norm_path))
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /// Scan mod folders and cache contents. Call once during init.
@@ -134,6 +158,7 @@ pub fn normalise_path(path: &str) -> Option<String> {
 }
 
 /// Find the first mod file matching the normalized path. Returns the full filesystem path.
+/// Falls through to the registered virtual-asset resolvers when no mod folder has it.
 pub fn find_first_modfile(norm_path: &str) -> Option<String> {
     let cfg = config();
     let lower = norm_path.to_lowercase();
@@ -153,7 +178,7 @@ pub fn find_first_modfile(norm_path: &str) -> Option<String> {
             }
         }
     }
-    None
+    resolve_virtual(norm_path)
 }
 
 /// Find the first mod folder matching the normalized path. Returns the full filesystem path.

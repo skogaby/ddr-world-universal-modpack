@@ -14,48 +14,48 @@ Load this file first. It routes a question to the detailed file that answers it.
 | How do the layers relate? Init order, threads, hook discipline, resilience? | `architecture.md` |
 | Where does module or feature X live? What mods exist, and which harness / RE note goes with each? | `components.md` |
 | Who owns which hook? What is the subscriber API? Which cross-mod predicates apply? Option-row API, Mod trait, signature registry? | `interfaces.md` |
-| Allocators, game layouts, config sections (who writes what), persistence wire model, file formats? | `data_models.md` |
-| Build, host tests, signature sweep, adding a mod/row/shader, runtime flows, the updater pipeline? | `workflows.md` |
+| Allocators, game layouts, config sections (who writes what), persistence wire model, file formats, the StepMania cache? | `data_models.md` |
+| Build, host tests, signature sweep, adding a mod/row/shader/virtual asset, runtime flows, the updater pipeline, `sm_pack_check`? | `workflows.md` |
 | Crates, toolchain, other crates, external tools? | `dependencies.md` |
 | Known code issues, stale strings, doc gaps? | `review_notes.md` |
 
 ## File Summaries
 
 - **[codebase_info.md](codebase_info.md)**
-  - What the DLL is and the target game modules.
+  - What the DLL is and the target game modules; the in-process StepMania pack conversion.
   - Key characteristics: binary neutrality, fail-open/fail-closed split, in-process discipline, pure-layer harnesses.
   - A mermaid map of the whole repository, and the analysis-coverage statement.
 - **[architecture.md](architecture.md)**
   - Layer model and placement rules.
-  - The load-bearing init sequence with its ordering constraints.
-  - Thread model: frame pump seam, audio/worker/job-graph threads.
-  - Hook discipline, resilience model, and the cross-cutting systems table.
+  - The load-bearing init sequence with its ordering constraints (incl. step 0' `stepmania::early_init` and the `startup.arc` open).
+  - Thread model: frame pump seam, FileManager I/O worker, audio/worker/job-graph threads, the StepMania index/scheduler/auto-sync pools.
+  - Hook discipline, resilience model (incl. injected-song taint + hiding), the StepMania pack flow diagram, and the cross-cutting systems table.
 - **[components.md](components.md)**
-  - Tables for `src/core/` and `src/services/` (grouped).
+  - Tables for `src/core/` (incl. the pure `sm`/`ssq` writer/`audio`/`sync`/`art` pipeline) and `src/services/` (grouped; `services/stepmania/` has its own table).
   - Every mod with id, entry path, purpose, harness script and RE note.
-  - Widgets/types, and everything outside the DLL crate: `updater/`, `tools/`, `shaders/`, `data_mods/`.
+  - Widgets/types, and everything outside the DLL crate: `updater/`, `tools/` (incl. `sm_pack_check`), `shaders/`, `data_mods/`, `stepmania/Songs/`.
 - **[interfaces.md](interfaces.md)**
   - The Mod trait and registry semantics, including `requested` vs `enabled` and the boot-only `is_active` rule.
   - The signature registry.
-  - The complete single-owner hook map, with shared mod-owned hooks and mod-private hooks.
-  - Cross-mod predicates, the option-row framework API, other service APIs, and external interfaces.
+  - The complete single-owner hook map, with shared mod-owned hooks and mod-private hooks; the LayeredFS extension points (resolvers, member transforms, fingerprints, progressive reads).
+  - Cross-mod predicates (incl. the song-delta provider and `stepmania::is_injected`), the option-row framework API, other service APIs, and external interfaces.
 - **[data_models.md](data_models.md)**
   - The three-heap allocator table and engine buffer headers.
   - Game layouts and where they are documented.
-  - `mod-config.json`: DLL-written sections vs operator-only sections.
-  - Sidecar files, the persistence wire model + score policy, in-process file formats, and runtime state.
+  - `mod-config.json`: DLL-written sections vs operator-only sections (incl. `stepmania_packs`).
+  - Sidecar files, the StepMania cache layout / identity derivation / injected `<music>` shape, the persistence wire model + score policy + judgement-offset composition, in-process file formats, and runtime state.
 - **[workflows.md](workflows.md)**
   - Build/deploy/release commands.
-  - The ARM host-test caveat and the `validate_*.sh` harness model.
+  - The ARM host-test caveat and the `validate_*.sh` harness model (incl. the StepMania harnesses and `sm_pack_check`).
   - The signature sweep procedure and cabinet validation.
-  - How to add mods, hook consumers, option rows and shaders, plus the tooling list and PDD convention.
-  - Runtime flows: frame, scene, judge, LayeredFS, song rate, score policy, updater, crash diagnostics.
+  - How to add mods, hook consumers, option rows, shaders and LayeredFS virtual assets; when to bump `FORMAT_VERSION`; the tooling list and PDD convention.
+  - Runtime flows: frame, scene, judge, LayeredFS, StepMania pack boot → play, song rate, score policy, updater, crash diagnostics.
 - **[dependencies.md](dependencies.md)**
-  - Crates with rationale, the nightly/Win7 toolchain notes, the other crates, runtime modules, external tools, and upgrade notes.
+  - Crates with rationale (incl. `encoding_rs`, `symphonia`, `rustfft` and their Win7 recipe), the nightly/Win7 toolchain notes, the other crates, runtime modules, external tools, and upgrade notes.
 - **[review_notes.md](review_notes.md)**
-  - Consistency verification.
+  - Consistency verification (incl. where the StepMania module docs supersede the planning design).
   - Which module docs were refreshed.
-  - Code issues and stale strings found along the way (not fixed), and recommendations.
+  - Code issues, stale strings and accepted StepMania limitations found along the way (not fixed), and recommendations.
 
 **Skipped:** none. All standard documents were generated.
 

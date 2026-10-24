@@ -37,6 +37,10 @@
 //! - `replay.rs` — pure transcription of onUpdate's post-Analyze arithmetic
 //!   (`compute_slot`) + the actor radar fold (`fold_radar`). Host-tested.
 //! - `plan.rs` — the pure boot-plan / flip-eligibility invariants. Host-tested.
+//! - `preflight.rs` — the background injected-file check (verdicts by file
+//!   name, published before the boot pass).
+//! - `quarantine.rs` — pure pre-flight planning for injected files (which
+//!   files, which slots) + the radar restore rule. Host-tested.
 //! - `mod.rs` (this file) — the `update_hook` orchestration: build the plan +
 //!   flip records on the first call, then per cursor item either Replay
 //!   (apply cached writes + accumulators + release + cursor + percent) or
@@ -49,7 +53,8 @@
 //!   the parent chain) runs natively on top of the accumulator state our
 //!   replays built up.
 //! - A file record is **flipped 1→6** (the stock "complete, empty" shape) only
-//!   when *every* item referencing it is Replay AND it is still status 1;
+//!   when *every* item referencing it is Replay (or Quarantine — nothing
+//!   reads its buffer) AND it is still status 1;
 //!   otherwise it loads and is processed stock. This structurally prevents a
 //!   stock item ever analyzing an emptied buffer — which would zero its
 //!   results AND trip the game's `ME1529 / FILE CORRUPTION ERROR` reporter, a
@@ -61,6 +66,48 @@
 //! - Everything fails open: a missing/corrupt bin, an unresolved derivation,
 //!   or any per-item failure degrades to the plain loader-acceleration
 //!   behavior (one WARN per class), never a crash or a wrong-metadata boot.
+//!
+//! ### Injected-song quarantine (StepMania packs)
+//!
+//! The analysis of an injected song reads a file the DLL wrote
+//! (`_cache/stepmania/ssq/<b>[_N].ssq`). Its slots were self-checked at
+//! index time, but a later edit, truncation or disk fault would make a
+//! declared slot analyse to zero steps → `ME1529`. So every injected file
+//! is re-read from its LayeredFS-resolved host path and run through
+//! `core::ssq::check::check_ssq` against the slots its items analyse — on
+//! a background thread started at enable (`preflight.rs`), so the plan
+//! build normally only looks verdicts up; files the thread has not reached
+//! yet are checked inline, and only those the cache cannot vouch for
+//! (`quarantine.rs`). A
+//! failing file's items become `ItemPlan::Quarantine` (release + advance,
+//! never the original), its record is flipped 1→6 so it never loads, the
+//! song gets `+0x1B0` (hidden at the next active-list rebuild) and one WARN
+//! `FastBootup: injected '<b>' quarantined -- …` names it. The final item
+//! must stay Stock; when it belongs to a quarantined file it runs with the
+//! entry's vptr pointed at a copy of its vtable whose `hasChart` slot
+//! answers "no" (restored right after), so the corruption branch — flag
+//! and reporter — cannot fire. Quarantined files are never captured, so
+//! every boot re-checks them (one read + walk each) until they are fixed.
+//!
+//! ### Radar maxima (E8 — refuted on 20260721)
+//!
+//! The ten per-side accumulators (`actor+0xA8..+0xCC`, zeroed by the
+//! actor's constructor) are copied at completion to `*DAT_1806F14F8 +
+//! 0x30..+0x54`, whose only reader (`FUN_1801dce20`, called from the
+//! gameplay actor's constructor) scales a played chart's raw radar
+//! piecewise: `raw ≤ T → raw·100/T`, else `100 + (raw−T)·100/(max−T)` with
+//! `T = {600, 300, 2000, 3500, 55}`. But `FUN_1801dcab0` overwrites the same
+//! ten fields with hardcoded maxima on global construction, at scene 7
+//! (WARNING_SPLASH, start of every attract loop) and at every new game — so
+//! the boot-computed values are dead before any song is played and an
+//! extreme injected chart cannot shrink stock radars on this build. Injected
+//! items are excluded anyway (cheap; robust to a build that drops the
+//! reset): an Analyze post-subscriber zeroes the radar block of injected
+//! stock items inside our boot pass (registered before capture, so the
+//! cache records zeros; it also covers the final item, whose completion
+//! copy happens inside the call), the accumulator image is snapshot/restored
+//! around them, and replay skips `fold_radar` for injected mcodes. The
+//! gameplay-time Analyze (outside the boot pass) is untouched.
 //!
 //! ## What it hooks
 //!
@@ -150,6 +197,8 @@ pub mod cache;
 pub mod capture;
 pub mod identity;
 pub mod plan;
+pub mod preflight;
+pub mod quarantine;
 pub mod replay;
 
 type UpdateFn = unsafe extern "C" fn(*mut u8);
@@ -280,6 +329,25 @@ static BOOT_PLAN: std::sync::OnceLock<Vec<plan::ItemPlan>> = std::sync::OnceLock
 /// One-shot latch for the null-mcode-during-replay WARN.
 static NULL_MCODE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Injected-song quarantine (StepMania packs). Armed when the music-DB
+/// lookup and the release function resolved (it needs no replay cache).
+static mut QUARANTINE_ARMED: bool = false;
+/// The final work item belongs to a quarantined file and runs with the
+/// entry's `hasChart` neutered (set at plan build).
+static mut FINAL_NEUTERED: bool = false;
+/// Set around the original call for an injected stock item: the Analyze
+/// post-subscriber zeroes that call's radar block so the item cannot raise
+/// the library-wide radar maxima (covers the final item, whose completion
+/// copy happens inside the call — a snapshot/restore cannot reach it).
+static RADAR_EXCLUDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Actor radar accumulator image: ten dwords `+0xA8..+0xCC`.
+const ACTOR_RADAR_DWORDS: usize = 10;
+/// Copied vtable slots for the neutered `hasChart` call (music::Info has
+/// well under 64 virtuals; the copy is generous and readability-checked).
+const FAKE_VTABLE_SLOTS: usize = 128;
+/// `[RTTI locator, slot 0, slot 1, …]` — the entry's vptr points at index 1.
+static mut FAKE_VTABLE: [usize; FAKE_VTABLE_SLOTS + 1] = [0; FAKE_VTABLE_SLOTS + 1];
+
 /// Read whether we're currently inside our own `update_hook` (the boot
 /// actor's `onUpdate`). The capture subscriber uses this to ignore any
 /// Analyze call that isn't ours.
@@ -334,6 +402,14 @@ unsafe fn raise_open_cap() {
     let mgr = manager();
     if mgr.is_null() {
         return;
+    }
+    // The boot analysis runs over the music DB the game just built from
+    // startup.arc. If LayeredFS never saw that open, no member transform
+    // (injected music-DB content) and no in-open arena patch can have landed.
+    if !crate::services::avs_layeredfs::arc_handler::startup_arc_seen() {
+        crate::log_warn!(
+            "FastBootup: the game built its music DB but LayeredFS never saw the startup.arc open — injected music-DB content cannot have landed this boot"
+        );
     }
     let cap_ptr = mgr.add(MGR_OPEN_CAP) as *mut u32;
     let stock = cap_ptr.read_unaligned();
@@ -395,10 +471,11 @@ unsafe extern "C" fn update_hook(actor: *mut u8) {
         cache_first_call(actor);
     }
 
-    // First hooked call: build the boot plan (Replay/Stock per item) and flip
-    // eligible records 1→6. Only replays when the verifier is ready and the
-    // derived addresses resolved; otherwise every item stays Stock.
-    if REPLAY_ARMED && !PLAN_BUILT {
+    // First hooked call: build the boot plan (Replay/Stock/Quarantine per
+    // item) and flip eligible records 1→6. Replays only when the verifier is
+    // ready and the derived addresses resolved; quarantines injected files
+    // that fail the pre-flight; otherwise every item stays Stock.
+    if (REPLAY_ARMED || QUARANTINE_ARMED) && !PLAN_BUILT {
         build_boot_plan(actor);
     }
 
@@ -421,6 +498,11 @@ unsafe extern "C" fn update_hook(actor: *mut u8) {
             plan::ItemPlan::Replay => {
                 replay_item(actor);
             }
+            plan::ItemPlan::Quarantine => {
+                if !quarantine_item(actor) {
+                    break;
+                }
+            }
             plan::ItemPlan::Stock => {
                 if processed >= MAX_PER_FRAME {
                     break;
@@ -428,12 +510,35 @@ unsafe extern "C" fn update_hook(actor: *mut u8) {
                 if !should_process_more(actor) {
                     break;
                 }
+                let mcode = current_item(actor).map(|(_, _, m)| m).unwrap_or(-1);
+                let injected = mcode > 0 && crate::services::stepmania::is_injected(mcode as u32);
+                let neuter =
+                    injected && FINAL_NEUTERED && pos + 1 == boot_total_items(actor) as usize;
                 let capturing = CACHE_ARMED && capture::is_active();
                 if capturing {
-                    stash_capture_item(actor);
+                    if neuter {
+                        // Never persist the analysis of a quarantined file.
+                        capture::clear_item();
+                    } else {
+                        stash_capture_item(actor);
+                    }
                 }
-                if let Some(ref hook) = FAST_BOOTUP_HOOK {
-                    hook.call(actor);
+                let radar_before = if injected {
+                    Some(read_actor_radar(actor))
+                } else {
+                    None
+                };
+                RADAR_EXCLUDE.store(injected, std::sync::atomic::Ordering::Release);
+                let ran_neutered = neuter && call_original_neutered(actor, mcode);
+                if !ran_neutered {
+                    if let Some(ref hook) = FAST_BOOTUP_HOOK {
+                        hook.call(actor);
+                    }
+                }
+                RADAR_EXCLUDE.store(false, std::sync::atomic::Ordering::Release);
+                if let Some(before) = radar_before {
+                    let after = read_actor_radar(actor);
+                    write_actor_radar(actor, &quarantine::restore_radar(&after, &before, true));
                 }
                 if capturing {
                     capture::harvest();
@@ -636,16 +741,20 @@ unsafe fn boot_cursor_pos(actor: *mut u8) -> Option<usize> {
     Some(index)
 }
 
-/// Build the per-item Replay/Stock plan and flip eligible records 1→6.
-/// Latched. Only replays when the verifier is ready; a record already
-/// in-flight (not status 1) at flip time is left alone and its items are
-/// downgraded to Stock (design §Error Handling — self-healing).
+/// Build the per-item Replay/Stock/Quarantine plan and flip eligible records
+/// 1→6. Latched. Replays only when the verifier is ready; quarantines
+/// injected files that fail the pre-flight (needs no cache). A record
+/// already in-flight (not status 1) at flip time is left alone and its
+/// Replay items are downgraded to Stock (design §Error Handling —
+/// self-healing); its Quarantine items stay Quarantine and wait for the
+/// load to settle before releasing.
 unsafe fn build_boot_plan(actor: *mut u8) {
     PLAN_BUILT = true;
-    if !identity::is_ready() {
-        // Verifier lost the ~1 s race — process everything stock this boot.
-        log_info!("FastBootup: verifier not ready at plan build -- all items stock this boot");
-        return;
+    preflight::mark_plan_started();
+    let replay_ok = REPLAY_ARMED && identity::is_ready();
+    if REPLAY_ARMED && !replay_ok {
+        // Verifier lost the ~1 s race — no replay this boot.
+        log_info!("FastBootup: verifier not ready at plan build -- no replay this boot");
     }
 
     let array = *(actor.add(ACTOR_WORK_BEGIN) as *const *const u8);
@@ -656,24 +765,64 @@ unsafe fn build_boot_plan(actor: *mut u8) {
     let total = (end as usize).saturating_sub(array as usize) / WORK_ITEM_STRIDE;
 
     let mut inputs: Vec<plan::PlannedInput> = Vec::with_capacity(total);
+    let mut q_inputs: Vec<quarantine::ItemInput> = Vec::with_capacity(total);
+    let mut mcodes: Vec<i32> = Vec::with_capacity(total);
     for pos in 0..total {
         let item = array.add(pos * WORK_ITEM_STRIDE);
         let entry_index = (item as *const i32).read_unaligned();
         let difficulty = (item.add(4) as *const i32).read_unaligned();
-        let hit = entry_index > 0
+        let mcode = (item.add(8) as *const i32).read_unaligned();
+        let hit = replay_ok
+            && entry_index > 0
             && difficulty >= 0
             && item_game_path(entry_index)
                 .map(|gp| identity::item_replayable(&gp, difficulty as u8))
                 .unwrap_or(false);
-        inputs.push(plan::PlannedInput { entry_index, hit });
+        let levels = if QUARANTINE_ARMED && mcode > 0 {
+            crate::services::stepmania::injected_song(mcode as u32).map(|e| e.levels)
+        } else {
+            None
+        };
+        inputs.push(plan::PlannedInput {
+            entry_index,
+            hit,
+            quarantine: false,
+        });
+        q_inputs.push(quarantine::ItemInput {
+            entry_index,
+            difficulty,
+            levels,
+            hit,
+        });
+        mcodes.push(mcode);
     }
 
-    let mut boot = plan::compute(&inputs);
+    if QUARANTINE_ARMED {
+        let failed = preflight_injected(&q_inputs, &mcodes);
+        for (input, flag) in inputs
+            .iter_mut()
+            .zip(quarantine::item_flags(&q_inputs, &failed))
+        {
+            input.quarantine = flag;
+        }
+    }
+
+    let final_neuter = std::ptr::read(std::ptr::addr_of!(ENTRY_HAS_CHART_VFUNC)) != 0;
+    let mut boot = plan::compute(&inputs, final_neuter);
+    if boot.final_quarantined {
+        if final_neuter {
+            FINAL_NEUTERED = true;
+        } else {
+            crate::log_warn!(
+                "FastBootup: the final work item's injected SSQ failed the pre-flight and the hasChart slot is underived -- it is analysed stock (ME1529 possible)"
+            );
+        }
+    }
 
     // Apply flips: only records that are still status 1 (queued, buf/len 0).
     // A record already opened by the pre-batch pump (status 2/3) is left
-    // alone and its items downgraded to Stock so the loader owns it (the
-    // stock path reads its buffer; replaying it would race the loader).
+    // alone and its Replay items downgraded to Stock so the loader owns it
+    // (the stock path reads its buffer; replaying it would race the loader).
     let mgr = manager();
     let entries = if mgr.is_null() {
         std::ptr::null()
@@ -699,21 +848,214 @@ unsafe fn build_boot_plan(actor: *mut u8) {
     }
     if !downgraded.is_empty() {
         for (i, input) in inputs.iter().enumerate() {
-            if downgraded.contains(&input.entry_index) {
+            if downgraded.contains(&input.entry_index) && boot.items[i] == plan::ItemPlan::Replay {
                 boot.items[i] = plan::ItemPlan::Stock;
             }
         }
     }
 
     let replay_n = boot.replay_count();
+    let quarantine_n = boot.quarantine_count();
     let _ = BOOT_PLAN.set(boot.items);
     log_info!(
-        "FastBootup: replay plan -- {}/{} items from cache, {} record(s) flipped, {} in-flight downgraded",
+        "FastBootup: replay plan -- {}/{} items from cache, {} quarantined, {} record(s) flipped, {} in-flight downgraded",
         replay_n,
         total,
+        quarantine_n,
         flipped,
         downgraded.len()
     );
+}
+
+/// Re-check every injected file the cache cannot vouch for (host read of
+/// the LayeredFS-resolved file + `check_ssq` against the slots its items
+/// analyse). Failing files' songs get the music-DB corruption flag (hides
+/// them; never the reporter) and one WARN each. Returns `entry_index →
+/// failed`.
+unsafe fn preflight_injected(
+    items: &[quarantine::ItemInput],
+    mcodes: &[i32],
+) -> std::collections::BTreeMap<i32, bool> {
+    let files = quarantine::files_to_check(items);
+    let mut failed = std::collections::BTreeMap::new();
+    if files.is_empty() {
+        return failed;
+    }
+    let started = std::time::Instant::now();
+    let mut warned: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut bad = 0usize;
+    let mut inline = 0usize;
+    for (&ei, slots) in &files {
+        let game_path = item_game_path(ei);
+        let reason = match game_path.as_deref() {
+            None => Some("SSQ file not found".to_string()),
+            Some(gp) => {
+                let name = gp.rsplit('/').next().unwrap_or(gp);
+                match preflight::lookup(name) {
+                    Some(verdict) => verdict,
+                    None => {
+                        inline += 1;
+                        preflight::check_file(gp, slots)
+                    }
+                }
+            }
+        };
+        failed.insert(ei, reason.is_some());
+        let Some(reason) = reason else { continue };
+        bad += 1;
+        // Every song whose items read this file is hidden and named once.
+        for (it, &mcode) in items.iter().zip(mcodes) {
+            if it.entry_index != ei || mcode <= 0 || !warned.insert(mcode) {
+                continue;
+            }
+            let basename = crate::services::stepmania::injected_song(mcode as u32)
+                .map(|e| e.basename.clone())
+                .unwrap_or_else(|| mcode.to_string());
+            let flagged = set_corrupt_flag(mcode);
+            crate::log_warn!(
+                "FastBootup: injected '{}' quarantined -- {}: {}{}",
+                basename,
+                game_path.as_deref().unwrap_or("?"),
+                reason,
+                if flagged {
+                    ""
+                } else {
+                    " (music-DB entry not found; not hidden)"
+                }
+            );
+        }
+    }
+    log_info!(
+        "FastBootup: injected pre-flight -- {} file(s) ({} checked inline) in {} ms, {} quarantined",
+        files.len(),
+        inline,
+        started.elapsed().as_millis(),
+        bad
+    );
+    failed
+}
+
+/// Set `entry+0x1B0` (the flag only — never the reporter) for `mcode`.
+unsafe fn set_corrupt_flag(mcode: i32) -> bool {
+    let entry = FIND_MCODE.map(|f| f(mcode)).unwrap_or(std::ptr::null_mut());
+    if entry.is_null()
+        || !crate::core::memory::is_readable(entry as *const u8, ENTRY_CORRUPT_FLAG + 1)
+    {
+        return false;
+    }
+    (entry.add(ENTRY_CORRUPT_FLAG) as *mut u8).write_unaligned(1);
+    true
+}
+
+/// Process a Quarantine item: release + advance, never the original. Waits
+/// (returns `false`, ending this frame's batch) while the record is still
+/// mid-load, so the release never races the loader.
+unsafe fn quarantine_item(actor: *mut u8) -> bool {
+    if let Some((entry_index, _, _)) = current_item(actor) {
+        let mgr = manager();
+        if !mgr.is_null() && entry_index > 0 {
+            let entries = *(mgr.add(0x08) as *const *const u8);
+            if !entries.is_null() {
+                let record = entries.offset((entry_index as isize) * (REC_STRIDE as isize));
+                let status = (record.add(REC_STATUS) as *const i32).read_unaligned();
+                if !READY_STATUSES.contains(&status) {
+                    return false;
+                }
+            }
+            if let Some(rel) = RELEASE_FN {
+                rel(mgr as *mut u8, entry_index);
+            }
+        }
+    }
+    advance_cursor_and_percent(actor);
+    true
+}
+
+/// `hasChart` replacement for the neutered final call: no slot has a chart,
+/// so the corruption branch (flag + `ME1529` reporter) cannot fire.
+unsafe extern "C" fn has_chart_never(_entry: *mut u8, _mode: i32, _difficulty: i32) -> u8 {
+    0
+}
+
+/// Run the original once for the final item with `mcode`'s entry answering
+/// `hasChart` "no": its vptr is pointed at a copy of the real vtable (RTTI
+/// locator included) with that one slot replaced, and restored right after.
+/// Then the song gets the corruption flag. `false` = could not set up (the
+/// caller runs the original plainly).
+unsafe fn call_original_neutered(actor: *mut u8, mcode: i32) -> bool {
+    let vslot = std::ptr::read(std::ptr::addr_of!(ENTRY_HAS_CHART_VFUNC));
+    if vslot == 0 || vslot % 8 != 0 || vslot / 8 >= FAKE_VTABLE_SLOTS {
+        return false;
+    }
+    let entry = FIND_MCODE.map(|f| f(mcode)).unwrap_or(std::ptr::null_mut());
+    if entry.is_null() || !crate::core::memory::is_readable(entry as *const u8, 8) {
+        return false;
+    }
+    let vptr = entry as *mut *const usize;
+    let vt = vptr.read_unaligned();
+    if vt.is_null()
+        || !crate::core::memory::is_readable(
+            (vt as *const u8).wrapping_sub(8),
+            (FAKE_VTABLE_SLOTS + 1) * 8,
+        )
+    {
+        return false;
+    }
+    let Some(ref hook) = FAST_BOOTUP_HOOK else {
+        return false;
+    };
+    let fake = std::ptr::addr_of_mut!(FAKE_VTABLE) as *mut usize;
+    for i in 0..=FAKE_VTABLE_SLOTS {
+        fake.add(i)
+            .write(vt.wrapping_sub(1).add(i).read_unaligned());
+    }
+    fake.add(1 + vslot / 8)
+        .write(has_chart_never as *const () as usize);
+    vptr.write_unaligned(fake.add(1));
+    hook.call(actor);
+    vptr.write_unaligned(vt);
+    set_corrupt_flag(mcode);
+    log_info!(
+        "FastBootup: final work item (injected mcode {}) analysed with hasChart neutered -- quarantined",
+        mcode
+    );
+    true
+}
+
+/// Read the actor's ten per-side radar accumulators.
+unsafe fn read_actor_radar(actor: *mut u8) -> quarantine::RadarImage {
+    let mut img = [0i32; ACTOR_RADAR_DWORDS];
+    let p = actor.add(ACTOR_RADAR_ACC_SIDE0) as *const i32;
+    for (i, v) in img.iter_mut().enumerate() {
+        *v = p.add(i).read_unaligned();
+    }
+    img
+}
+
+/// Write the actor's ten per-side radar accumulators.
+unsafe fn write_actor_radar(actor: *mut u8, img: &quarantine::RadarImage) {
+    let p = actor.add(ACTOR_RADAR_ACC_SIDE0) as *mut i32;
+    for (i, v) in img.iter().enumerate() {
+        p.add(i).write_unaligned(*v);
+    }
+}
+
+/// Analyze post-subscriber: while an injected stock item runs inside our
+/// boot pass, zero its radar block so the actor's max-fold ignores it.
+/// Registered before the capture subscriber, so the cache records zeros too.
+fn radar_exclude_subscriber(args: &crate::services::analyze_hook::AnalyzeArgs, _ret: u8) {
+    if !RADAR_EXCLUDE.load(std::sync::atomic::Ordering::Acquire)
+        || !in_hook()
+        || args.radar.is_null()
+    {
+        return;
+    }
+    unsafe {
+        let p = args.radar as *mut i32;
+        for i in 0..5 {
+            p.add(i).write_unaligned(0);
+        }
+    }
 }
 
 /// Replay the item at the actor's current cursor: apply the cached music-DB
@@ -743,7 +1085,10 @@ unsafe fn replay_item(actor: *mut u8) {
                     );
                 }
             } else {
-                apply_db_writes(actor, entry, difficulty, &slots, special);
+                // Injected songs never feed the library-wide radar maxima
+                // (E8) — also for entries captured before the exclusion.
+                let fold = !crate::services::stepmania::is_injected(mcode as u32);
+                apply_db_writes(actor, entry, difficulty, &slots, special, fold);
             }
         }
 
@@ -768,6 +1113,7 @@ unsafe fn apply_db_writes(
     difficulty: i32,
     slots: &[cache::SlotPayload; 2],
     special: replay::SpecialFile,
+    fold: bool,
 ) {
     let threshold = VARIABLE_BPM_THRESHOLD;
     for mode in 0..2usize {
@@ -804,6 +1150,9 @@ unsafe fn apply_db_writes(
 
     // Radar accumulators are per-side: side 0 → +0xA8, side 1 → +0xBC. Each
     // side folds its own mode's radar block (sota/thr8 gate on indices 0/1).
+    if !fold {
+        return;
+    }
     for side in 0..2usize {
         let base = if side == 0 {
             ACTOR_RADAR_ACC_SIDE0
@@ -1077,7 +1426,9 @@ impl Mod for FastBootupMod {
         }
         // Register the boot-capture subscriber on the shared Analyze
         // dispatcher (harmless if the dispatcher never armed — the subscriber
-        // self-gates on the boot window).
+        // self-gates on the boot window). The injected-radar exclusion goes
+        // first so capture records the zeroed block.
+        crate::services::analyze_hook::register_post(radar_exclude_subscriber);
         capture::register();
         true
     }
@@ -1117,6 +1468,16 @@ impl Mod for FastBootupMod {
             }
             CACHE_ARMED = cache_armed;
             REPLAY_ARMED = replay_armed;
+            QUARANTINE_ARMED = find_ok && release_ok;
+            if QUARANTINE_ARMED {
+                // Injected-file checks off the game thread, before the boot pass.
+                preflight::spawn();
+            }
+            if !QUARANTINE_ARMED && crate::services::stepmania::is_armed() {
+                crate::log_warn!(
+                    "FastBootup: music-DB lookup or release unresolved -- injected-song boot quarantine disabled (index self-check is the only guard)"
+                );
+            }
             if cache_armed || replay_armed {
                 let stamp = std::ptr::read(std::ptr::addr_of!(GAMEMDX_STAMP));
                 let size = std::ptr::read(std::ptr::addr_of!(GAMEMDX_SIZE));

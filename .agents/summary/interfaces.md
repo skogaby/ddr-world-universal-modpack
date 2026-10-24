@@ -54,10 +54,11 @@ Every entry below is the **only** detour on that target. A new consumer must sub
 | `judge_hook` | `GamePlayActor::judgeNotes` | `register_pre/post(Priority, fn)` |
 | `foot_panel_swap` | (judge_hook subscriber) the foot-panel slot during judge | `set_perfect`, `arm_bot`, `disarm_bot` |
 | `render_notes_hook` | `ArrowRenderer::render_notes` | `register_pre/post(Priority, fn)` |
-| `analyze_hook` | `IStepReader::Analyze` | `register_post` |
+| `scroll_remap` | `get_offset_y` (the renderer's per-note scroll-Y function; also a `render_notes_hook` pre @ Early subscriber for the per-frame clock snapshot) | `publish(label, Arc<ScrollGimmicks>, beat0_ms)`, `clear`, `is_active` — fed by `services::stepmania` at gameplay load (StepMania `#SCROLLS`/`#SPEEDS`) |
+| `analyze_hook` | `IStepReader::Analyze` | `register_post` (registration order is dispatch order: fast-bootup registers its injected-radar exclusion BEFORE its capture, so the cache records the zeroed block) |
 | `overlay_draw` | layer dispatcher (the frame seam) | `set_background`, anchors, topmost emitter |
-| `widget_renderer` | widget render fn, wrapper render fn | `create_*_widget`, `run_on_render_thread` |
-| `avs_layeredfs::file_hooks` | `avs_fs_open/lstat/mount/read/convert_path`, `GetLongPathNameA` | `mod_paths::find_*`, handlers |
+| `widget_renderer` | widget render fn, wrapper render fn | `create_*_widget`, `run_on_render_thread`, `is_render_thread` |
+| `avs_layeredfs::file_hooks` | `avs_fs_open/lstat/mount/read/convert_path`, `GetLongPathNameA` | `mod_paths::find_*`, handlers; `mod_paths::register_resolver` (virtual assets), `arc_handler::{register_member_transform, register_pre_repack_hook, register_arc_fingerprint, startup_arc_seen}`, progressive reads via `stepmania::progressive::register` (see "LayeredFS extension points") |
 | `afp_patcher` | libafp `afp_stream_do_create` | `register_patch`, `register_raw_interceptor` |
 | `custom_options` | row builder, tab filter, `OptionForm` dtor | `register_option` |
 | `custom_options_persistence` | ess save sender, load receiver | `register_string_field`, `register_data_node_producer`, `register_card_in_callback` |
@@ -67,6 +68,8 @@ Every entry below is the **only** detour on that target. A new consumer must sub
 | `call_voice_hooks` | `CallVoiceActor::onUpdate` (announcer) | `acquire`, `set_mute`, `set_override` |
 | `bottom_text` | bottom-text renderer | `set_hidden(HideReason, bool)` |
 | `movie_policy` | `DShowPlayer::BuildGraph` | `set_suppressed(MovieSuppressor, bool)`, `last_build` |
+| `wheel_cards` | `selectmusic_card_refresh` (song-select wheel card) | `on_card_bound(fn(&CardBound))` — s-marvelous lamp badge, stepmania scheduler prefetch |
+| `ssq_path` | `build_ssq_path` (basename + difficulty → `data/mdb_apx/ssq/<b>[_N].ssq`) | `register(priority, fn(&[u8], usize) -> Option<Choice>)` — first `Some` in ascending priority wins, `None` from all → the original; `set_divergence_oracle`. Consumers: `stepmania::ssq_split` (10, injected basenames from the index's split table), `split-ssq-auto-discovery` (20, Rule-A disk index) |
 | `song_rate` | XACT readFile + getOverlappedResult (pair), wavebank create + unregister (pair); byte patch: clock stub | runtime setters, `clock_patch::snapshot` |
 | `audio_sync_diag` / `::xact` | song play/prepare/stop/start/broadcast; XACT factory + engine internals | observers for `audio_clock::engine` |
 | `audio_clock::game` | `input_tick_function` | `corrected_rbx` (clock-stub call-out) |
@@ -88,19 +91,28 @@ These have exactly one owner and no consumers:
 
 - **custom-resolution:** `graphics_init`, letterbox, scissor, debug font/sprite
 - **ddr-selection:** package helper, ShutterActor update, SceneManageActor init, gauge/score/option-icon actors, AFP sound callback
-- **fast-bootup:** `CheckStepDataActor::onUpdate`
+- **fast-bootup:** `CheckStepDataActor::onUpdate` (also an `analyze_hook` post-subscriber; the quarantine/preflight machinery is internal — no public API)
 - **folder-expansion:** folder ctor/register/has-songs, `folder_apply_to_model`, `selectmusic_source_list` (ALL MUSIC exclusion)
 - **multiplayer-bot:** extra-stage grant
 - **player-perspective:** `spot_render`, `judge_effect_render`
 - **power-user-statistics:** calorie tick
 - **premium-free:** result commit, ghost init
-- **s-marvelous:** results graph/score/emblem, full-combo msg, lamp refreshes
+- **s-marvelous:** results graph/score/emblem, full-combo msg, difficulty/record-panel lamp refreshes (the card refresh is `wheel_cards`')
 - **series-expansion:** filter entry-count table
 - **smx-hardware:** machine/PC type, lamp exports
-- **split-ssq-auto-discovery:** `build_ssq_path`
 - **timing-offsets:** timing config setter
 
-Byte patches have one owner each: `cull_window` (multi-contributor), `song_rate::clock_patch`, fps-unlock, song-limit-expansion, timer-freeze, anytime-speedmod, premium-free, quick-restart-or-fail, real-speed-fix, series-expansion, folder-expansion, s-marvelous, power-user-statistics (pacemaker), custom-resolution, background-dancers (screen route), and ddr-selection. The ddr-selection patches are scoped to a single call or update.
+Byte patches have one owner each: `cull_window` (multi-contributor), `song_rate::clock_patch`, fps-unlock, song-limit-expansion (applied from the `startup.arc` pre-repack hook or `early_apply`, whichever runs first), timer-freeze, anytime-speedmod, premium-free, quick-restart-or-fail, real-speed-fix, series-expansion, folder-expansion, s-marvelous, power-user-statistics (pacemaker), custom-resolution, background-dancers (screen route), and ddr-selection. The ddr-selection patches are scoped to a single call or update.
+
+## LayeredFS Extension Points (`src/services/avs_layeredfs/`)
+
+All are safe to call before `avs_layeredfs::init` (the StepMania loader registers at step 0'); none adds a detour.
+
+- **`mod_paths::register_resolver(fn(&str) -> Option<String>)`** — a virtual-asset resolver: normalised game path → host path to serve. Consulted by `find_first_modfile` AFTER the operator's mod folders, in registration order, on every intercepted open/lstat/convert_path — so it must be cheap for non-matching paths (prefix test). Every DLL-side reader that already goes through `find_first_modfile` (`chart_length`, fast-bootup identity, split discovery) sees the materialised files for free.
+- **`arc_handler::register_member_transform(arc, member, fn(&[u8]) -> Option<Vec<u8>>)`** — rewrites one member of a repacked arc AFTER overlays (an operator's full-file `musicdb.xml` overlay keeps working underneath). An arc with a transform is repacked even without a mod folder.
+- **`arc_handler::register_pre_repack_hook(arc, fn)`** — runs inside the game's open of that arc, before the repack (the XML-arena patch rides `startup.arc` this way).
+- **`arc_handler::register_arc_fingerprint(arc, fn() -> Option<String>)`** — extra cache-key material; the arc cache key is the original arc's AVS size+mtime + overlay stamps + transform member names + fingerprints (the StepMania index digest, so a changed pack set re-repacks). `startup_arc_seen()` reports whether this boot's open went through LayeredFS.
+- **Progressive reads** — `stepmania::progressive::register` publishes a `ProgressiveFile { watermark, tail_ready, done }` findable by its `.part` and final paths; `file_hooks` records `fd → handle` at open and holds a read past the watermark (≤ 5 s, then passes through). `lseek`/`close`/`fstat` stay unhooked; the per-fd cursor follows what each read returned (the FileManager's single I/O worker streams sequentially).
 
 ## Cross-Mod Predicates Features Must Respect
 
@@ -111,6 +123,9 @@ Byte patches have one owner each: `cull_window` (multi-contributor), `song_rate:
 | `s_marvelous::on_ddr_selection_enabled()` / `legacy_combo_smarv(skin, side)` | DDR SELECTION's `enable` triggers S-Marvelous' legacy-skin staging; its A3 combo write asks for the all-S-Marvelous sheet (skins 4–5). |
 | `ddr_selection::leaked_forced_options(side)` | The save trampoline strips forced 1st-5th options from the save tree. |
 | `per_song_judgement_offsets` at `Priority::Early` | It writes `Option+0x24` before assist-tick reads it at `Normal` on the same dispatch. |
+| `per_song_judgement_offsets::override_hook::set_song_delta_provider` | A cabinet-wide per-song judgement delta (today StepMania auto-sync, `stepmania::sync_apply`) is applied THROUGH this one write — `compose.rs`: `(player's entry, else stock) + delta`, ±100 — never by rewriting a song file; the provider may block ≤ 3 s on the game thread at a side's first judge, and must return the same value for both sides and every replay in the session (freeze rule). |
+| `stepmania::is_injected(mcode)` / `is_injected_basename(&str)` / `injected_song(mcode)` | Anything that treats an injected StepMania song differently (fast-bootup quarantine + radar exclusion, `hide`, the taint) keys on these. An injected song must never reach a score save: route new score paths through `score_guard`. |
+| `stepmania::is_armed()` | True once `early_init` ran with the mod enabled and a songs root; `scroll_remap` installs only when it is armed and `stepmania_packs.scroll_gimmicks` is on. |
 | `s_marvelous::is_enabled()` / `state::is_armed` | Readers of the S-Marv split (PUS widget, bot filler) gate on it. |
 | `song_reset::on_song_reset` | Subscribe to it when state must follow in-place restarts and seeks (movie sync, calibration, training). |
 | `versus_mirror::register` / `mirror_edit` | Rows backed by one cabinet-global mechanism mirror P1 → P2 while both players are entered. |
@@ -149,7 +164,10 @@ Re-registering a key replaces it in place.
 - **`scene_manager`:** `current_scene()` (0-indexed), `on_scene_change`, `add_redirect_once`, `redirect_repair_available`.
   - Note: `agcs::Sequence::finish` (signature `sequence_finish`) takes **1-indexed** scene ids. It is the only 1-indexed API.
 - **`toast`:** `flash`, `flash_with_hold`, `show_pulsing`, `dismiss`.
-- **`score_guard`:** `set_autoplay_taint`, `set_quick_fail`, `set_training_taint`, `set_assist_tick_taint`, rate ledger; enforcement lives in the persistence save trampoline.
+- **`score_guard`:** `set_autoplay_taint`, `set_quick_fail`, `set_training_taint`, `set_assist_tick_taint`, `set_injected_song_taint(bool)` (level-written by `stepmania::taint` from the full-bank request stream; cleared by `reset_session`, NOT by `reset_song_taint`), `is_full_sanitization_available`, rate ledger; enforcement lives in the persistence save trampoline.
+- **`stepmania`:** `early_init` (step 0' only), `is_armed`, `init_runtime`, `ensure_registration`, `start_sync_sweep`, `is_injected(mcode)`, `is_injected_basename`, `injected_song(mcode) -> Option<Arc<SongEntry>>`, `injected_entries()` (falls back to the `startup.arc` fingerprint snapshot on a warm boot whose arc cache skipped the transform), `status() -> Option<IndexSnapshot>`, `scroll_tables_for`, `root_exists`, `songs_root`.
+- **`folder_expansion::register_runtime_folder(CustomFolderEntry) -> Result` / `lowest_free_bit()`** and **`series_expansion::register_runtime_series(CustomSeriesEntry, label_art_dir) -> Result` / `lowest_free_series_value()`:** code-registered folder/series entries, merged into the config lists at each mod's `load_config`. Call before those mods' `init` (step 0' or an earlier mod's `init`); they reject collisions with the operator's config or earlier registrations.
+- **`song_limit_expansion::{register_startup_arc_hook, apply_arena_patch, arena_patch_state}`:** the XML-arena patch as a static, idempotent, process-wide operation; applied from the `startup.arc` pre-repack hook or `early_apply`, reverted by `disable`.
 
 ## External Interfaces
 
@@ -157,6 +175,6 @@ Re-registering a key replaces it in place.
 |---|---|
 | **spice2x** | Loads the DLL with `-k`. Log output appears in spice2x's `log.txt`. Under Wine, `-icmphook` is recommended, and movie fallback mode needs `-audiohookdisable`. |
 | **Backend server** (optional) | Stores the `mod_*` fields, native customize columns, and the S-Marvelous `/data/s_marv` node. Works offline through the JSON cache. |
-| **Filesystem** | `mod-config.json`, `judgement_offsets.csv`, `data_mods/` (plus the machine-owned `data_mods/_cache/`), `ddr_hook_crash.log` |
+| **Filesystem** | `mod-config.json`, `judgement_offsets.csv`, `data_mods/` (plus the machine-owned `data_mods/_cache/`, including `_cache/stepmania/`), `stepmania/Songs/<Pack>/<Song>/` (operator StepMania packs, read at boot), `ddr_hook_crash.log` |
 | **SpiceAPI** | `scripts/game_nav/` drives a running cabinet through `spice2x-cli/`. |
 | **GitHub releases** | The updater looks for the asset `ddr-world-universal-modpack-*.zip` and checks its sha256 digest. |

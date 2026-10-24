@@ -4,12 +4,12 @@
 
 ## What This Is
 
-A Rust hook DLL (`cdylib`, crate `ddr-world-hook`) for the DanceDanceRevolution World arcade game (64-bit). spice2x injects it into the live game process with `-k`. It installs inline detours and checked byte patches against `gamemdx.dll` and sibling Konami DLLs, and renders everything through the game's own UI and 3D pipelines. Widgets, option rows, previews and the 3D background are native engine objects, not an external overlay.
+A Rust hook DLL (`cdylib`, crate `ddr-world-hook`) for the DanceDanceRevolution World arcade game (64-bit). spice2x injects it into the live game process with `-k`. It installs inline detours and checked byte patches against `gamemdx.dll` and sibling Konami DLLs, and renders everything through the game's own UI and 3D pipelines. Widgets, option rows, previews and the 3D background are native engine objects, not an external overlay. It also converts content in-process: StepMania packs dropped into `stepmania/Songs/` become native songs at boot (charts, audio banks and art materialised into a cache the game reads like stock files).
 
 The repository also holds:
 
 - **`updater/`** — a standalone auto-updater binary (separate crate).
-- **`tools/`** — a Blender add-on for the game's 3D formats, an offline bot simulator, and the pinned HLSL compiler.
+- **`tools/`** — a Blender add-on for the game's 3D formats, an offline bot simulator, a StepMania pack dry-run converter, and the pinned HLSL compiler.
 - **`scripts/`** — Python/bash tooling for asset generation, format work, host-test harnesses and cabinet automation.
 
 ## Technology Stack
@@ -21,7 +21,8 @@ The repository also holds:
 | Cross-compilation | `cargo-xwin` from macOS/Linux |
 | Hooking | `retour` `GenericDetour`; checked patch transactions in `src/core/memory_patch.rs` |
 | Win32 | `windows` 0.58 (curated feature list) |
-| Assets | `image`, `texpresso` (DXT5), in-crate ARC/IFS/AFP/AP2/kbin/AVSLZ/XACT/SSQ/ANM codecs |
+| Assets | `image`, `texpresso` (DXT5/BC1), in-crate ARC/IFS/AFP/AP2/kbin/AVSLZ/XACT/SSQ/ANM codecs |
+| Pack conversion | `encoding_rs` (simfile text), `symphonia` (OGG/Vorbis, MP3, WAV decode), `rustfft` (auto-sync onset analysis); in-crate SM/SSC parser, SSQ writer + self-check, XWB/XSB writers |
 | Config | `serde_json` over the single `mod-config.json` |
 | Auxiliary | Python 3 scripts, bash harnesses, HLSL built with fxc 9.29 under CrossOver, Blender add-on (Python) |
 
@@ -40,12 +41,12 @@ The repository also holds:
 ## Key Characteristics
 
 - **Binary neutrality.** Nothing is hardcoded. Every address comes from an AOB signature (`src/core/signatures.rs`), an RTTI/vtable walk, or a validated derivation from a scanned landmark. `scripts/validate_signatures.sh` sweeps every supported `gamemdx` build offline.
-- **Fail-open features, fail-closed derivations.** A missing signature disables only its consumer. A derivation that cannot validate publishes nothing. Score-integrity policy fails closed.
+- **Fail-open features, fail-closed derivations.** A missing signature disables only its consumer. A derivation that cannot validate publishes nothing. Score-integrity policy fails closed: injected StepMania songs are hidden outright when score sanitisation cannot arm.
 - **In-process discipline:**
   - allocator matching across three heaps
   - no panics across `extern "C"`
   - one detour per target function, with shared dispatcher services where several features need the same hook
-- **Pure logic is split out** into dependency-free files that host tests mount through temp-crate harnesses (`scripts/validate_*.sh`). Engine-facing code is validated on a live cabinet.
+- **Pure logic is split out** into dependency-free files that host tests mount through temp-crate harnesses (`scripts/validate_*.sh`). Engine-facing code is validated on a live cabinet. The whole StepMania conversion pipeline (`core/{sm,ssq,audio,sync,art,xact}`) is pure and doubles as the host CLI `tools/sm_pack_check`.
 
 ## Codebase Map
 
@@ -54,33 +55,42 @@ graph TD
     subgraph DLL crate
         LIB[src/lib.rs<br/>DllMain + init sequence]
         CORE[src/core/<br/>scanner, signatures, hooks, memory,<br/>frame pump, formats]
+        PURE[src/core/sm, ssq, audio, sync, art, xact<br/>pure StepMania conversion pipeline]
         SVC[src/services/<br/>game-system integrations,<br/>single-owner hook services]
+        SMSVC[src/services/stepmania/<br/>index, resolver, scheduler,<br/>progressive banks, auto-sync, taint]
         MODS[src/mods/<br/>one module per mod + config]
+        SMMOD[src/mods/stepmania_packs/]
         WID[src/widgets/<br/>TextWidget, ImageWidget]
         TYPES[src/types/<br/>scenes, buttons, GameNote]
     end
     UPD[updater/<br/>standalone auto-updater crate]
-    TOOLS[tools/<br/>blender_ddr_addon, bot_sim, fxc]
+    TOOLS[tools/<br/>blender_ddr_addon, bot_sim,<br/>sm_pack_check, fxc]
     SCRIPTS[scripts/<br/>validate_*, sig_harness, gen_*,<br/>format tools, game_nav, release]
     SHADERS[shaders/src/<br/>HLSL]
-    DATA[data_mods/<br/>shipped runtime assets]
+    DATA[data_mods/<br/>shipped runtime assets<br/>incl. stepmania_packs/ art]
+    SONGS[stepmania/Songs/<br/>operator pack drop-in, runtime input]
     DOCS[docs/<br/>RE research notes]
     AG[.agents/<br/>summary, steering, learnings, planning]
 
     LIB --> CORE & SVC & MODS
     MODS --> SVC & WID & TYPES
+    SMMOD --> SMSVC
     WID --> SVC
     SVC --> CORE & TYPES
+    SMSVC --> PURE
+    SONGS -. indexed at boot .-> SMSVC
+    SMSVC -. writes data_mods/_cache/stepmania .-> DATA
     SHADERS -. build_shaders.sh .-> DATA
     SCRIPTS -. generate .-> DATA
     TOOLS -. bot_sim mounts pure mod files .-> MODS
+    TOOLS -. sm_pack_check mounts pure core + stepmania files .-> PURE
     UPD -. mounts csv grammar .-> MODS
 ```
 
 ## Analysis Coverage
 
 - **Analyzed:**
-  - all Rust under `src/`, `updater/` and `tools/bot_sim/`
+  - all Rust under `src/`, `updater/`, `tools/bot_sim/` and `tools/sm_pack_check/`
   - `Cargo.toml` and `rust-toolchain.toml`
   - the build, deploy and release scripts
   - the harness mechanism of `scripts/validate_*.sh` and `scripts/sig_harness/`

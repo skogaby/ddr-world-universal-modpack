@@ -12,18 +12,20 @@
 | `./build.sh` | Release DLL (`cargo xwin`, msvc target) → `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll` |
 | `./build_win7.sh` | Windows 7 build (`-Z build-std`; avoids the `ProcessPrng` import) |
 | `./scripts/deploy.sh` | Build and `scp` to the cabinet. Reads `/tmp/sshhost`, `/tmp/sshuser`, `/tmp/sshpass`. |
-| `./scripts/build_release_archive.sh` | Win7 DLL + updater into `release/`: a zip, a bare updater exe, and a tester `install-update-YYYYMMDD.bat`. It fails if either binary imports `ProcessPrng`. |
+| `./scripts/build_release_archive.sh` | Win7 DLL + updater into `release/`: a zip, a bare updater exe, and a tester `install-update-YYYYMMDD.bat`. It fails if either binary imports `ProcessPrng`. The image also carries `stepmania/Songs/README.txt` (from `src/services/stepmania/songs_readme.txt`). |
 | `cargo fmt` | Run on the whole crate only. `cargo fmt -- <file>` still formats everything. |
 
 **Host tests.** The DLL crate **cannot** be built by `cargo test` on an ARM host, because `retour` has no aarch64 backend. Pure modules are tested by the `scripts/validate_*.sh` harnesses instead. Each harness writes a throwaway crate that `#[path]`-mounts dependency-free source files and runs `cargo test` in it. This is why pure files must not use `crate::` imports.
 
 - Some harness legs need extra inputs:
   - `$DDR_WORLD_INSTALL` for real game data
-  - a sibling `ddr-chart-tools` checkout, for se_bank_synth and song_playback_speed
+  - a sibling `ddr-chart-tools` checkout, for se_bank_synth, song_playback_speed and the StepMania byte-identity / auto-sync parity legs (SKIPPED with a note when absent)
   - a sibling `bemaniutils` checkout, for s_marvelous dev legs (Leg H's art-size check also needs `kbinxml`, which ships with `ifstools`)
-- `updater/` and `tools/bot_sim/` are standalone crates that test natively:
+- `updater/`, `tools/bot_sim/` and `tools/sm_pack_check/` are standalone crates that test natively:
   - `cargo test --manifest-path updater/Cargo.toml`
   - `scripts/validate_multiplayer_bot.sh`
+  - `scripts/validate_sm_pack_check.sh [song-or-pack]` (the tool's tests + the mounted modules' suites, a smoke conversion, and the auto-sync parity leg against the CLI when the test pack is installed)
+- StepMania-related harnesses: `scripts/validate_stepmania.sh [--chart-tools <p>]` (the whole pure pipeline — `core/{sm,ssq,audio,sync,art}`, `core/xact/{song_bank,xsb}`, `services/stepmania/{identity,musicdb,model,convert,scheduler_logic,progressive_logic,sync_state}`, `services/ssq_path_logic` — plus byte identity against the CLI, quad split, delay nudge, timing split, self-check negatives), `scripts/validate_judgement_offsets.sh` (now also `compose.rs`), `scripts/validate_fast_bootup.sh` (now also `quarantine.rs`), `scripts/validate_split_ssq.sh` (the `ssq_path` consumer rewrite).
 
 **Signature sweep** (run whenever `signatures.rs` or a consumer-side fixed offset changes):
 
@@ -49,7 +51,9 @@
   - Cabinet-wide overlay rows use `mod_menu::register_*_row`.
   - Labels are generated textures: edit `scripts/option_strings.py` (en/ja/ko), run `scripts/gen_option_labels.py`, and regression-check with `scripts/check_option_takeover.py`. Never hand-edit a generated PNG.
 - **Shaders:** edit `shaders/src/*.hlsl`, then run `scripts/build_shaders.sh`. fxc 9.29 under the CrossOver bottle is the golden path; `--vkd3d`/Docker is a fallback only. Commit the `.d3dbc` blobs in `data_mods/shader_fixes/blobs/`. Containers are synthesized at runtime, and blob changes re-trigger synthesis through the fingerprint.
-- **Deploying assets:** a DLL-only deploy does not carry `data_mods/`. Features with shipped labels, blobs or art need the matching `data_mods/` files on the install.
+- **A virtual asset served by LayeredFS:** register a resolver (`mod_paths::register_resolver`) before `avs_layeredfs::init`, materialise real files under `data_mods/_cache/<feature>/`, and keep the resolver a prefix test for everything that is not yours. To rewrite one member of a game arc, use `arc_handler::register_member_transform` + `register_arc_fingerprint` (the cache key must change when your input changes). Never add a detour to `file_hooks`.
+- **StepMania conversion changes:** after touching `core/sm`, `core/ssq/writer.rs`, `core/audio`, `core/art`, `core/xact/{song_bank,xsb}` or `services/stepmania/convert.rs`, bump `model::FORMAT_VERSION` so every cached song re-converts (the fingerprint covers the pack files, not the pipeline), run `scripts/validate_stepmania.sh` and `scripts/validate_sm_pack_check.sh`, and dry-run a real pack with `tools/sm_pack_check` (`cargo run --release --manifest-path tools/sm_pack_check/Cargo.toml -- <song-or-pack> --out <dir> [--auto-sync] [--lead-in auto|<ms>] [--code <b>]`). A `sync.bin` record survives only while the song's source fingerprint matches.
+- **Deploying assets:** a DLL-only deploy does not carry `data_mods/`. Features with shipped labels, blobs or art need the matching `data_mods/` files on the install — for StepMania that is `data_mods/stepmania_packs/` (folder/series textures, `series_labels/`, `placeholder_jacket.png`); without it the STEPMANIA folder and VERSION entry render blank.
 
 ### Other tooling
 
@@ -58,6 +62,9 @@
 - `scripts/convert_movies.sh` — VC-1 → H.264 for Wine (idempotent, `--restore`).
 - `scripts/ddr_selection/import_a3_assets.{sh,bat}` — operator-side import of A3-only assets into `data_mods/ddr_selection_a3/`.
 - `scripts/gen_ddr_selection_smarv_art.py` — regenerates the legacy skins' S-Marvelous art in `data_mods/ddr_selection/s_marvelous/` from the installed legacy textures (needs `ifstools`); `--check-world` proves its recipes against `data_mods/s_marvelous/`.
+- `scripts/gen_stepmania_folder_art.py` — renders the STEPMANIA folder/series textures into `data_mods/stepmania_packs/` (same IFS folder names as the operator `custom_folders` / `custom_series` sets); `scripts/gen_stepmania_placeholder.py` — the embedded placeholder jacket. Never hand-edit the PNGs.
+- `python3 scripts/gen_title_glyph_table.py [--install <dir>] [--check]` — regenerates `src/core/sm/title_glyphs.rs` (the intersection of the two song-title KBF fonts' glyph tables) from the install's font arcs (`$DDR_WORLD_INSTALL`); `--check` fails when the committed file is stale. Part of the readiness gate after a font change.
+- `tools/sm_pack_check/` — dry-run converter for a song or pack folder (see "StepMania conversion changes" above); `--max-audio-mb` defaults to the runtime cap.
 - Format tools: `arc_tool.py` / `arctool`, `unpack_arc.py`, `unpack_all.py`, `ktmdl_dump.py`, `anm_dump.py`, `split_camanm.py`, `gsp_pack.py`, `kbf_to_font.py`.
 
 ### Planning convention (PDD)
@@ -100,10 +107,25 @@ flowchart LR
     P -->|texture| T[ifs_textures convert + cache]
     P -->|arc| A[arc_handler overlay/repack]
     A -->|shader.arc| S[shader_synthesis]
+    A -->|startup.arc| MT[pre-repack hook: arena patch<br/>member transform: musicdb.xml + injected entries]
     P -->|xml| X[xml_merger]
     P -->|other| M[serve mod file]
-    P -->|no| G[passthrough]
+    P -->|no| R{resolver answers?}
+    R -->|yes| V[serve cache file<br/>progressive: read hook holds at watermark]
+    R -->|no| G[passthrough]
 ```
+
+### StepMania pack (boot → play)
+
+1. **Drop.** The operator puts `<Pack>/<Song>/` folders under `stepmania/Songs/`. Nothing is converted ahead of time.
+2. **Cold index** (step 0', worker pool). Per song: parse → audio probe → SSQ write with the chosen lead-in → `check_ssq` on every file → `ssq/`, `xsb/`, `tn/` + a `SongEntry`. Roughly 25 ms per song; `index_timeout_s` (30 s) covers about 1,200 songs cold. A warm boot reuses every song whose fingerprint and artefacts match.
+3. **Inject.** The game's `startup.arc` open waits (bounded) for the index, registers the STEPMANIA folder bit + series value, builds the series thumbnail arc, appends the `<music>` elements and applies the arena patch. Songs finishing later are cached for the next boot. The arc cache key includes the index digest, so an unchanged pack set serves the cached repack without re-running the transform.
+4. **Boot pass.** `fast_bootup`'s preflight re-checks every injected SSQ; a failing file is quarantined (hidden, never reported). At mod enable `hide::enforce` hides everything if score sanitisation is unavailable.
+5. **Wheel.** Each card bind enqueues preview bank + jacket jobs; the highlight re-prioritises; a 1.5 s dwell starts the full bank speculatively. The scene-25 open serves the preview variant (≤ 300 ms wait on the I/O worker, else silent).
+6. **Decide / sweep.** On the 25→26 commit an unmeasured song is measured on the normal-priority on-decide thread; otherwise the below-normal sweep measures songs between plays. Measurements never change a file.
+7. **Load.** The full-bank request (outside scene 25) sets the injected taint, publishes `#SCROLLS`/`#SPEEDS` tables to `scroll_remap`, holds ≤ 5 s for a pending measurement, then serves the complete bank or the progressive `.part` (header first; reads held at the watermark).
+8. **Judge.** At each side's first judge dispatch `per_song_judgement_offsets` writes `clamp(entry-or-stock + delta, ±100)` (provider hold ≤ 3 s); the value freezes for the session.
+9. **Save.** The stage save is suppressed; the logout save is wiped side-wide; `reset_session` clears the taint.
 
 ### Song rate (largest runtime flow)
 
@@ -119,6 +141,7 @@ Every failure falls back to stock 100 %.
 
 - Per-stage saves from tainted sides are suppressed.
 - The logout save is sanitised, or suppressed if sanitising isn't available.
+- Injected StepMania songs are additionally hidden from the wheel when sanitising isn't available (fail closed at mod enable).
 
 ### Auto-updater (`updater/`)
 

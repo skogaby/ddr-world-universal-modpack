@@ -1,10 +1,14 @@
 //! Song-select S-MFC lamp badges (server-upload design §4.5, plan Step 8):
-//! post-original detours on the two song-select refreshers that draw a
+//! post-original passes on the three song-select refreshers that draw a
 //! clear-kind lamp, re-binding the lamp bitmap to a net-new violet S-MFC
 //! texture when the chart is in the side's S-MFC set ([`super::lamp`]):
 //!
 //! 1. the header card (`selectmusic_card_refresh`) — widget
-//!    `fullcombo_<n>p_usr`, `muca_card_fc_mfc` → `muca_card_fc_smfc` (20×8);
+//!    `fullcombo_<n>p_usr`, `muca_card_fc_mfc` → `muca_card_fc_smfc` (20×8).
+//!    The detour is OWNED by `services::wheel_cards` (one detour per
+//!    target; the StepMania prefetch scheduler shares it); this module is a
+//!    `on_card_bound` subscriber and receives the card's own song holder +
+//!    mcode already resolved;
 //! 2. the difficulty panel's CLEAR RANK column
 //!    (`selectmusic_difficulty_panel_refresh` = `DifficultyPanel::Reflesh`)
 //!    — one lamp per displayed difficulty row, widget
@@ -49,7 +53,7 @@ use crate::services::avs_layeredfs::atlas_cloner::{
     generate_cloned_atlases_cached, load_stock_texturelist, AtlasSet, BatchResult, OwnedTextureSpec,
 };
 use crate::services::avs_layeredfs::mod_paths;
-use crate::services::{bm2d_api, scene_manager, selectmusic_highlight, stage_records};
+use crate::services::{bm2d_api, scene_manager, selectmusic_highlight, stage_records, wheel_cards};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
 
@@ -57,12 +61,9 @@ use super::assets::{CACHE_ROOT, MOD_ROOT};
 use super::lamp;
 use super::upload::chart_index;
 
-/// `fn(this, flag: u8)` — the header-card refresh.
-type CardRefreshFn = unsafe extern "C" fn(*mut u8, u8);
 /// `fn(this)` — `DifficultyPanel::Reflesh` and `RecordPanel::Refresh`.
 type PanelRefreshFn = unsafe extern "C" fn(*mut u8);
 
-static DETOUR: OnceCell<GenericDetour<CardRefreshFn>> = OnceCell::new();
 static PANEL_DETOUR: OnceCell<GenericDetour<PanelRefreshFn>> = OnceCell::new();
 static RECORD_DETOUR: OnceCell<GenericDetour<PanelRefreshFn>> = OnceCell::new();
 /// Mod enabled (activate/deactivate).
@@ -87,12 +88,10 @@ static FIRST_RECORD_SWAP_LOGGED: AtomicBool = AtomicBool::new(false);
 /// stock setter passes to `find_child`).
 const CARD_LAYER_OBJ: usize = 0xD0;
 const LAYER_ID: usize = 0x08;
-/// The card's OWN song holder pointer (`MOV RCX,[this+0x148]; CALL
-/// FUN_18010f790` — the first thing the refresh does; identical on
-/// 20250805/20260224/20260825). Every visible wheel card is a separate
-/// object drawing its own song — never key a card on the highlight
-/// (deploy #5: cards flipped between MFC/S-MFC with the cursor).
-const CARD_SONG_HOLDER: usize = 0x148;
+// The card's OWN song holder (`this+0x148`) is read by `wheel_cards` and
+// arrives in the `CardBound` event. Every visible wheel card is a separate
+// object drawing its own song — never key a card on the highlight (deploy
+// #5: cards flipped between MFC/S-MFC with the cursor).
 
 /// DifficultyPanel fields (RE 20260825 + 20250805; `+0xC0` pinned by the
 /// signatures' `CMP [RCX+0xC0]`, the rows vector read in the row loop as
@@ -154,7 +153,7 @@ fn warn_once(latch: &AtomicBool, msg: &str) {
 
 // ── Install (mod init) ───────────────────────────────────────────────
 
-/// Resolve the two refreshers and install the post-original detours. The
+/// Subscribe to the card events and install the two panel detours. The
 /// card lamp is the gate (`false` ⇒ badge inert, stock lamps everywhere);
 /// the difficulty-panel lamps are best-effort on top of it. The upload half
 /// is independent of both.
@@ -163,30 +162,14 @@ pub fn install(signatures: &SignatureStore) -> bool {
         log_warn!("SMarvelous: selectmusic_highlight unavailable -- S-MFC lamp badge inert");
         return false;
     }
-    let Some(target) = signatures.get_address("selectmusic_card_refresh") else {
-        log_warn!("SMarvelous: selectmusic_card_refresh unresolved -- S-MFC lamp badge inert");
+    if !wheel_cards::is_available() {
+        log_warn!(
+            "SMarvelous: wheel_cards (card-refresh detour) unavailable -- S-MFC lamp badge inert"
+        );
         return false;
-    };
-    let target: CardRefreshFn = unsafe { std::mem::transmute(target) };
-    match unsafe { GenericDetour::new(target, card_refresh_hook) } {
-        Ok(detour) => {
-            if unsafe { detour.enable() }.is_err() {
-                log_warn!(
-                    "SMarvelous: card-refresh detour enable failed -- S-MFC lamp badge inert"
-                );
-                return false;
-            }
-            let _ = DETOUR.set(detour);
-            log_info!("SMarvelous: song-select card-refresh detour installed (S-MFC lamp)");
-        }
-        Err(e) => {
-            log_warn!(
-                "SMarvelous: card-refresh detour failed: {:?} -- S-MFC lamp badge inert",
-                e
-            );
-            return false;
-        }
     }
+    wheel_cards::on_card_bound(on_card_bound);
+    log_info!("SMarvelous: subscribed to song-select card-bound events (S-MFC lamp)");
 
     if let Some(panel) = signatures.get_address("selectmusic_difficulty_panel_refresh") {
         let panel: PanelRefreshFn = unsafe { std::mem::transmute(panel) };
@@ -245,7 +228,8 @@ pub fn activate() {
     ACTIVE.store(true, Ordering::Release);
 }
 
-/// Disarm (the detours stay installed as passthroughs).
+/// Disarm (the detours stay installed as passthroughs; the card
+/// subscription stays registered and gates on `ACTIVE`).
 pub fn deactivate() {
     ACTIVE.store(false, Ordering::Release);
 }
@@ -419,40 +403,34 @@ fn current_song(side: usize) -> Option<(i32, i32)> {
     Some((mcode, side_style(side)?))
 }
 
-// ── Header-card detour ───────────────────────────────────────────────
+// ── Header-card subscriber (wheel_cards owns the detour) ─────────────
 
-unsafe extern "C" fn card_refresh_hook(this: *mut u8, flag: u8) {
-    if let Some(detour) = DETOUR.get() {
-        detour.call(this, flag);
-    }
+/// `wheel_cards::on_card_bound` subscriber: the service already ran the
+/// original, checked scene 25 and resolved this card's own song holder +
+/// mcode; we gate on the mod's own latches and re-bind the lamp.
+fn on_card_bound(ev: &wheel_cards::CardBound) {
     if !ACTIVE.load(Ordering::Acquire) || !TEXTURE_READY.load(Ordering::Acquire) {
         return;
     }
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| after_refresh(this)));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        after_refresh(ev.card, ev.holder, ev.mcode)
+    }));
 }
 
-/// Post-original: this card draws ITS OWN song (`this+0x148`); for each
-/// entered side, resolve that song's row for the side's KIND cursor exactly
-/// like the game (`holder_difficulty`) and re-bind the side's lamp widget
-/// when the chart is an S-MFC.
-fn after_refresh(this: *mut u8) {
+/// Post-original: this card draws ITS OWN song (`holder`, from
+/// `card+0x148`); for each entered side, resolve that song's row for the
+/// side's KIND cursor exactly like the game (`holder_difficulty`) and
+/// re-bind the side's lamp widget when the chart is an S-MFC.
+fn after_refresh(this: *mut u8, holder: *const u8, mcode: i32) {
     if scene_manager::current_scene() != scene::SONG_SELECT {
         return;
     }
     let Some(layer_id) = layer_id_of(this, CARD_LAYER_OBJ, &WARN_LAYER, "card") else {
         return;
     };
-    if !memory::is_readable(unsafe { this.add(CARD_SONG_HOLDER) }, 8) {
-        warn_once(&WARN_LAYER, "card song holder unreadable");
-        return;
-    }
-    let holder = unsafe { memory::read_ptr(this.add(CARD_SONG_HOLDER)) };
     if holder.is_null() {
         return; // empty wheel slot
     }
-    let Some(mcode) = selectmusic_highlight::mcode_of_holder(holder) else {
-        return;
-    };
     for side in 0..2usize {
         if lamp::count(side) == 0 || stage_records::side_entered(side) != Some(true) {
             continue;

@@ -15,6 +15,19 @@
 //! `VANILLA_ENTRIES` constant), then the custom entries sorted by
 //! `series_value` (group 8, like WORLD), then a sentinel.
 //!
+//! ## Runtime registration
+//!
+//! Code may add series before `init` with [`register_runtime_series`]
+//! (`lib.rs` step 0' — the StepMania loader registers STEPMANIA at
+//! [`lowest_free_series_value`], which skips configured values and, in
+//! enhanced mode, configured cell ranges). `load_config` appends the runtime
+//! entries to `custom_series`, synthesising a section when the operator has
+//! none. In enhanced mode each runtime series becomes its own cell after the
+//! configured ones, labelled from the registration's art directory
+//! (`sefi_version_<texture>_<N>col.png`); in legacy mode the label PNG is
+//! found like any other, in `data_mods/custom_series/`, then in any LayeredFS
+//! mod folder (`select_music_option_v3_ifs/tex/`), then in that directory.
+//!
 //! ## Byte patches (saved and restored on disable)
 //!
 //! 1. Series mapper default: xor eax,eax → mov eax,esi (pass through raw value)
@@ -241,6 +254,186 @@ pub fn get_config() -> Option<&'static SeriesConfig> {
     unsafe { (*std::ptr::addr_of!(SERIES_CONFIG)).as_ref() }
 }
 
+// ── Runtime registration ────────────────────────────────────────────
+
+/// A series registered by code: the entry plus the directory holding its
+/// enhanced-layout label art (`sefi_version_<texture>_<N>col.png`, with
+/// `sefi_version_<texture>.png` as the fallback).
+#[derive(Clone)]
+struct RuntimeSeries {
+    entry: CustomSeriesEntry,
+    label_art_dir: String,
+}
+
+/// Series registered by code before `init`, merged by `load_config`.
+static RUNTIME_SERIES: std::sync::Mutex<Vec<RuntimeSeries>> = std::sync::Mutex::new(Vec::new());
+
+fn runtime_series() -> Vec<RuntimeSeries> {
+    RUNTIME_SERIES.lock().map(|r| r.clone()).unwrap_or_default()
+}
+
+/// Operator section (absent config store or section ⇒ `None`).
+fn configured_section() -> Option<SeriesConfig> {
+    super::config::get().and_then(|cfg| cfg.series_expansion.clone())
+}
+
+/// The enhanced-mode plan the operator's section describes, if any.
+fn configured_enhanced_plan(
+    section: Option<&SeriesConfig>,
+) -> Option<enhanced::model::EnhancedPlan> {
+    section
+        .and_then(|c| c.custom_series_enhanced.as_ref())
+        .and_then(|v| enhanced::model::parse(v).ok())
+        .map(|(plan, _)| plan)
+}
+
+/// `series_value`s the operator's config and the runtime registry already
+/// use, plus (enhanced mode) the inclusive ranges of every configured cell.
+fn series_values_in_use() -> (Vec<u8>, Vec<(u8, u8)>) {
+    let section = configured_section();
+    let mut used: Vec<u8> = section
+        .as_ref()
+        .map(|c| c.custom_series.iter().map(|e| e.series_value).collect())
+        .unwrap_or_default();
+    used.extend(runtime_series().iter().map(|r| r.entry.series_value));
+    let ranges = configured_enhanced_plan(section.as_ref())
+        .map(|plan| plan.cells.iter().map(|c| (c.start, c.end)).collect())
+        .unwrap_or_default();
+    (used, ranges)
+}
+
+/// Register a custom series from code. Call before the mod's `init` (the
+/// registry is read once, at `load_config`). The entry is appended to
+/// `custom_series`; in enhanced mode it also becomes its own cell after the
+/// configured ones, labelled from `label_art_dir`. Fails when the strings
+/// would not fit the game's SSO buffers, the texture key is not
+/// `[a-z0-9_]+`, the value is outside 22..=127 (stock range / thumbnail
+/// loop limit) or it collides with the operator's config, a configured
+/// enhanced cell range or an earlier registration.
+pub fn register_runtime_series(
+    entry: CustomSeriesEntry,
+    label_art_dir: &str,
+) -> Result<(), String> {
+    let what = format!("runtime series '{}'", entry.label);
+    if entry.label.is_empty() || entry.label.len() > 15 {
+        return Err(format!("{}: label must be 1–15 bytes", what));
+    }
+    if entry.texture_name.len() > 15
+        || entry.texture_name.is_empty()
+        || !entry
+            .texture_name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(format!(
+            "{}: texture_name '{}' must be 1–15 bytes of [a-z0-9_]",
+            what, entry.texture_name
+        ));
+    }
+    let value = entry.series_value;
+    if !(enhanced::model::FIRST_CUSTOM_SERIES..=enhanced::model::THUMBNAIL_MAX_BOUND)
+        .contains(&value)
+    {
+        return Err(format!(
+            "{}: series_value {} outside {}..={}",
+            what,
+            value,
+            enhanced::model::FIRST_CUSTOM_SERIES,
+            enhanced::model::THUMBNAIL_MAX_BOUND
+        ));
+    }
+    let (used, ranges) = series_values_in_use();
+    if used.contains(&value) || ranges.iter().any(|&(s, e)| s <= value && value <= e) {
+        return Err(format!("{}: series_value {} already in use", what, value));
+    }
+    if configured_section()
+        .map(|c| {
+            c.custom_series
+                .iter()
+                .any(|e| e.texture_name == entry.texture_name)
+        })
+        .unwrap_or(false)
+        || runtime_series()
+            .iter()
+            .any(|r| r.entry.texture_name == entry.texture_name)
+    {
+        return Err(format!(
+            "{}: texture_name '{}' already in use",
+            what, entry.texture_name
+        ));
+    }
+    let mut reg = RUNTIME_SERIES
+        .lock()
+        .map_err(|_| "runtime series registry poisoned".to_string())?;
+    log_info!(
+        "SeriesExpansion: {} registered (series_value={}, texture={}, art {})",
+        what,
+        value,
+        entry.texture_name,
+        label_art_dir
+    );
+    reg.push(RuntimeSeries {
+        entry,
+        label_art_dir: label_art_dir.to_string(),
+    });
+    Ok(())
+}
+
+/// Lowest series value in 22..=127 used by neither the operator's
+/// `custom_series`, a configured enhanced cell range, nor an
+/// already-registered runtime series; `None` when none is free.
+pub fn lowest_free_series_value() -> Option<u8> {
+    let (used, ranges) = series_values_in_use();
+    enhanced::model::lowest_free_series_value(&used, &ranges)
+}
+
+/// The config `init` works from: the operator's section with the runtime
+/// series appended to `custom_series`, or a section of just the runtime
+/// series when the operator has none. `None` when there is nothing at all.
+fn merge_runtime_series(
+    section: Option<SeriesConfig>,
+    runtime: &[RuntimeSeries],
+) -> Option<SeriesConfig> {
+    let extra = runtime.iter().map(|r| r.entry.clone());
+    match section {
+        Some(mut config) => {
+            config.custom_series.extend(extra);
+            Some(config)
+        }
+        None if runtime.is_empty() => None,
+        None => Some(SeriesConfig {
+            custom_series: extra.collect(),
+            custom_series_enhanced: None,
+        }),
+    }
+}
+
+/// Source PNG for legacy label `name` (`sefi_version_<texture>`): the
+/// operator's `data_mods/custom_series/<ifs>/tex/` copy, else the first
+/// LayeredFS mod folder shipping `<ifs>/tex/<name>.png`, else the runtime
+/// series' `label_art_dir` (unsuffixed, then the 104-px `_2col` variant),
+/// else the `custom_series` path (the cloner logs the miss).
+fn legacy_label_png(name: &str, texture: &str, runtime: &[RuntimeSeries]) -> String {
+    let local = format!("{}/{}/tex/{}.png", MOD_ROOT, OPTION_IFS_MOD_PATH, name);
+    if std::path::Path::new(&local).is_file() {
+        return local;
+    }
+    if let Some(p) =
+        mod_paths::find_first_modfile(&format!("{}/tex/{}.png", OPTION_IFS_MOD_PATH, name))
+    {
+        return p;
+    }
+    if let Some(r) = runtime.iter().find(|r| r.entry.texture_name == texture) {
+        for candidate in enhanced::model::source_candidates(texture, 2).iter().rev() {
+            let p = format!("{}/{}", r.label_art_dir, candidate);
+            if std::path::Path::new(&p).is_file() {
+                return p;
+            }
+        }
+    }
+    local
+}
+
 /// Build cloned-atlas label textures for each custom series and emit a
 /// `texturelist.merged.xml` LayeredFS merges into the stock options IFS.
 ///
@@ -273,12 +466,13 @@ fn generate_label_atlases(config: &SeriesConfig) {
 
     // Texture name + PNG path per custom entry. Held in a Vec so the
     // NewTextureSpec borrows stay valid for the generate call.
+    let runtime = runtime_series();
     let owned: Vec<(String, String)> = config
         .custom_series
         .iter()
         .map(|entry| {
             let new_name = format!("sefi_version_{}", entry.texture_name);
-            let png_path = format!("{}/{}/tex/{}.png", MOD_ROOT, OPTION_IFS_MOD_PATH, new_name);
+            let png_path = legacy_label_png(&new_name, &entry.texture_name, &runtime);
             (new_name, png_path)
         })
         .collect();
@@ -524,22 +718,22 @@ impl SeriesExpansionMod {
     }
 
     fn load_config() -> Option<SeriesConfig> {
-        match super::config::get() {
-            Some(cfg) => match cfg.series_expansion.clone() {
-                Some(config) => {
-                    log_info!(
-                        "SeriesExpansion: loaded {} custom series from config",
-                        config.custom_series.len()
-                    );
-                    Some(config)
-                }
-                None => {
-                    log_warn!("SeriesExpansion: no series_expansion config — mod disabled");
-                    None
-                }
-            },
+        if super::config::get().is_none() {
+            log_warn!("SeriesExpansion: config store not available — mod disabled");
+            return None;
+        }
+        let runtime = runtime_series();
+        match merge_runtime_series(configured_section(), &runtime) {
+            Some(config) => {
+                log_info!(
+                    "SeriesExpansion: loaded {} custom series ({} runtime)",
+                    config.custom_series.len(),
+                    runtime.len()
+                );
+                Some(config)
+            }
             None => {
-                log_warn!("SeriesExpansion: config store not available — mod disabled");
+                log_warn!("SeriesExpansion: no series_expansion config — mod disabled");
                 None
             }
         }
@@ -981,8 +1175,13 @@ impl SeriesExpansionMod {
             return;
         };
         let plan = &state.plan;
-        // Label art first: declared before the options IFS mounts.
-        enhanced::labels::prepare(plan);
+        // Label art first: declared before the options IFS mounts. Runtime
+        // series bring their own art directory.
+        let runtime_dirs: Vec<(String, String)> = runtime_series()
+            .into_iter()
+            .map(|r| (r.entry.texture_name, r.label_art_dir))
+            .collect();
+        enhanced::labels::prepare(plan, &runtime_dirs);
         let sites = state.sites;
         let columns = plan.columns;
         let n = plan.cells.len() as u32;
@@ -1070,8 +1269,22 @@ impl Mod for SeriesExpansionMod {
         };
         if let Some(value) = config.custom_series_enhanced.as_ref() {
             match enhanced::model::parse(value) {
-                Ok((plan, warnings)) => {
+                Ok((mut plan, warnings)) => {
                     for warning in &warnings {
+                        log_warn!("SeriesExpansion[enhanced]: {}", warning);
+                    }
+                    // Runtime series: one cell each, after the configured ones.
+                    let runtime_cells: Vec<enhanced::model::Cell> = runtime_series()
+                        .iter()
+                        .map(|r| enhanced::model::Cell {
+                            label: r.entry.label.clone(),
+                            start: r.entry.series_value,
+                            end: r.entry.series_value,
+                            texture: r.entry.texture_name.clone(),
+                            group: None,
+                        })
+                        .collect();
+                    for warning in plan.append_cells(runtime_cells) {
                         log_warn!("SeriesExpansion[enhanced]: {}", warning);
                     }
                     log_info!("SeriesExpansion[enhanced]: {}", plan.summary());
