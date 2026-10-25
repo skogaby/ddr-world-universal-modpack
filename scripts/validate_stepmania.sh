@@ -3,8 +3,9 @@
 # pipeline (`src/core/sm/` parser, `src/core/ssq/{writer,check}.rs`,
 # `src/core/audio/`, `src/core/xact/{song_bank,xsb}.rs`, `src/core/art/
 # {source,jacket,thumbnail}.rs`) and the loader's pure service files
-# (`src/services/stepmania/{identity,musicdb,model,convert,scheduler_logic,
-# progressive_logic,sync_state}.rs` and `src/services/ssq_path_logic.rs`) and
+# (`src/services/stepmania/{identity,musicdb,model,convert,ceiling,
+# scheduler_logic,progressive_logic,sync_state}.rs` and
+# `src/services/ssq_path_logic.rs`) and
 # the auto-sync estimator (`src/core/sync/`); plan
 # `.agents/planning/2026-10-20-stepmania-pack-loader/implementation/plan.md`
 # Steps 4, 5, 6, 8, 9, 10 and 12.
@@ -165,7 +166,7 @@ done
 for f in mod.rs onset.rs estimate.rs events.rs timemap.rs measure.rs; do
   [[ -r "$REPO_ROOT/src/core/sync/$f" ]] || die "module source missing: src/core/sync/$f"
 done
-for f in identity.rs musicdb.rs model.rs convert.rs scheduler_logic.rs progressive_logic.rs sync_state.rs; do
+for f in identity.rs musicdb.rs model.rs convert.rs ceiling.rs scheduler_logic.rs progressive_logic.rs sync_state.rs; do
   [[ -r "$REPO_ROOT/src/services/stepmania/$f" ]] || die "module source missing: src/services/stepmania/$f"
 done
 [[ -r "$REPO_ROOT/src/services/ssq_path_logic.rs" ]] || die "module source missing: src/services/ssq_path_logic.rs"
@@ -240,6 +241,8 @@ pub mod services {
     #[path = "$REPO_ROOT/src/services/ssq_path_logic.rs"]
     pub mod ssq_path_logic;
     pub mod stepmania {
+        #[path = "$REPO_ROOT/src/services/stepmania/ceiling.rs"]
+        pub mod ceiling;
         #[path = "$REPO_ROOT/src/services/stepmania/convert.rs"]
         pub mod convert;
         #[path = "$REPO_ROOT/src/services/stepmania/identity.rs"]
@@ -1882,7 +1885,7 @@ fn leg_musicdb(rep: &mut Report) {
     let body = STOCK_DOC.trim_end_matches("</mdb>\n");
     let doc_prefix = format!("{body}<!-- a stray </mdb> inside a comment -->\n");
     let doc = format!("{doc_prefix}</mdb>\n");
-    let report = musicdb::transform_report(doc.as_bytes(), &[a, b, c, d], 30, Some(10));
+    let report = musicdb::transform_report(doc.as_bytes(), &[a, b, c, d], 30, Some(10), None);
     let out = report
         .xml
         .clone()
@@ -1895,7 +1898,7 @@ fn leg_musicdb(rep: &mut Report) {
             && out.ends_with("  </music>\n</mdb>\n")
             && out.matches("<music>").count() == 3
             && out.starts_with(&doc_prefix)
-            && musicdb::transform(STOCK_DOC.as_bytes(), &[], 30, None).is_none(),
+            && musicdb::transform(STOCK_DOC.as_bytes(), &[], 30, None, None).is_none(),
         format!("{:?} {:?}\n{out}", report.injected, report.dropped),
     );
     let file = IndexFile {

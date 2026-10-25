@@ -67,6 +67,22 @@
 //! by `index_timeout_s` is injected (one WARN on timeout); songs finishing
 //! later are cached for the next boot. Nothing here depends on `resolve_all`.
 //!
+//! ## The injection ceiling
+//!
+//! The index is unbounded; what reaches the game is not. `ceiling.rs`
+//! selects the subset one boot may inject — a fixed count ceiling over
+//! everything downstream that scales with the injected count (thumbnail
+//! arc, boot pass, wheel) and nothing at all when the XML property arena is
+//! stock-sized (`song_limit_expansion` off or its patch failed: the stock
+//! document already fills most of it, and an overflowing parse loads NO
+//! songs and stalls the boot) — and `musicdb::transform` enforces the arena
+//! text budget on the final document as the last safety net. Every path
+//! that publishes "the songs this boot" (registration + thumbnail arc, the
+//! `startup.arc` fingerprint, the transform, `injected_entries`) goes
+//! through [`injectable`], so they agree. One WARN per boot names what was
+//! left out and why; the operator's lever is the folder contents (the first
+//! packs alphabetically are kept).
+//!
 //! ## Release / update safety
 //!
 //! The release ships `stepmania/Songs/README.txt` only. The updater's plan
@@ -77,6 +93,7 @@
 //! survive every update.
 
 pub mod cache;
+pub mod ceiling;
 pub mod convert;
 pub mod hide;
 pub mod identity;
@@ -107,6 +124,7 @@ use crate::mods::config::{self, StepmaniaPacksConfig};
 use crate::mods::folder_expansion::{self, CustomFolderEntry};
 use crate::mods::mod_trait::mod_enabled_in_config;
 use crate::mods::series_expansion::{self, CustomSeriesEntry};
+use crate::mods::song_limit_expansion;
 use crate::services::avs_layeredfs::{arc_handler, mod_paths};
 use crate::services::{scene_manager, scroll_remap};
 use crate::types::scenes::scene;
@@ -135,6 +153,7 @@ static SETTINGS: OnceCell<Settings> = OnceCell::new();
 /// Set once the index holds at least one entry (the resolver's cheap gate).
 static SERVING: AtomicBool = AtomicBool::new(false);
 static TIMEOUT_WARNED: AtomicBool = AtomicBool::new(false);
+static CEILING_WARNED: AtomicBool = AtomicBool::new(false);
 /// The scroll-gimmick scene-exit clear is subscribed once.
 static SCROLL_SCENE_ARMED: AtomicBool = AtomicBool::new(false);
 
@@ -400,11 +419,57 @@ fn wait_index() -> IndexSnapshot {
     snap
 }
 
+/// This boot's injection budget: the arena the game's parsers will use
+/// (accurate from `early_apply` onwards and inside the `startup.arc` open,
+/// after its pre-repack hook) and the fixed count ceiling.
+fn budget() -> ceiling::Budget {
+    ceiling::Budget {
+        arena_bytes: song_limit_expansion::arena_bytes(),
+        max_songs: ceiling::MAX_INJECTED_SONGS,
+    }
+}
+
+/// The subset of `snap` this boot may inject (`ceiling::select`), as a
+/// snapshot in selection order; WARNs once per boot about what was left
+/// out. Every publisher of "the songs this boot" goes through here.
+fn injectable(snap: IndexSnapshot) -> IndexSnapshot {
+    let b = budget();
+    let sel = ceiling::select(&snap.songs, &b);
+    if (sel.arena_unpatched && !snap.songs.is_empty()) || sel.over_count > 0 {
+        if !CEILING_WARNED.swap(true, Ordering::AcqRel) {
+            if sel.arena_unpatched {
+                log_warn!(
+                    "StepMania: the game's XML arena is stock-sized ({} MiB; Song Limit Expansion off or its patch failed) -- none of the {} indexed song(s) injected: the stock musicdb already fills it",
+                    b.arena_bytes >> 20,
+                    snap.songs.len()
+                );
+            } else {
+                log_warn!(
+                    "StepMania: {} indexed song(s) exceed the {}-song ceiling -- the first {} by pack/folder name are injected, {} left out (remove packs to choose)",
+                    snap.songs.len(),
+                    b.max_songs,
+                    sel.kept.len(),
+                    sel.over_count
+                );
+            }
+        }
+    }
+    let songs: Vec<Arc<model::SongEntry>> = sel
+        .kept
+        .iter()
+        .filter_map(|&i| snap.songs.get(i).cloned())
+        .collect();
+    IndexSnapshot {
+        songs: Arc::new(songs),
+        ..snap
+    }
+}
+
 /// Register the STEPMANIA folder bit and series value (lowest free of each)
 /// and build the thumbnail arc — once, from whichever path gets there first
 /// (the `startup.arc` open or the mod's `init`). No-op until the index has
-/// ≥ 1 song. Returns the registration (series may be `None` when every value
-/// is taken — then nothing is injected).
+/// ≥ 1 injectable song. Returns the registration (series may be `None`
+/// when every value is taken — then nothing is injected).
 pub fn ensure_registration() -> Option<Registration> {
     if !is_armed() {
         return None;
@@ -416,7 +481,7 @@ pub fn ensure_registration() -> Option<Registration> {
     if let Some(r) = REGISTRATION.get() {
         return Some(*r);
     }
-    let snap = wait_index();
+    let snap = injectable(wait_index());
     if snap.songs.is_empty() {
         return None;
     }
@@ -492,7 +557,7 @@ pub(crate) fn on_index_complete() {
         SERVING.store(true, Ordering::Release);
     }
     if let Some(series) = registered_series() {
-        build_thumbnail_arc(series, &snap);
+        build_thumbnail_arc(series, &injectable(snap));
     }
 }
 
@@ -556,23 +621,26 @@ fn build_thumbnail_arc(series: u8, snap: &IndexSnapshot) {
     }
 }
 
-/// `arc/startup.arc` cache-key contribution: the index digest plus the
-/// series / bit the entries will carry. Runs inside the game's open, BEFORE
-/// the transform, so it is where the bounded wait and the registration
-/// happen.
+/// `arc/startup.arc` cache-key contribution: the digest of the injectable
+/// subset plus the series / bit the entries will carry and the arena size
+/// (a toggled Song Limit Expansion changes the ceiling verdict). Runs inside
+/// the game's open, BEFORE the transform, so it is where the bounded wait
+/// and the registration happen.
 fn startup_fingerprint() -> Option<String> {
     let reg = ensure_registration();
-    let snap = index::snapshot();
+    let snap = injectable(index::snapshot());
     let entries = snap.entries();
+    let arena = song_limit_expansion::arena_bytes();
     if let Ok(mut slot) = STARTUP_SNAPSHOT.lock() {
-        *slot = Some(snap.clone());
+        *slot = Some(snap);
     }
     Some(format!(
-        "stepmania:{:016x}:{:?}:{:?}:{}",
+        "stepmania:{:016x}:{:?}:{:?}:{}:{}",
         model::index_digest(&entries),
         reg.and_then(|r| r.series),
         reg.and_then(|r| r.folder_bit),
-        entries.len()
+        entries.len(),
+        arena
     ))
 }
 
@@ -598,13 +666,23 @@ fn transform_inner(xml: &[u8]) -> Option<Vec<u8>> {
         .lock()
         .ok()
         .and_then(|mut slot| slot.take())
-        .unwrap_or_else(index::snapshot);
+        .unwrap_or_else(|| injectable(index::snapshot()));
     if snap.songs.is_empty() {
         return None;
     }
     let entries = snap.entries();
-    let report = musicdb::transform_report(xml, &entries, series, reg.folder_bit);
+    let arena = song_limit_expansion::arena_bytes();
+    let report = musicdb::transform_report(
+        xml,
+        &entries,
+        series,
+        reg.folder_bit,
+        Some(ceiling::text_budget(arena)),
+    );
     for (i, reason) in &report.dropped {
+        if *reason == musicdb::DropReason::ArenaBudget {
+            continue; // summarised below
+        }
         if let Some(e) = entries.get(*i) {
             log_warn!(
                 "StepMania: '{}/{}' ({} / {}) not injected: {}",
@@ -615,6 +693,16 @@ fn transform_inner(xml: &[u8]) -> Option<Vec<u8>> {
                 reason
             );
         }
+    }
+    let over_budget = report.over_budget();
+    if over_budget > 0 {
+        log_warn!(
+            "StepMania: {} song(s) not injected -- musicdb.xml ({} KiB) would exceed the {} MiB property arena's text budget ({} KiB)",
+            over_budget,
+            xml.len() / 1024,
+            arena >> 20,
+            ceiling::text_budget(arena) / 1024
+        );
     }
     if report.no_close_tag {
         log_warn!("StepMania: musicdb.xml has no </mdb> -- nothing injected");
@@ -644,9 +732,9 @@ fn transform_inner(xml: &[u8]) -> Option<Vec<u8>> {
 /// the cache key includes [`startup_fingerprint`] (index digest, series,
 /// folder bit, count), so the cached `musicdb.xml` was produced from the same
 /// snapshot: the answer is that snapshot's songs — a superset only by songs
-/// the transform dropped for a base-musicdb collision (WARNed when it ran),
-/// which have no music-DB entry and are skipped by every consumer that
-/// looks them up.
+/// the transform dropped for a base-musicdb collision or the arena text
+/// budget (WARNed when it ran), which have no music-DB entry and are skipped
+/// by every consumer that looks them up.
 #[must_use]
 pub fn injected_entries() -> Vec<Arc<model::SongEntry>> {
     if let Some(v) = INJECTED.get() {

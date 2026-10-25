@@ -1,14 +1,21 @@
-//! Song Limit Expansion Mod — Increases the XML read buffer from 1MB to 8MB.
+//! Song Limit Expansion Mod — Increases the XML property arena from 1 MiB
+//! to 64 MiB.
 //!
-//! The game allocates a fixed 1MB property arena to parse musicdb.xml (and
-//! coursedb.xml, license.xml). At ~463 bytes per song in XML, 1MB caps out at
-//! ~2262 songs. This mod patches the size to 8MB, supporting ~17,000 songs.
+//! The game allocates a fixed 1 MiB arena for the AVS property tree it
+//! parses `musicdb.xml` into (and `coursedb.xml`, `license.xml`;
+//! `docs/stepmania_runtime_packs_feasibility.md` §4.1). The tree costs
+//! roughly the text size — the stock 716 KB file fits — so 1 MiB caps out
+//! around 2,000 songs. This mod patches the size to 64 MiB; the arena comes
+//! from the AGCS app heap (OS-heap backed) and is freed right after the
+//! parse, so the cost is transient. The size is deliberately far above the
+//! StepMania loader's injection ceiling (`services::stepmania::ceiling`) so
+//! the ceiling can rise with testing without touching this patch.
 //!
 //! Each parser has two patch sites:
 //!   1. MOV EDX, 0x100000       (allocation size)
-//!   2. MOV [RSP+0x20], 0x100000 (read size parameter)
+//!   2. MOV [RSP+0x20], 0x100000 (arena size passed to the parser)
 //!
-//! The patch is a single byte change at each site: 0x10 → 0x80.
+//! The patch rewrites the full imm32 at each site: 0x00100000 → 0x04000000.
 //!
 //! ## When the patch lands
 //!
@@ -37,27 +44,27 @@ use crate::{log_info, log_warn};
 
 pub const MOD_ID: &str = "song-limit-expansion";
 
-/// Original buffer size byte (0x10 in the imm32 = 0x100000 = 1MB)
-const ORIGINAL_SIZE_BYTE: u8 = 0x10;
-/// New buffer size byte (0x80 in the imm32 = 0x800000 = 8MB)
-const NEW_SIZE_BYTE: u8 = 0x80;
+/// Stock arena size (the imm32 at every site).
+pub const STOCK_ARENA_BYTES: u32 = 0x0010_0000;
+/// Patched arena size.
+pub const EXPANDED_ARENA_BYTES: u32 = 0x0400_0000;
 
 /// XOR R8D,R8D; MOV EDX,0x100000; CALL ...
-/// The 0x10 byte is at pattern offset 6.
+/// The imm32 starts at pattern offset 4.
 const ALLOC_PATTERN: &str = "45 33 C0 BA 00 00 10 00 E8";
-const ALLOC_PATCH_OFFSET: usize = 6;
+const ALLOC_PATCH_OFFSET: usize = 4;
 
 /// MOV dword ptr [RSP+0x20], 0x100000
-/// The 0x10 byte is at pattern offset 6.
+/// The imm32 starts at pattern offset 4.
 const READ_PATTERN: &str = "C7 44 24 20 00 00 10 00";
-const READ_PATCH_OFFSET: usize = 6;
+const READ_PATCH_OFFSET: usize = 4;
 
 const EXPECTED_HITS: usize = 3; // license, musicdb, coursedb
 
 #[derive(Clone, Copy)]
 struct PatchSite {
+    /// Address of the imm32.
     addr: *mut u8,
-    original: u8,
 }
 
 unsafe impl Send for PatchSite {}
@@ -96,6 +103,16 @@ pub fn arena_patch_state() -> ArenaPatchState {
         .unwrap_or(ArenaPatchState::Failed)
 }
 
+/// The arena size the game's parsers use right now: expanded when the patch
+/// is applied, stock otherwise (never attempted, failed, or reverted).
+#[must_use]
+pub fn arena_bytes() -> usize {
+    match arena_patch_state() {
+        ArenaPatchState::Applied => EXPANDED_ARENA_BYTES as usize,
+        _ => STOCK_ARENA_BYTES as usize,
+    }
+}
+
 /// Scan, verify and write the six patch sites once. Idempotent: a second call
 /// returns the existing outcome without rescanning. `who` names the caller in
 /// the log line. Returns `true` when the bytes are (now) patched.
@@ -108,7 +125,7 @@ pub fn apply_arena_patch(module: &GameModule, who: &'static str) -> bool {
         ArenaPatchState::Applied => return true,
         ArenaPatchState::Failed => return false,
         ArenaPatchState::Reverted => {
-            write_sites(&patch.sites, NEW_SIZE_BYTE);
+            write_sites(&patch.sites, EXPANDED_ARENA_BYTES);
             patch.state = ArenaPatchState::Applied;
             log_info!(
                 "SongLimitExpansion: re-applied by {} ({} patches)",
@@ -121,10 +138,11 @@ pub fn apply_arena_patch(module: &GameModule, who: &'static str) -> bool {
     }
     match scan_and_verify(module.base, module.size) {
         Some(sites) => {
-            write_sites(&sites, NEW_SIZE_BYTE);
+            write_sites(&sites, EXPANDED_ARENA_BYTES);
             log_info!(
-                "SongLimitExpansion: applied by {} — XML buffers expanded to 8MB ({} patches)",
+                "SongLimitExpansion: applied by {} — XML arenas expanded to {} MiB ({} patches)",
                 who,
+                EXPANDED_ARENA_BYTES >> 20,
                 sites.len()
             );
             patch.sites = sites;
@@ -143,9 +161,9 @@ pub fn apply_arena_patch(module: &GameModule, who: &'static str) -> bool {
 fn revert_arena_patch() {
     if let Ok(mut patch) = ARENA_PATCH.lock() {
         if patch.state == ArenaPatchState::Applied {
-            write_sites(&patch.sites, ORIGINAL_SIZE_BYTE);
+            write_sites(&patch.sites, STOCK_ARENA_BYTES);
             patch.state = ArenaPatchState::Reverted;
-            log_info!("SongLimitExpansion: disabled — XML buffers restored to 1MB");
+            log_info!("SongLimitExpansion: disabled — XML arenas restored to 1 MiB");
         }
     }
 }
@@ -180,12 +198,12 @@ fn startup_arc_pre_repack() {
             }
             if !apply_arena_patch(&module, "startup.arc open") {
                 log_warn!(
-                    "SongLimitExpansion: arena patch unavailable at the startup.arc open — large injected libraries may truncate"
+                    "SongLimitExpansion: arena patch unavailable at the startup.arc open — the StepMania loader injects nothing under a stock arena"
                 );
             }
         }
         None => log_warn!(
-            "SongLimitExpansion: startup.arc opened before gamemdx was resolvable — arena patch deferred to early_apply (racy)"
+            "SongLimitExpansion: startup.arc opened before gamemdx was resolvable — arena patch deferred to early_apply (racy; the StepMania loader injects nothing this boot)"
         ),
     }
 }
@@ -218,15 +236,17 @@ fn scan_and_verify(base: *const u8, size: usize) -> Option<Vec<PatchSite>> {
     record_sites(&mut sites, &read_hits, READ_PATCH_OFFSET)?;
 
     log_info!(
-        "SongLimitExpansion: found {} patch sites (1MB → 8MB)",
-        sites.len()
+        "SongLimitExpansion: found {} patch sites ({} MiB → {} MiB)",
+        sites.len(),
+        STOCK_ARENA_BYTES >> 20,
+        EXPANDED_ARENA_BYTES >> 20
     );
     Some(sites)
 }
 
-/// Verify each hit holds the expected original byte at `patch_offset` and
-/// record a `PatchSite` so the patch can be rolled back. `None` on the first
-/// unexpected byte (abort to avoid corrupting unknown memory).
+/// Verify each hit holds the stock imm32 at `patch_offset` and record a
+/// `PatchSite` so the patch can be rolled back. `None` on the first
+/// unexpected value (abort to avoid corrupting unknown memory).
 fn record_sites(
     sites: &mut Vec<PatchSite>,
     hits: &[ScanResult],
@@ -234,29 +254,27 @@ fn record_sites(
 ) -> Option<()> {
     for hit in hits {
         let addr = unsafe { hit.address.add(patch_offset) as *mut u8 };
-        let val = unsafe { *addr };
-        if val != ORIGINAL_SIZE_BYTE {
+        let val = unsafe { memory::read_u32(addr) };
+        if val != STOCK_ARENA_BYTES {
             log_warn!(
-                "SongLimitExpansion: unexpected byte 0x{:02X} at site +0x{:X}",
+                "SongLimitExpansion: unexpected imm32 0x{:08X} at site +0x{:X}",
                 val,
                 hit.offset
             );
             return None;
         }
-        sites.push(PatchSite {
-            addr,
-            original: val,
-        });
+        sites.push(PatchSite { addr });
     }
     Some(())
 }
 
-fn write_sites(sites: &[PatchSite], byte: u8) {
+fn write_sites(sites: &[PatchSite], value: u32) {
     for site in sites {
         unsafe {
-            let old = memory::make_writable(site.addr as *const u8, 1);
-            memory::write_u8(site.addr, byte);
-            memory::restore_protection(site.addr as *const u8, 1, old);
+            let old = memory::make_writable(site.addr as *const u8, 4);
+            // Code immediates are unaligned.
+            (site.addr as *mut u32).write_unaligned(value);
+            memory::restore_protection(site.addr as *const u8, 4, old);
         }
     }
 }
@@ -277,7 +295,7 @@ impl Mod for SongLimitExpansionMod {
         "Song Limit Expansion"
     }
     fn description(&self) -> &str {
-        "Increases the number of songs that can be loaded by ~8x"
+        "Increases the number of songs that can be loaded by ~64x"
     }
     fn required_signatures(&self) -> &[&str] {
         &[]

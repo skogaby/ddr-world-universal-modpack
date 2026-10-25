@@ -249,6 +249,8 @@ pub enum DropReason {
     McodeInBase,
     BasenameInBase,
     NoDeclaredSlot,
+    /// Appending it would push the document past the arena text budget.
+    ArenaBudget,
 }
 
 impl std::fmt::Display for DropReason {
@@ -257,6 +259,7 @@ impl std::fmt::Display for DropReason {
             Self::McodeInBase => "mcode already in the base musicdb",
             Self::BasenameInBase => "basename already in the base musicdb",
             Self::NoDeclaredSlot => "no declared slot",
+            Self::ArenaBudget => "musicdb.xml would exceed the property arena budget",
         })
     }
 }
@@ -275,16 +278,35 @@ pub struct TransformReport {
     pub no_close_tag: bool,
 }
 
+impl TransformReport {
+    /// How many entries the arena budget left out.
+    #[must_use]
+    pub fn over_budget(&self) -> usize {
+        self.dropped
+            .iter()
+            .filter(|(_, r)| *r == DropReason::ArenaBudget)
+            .count()
+    }
+}
+
 /// Inject `entries` before the final `</mdb>`, dropping base collisions.
+/// `text_budget` (bytes; `None` = unbounded) caps the rewritten document:
+/// entries are appended in order until the next one would exceed it, and
+/// the rest are dropped as [`DropReason::ArenaBudget`] — a document larger
+/// than the game's property arena loads NO songs, so a smaller library
+/// beats a complete one.
 #[must_use]
 pub fn transform_report(
     xml: &[u8],
     entries: &[SongEntry],
     series: u8,
     property_bit: Option<u32>,
+    text_budget: Option<usize>,
 ) -> TransformReport {
     let mut report = TransformReport::default();
     let base = scan_base_ids(xml);
+    // The insertion adds at most one LF besides the fragment.
+    let budget = text_budget.map(|b| b.saturating_sub(xml.len() + 1));
     let mut fragment = String::new();
     for (i, e) in entries.iter().enumerate() {
         if e.levels.iter().all(|&l| l == 0) {
@@ -299,7 +321,12 @@ pub fn transform_report(
             report.dropped.push((i, DropReason::BasenameInBase));
             continue;
         }
-        fragment.push_str(&entry_xml(e, series, property_bit));
+        let element = entry_xml(e, series, property_bit);
+        if budget.is_some_and(|b| fragment.len() + element.len() > b) {
+            report.dropped.push((i, DropReason::ArenaBudget));
+            continue;
+        }
+        fragment.push_str(&element);
         report.injected.push(i);
     }
     if report.injected.is_empty() {
@@ -331,8 +358,9 @@ pub fn transform(
     entries: &[SongEntry],
     series: u8,
     property_bit: Option<u32>,
+    text_budget: Option<usize>,
 ) -> Option<Vec<u8>> {
-    transform_report(xml, entries, series, property_bit).xml
+    transform_report(xml, entries, series, property_bit, text_budget).xml
 }
 
 #[cfg(test)]
@@ -425,7 +453,7 @@ mod tests {
         d.basename = "zdddd1".into();
         d.mcode = 9_000_004;
         d.levels = [0; 10];
-        let report = transform_report(STOCK.as_bytes(), &[a, b, c, d], 30, Some(10));
+        let report = transform_report(STOCK.as_bytes(), &[a, b, c, d], 30, Some(10), None);
         assert_eq!(report.injected, vec![0]);
         assert_eq!(
             report.dropped,
@@ -440,10 +468,39 @@ mod tests {
         assert_eq!(out.matches("<music>").count(), 2);
         assert!(out.starts_with(STOCK.split("</mdb>").next().unwrap()));
         // Nothing to inject → unchanged.
-        assert!(transform(STOCK.as_bytes(), &[], 30, None).is_none());
+        assert!(transform(STOCK.as_bytes(), &[], 30, None, None).is_none());
         // No close tag → unchanged, flagged.
-        let r = transform_report(b"<mdb>", &[entry()], 30, None);
+        let r = transform_report(b"<mdb>", &[entry()], 30, None, None);
         assert!(r.xml.is_none() && r.no_close_tag);
+    }
+
+    #[test]
+    fn arena_budget_caps_the_document() {
+        let mut entries = Vec::new();
+        for i in 0..5u32 {
+            let mut e = entry();
+            e.basename = format!("zb{i:04}");
+            e.mcode = 9_100_000 + i;
+            entries.push(e);
+        }
+        let one = entry_xml(&entries[0], 30, None).len();
+        // Room for the stock document, the LF and exactly three entries.
+        let budget = STOCK.len() + 1 + 3 * one;
+        let report = transform_report(STOCK.as_bytes(), &entries, 30, None, Some(budget));
+        assert_eq!(report.injected, vec![0, 1, 2]);
+        assert_eq!(
+            report.dropped,
+            vec![(3, DropReason::ArenaBudget), (4, DropReason::ArenaBudget)]
+        );
+        assert_eq!(report.over_budget(), 2);
+        assert!(report.xml.as_ref().unwrap().len() <= budget);
+        // A budget the stock document already exceeds injects nothing.
+        let none = transform_report(STOCK.as_bytes(), &entries, 30, None, Some(STOCK.len()));
+        assert!(none.xml.is_none());
+        assert_eq!(none.over_budget(), 5);
+        // Unbounded keeps everything.
+        let all = transform_report(STOCK.as_bytes(), &entries, 30, None, None);
+        assert_eq!(all.injected.len(), 5);
     }
 
     #[test]

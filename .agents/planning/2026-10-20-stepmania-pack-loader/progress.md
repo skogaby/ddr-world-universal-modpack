@@ -16,6 +16,24 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## Done
 
+- **Post-launch guard rails (2026-10-24, after a tester's 14,000-song library stalled the boot
+  for 15 min with a complete index and a clean log)**: `services/stepmania/ceiling.rs` (pure,
+  harness-mounted) selects what one boot may inject — `MAX_INJECTED_SONGS = 4_000` first by
+  `pack/folder`, NOTHING under a stock-sized XML arena (patch failed / Song Limit Expansion
+  off) — and every "songs this boot" publisher (`ensure_registration`, `startup_fingerprint`
+  — which now also keys on the arena size —, `transform_inner`, `on_index_complete`,
+  `injected_entries`) goes through `mod.rs::injectable`; one WARN per boot names what was left
+  out. `musicdb::transform_report` takes a `text_budget` (`arena × 2/3`, `DropReason::
+  ArenaBudget`) as the last safety net on the final document. `mods/song_limit_expansion.rs`
+  rewrites the full imm32 at the six sites: arena 1 MiB → **64 MiB** (was 8 MiB; AGCS heap,
+  freed after the parse) and exposes `arena_bytes()`. Readiness gate green (`cargo check`,
+  `cargo fmt`, `./build.sh`, stepmania harness 284 tests / 102 legs). NOT yet cabinet-tested:
+  the 64 MiB allocation and the ceiling WARN. Root-cause hypothesis for the 14k stall (log not
+  obtained): 15.5k entries at ~530 B each ≈ the 8 MiB property arena → parse failure → empty
+  music DB → boot never leaves `onBoot`. Follow-up feature:
+  `.agents/planning/2026-10-24-stepmania-prep-tool/` (standalone pre-indexer; also carries
+  `index.bin` checkpointing and post-deadline worker priority).
+
 - **Step 12 rework (2026-10-24; subagent task-02, reviewed; DLL deployed 02:03)**: measure-only.
   `services/stepmania/sync_apply.rs` (ledger load/save, live `basename → {delta, frozen}` map,
   on-decide thread `stepmania-sync-decide` at normal priority, the two holds, the provider),
