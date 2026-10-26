@@ -1,10 +1,10 @@
 # Progress: StepMania Prep Tool
 
-Updated: 2026-10-25
-Status: ALL 5 STEPS DONE (2026-10-25) — uncommitted; DLL side NOT cabinet-tested
+Updated: 2026-10-26
+Status: ALL 5 STEPS DONE (2026-10-25); cabinet matrix PASSED 2026-10-26 (deploys #1–#4) — uncommitted
 
-NEXT ACTION: Maintainer: (1) review + commit; (2) cabinet deploy of the Step 3+4 DLL together
-with a prep-tool run — matrix below.
+NEXT ACTION: Maintainer: review + commit. Optional: the 14k synthetic-library ceiling run
+(design §7 item 6) and the tester release note ("run the tool once after updating").
 
 Resume protocol: `implementation/plan.md` (checklist) → `design/detailed-design.md` →
 `idea-honing.md`. Checkpoint commit before this work: `d5e019bc`.
@@ -116,7 +116,10 @@ Resume protocol: `implementation/plan.md` (checklist) → `design/detailed-desig
 
 | # | date | build | result |
 |---|---|---|---|
-| — | — | Step 3+4 DLL | NOT YET DEPLOYED. Add to the matrix: (4) play a tool-measured song → `P1 override applied (d ms = stock s + d)` judge line, no stage-load hold; (5) `--no-sync` library → `N without a record play as authored` INFO at enable. Matrix (design §7): (1) packs + no `index.bin` → F12 WARN, no STEPMANIA folder; (2) after a tool run → songs load, `index validated -- N kept` line, no `stepmania-index` thread; (3) edit a simfile → that song dropped with the tally WARN; tool run → back; also verifies the 64 MiB arena. |
+| 1 | 2026-10-26 | prep exe (Win7), maintainer's CrossOver install | **Tool PASS.** Warm run over the DLL-written cache: 138 reused / 0 written in 1.4 s (Wine stat walk). With `auto_sync: true`: 138 measured in 28 s on 6 workers → **102 measured / 36 refused — identical to the in-game sweep's result on the same packs** (loader run #15). Up-front duration estimate was 36 % off → replaced by elapsed + extrapolated remaining on the progress line (every 100 songs / ≥ 10 s). In-game test pending. |
+| 2 | 2026-10-26 | Step 3+4 DLL (Win7) + prep exe, `_cache/stepmania` deleted first | **PASS.** Tool: cold 138 songs in 4.4 s, 102/36 sync in 27 s, 0 WARN. Game: `SongLimitExpansion: … 1 MiB → 64 MiB (6 patches)` applied (first cabinet confirmation), `registered series 22 / bit 31 for 138`, thumbnail arc 138 members 93 ms, `StepmaniaPacks: index validated -- 138 … 0 dropped by validation`, pre-flight 138/0 failing, `sync.bin holds 138 record(s); 138 of 138 live`, no StepMania WARN, no index/sweep/on-decide lines. Wheel: previews + jackets 150–260 ms each. Play (Anubis `z3agij`): bank served complete with no hold, `P1 override applied (-4 ms = stock 0 -4)` = the tool's `delta -4 ms`. Early-init lines predate the debughook (known). |
+| 3 | 2026-10-26 | same DLL; one character changed in Anubis's `.sm`, no tool run | **PASS.** `StepMania: 1 song(s) dropped -- changed or missing since the last prep run (0 artefact(s) missing, 0 source(s) missing, 1 changed) -- run ddr_world_hook_prep.exe`; `index validated -- 137 kept, 1 dropped, 1473 ms` (validation lines reached log.txt this boot); registration / thumbnail arc / musicdb / sanitiser all 137; `sync.bin holds 138 record(s); 137 of 137 live` (stale record inert until the tool runs); `z3agij` absent from the rest of the log. |
+| 4 | 2026-10-26 | same DLL; `index.bin` renamed away | **PASS.** `StepmaniaPacks: no index -- run ddr_world_hook_prep.exe before the game to load packs from ./stepmania/Songs`; no series/folder/thumbnail/injection lines; `0 song(s) in the music DB`; STEPMANIA folder absent in-game (maintainer); no WARN/ERROR, stock boot otherwise. Early-init WARN predates the debughook (known). **Design §7 cabinet matrix complete** except the 14k synthetic-library ceiling run. | Add to the matrix: (4) play a tool-measured song → `P1 override applied (d ms = stock s + d)` judge line, no stage-load hold; (5) `--no-sync` library → `N without a record play as authored` INFO at enable. Matrix (design §7): (1) packs + no `index.bin` → F12 WARN, no STEPMANIA folder; (2) after a tool run → songs load, `index validated -- N kept` line, no `stepmania-index` thread; (3) edit a simfile → that song dropped with the tally WARN; tool run → back; also verifies the 64 MiB arena. |
 
 ## Deviations & open questions
 

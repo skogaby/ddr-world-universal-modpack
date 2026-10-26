@@ -84,23 +84,45 @@ impl Sink for ConsoleSink {
     }
 }
 
-/// The measurement pass on the console.
-#[derive(Default)]
+/// The measurement pass on the console. No up-front estimate (per-song
+/// cost varies too much with machine, codec and length to guess); instead
+/// the progress line carries the remaining time extrapolated from the
+/// throughput so far, every 100 songs and at least every ~10 s.
 pub struct MeasureConsole {
     total: AtomicUsize,
     done: AtomicUsize,
+    started: std::sync::Mutex<Option<std::time::Instant>>,
+    last_report: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
+impl Default for MeasureConsole {
+    fn default() -> Self {
+        Self {
+            total: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
+            started: std::sync::Mutex::new(None),
+            last_report: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Progress heartbeat interval.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl measure::Sink for MeasureConsole {
-    fn started(&self, eligible: usize, known: usize, estimate: std::time::Duration) {
+    fn started(&self, eligible: usize, known: usize) {
         self.total.store(eligible, Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        if let Ok(mut s) = self.started.lock() {
+            *s = Some(now);
+        }
+        if let Ok(mut l) = self.last_report.lock() {
+            *l = Some(now);
+        }
         if eligible == 0 {
             log_info!("auto-sync: every injected song is measured already ({known} record(s))");
         } else {
-            log_info!(
-                "auto-sync: measuring {eligible} song(s) ({known} already measured) -- about {} ...",
-                human_duration(estimate)
-            );
+            log_info!("auto-sync: measuring {eligible} song(s) ({known} already measured) ...");
         }
     }
 
@@ -112,9 +134,38 @@ impl measure::Sink for MeasureConsole {
             entry.pack,
             entry.folder
         );
-        // Keep the console alive on long passes without a line per song.
-        if done % 100 == 0 || done == total {
-            log_info!("auto-sync: {done}/{total} measured");
+        let now = std::time::Instant::now();
+        let due = self
+            .last_report
+            .lock()
+            .ok()
+            .and_then(|l| *l)
+            .is_none_or(|l| now.duration_since(l) >= PROGRESS_EVERY);
+        if done == total || done % 100 == 0 || due {
+            if let Ok(mut l) = self.last_report.lock() {
+                *l = Some(now);
+            }
+            let elapsed = self
+                .started
+                .lock()
+                .ok()
+                .and_then(|s| *s)
+                .map(|s| now.duration_since(s))
+                .unwrap_or_default();
+            if done == total {
+                log_info!(
+                    "auto-sync: {done}/{total} measured ({})",
+                    human_duration(elapsed)
+                );
+            } else {
+                let per_song = elapsed.as_secs_f64() / done as f64;
+                let left = std::time::Duration::from_secs_f64(per_song * (total - done) as f64);
+                log_info!(
+                    "auto-sync: {done}/{total} measured ({} elapsed, about {} left)",
+                    human_duration(elapsed),
+                    human_duration(left)
+                );
+            }
         }
     }
 

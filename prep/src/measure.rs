@@ -20,7 +20,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::core::audio::decode::decode_whole;
 use crate::core::audio::probe;
@@ -40,8 +40,6 @@ use crate::{log_debug, log_info, log_warn};
 /// Longest audio measured (the whole song is decoded into memory: 4 bytes
 /// per frame plus the analysis' mono copy).
 pub const MAX_MEASURE_S: f64 = 20.0 * 60.0;
-/// Rough CPU cost per song, for the estimate line.
-pub const SECONDS_PER_SONG: f64 = 0.8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -51,7 +49,7 @@ pub struct Settings {
 
 /// Progress events. All methods have no-op defaults.
 pub trait Sink: Sync {
-    fn started(&self, _eligible: usize, _known: usize, _estimate: Duration) {}
+    fn started(&self, _eligible: usize, _known: usize) {}
     fn song_done(&self, _entry: &SongEntry, _summary: &str) {}
     fn checkpoint(&self, _records: usize) {}
     fn should_abort(&self) -> bool {
@@ -272,8 +270,7 @@ pub fn run(
     }
     stats.eligible = queue.len();
     let workers = settings.workers.max(1).min(queue.len().max(1));
-    let estimate = Duration::from_secs_f64(queue.len() as f64 * SECONDS_PER_SONG / workers as f64);
-    sink.started(stats.eligible, stats.known, estimate);
+    sink.started(stats.eligible, stats.known);
     if queue.is_empty() {
         save(&table);
         return stats;
