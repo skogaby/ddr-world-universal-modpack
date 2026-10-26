@@ -1,10 +1,11 @@
 //! StepMania Packs — the thin `Mod` over `services::stepmania` (design §4.15).
 //!
 //! Everything that matters happens at step 0' (`stepmania::early_init`, see
-//! the service doc): the index, the `startup.arc` musicdb transform, the
-//! resolver and the folder/series registration are armed long before the mod
-//! registry exists, because the game reads `musicdb.xml` within ms of
-//! gamemdx loading. This mod exists so the loader is a visible, togglable
+//! the service doc): the prep tool's `index.bin` is loaded, its validation
+//! started, and the `startup.arc` musicdb transform, the resolver and the
+//! folder/series registration are armed long before the mod registry
+//! exists, because the game reads `musicdb.xml` within ms of gamemdx
+//! loading. This mod exists so the loader is a visible, togglable
 //! entry in the mod menu and so the slow-cabinet ordering is covered: its
 //! `init` runs at step 7 BEFORE `series_expansion` / `folder_expansion`
 //! initialise (list order in `lib.rs`) and calls `ensure_registration`,
@@ -20,7 +21,7 @@
 //! `enable` applies the fail-closed visibility guards (hide everything when
 //! score sanitisation is unavailable; hide per-chart-timing songs when the
 //! `ssq_path` chain is not up) — deferred to the first scene change when the
-//! music DB is not built yet — and starts the auto-sync sweep when
+//! music DB is not built yet — and loads the auto-sync ledger when
 //! `auto_sync` is on. `disable` only logs. No signatures are required.
 
 use crate::log_info;
@@ -89,19 +90,22 @@ impl Mod for StepmaniaPacksMod {
             }
         );
         match stepmania::status() {
+            Some(s) if s.songs.is_empty() && s.validated && s.dropped == 0 => log_info!(
+                "StepmaniaPacks: no index -- run {} before the game to load packs from {}",
+                stepmania::PREP_TOOL,
+                stepmania::SONGS_ROOT
+            ),
             Some(s) => log_info!(
-                "StepmaniaPacks: index {} -- {} song(s), {} pack(s), {} rejected ({} converted, {} reused, {} ms); series {:?}, folder bit {:?}",
-                if s.complete { "complete" } else { "still running" },
+                "StepmaniaPacks: index {} -- {} song(s), {} pack(s), {} cached rejection(s), {} dropped by validation; series {:?}, folder bit {:?}",
+                if s.validated { "validated" } else { "still validating" },
                 s.songs.len(),
                 s.packs,
                 s.rejected,
-                s.converted,
-                s.reused,
-                s.elapsed_ms,
+                s.dropped,
                 stepmania::registered_series(),
                 stepmania::registered_folder_bit()
             ),
-            None => log_info!("StepmaniaPacks: no index this boot"),
+            None => log_info!("StepmaniaPacks: loader not armed"),
         }
         true
     }
@@ -122,15 +126,12 @@ impl Mod for StepmaniaPacksMod {
             } else {
                 apply_visibility_guards(&entries);
             }
-            // Auto-sync (`stepmania_packs.auto_sync`): loads the ledger and
-            // registers the judgement-offset provider now; the sweep waits
-            // for the index, the startup.arc injection and the end of the
-            // boot pass on its own thread (the injection can come after
-            // this on a slow cabinet).
+            // Auto-sync (`stepmania_packs.auto_sync`): load the ledger the
+            // prep tool wrote and register the judgement-offset provider.
             if !stepmania::auto_sync_enabled() {
                 log_info!("StepmaniaPacks: auto-sync off (config) -- songs play as authored");
             } else {
-                let _ = stepmania::start_sync_sweep();
+                let _ = stepmania::init_sync();
             }
         } else {
             log_info!("StepmaniaPacks: enabled -- takes effect at the next boot");

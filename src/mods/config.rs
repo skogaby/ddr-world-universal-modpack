@@ -872,17 +872,14 @@ pub struct StepmaniaPacksConfig {
     /// `data_mods/_cache/stepmania/`.
     #[serde(default = "default_stepmania_audio_cache_mb")]
     pub audio_cache_mb: u32,
-    /// Auto-sync (`services::stepmania::sync_sweep` / `sync_apply`): measure
-    /// each injected song against its audio once per source fingerprint and
-    /// apply the correction at play time through the game's JUDGEMENT
-    /// OFFSET (never by changing a file). When false nothing is measured or
-    /// applied.
+    /// Auto-sync: the prep tool measures each injected song against its
+    /// audio once per source fingerprint (`sync.bin`) and
+    /// `services::stepmania::sync_apply` applies the correction at play time
+    /// through the game's JUDGEMENT OFFSET (never by changing a file). When
+    /// false the tool measures nothing and nothing is applied. (The retired
+    /// `index_timeout_s` key is parsed and ignored.)
     #[serde(default = "default_true")]
     pub auto_sync: bool,
-    /// How long the `startup.arc` open waits for the index before injecting
-    /// whatever finished.
-    #[serde(default = "default_stepmania_index_timeout_s")]
-    pub index_timeout_s: u32,
     /// `hide_chart` (the only policy today): charts with warps / negative
     /// BPMs / negative stops are not declared.
     #[serde(default = "default_stepmania_gimmick_policy")]
@@ -900,7 +897,6 @@ impl Default for StepmaniaPacksConfig {
             exclude_from_all_music: true,
             audio_cache_mb: default_stepmania_audio_cache_mb(),
             auto_sync: true,
-            index_timeout_s: default_stepmania_index_timeout_s(),
             gimmick_policy: default_stepmania_gimmick_policy(),
             scroll_gimmicks: true,
         }
@@ -909,9 +905,6 @@ impl Default for StepmaniaPacksConfig {
 
 fn default_stepmania_audio_cache_mb() -> u32 {
     1024
-}
-fn default_stepmania_index_timeout_s() -> u32 {
-    30
 }
 fn default_stepmania_gimmick_policy() -> String {
     "hide_chart".to_string()

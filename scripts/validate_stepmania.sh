@@ -3,8 +3,8 @@
 # pipeline (`src/core/sm/` parser, `src/core/ssq/{writer,check}.rs`,
 # `src/core/audio/`, `src/core/xact/{song_bank,xsb}.rs`, `src/core/art/
 # {source,jacket,thumbnail}.rs`) and the loader's pure service files
-# (`src/services/stepmania/{identity,musicdb,model,convert,ceiling,
-# scheduler_logic,progressive_logic,sync_state}.rs` and
+# (`src/services/stepmania/{identity,musicdb,model,convert,ceiling,cache,
+# records,validation,scheduler_logic,progressive_logic,sync_state}.rs` and
 # `src/services/ssq_path_logic.rs`) and
 # the auto-sync estimator (`src/core/sync/`); plan
 # `.agents/planning/2026-10-20-stepmania-pack-loader/implementation/plan.md`
@@ -166,7 +166,7 @@ done
 for f in mod.rs onset.rs estimate.rs events.rs timemap.rs measure.rs; do
   [[ -r "$REPO_ROOT/src/core/sync/$f" ]] || die "module source missing: src/core/sync/$f"
 done
-for f in identity.rs musicdb.rs model.rs convert.rs ceiling.rs scheduler_logic.rs progressive_logic.rs sync_state.rs; do
+for f in identity.rs musicdb.rs model.rs convert.rs ceiling.rs cache.rs records.rs validation.rs scheduler_logic.rs progressive_logic.rs sync_state.rs; do
   [[ -r "$REPO_ROOT/src/services/stepmania/$f" ]] || die "module source missing: src/services/stepmania/$f"
 done
 [[ -r "$REPO_ROOT/src/services/ssq_path_logic.rs" ]] || die "module source missing: src/services/ssq_path_logic.rs"
@@ -216,10 +216,20 @@ cat >"$TMP/src/lib.rs" <<EOF
 //! scripts/validate_stepmania.sh; never committed.
 #![allow(dead_code)]
 
+// The DLL's log macros, for mounted files that log (cache.rs).
+#[macro_export]
+macro_rules! log_info { (\$(\$arg:tt)*) => { eprintln!("INFO  {}", format!(\$(\$arg)*)) }; }
+#[macro_export]
+macro_rules! log_warn { (\$(\$arg:tt)*) => { eprintln!("WARN  {}", format!(\$(\$arg)*)) }; }
+#[macro_export]
+macro_rules! log_debug { (\$(\$arg:tt)*) => { eprintln!("DEBUG {}", format!(\$(\$arg)*)) }; }
+
 pub mod core {
     pub mod art {
         #[path = "$REPO_ROOT/src/core/art/jacket.rs"]
         pub mod jacket;
+        #[path = "$REPO_ROOT/src/core/art/placeholder.rs"]
+        pub mod placeholder;
         #[path = "$REPO_ROOT/src/core/art/source.rs"]
         pub mod source;
         #[path = "$REPO_ROOT/src/core/art/thumbnail.rs"]
@@ -241,6 +251,8 @@ pub mod services {
     #[path = "$REPO_ROOT/src/services/ssq_path_logic.rs"]
     pub mod ssq_path_logic;
     pub mod stepmania {
+        #[path = "$REPO_ROOT/src/services/stepmania/cache.rs"]
+        pub mod cache;
         #[path = "$REPO_ROOT/src/services/stepmania/ceiling.rs"]
         pub mod ceiling;
         #[path = "$REPO_ROOT/src/services/stepmania/convert.rs"]
@@ -253,10 +265,14 @@ pub mod services {
         pub mod musicdb;
         #[path = "$REPO_ROOT/src/services/stepmania/progressive_logic.rs"]
         pub mod progressive_logic;
+        #[path = "$REPO_ROOT/src/services/stepmania/records.rs"]
+        pub mod records;
         #[path = "$REPO_ROOT/src/services/stepmania/scheduler_logic.rs"]
         pub mod scheduler_logic;
         #[path = "$REPO_ROOT/src/services/stepmania/sync_state.rs"]
         pub mod sync_state;
+        #[path = "$REPO_ROOT/src/services/stepmania/validation.rs"]
+        pub mod validation;
     }
 }
 EOF

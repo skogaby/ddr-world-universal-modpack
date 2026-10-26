@@ -6,12 +6,12 @@
 >
 > | Here | Module |
 > |---|---|
-> | §4.1, §7 music DB / `startup.arc` member transform, arena patch | `services/stepmania/{musicdb,mod}.rs`, `avs_layeredfs/arc_handler.rs` (`register_member_transform`, `register_arc_fingerprint`), `mods/song_limit_expansion.rs::apply_arena_patch` |
+> | §4.1, §7 music DB / `startup.arc` member transform, arena patch | `services/stepmania/{musicdb,mod}.rs`, `avs_layeredfs/arc_handler.rs` (`register_member_transform`, `register_arc_fingerprint`), `mods/song_limit_expansion.rs::apply_arena_patch` (64 MiB; the injection ceiling is `services/stepmania/ceiling.rs`). Indexing/conversion itself (§5) lives in the standalone prep tool `prep/` (2026-10-25) — the DLL only reads its cache (`services/stepmania/{index,validation,records}.rs`) |
 > | §8 SM/SSC → SSQ (parser, writer, §8.6 self-check) | `core/sm/`, `core/ssq/{writer,check}.rs` |
 > | §9 audio → XWB/XSB, lead-in, §9.5 progressive banks | `core/audio/`, `core/xact/{song_bank,xsb}.rs`, `services/stepmania/{providers,progressive,scheduler}.rs` |
 > | §8.4 `build_ssq_path` chain, per-chart-timing split files | `services/ssq_path.rs`, `services/stepmania/ssq_split.rs` |
 > | §8.5 boot analysis: `ME1529` quarantine, radar maxima (E8 refuted — the maxima are reset to constants at scene 7) | `mods/fast_bootup/{quarantine,preflight}.rs` + `mod.rs` header |
-> | §9.1 sync | `core/sync/` (estimator port), `services/stepmania/sync_sweep.rs` — measures only; the correction is applied through the judgement offset via `per_song_judgement_offsets` |
+> | §9.1 sync | `core/sync/` (estimator port), measured by the prep tool (`prep/src/measure.rs`) into `sync.bin`; `services/stepmania/sync_apply.rs` applies the correction through the judgement offset via `per_song_judgement_offsets` |
 > | §4.6, §10 art (jacket, thumbnails) | `core/art/`, `data_mods/stepmania_packs/` |
 > | §11 delivery: materialised files via LayeredFS resolvers (NOT the virtual-file layer proposed there) | `avs_layeredfs/mod_paths.rs::register_resolver`, `file_hooks.rs` progressive reads |
 > | §12 score isolation | `services/score_guard.rs::INJECTED_SONG_TAINT`, `services/stepmania/{taint,hide}.rs` |

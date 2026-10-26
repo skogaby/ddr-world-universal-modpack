@@ -16,6 +16,12 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## Done
 
+- **Hand-over (2026-10-25)**: indexing, conversion and sync measurement moved OUT of the DLL
+  into the standalone prep tool (`prep/`, `ddr_world_hook_prep.exe`); the DLL is a reader of
+  the tool's cache (`index.rs` load/validate/publish, `validation.rs`, `records.rs`;
+  `sync_sweep.rs` deleted, `sync_apply.rs` slim, `index_timeout_s` retired). Live state for
+  that work: `.agents/planning/2026-10-24-stepmania-prep-tool/progress.md`. The cabinet
+  matrix there supersedes this feature's remaining deploy items.
 - **Post-launch guard rails (2026-10-24, after a tester's 14,000-song library stalled the boot
   for 15 min with a complete index and a clean log)**: `services/stepmania/ceiling.rs` (pure,
   harness-mounted) selects what one boot may inject — `MAX_INJECTED_SONGS = 4_000` first by

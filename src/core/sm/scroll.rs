@@ -28,7 +28,7 @@
 //! and panic-free (`get`/`partition_point`, no indexing, finite-guarded).
 //!
 //! Purity contract: `std` only, `crate::core::sm` imports only. Mounted by
-//! `scripts/validate_stepmania.sh` and `tools/sm_pack_check` through
+//! `scripts/validate_stepmania.sh` and `prep/` (the StepMania prep tool) through
 //! `core/sm/mod.rs`.
 
 use super::model::{Beat, Rational, Timing, Warning};

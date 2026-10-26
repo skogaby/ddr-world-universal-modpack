@@ -28,13 +28,9 @@
 //! placeholder jacket arc (`.ph` marker beside it, upgraded by the next
 //! worker request).
 //!
-//! **Full bank**: never blocks the open on the ENCODE. One bounded hold
-//! exists: an injected song whose auto-sync measurement is still running
-//! (picked before the sweep reached it) waits ≤ 5 s for it first
-//! (`sync_apply::hold_for_measurement`, on the FileManager I/O worker —
-//! never on the render thread; expiry plays the song as authored for the
-//! session), so the judgement offset the stage uses is decided before the
-//! first judge. If `xwb/<b>.xwb` exists it is
+//! **Full bank**: never blocks the open on the ENCODE (auto-sync deltas come
+//! from the prep tool's ledger, so nothing waits on a measurement here). If
+//! `xwb/<b>.xwb` exists it is
 //! served; otherwise the progressive `.part` is served — created HERE,
 //! synchronously, when no job has started it yet (audio read + probe +
 //! pre-size + header: a few ms), then encoded on a worker at gameplay-load
@@ -45,7 +41,8 @@
 //! file equals a `write_complete` build byte for byte.
 //!
 //! Builds are panic-contained; a failed build serves the fallback and flags
-//! the song `audio_failed` for the next boot. Every full-variant request —
+//! the song `audio_failed` for this session (the prep tool's measurement
+//! pass records real decode failures). Every full-variant request —
 //! ours or stock — is reported to `taint.rs`, which level-writes the score
 //! taint from it. Banks and jackets live under the `audio_cache_mb` LRU
 //! (`.part` files count from creation).
@@ -74,7 +71,6 @@ use super::model::SongEntry;
 use super::progressive::{self, ProgressiveFile, Staged};
 use super::scheduler::{self, Ticket, RESOLVER_WAIT};
 use super::scheduler_logic::{JobKind, Urgency};
-use super::sync_apply;
 use super::taint;
 
 const SSQ_PREFIX: &str = "mdb_apx/ssq/";
@@ -338,10 +334,8 @@ fn serve_preview_bank(entry: &Arc<SongEntry>) -> Option<String> {
 
 fn serve_full_bank(entry: &Arc<SongEntry>) -> Option<String> {
     let b = entry.basename.as_str();
-    // Hold (bounded) for an in-flight auto-sync measurement — the I/O
-    // worker only; the render thread never waits here.
-    if !widget_renderer::is_render_thread() {
-        sync_apply::hold_for_measurement(b, sync_apply::STAGE_LOAD_HOLD);
+    if index::is_audio_failed_session(b) {
+        return serve_silent(b);
     }
     progressive::retry_pending_renames();
     let key = cache::xwb_key(b, BankVariant::Full);
@@ -383,11 +377,11 @@ fn serve_full_bank(entry: &Arc<SongEntry>) -> Option<String> {
         }
         Err(e) => {
             log_warn!(
-                "StepMania: full bank for '{}' cannot start: {} -- serving silence; song flagged audio_failed for the next boot",
+                "StepMania: full bank for '{}' cannot start: {} -- serving silence; song flagged audio_failed for this session",
                 b,
                 e
             );
-            index::mark_audio_failed(b);
+            index::mark_audio_failed_session(b);
             serve_silent(b)
         }
     }
@@ -484,12 +478,12 @@ pub(super) fn run_preview_job(entry: &SongEntry) -> Result<String, String> {
             cache::lru_insert(&key, report.bytes);
             if let Some(w) = report.decode_warning {
                 log_warn!("StepMania: '{}' audio decode: {}", b, w);
-                index::mark_audio_failed(b);
+                index::mark_audio_failed_session(b);
             }
             Ok(format!("{} KiB", report.bytes / 1024))
         }
         Err(e) => {
-            index::mark_audio_failed(b);
+            index::mark_audio_failed_session(b);
             Err(e)
         }
     }
@@ -716,7 +710,7 @@ fn encode_full_bank(
                     b,
                     w
                 );
-                index::mark_audio_failed(b);
+                index::mark_audio_failed_session(b);
             }
             Ok(format!(
                 "{} KiB{}",
@@ -734,7 +728,7 @@ fn encode_full_bank(
         }
         Err(e) => {
             abandon_full_bank(h, "encode failed");
-            index::mark_audio_failed(b);
+            index::mark_audio_failed_session(b);
             Err(e)
         }
     }

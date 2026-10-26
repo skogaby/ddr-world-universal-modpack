@@ -15,43 +15,43 @@ Load this file first. It routes a question to the detailed file that answers it.
 | Where does module or feature X live? What mods exist, and which harness / RE note goes with each? | `components.md` |
 | Who owns which hook? What is the subscriber API? Which cross-mod predicates apply? Option-row API, Mod trait, signature registry? | `interfaces.md` |
 | Allocators, game layouts, config sections (who writes what), persistence wire model, file formats, the StepMania cache? | `data_models.md` |
-| Build, host tests, signature sweep, adding a mod/row/shader/virtual asset, runtime flows, the updater pipeline, `sm_pack_check`? | `workflows.md` |
+| Build, host tests, signature sweep, adding a mod/row/shader/virtual asset, runtime flows, the updater pipeline, the StepMania prep tool (`prep/`, `--dry-run`)? | `workflows.md` |
 | Crates, toolchain, other crates, external tools? | `dependencies.md` |
 | Known code issues, stale strings, doc gaps? | `review_notes.md` |
 
 ## File Summaries
 
 - **[codebase_info.md](codebase_info.md)**
-  - What the DLL is and the target game modules; the in-process StepMania pack conversion.
+  - What the DLL is and the target game modules; the StepMania pack cache (converted out of process by `prep/`, read by the DLL).
   - Key characteristics: binary neutrality, fail-open/fail-closed split, in-process discipline, pure-layer harnesses.
   - A mermaid map of the whole repository, and the analysis-coverage statement.
 - **[architecture.md](architecture.md)**
   - Layer model and placement rules.
   - The load-bearing init sequence with its ordering constraints (incl. step 0' `stepmania::early_init` and the `startup.arc` open).
-  - Thread model: frame pump seam, FileManager I/O worker, audio/worker/job-graph threads, the StepMania index/scheduler/auto-sync pools.
-  - Hook discipline, resilience model (incl. injected-song taint + hiding), the StepMania pack flow diagram, and the cross-cutting systems table.
+  - Thread model: frame pump seam, FileManager I/O worker, audio/worker/job-graph threads, the StepMania validation thread and scheduler pool.
+  - Hook discipline, resilience model (incl. injected-song taint + hiding), the StepMania pack flow diagram (prep tool → cache → DLL) with the cache-ownership split, and the cross-cutting systems table.
 - **[components.md](components.md)**
-  - Tables for `src/core/` (incl. the pure `sm`/`ssq` writer/`audio`/`sync`/`art` pipeline) and `src/services/` (grouped; `services/stepmania/` has its own table).
+  - Tables for `src/core/` (incl. the pure `sm`/`ssq` writer/`audio`/`sync`/`art` pipeline) and `src/services/` (grouped; `services/stepmania/` has its own table — index reader, `validation.rs`, `records.rs`, `ceiling.rs`, `sync_apply.rs`).
   - Every mod with id, entry path, purpose, harness script and RE note.
-  - Widgets/types, and everything outside the DLL crate: `updater/`, `tools/` (incl. `sm_pack_check`), `shaders/`, `data_mods/`, `stepmania/Songs/`.
+  - Widgets/types, and everything outside the DLL crate: `updater/`, `prep/` (the StepMania prep tool, module by module), `tools/`, `shaders/`, `data_mods/`, `stepmania/Songs/`.
 - **[interfaces.md](interfaces.md)**
   - The Mod trait and registry semantics, including `requested` vs `enabled` and the boot-only `is_active` rule.
   - The signature registry.
   - The complete single-owner hook map, with shared mod-owned hooks and mod-private hooks; the LayeredFS extension points (resolvers, member transforms, fingerprints, progressive reads).
-  - Cross-mod predicates (incl. the song-delta provider and `stepmania::is_injected`), the option-row framework API, other service APIs, and external interfaces.
+  - Cross-mod predicates (incl. the song-delta provider and `stepmania::is_injected`), the option-row framework API, other service APIs (incl. `stepmania::{index,ceiling}`), and external interfaces (incl. the prep tool's exit codes).
 - **[data_models.md](data_models.md)**
   - The three-heap allocator table and engine buffer headers.
   - Game layouts and where they are documented.
   - `mod-config.json`: DLL-written sections vs operator-only sections (incl. `stepmania_packs`).
-  - Sidecar files, the StepMania cache layout / identity derivation / injected `<music>` shape, the persistence wire model + score policy + judgement-offset composition, in-process file formats, and runtime state.
+  - Sidecar files, the StepMania cache layout with its tool/DLL ownership split, the injection ceiling, identity derivation, the injected `<music>` shape, the persistence wire model + score policy + judgement-offset composition, in-process file formats, and runtime state.
 - **[workflows.md](workflows.md)**
   - Build/deploy/release commands.
-  - The ARM host-test caveat and the `validate_*.sh` harness model (incl. the StepMania harnesses and `sm_pack_check`).
+  - The ARM host-test caveat and the `validate_*.sh` harness model (incl. the StepMania harnesses and `validate_prep.sh`).
   - The signature sweep procedure and cabinet validation.
   - How to add mods, hook consumers, option rows, shaders and LayeredFS virtual assets; when to bump `FORMAT_VERSION`; the tooling list and PDD convention.
-  - Runtime flows: frame, scene, judge, LayeredFS, StepMania pack boot → play, song rate, score policy, updater, crash diagnostics.
+  - Runtime flows: frame, scene, judge, LayeredFS, StepMania pack prep → boot → play, song rate, score policy, updater, crash diagnostics.
 - **[dependencies.md](dependencies.md)**
-  - Crates with rationale (incl. `encoding_rs`, `symphonia`, `rustfft` and their Win7 recipe), the nightly/Win7 toolchain notes, the other crates, runtime modules, external tools, and upgrade notes.
+  - Crates with rationale (incl. `encoding_rs`, `symphonia`, `rustfft` and their Win7 recipe), the nightly/Win7 toolchain notes, the other crates (`updater/`, `prep/`, `tools/bot_sim/`), runtime modules, external tools, and upgrade notes.
 - **[review_notes.md](review_notes.md)**
   - Consistency verification (incl. where the StepMania module docs supersede the planning design).
   - Which module docs were refreshed.

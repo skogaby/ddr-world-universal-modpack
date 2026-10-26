@@ -10,7 +10,6 @@
 //!                                        highlight moves on in scene 25 uncommitted)
 //! resolver, full-variant open        ─► FullBank (gameplay-load class, de-speculated)
 //! resolver, preview / jacket open    ─► Preview / Jacket (highlighted class) + wait ≤ 300 ms
-//! scene 25 → 26 with a dwell song     ─► sync_apply::request_on_decide (auto-sync measurement)
 //! ```
 //!
 //! Ordering / dedupe / cancel live in the pure [`super::scheduler_logic`];
@@ -37,7 +36,6 @@ use super::index;
 use super::progressive;
 use super::providers;
 use super::scheduler_logic::{Absorbed, Cancelled, JobKind, JobQueue, Urgency};
-use super::sync_apply;
 
 pub use super::scheduler_logic::pool_size;
 
@@ -248,7 +246,7 @@ fn worker_main() {
             ),
         }
         if outcome.is_err() && job.kind != JobKind::Jacket {
-            index::mark_audio_failed(&job.basename);
+            index::mark_audio_failed_session(&job.basename);
         }
         job.payload.ok.store(ok, Ordering::Release);
         job.payload.done.store(true, Ordering::Release);
@@ -261,6 +259,9 @@ fn worker_main() {
 
 fn run_job(kind: JobKind, basename: &str, ticket: &Ticket) -> Result<String, String> {
     let entry = index::entry_by_basename(basename).ok_or("not in the index")?;
+    if kind != JobKind::Jacket && index::is_audio_failed_session(basename) {
+        return Err("audio failed earlier this session".into());
+    }
     match kind {
         JobKind::Preview => providers::run_preview_job(&entry),
         JobKind::Jacket => providers::run_jacket_job(&entry),
@@ -405,8 +406,7 @@ fn on_frame() {
 }
 
 /// Leaving the wheel: a decide (→ 26) keeps the speculative bank — it is
-/// about to be requested for real — and is the auto-sync on-decide trigger
-/// for the committed (dwell) song; any other exit cancels the bank.
+/// about to be requested for real; any other exit cancels the bank.
 fn on_scene_change(prev: i32, next: i32) {
     let Ok(mut d) = DWELL.lock() else {
         return;
@@ -422,9 +422,7 @@ fn on_scene_change(prev: i32, next: i32) {
     let Some(b) = basename else {
         return;
     };
-    if next == scene::SONG_TO_STAGE_INTERSTITIAL {
-        sync_apply::request_on_decide(&b);
-    } else if speculated {
+    if next != scene::SONG_TO_STAGE_INTERSTITIAL && speculated {
         cancel_speculative(&b);
     }
 }

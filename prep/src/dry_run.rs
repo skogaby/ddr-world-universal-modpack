@@ -1,19 +1,17 @@
-//! `sm_pack_check` — dry-run StepMania → DDR World conversion.
+//! `--dry-run` — StepMania → DDR World conversion into a scratch directory
+//! with a per-song verdict (the former `tools/sm_pack_check`).
 //!
-//! Mounts the hook DLL's REAL pure modules (`core::sm` parser,
-//! `core::ssq::{writer,check}`, `core::audio`, `core::xact::{adpcm,
-//! song_bank,xsb}`) via `#[path]` and runs a song folder — or every song
-//! folder of a pack — through the same pipeline the runtime uses:
-//! parse → SSQ (+ self-check) → probe audio → lead-in → song bank (XWB) +
-//! sound bank (XSB). Artefacts land in `--out` under the song's basename
-//! (`<code>.ssq` / `<code>_N.ssq`, `<code>.xsb`, `<code>.xwb`) so they can
-//! be vetted offline or dropped into a mod folder for a cabinet check; the
-//! verdict names every chart kept or rejected and why, and for a song with
-//! per-chart timing lists which `<code>_N.ssq` the runtime's `ssq_path`
-//! chain would answer for each difficulty.
+//! Runs a song folder — or every song folder of a pack — through the same
+//! pipeline the runtime uses: parse → SSQ (+ self-check) → probe audio →
+//! lead-in → song bank (XWB) + sound bank (XSB). Artefacts land in `--out`
+//! under the song's basename (`<code>.ssq` / `<code>_N.ssq`, `<code>.xsb`,
+//! `<code>.xwb`) so they can be vetted offline or dropped into a mod folder
+//! for a cabinet check; the verdict names every chart kept or rejected and
+//! why, and for a song with per-chart timing lists which `<code>_N.ssq` the
+//! runtime's `ssq_path` chain would answer for each difficulty.
 //!
 //! Basename: `--code` for a single song, otherwise the runtime's own
-//! derivation (`services/stepmania/identity.rs`, mounted here): `"z" +
+//! derivation (`services/stepmania/identity.rs`, mounted): `"z" +
 //! base36(fnv1a64(casefold(pack) + "/" + casefold(song)))[0..5]` with
 //! deterministic probing across the songs of one run. The folder-discovery,
 //! lead-in timing and display-text rules come from the runtime's
@@ -22,49 +20,43 @@
 //! `services/stepmania/musicdb.rs`.
 //!
 //! `--auto-sync` measures every SSQ file against the song's decoded audio
-//! through `core::sync::measure` — the exact path the runtime sweep
-//! (`services/stepmania/sync_sweep.rs`) uses — and prints, per file,
-//! `measured_ms=` / `correction_ms=` / the outcome. The written SSQ is left
-//! as converted (this is a report, like the CLI's `--auto-sync report`).
+//! through `core::sync::measure` and prints, per file, `measured_ms=` /
+//! `correction_ms=` / the outcome. The written SSQ is left as converted.
 //!
-//! `cargo test` here also runs the mounted modules' own `#[cfg(test)]`
-//! suites; `scripts/validate_sm_pack_check.sh` is the one-liner for that.
-
-#![allow(dead_code)]
-
-pub mod core;
-pub mod services;
+//! The conversion itself is `indexer::convert_song` — the same function the
+//! default run uses to fill the game's cache — writing into `--out` through
+//! `indexer::FlatPaths`; this module adds the full bank (built once so it
+//! can be vetted) and the report. Output is a report, so it goes to stdout
+//! directly rather than the log.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use core::audio::decode::{decode_whole, Decoder, TargetFormat};
-use core::audio::lead_in::{choose_lead_in, LeadIn};
-use core::audio::preview::{PreviewDecoder, PreviewWindow};
-use core::audio::{probe, AudioInfo};
-use core::sm::model::Song;
-use core::ssq::check::check_ssq;
-use core::ssq::writer::{self, WriteOptions};
-use core::sync::measure::SongAnalysis;
-use core::sync::{AudioView, Outcome, Params};
-use core::xact::song_bank::{self, SongBankPlan};
-use core::xact::{xsb, xwb};
-use services::stepmania::convert::{self, chart_timings, find_audio, find_simfile};
-use services::stepmania::identity::{self, Identity};
-use services::stepmania::model::{AudioMeta, SongEntry};
-use services::stepmania::musicdb;
+use crate::core;
+use crate::core::audio::decode::{decode_whole, Decoder, TargetFormat};
+use crate::core::audio::preview::{PreviewDecoder, PreviewWindow};
+use crate::core::audio::AudioInfo;
+use crate::core::sm::model::Song;
+use crate::core::sync::measure::SongAnalysis;
+use crate::core::sync::{AudioView, Outcome, Params};
+use crate::core::xact::song_bank::{self, SongBankPlan};
+use crate::core::xact::{xsb, xwb};
+use crate::indexer::{self, ArtefactPaths};
+use crate::services::stepmania::convert::find_simfile;
+use crate::services::stepmania::identity::{self, Identity};
+use crate::services::stepmania::musicdb;
 
-const USAGE: &str = "\
-sm_pack_check — dry-run StepMania → DDR World conversion
+pub const USAGE: &str = "\
+ddr_world_hook_prep --dry-run — convert a StepMania song or pack into a scratch directory
 
 USAGE:
-  sm_pack_check <song-or-pack dir> --out <dir> [options]
+  ddr_world_hook_prep --dry-run <song-or-pack dir> --out <dir> [options]
 
 OPTIONS:
   --out <dir>            Where <code>.ssq[_N] / <code>.xsb / <code>.xwb are written (required)
-  --code <code>          Basename for a SINGLE song (1-6 chars [a-z0-9_]); default: design §5.2 placeholder
+  --code <code>          Basename for a SINGLE song (1-6 chars [a-z0-9_]); default: the runtime's derivation
   --lead-in auto|0|<ms>  auto (default): smallest block multiple with td0 ≥ 60 ms and ≥ 2 s before the
                          first note; 0: none (SSQ byte-identical to the ddr-chart-tools CLI);
                          <ms>: at least that many ms, rounded up to whole ADPCM blocks
@@ -75,7 +67,7 @@ OPTIONS:
 ";
 
 #[derive(Debug, Clone)]
-struct Args {
+pub struct Args {
     input: PathBuf,
     out: PathBuf,
     code: Option<String>,
@@ -91,20 +83,18 @@ enum LeadInArg {
     AtLeastMs(u32),
 }
 
-fn parse_args() -> Result<Args, String> {
+/// Parse the arguments AFTER `--dry-run`.
+pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut input = None;
     let mut out = None;
     let mut code = None;
     let mut lead_in = LeadInArg::Auto;
     let mut max_audio_mb = 256u64;
     let mut auto_sync = false;
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-h" | "--help" => {
-                print!("{USAGE}");
-                std::process::exit(0);
-            }
+            "-h" | "--help" => return Err(String::new()),
             "--out" => out = Some(PathBuf::from(it.next().ok_or("--out needs a path")?)),
             "--code" => code = Some(it.next().ok_or("--code needs a value")?),
             "--lead-in" => {
@@ -145,23 +135,29 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-fn main() {
-    let args = match parse_args() {
+/// Run the dry-run; returns the process exit code (0 all converted, 1 some
+/// rejected, 2 usage / I/O error).
+pub fn run(argv: &[String]) -> i32 {
+    let args = match parse_args(argv) {
         Ok(a) => a,
+        Err(e) if e.is_empty() => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("error: {e}\n\n{USAGE}");
-            std::process::exit(2);
+            return 2;
         }
     };
     if let Err(e) = fs::create_dir_all(&args.out) {
         eprintln!("error: cannot create {}: {e}", args.out.display());
-        std::process::exit(2);
+        return 2;
     }
     let songs = match discover_songs(&args.input) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
-            std::process::exit(2);
+            return 2;
         }
     };
     if songs.is_empty() {
@@ -169,14 +165,14 @@ fn main() {
             "error: no .ssc/.sm found in {} or its subfolders",
             args.input.display()
         );
-        std::process::exit(1);
+        return 1;
     }
     if args.code.is_some() && songs.len() > 1 {
         eprintln!(
             "error: --code applies to a single song folder; {} songs found",
             songs.len()
         );
-        std::process::exit(2);
+        return 2;
     }
     let identities = assign_identities(&songs);
     let mut ok = 0usize;
@@ -207,7 +203,9 @@ fn main() {
     }
     println!("{ok} song(s) converted, {failed} rejected");
     if failed > 0 {
-        std::process::exit(1);
+        1
+    } else {
+        0
     }
 }
 
@@ -274,26 +272,50 @@ impl std::fmt::Display for Report {
 }
 
 fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<Report, String> {
-    let simfile = find_simfile(song_dir).ok_or("no simfile")?;
-    let bytes = fs::read(&simfile).map_err(|e| format!("read {}: {e}", simfile.display()))?;
-    let hint = simfile
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("x.sm");
-    let song: Song = core::sm::parse_bytes(hint, &bytes).ok_or("simfile exceeds the 4 MiB cap")?;
     let code = code.to_string();
     if !xsb::is_valid_name(&code) || code.len() > 6 {
         return Err(format!("code {code:?} must be 1-6 chars of [a-z0-9_]"));
     }
-    if !song.selectable {
-        return Err("#SELECTABLE:NO".into());
-    }
+    let job = indexer::Job::for_dir(
+        song_dir,
+        Identity {
+            basename: code.clone(),
+            mcode,
+            probe: 0,
+        },
+    )
+    .ok_or("no simfile")?;
+    // `root` only shapes the relative paths recorded in the entry.
+    let root = job
+        .pack_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| job.pack_dir.clone());
+    let opts = indexer::ConvertOptions {
+        lead_in: match args.lead_in {
+            LeadInArg::Auto => indexer::LeadInPolicy::Auto,
+            LeadInArg::Zero => indexer::LeadInPolicy::Zero,
+            LeadInArg::AtLeastMs(ms) => indexer::LeadInPolicy::AtLeastMs(ms),
+        },
+        max_audio_bytes: args.max_audio_mb * 1024 * 1024,
+        strict_identity: false,
+    };
+    let paths = indexer::FlatPaths(args.out.clone());
 
-    let title = convert::display_title(&song);
-    let artist = convert::display_artist(&song);
+    // The shared pipeline: SSQ (+ self-check), XSB and thumbnail into --out.
+    let c = indexer::convert_song(&root, &job, &opts, &paths)?;
+    let song = &c.song;
+    let info = &c.info;
+    let rate = info.target_rate();
+    let hint = job
+        .simfile
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("x.sm");
+
     let mut lines = vec![
         format!("== {}", song_dir.display()),
-        format!("   title: {title} — {artist}"),
+        format!("   title: {} — {}", c.entry.title, c.entry.artist),
         format!(
             "   simfile: {} ({} charts parsed, {} rejected by the parser)",
             hint,
@@ -310,43 +332,9 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
     for w in &song.warnings {
         lines.push(format!("     warning: {w}"));
     }
-
-    // SSQ with no lead-in first (the CLI-identical output; also what the
-    // lead-in rule reads its timings from).
-    let bundle0 = writer::write_song(&song, &WriteOptions::default()).map_err(|e| {
-        let mut why = format!("no playable chart ({e})");
-        let writer::WriteError::NothingPlayable(rejects) = &e;
-        for (label, reason) in rejects {
-            why.push_str(&format!("\n     {label}: {reason}"));
-        }
-        why
-    })?;
-
-    // Audio.
-    let audio_path = find_audio(song_dir, &song.music)
-        .ok_or_else(|| format!("audio not found (#MUSIC {:?})", song.music))?;
-    let audio_len = fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
-    if audio_len > args.max_audio_mb * 1024 * 1024 {
-        return Err(format!(
-            "audio {} is {} MiB > --max-audio-mb {}",
-            audio_path.display(),
-            audio_len / (1024 * 1024),
-            args.max_audio_mb
-        ));
-    }
-    let audio = fs::read(&audio_path).map_err(|e| format!("read {}: {e}", audio_path.display()))?;
-    let info: AudioInfo = probe::probe(&audio).map_err(|e| {
-        format!(
-            "audio {}: {e}",
-            audio_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-        )
-    })?;
     lines.push(format!(
         "   audio: {} — {:?} {} Hz {} ch, {} frames ({:.3} s){}; bank rate {} Hz, {} frames",
-        audio_path
+        c.audio_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?"),
@@ -363,65 +351,36 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
         } else {
             String::new()
         },
-        info.target_rate(),
+        rate,
         info.target_frames()
     ));
-
-    // Lead-in.
-    let rate = info.target_rate();
-    let (td0_min, first_note_ms) = chart_timings(&bundle0);
-    let lead_in = match args.lead_in {
-        LeadInArg::Zero => LeadIn::ZERO,
-        LeadInArg::AtLeastMs(ms) => LeadIn::at_least_ms(ms, rate),
-        LeadInArg::Auto => choose_lead_in(
-            -(td0_min as f64) / 1000.0,
-            first_note_ms as f64 / 1000.0,
-            rate,
-        ),
-    };
+    let lead_in = c.lead_in;
     lines.push(format!(
         "   lead-in: {} ms = {} frames ({} blocks{}); tempo_data[0] {} → {} ms; first note at {} → {} ms",
         lead_in.ms,
         lead_in.frames,
         lead_in.frames / 128,
         if lead_in.exact { ", exact" } else { ", ±0.5 ms" },
-        td0_min,
-        td0_min + lead_in.ms as i32,
-        first_note_ms,
-        first_note_ms + lead_in.ms as i32
+        c.td0_ms,
+        c.td0_ms + lead_in.ms as i32,
+        c.first_note_ms,
+        c.first_note_ms + lead_in.ms as i32
     ));
-    let bundle = if lead_in.ms == 0 {
-        bundle0
-    } else {
-        writer::write_song(
-            &song,
-            &WriteOptions {
-                lead_in_ms: lead_in.ms,
-                ..WriteOptions::default()
-            },
-        )
-        .map_err(|e| e.to_string())?
-    };
 
     // Charts.
     let mut verdict_ok = true;
     let mut kept = 0usize;
-    let mut passed: Vec<&writer::SsqFile> = Vec::new();
-    for file in &bundle.files {
-        let name = convert::ssq_file_name(&code, file.index);
-        let slots: Vec<u8> = file.charts.iter().map(|c| c.0).collect();
-        let check = check_ssq(&file.bytes, &slots);
-        let path = args.out.join(&name);
-        fs::write(&path, &file.bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    for file in &c.files {
         lines.push(format!(
-            "   {name}: {} bytes, charts {}, self-check {}",
+            "   {}: {} bytes, charts {}, self-check {}",
+            file.name,
             file.bytes.len(),
             file.charts
                 .iter()
                 .map(|(slot, level)| format!("{} lv{level}", slot_name(*slot)))
                 .collect::<Vec<_>>()
                 .join(", "),
-            match &check {
+            match &file.check {
                 Ok(()) => "OK".to_string(),
                 Err(f) => {
                     verdict_ok = false;
@@ -429,28 +388,22 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
                 }
             }
         ));
-        // The runtime declares a slot only when its file passed.
-        if check.is_ok() {
-            passed.push(file);
-        }
         kept += file.charts.len();
     }
-    for (label, reason) in &bundle.rejects {
+    for (label, reason) in &c.bundle_rejects {
         lines.push(format!("     rejected {label}: {reason}"));
     }
-    let declared = convert::declare(&passed);
-    let levels = declared.levels;
-    let split_levels = declared.split_levels;
+    if let Some(why) = &c.scroll_conflict {
+        lines.push(format!("     scroll gimmicks: {why}"));
+    }
+    let levels = c.entry.levels;
+    let split_levels = c.entry.split_levels;
     if split_levels.iter().any(|&m| m != 0) {
-        let probe = SongEntry {
-            split_levels,
-            ..SongEntry::default()
-        };
         let answers: Vec<String> = (0..5)
             .map(|d| {
                 format!(
                     "d={d}→{}",
-                    match probe.split_file_for(d) {
+                    match c.entry.split_file_for(d) {
                         Some(n) => format!("{code}_{n}.ssq"),
                         None => format!("{code}.ssq"),
                     }
@@ -466,17 +419,18 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
     // Auto-sync report (the runtime sweep's measurement, per file).
     if args.auto_sync {
         lines.extend(auto_sync_lines(
-            &song,
-            &audio,
-            &info,
-            &bundle,
+            song,
+            &c.audio,
+            info,
+            &c.files,
             &code,
             lead_in.frames,
         ));
     }
 
-    // Banks.
-    let window = PreviewWindow::for_audio(song.sample_start_s, song.sample_length_s, &info);
+    // Banks (the runtime builds these on demand; the dry run builds the full
+    // bank once so it can be vetted).
+    let window = PreviewWindow::for_audio(song.sample_start_s, song.sample_length_s, info);
     let frames_main = lead_in.frames + info.target_frames();
     let plan = SongBankPlan::new(&code, rate, frames_main, window.len_frames)
         .map_err(|e| format!("bank plan: {e}"))?;
@@ -486,9 +440,9 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
         total_frames: plan.frames(0),
     };
     let mut main_dec =
-        Decoder::open(&audio, &info, target).map_err(|e| format!("open main: {e}"))?;
+        Decoder::open(&c.audio, info, target).map_err(|e| format!("open main: {e}"))?;
     let mut preview_dec =
-        PreviewDecoder::open(&audio, &info, &window).map_err(|e| format!("open preview: {e}"))?;
+        PreviewDecoder::open(&c.audio, info, &window).map_err(|e| format!("open preview: {e}"))?;
     let xwb_path = args.out.join(format!("{code}.xwb"));
     let file =
         fs::File::create(&xwb_path).map_err(|e| format!("create {}: {e}", xwb_path.display()))?;
@@ -514,9 +468,7 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
             "   preview decode FAILED mid-stream (rest silent): {e}"
         ));
     }
-    let xsb_bytes = xsb::write_song_profile(&code).map_err(|e| e.to_string())?;
-    let xsb_path = args.out.join(format!("{code}.xsb"));
-    fs::write(&xsb_path, &xsb_bytes).map_err(|e| format!("write {}: {e}", xsb_path.display()))?;
+    let xsb_len = fs::metadata(paths.xsb(&code)).map(|m| m.len()).unwrap_or(0);
 
     // Bank self-check: read back through the strict stock parser.
     let xwb_bytes = fs::read(&xwb_path).map_err(|e| e.to_string())?;
@@ -549,35 +501,21 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
         encode_time.as_secs_f64(),
     ));
     lines.push(format!(
-        "   {code}.xsb: {} bytes (cues {code} → wave 0, {code}_s → wave 1)",
-        xsb_bytes.len()
+        "   {code}.xsb: {xsb_len} bytes (cues {code} → wave 0, {code}_s → wave 1)"
+    ));
+    lines.push(format!(
+        "   {code}.dds: thumbnail from {}",
+        match &c.entry.art.source {
+            Some(src) => src.as_str(),
+            None => "the placeholder jacket",
+        }
     ));
     if levels.iter().any(|&l| l != 0) {
-        let (bpm_min, bpm_max) = convert::bpm_range(&song);
-        let entry = SongEntry {
-            basename: code.clone(),
-            mcode,
-            title: title.clone(),
-            title_sort: convert::sort_title(&song),
-            artist: artist.clone(),
-            bpm_min,
-            bpm_max,
-            levels,
-            audio: AudioMeta {
-                rate,
-                frames: info.target_frames(),
-                lead_in_frames: lead_in.frames,
-                lead_in_ms: lead_in.ms,
-                ..AudioMeta::default()
-            },
-            split_levels,
-            ..SongEntry::default()
-        };
         lines.push(
             "   musicdb (series/property are placeholders -- the runtime picks them at boot):"
                 .to_string(),
         );
-        for l in musicdb::entry_xml(&entry, 0, None).lines() {
+        for l in musicdb::entry_xml(&c.entry, 0, None).lines() {
             lines.push(format!("   {l}"));
         }
     } else {
@@ -591,7 +529,7 @@ fn convert_song(song_dir: &Path, args: &Args, code: &str, mcode: u32) -> Result<
         } else {
             "FAILED"
         },
-        bundle.rejects.len() + song.rejected.len()
+        c.bundle_rejects.len() + song.rejected.len()
     ));
     Ok(Report {
         lines,
@@ -604,8 +542,8 @@ fn auto_sync_lines(
     song: &Song,
     audio: &[u8],
     info: &AudioInfo,
-    bundle: &writer::SsqBundle,
-    code: &str,
+    files: &[indexer::FileReport],
+    _code: &str,
     lead_in_frames: u64,
 ) -> Vec<String> {
     let rate = info.target_rate();
@@ -626,10 +564,10 @@ fn auto_sync_lines(
     let analysed = started.elapsed();
     let lead_in_s = lead_in_frames as f64 / f64::from(rate);
     let mut out = Vec::new();
-    for file in &bundle.files {
+    for file in files {
         let m = analysis.measure(song, &file.bytes, lead_in_s, &Params::default());
         let e = &m.estimate;
-        let mut l = format!("   auto-sync {}:", convert::ssq_file_name(code, file.index));
+        let mut l = format!("   auto-sync {}:", file.name);
         if let Some(v) = e.measured_ms {
             l.push_str(&format!(" measured_ms={v:.2}"));
         }
@@ -652,8 +590,7 @@ fn auto_sync_lines(
     out.push(format!(
         "   auto-sync: decode + onset analysis {:.2} s, slots {:?}",
         analysed.as_secs_f64(),
-        bundle
-            .files
+        files
             .iter()
             .map(|f| core::sync::measure::file_slots(&f.bytes))
             .collect::<Vec<_>>()

@@ -18,7 +18,7 @@
 //!
 //! Purity contract: `std` only, no logging, no `crate::` imports outside
 //! `crate::core`. Mounted by `scripts/validate_stepmania.sh` and
-//! `tools/sm_pack_check`.
+//! `prep/` (the StepMania prep tool).
 
 use std::collections::HashMap;
 

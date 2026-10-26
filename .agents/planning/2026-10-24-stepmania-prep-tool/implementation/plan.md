@@ -4,11 +4,11 @@ Status: Approved 2026-10-24
 
 Design: `design/detailed-design.md`. Register: `idea-honing.md`.
 
-- [ ] Step 1: `prep/` crate skeleton with the dry-run port (sm_pack_check retired)
-- [ ] Step 2: Indexer moves into the tool; the tool produces the DLL's warm cache
-- [ ] Step 3: DLL becomes a reader — load, validate, publish; index thread and timeout removed
-- [ ] Step 4: Sync measurement moves into the tool; DLL sweep and on-decide removed
-- [ ] Step 5: Release plumbing and documentation
+- [x] Step 1: `prep/` crate skeleton with the dry-run port (sm_pack_check retired)
+- [x] Step 2: Indexer moves into the tool; the tool produces the DLL's warm cache
+- [x] Step 3: DLL becomes a reader — load, validate, publish; index thread and timeout removed
+- [x] Step 4: Sync measurement moves into the tool; DLL sweep and on-decide removed
+- [x] Step 5: Release plumbing and documentation
 
 Sequencing rationale: the tool must exist and produce a trusted cache (Steps 1–2) before
 the DLL stops producing its own (Step 3), so the maintainer's cabinet keeps booting songs

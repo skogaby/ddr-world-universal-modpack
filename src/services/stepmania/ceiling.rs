@@ -36,8 +36,13 @@ use super::model::SongEntry;
 
 /// Count ceiling (see the module doc for why this value).
 pub const MAX_INJECTED_SONGS: usize = 4_000;
-/// The stock property arena; at or below this nothing is injected.
+/// The stock property arena (the imm32 at every parser site); at or below
+/// this nothing is injected.
 pub const STOCK_ARENA_BYTES: usize = 0x0010_0000;
+/// The arena `mods::song_limit_expansion` patches in (64 MiB; AGCS heap,
+/// freed after the parse). Defined here, in a mountable file, so the prep
+/// tool's ceiling report and the DLL's patch share one number.
+pub const EXPANDED_ARENA_BYTES: usize = 0x0400_0000;
 /// Tree-over-text safety factor, as `text ≤ arena × NUM / DEN`.
 const ARENA_TEXT_NUM: usize = 2;
 const ARENA_TEXT_DEN: usize = 3;
@@ -125,7 +130,7 @@ mod tests {
         }
     }
 
-    const EXPANDED: usize = 0x0400_0000;
+    const EXPANDED: usize = EXPANDED_ARENA_BYTES;
 
     #[test]
     fn text_budget_is_two_thirds() {

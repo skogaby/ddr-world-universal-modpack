@@ -1940,11 +1940,35 @@ find every caller that iterates "until position > bound" and keep it on stock va
 `services/stepmania/model.rs::FORMAT_VERSION` with every change to conversion output or
 `index.bin`; the cost is one re-index (~25 ms/song).
 
-**Cold index ≈ 25 ms/song on 6 workers; `index_timeout_s` (default 30) covers ≈ 1,200
-songs.** Past the deadline the `startup.arc` open injects the songs that finished and the
-rest arrive next boot (one WARN) — by design, but surprising on a first boot with a huge
-library. The index thread keeps converting past the deadline and writes `index.bin` when it
-finishes, so the next boot is warm.
+**The DLL never indexes StepMania packs; `ddr_world_hook_prep.exe` (`prep/`) does, before the
+game.** (2026-10-25, after a 14,000-song library stalled a tester's boot for 15 minutes with a
+clean log.) Cache ownership is the race-freedom argument and is strict: the tool writes
+`index.bin`, `ssq/`, `xsb/`, `tn/`, `sync.bin`; the DLL writes `xwb/`, `jacket/`, `lru.bin`,
+`thumbnail/`. Never add a DLL write to a tool-owned file (the old `mark_audio_failed` was the
+one such write — it is session-only now) and never add a tool write to a DLL-owned one. The
+DLL loads `index.bin` at step 0', validates records read-only on a thread (`validation.rs`;
+the `startup.arc` fingerprint waits ≤ 15 s) and drops anything whose artefacts or source
+stamps changed. There is no in-game timeout/partial-injection path any more; a boot without a
+tool-written `index.bin` injects nothing and WARNs once.
+
+**The tool must BE the DLL's pipeline, mounted — never a re-implementation.** The warm path
+trusts a record only when fingerprint + identity + artefacts match, so a tool that converted
+even slightly differently would produce a cache the game re-validates and the next tool run
+re-converts. `prep/` mounts `src/core/*` and `src/services/stepmania/{cache,ceiling,convert,
+identity,model,musicdb,records,sync_state}.rs` by `#[path]` with `log_*` macro shims at its
+crate root; the former `tools/sm_pack_check` (which had its own `convert_song`) is gone,
+folded in as `--dry-run`. Mounted files may import only `crate::core::*`, siblings via
+`super::`, and `crate::{log_info,log_warn,log_debug}`. One asterisk on "byte-for-byte": BC1
+thumbnails (`tn/*.dds`, texpresso) differ by one block endpoint ±1 LSB between an ARM host
+and the x86 DLL — float rounding, invisible, irrelevant to the warm path (fingerprints cover
+sources). On a Windows cabinet both sides are x86.
+
+**Injection has a ceiling (`ceiling.rs`), never a knob.** `MAX_INJECTED_SONGS = 4_000`, first
+by `pack/folder` name, and NOTHING under a stock-sized XML arena. The arena is the AVS
+property-tree arena (`song_limit_expansion`, now 64 MiB, defined once in `ceiling.rs`), not a
+text buffer; the stock 716 KB document fits 1 MiB, so text ≤ arena × 2/3 is the budget the
+transform enforces as a last net. Raise the constant by testing, never per cabinet; the tool
+prints what the game will inject so the operator trims packs instead.
 
 **Injected songs are the LAST boot work items.** Their mcodes (9,000,000+) and their
 position in `musicdb.xml` (appended) put them at the end of `CheckStepDataActor`'s work list,
@@ -1959,3 +1983,71 @@ maxima are dead data on 20260721 (reset to constants at scene 7 and every new ga
 debughook attaches (LayeredFS install, index spawn, a fast cabinet's `startup.arc`
 transform) is invisible on the cabinet; prove early-boot behaviour with a later summary line
 or a marker file, not with an early INFO.
+
+## A skinned normal carries the bone's scale — Big Head tripled the outline push on every head (2026-10-25)
+
+The DSU outline hull pushes each vertex along its SKINNED normal by a world-metre amount
+(`mdl_cel.hlsl::outline_out`). `skin_apply` multiplies the normal by the bone's 3×3, and Big Head
+scales `bones[Head]` by 3, so every Head-weighted vertex was pushed 3× further: 9–20 mm of ink on
+a 3× head, eye sockets filled black (the first dancers with eyeball geometry — the JoJo EoH port —
+showed "no irises" and "distorted faces" only under BIG HEAD). Stock dancers hid it because their
+eyes are painted on the face sheet. Fix: `normalize(ns)` before the push (DSU's own normals were
+unit on its unit-scale rigs, so this is faithful); the two `mdl_*_outline.vs` blobs were rebuilt.
+Rule: anything that converts a skinned normal into a world LENGTH must normalise it first — bone
+matrices are not pure rotations once Big Head (or any per-bone scale track) is in play.
+
+## A donor-rig dancer CAN carry extra bones: dynamic chains are appended after the 33 (2026-10-25)
+
+Stock clips address bones 0..32 by index and `evaluate_into` seeds every untracked bone at its
+rest local, so bones APPENDED after the 33 ride their parent at rest and the dynbones solver
+(`dynbones_logic.rs`, resolved by `.b2it` name, `parents[i] == parent`) drives them like the Winx
+hair. Requirements seen while adding Jotaro's chain / Dio's muffler: the game-space bind +x must
+run along the segment (`edit_bone.matrix` with X = direction; the add-on exports the bone frame
+as is), `ddr_bone_order` must list the new bones after the 33, the chain must be posed into its
+REST (hanging) shape before the bake since that pose is what the solver returns to, and
+`port_lib.export_and_check` now accepts ≥ 33 bones (palette ≤ 52, frame board 64 — a few chains
+fit). `exclude=` lists the colliders a bone IGNORES (the anchored root link sits inside the torso
+box). The dancer's whole-body clips still warn "33 bones, armature has 37" in Blender previews;
+that is expected.
+
+## A flat stage rig's `root` must be the GAME identity, not Blender's (2026-10-25)
+
+The ASBR stage port's first animated parts looked right in Blender and wrong on re-import: every
+mesh weighted to `root` (the whole static part) stood 90° on its side. The port had left the
+`root` edit bone at Blender's identity; the exporter converts bone frames Blender → game
+(`convert.rowmat_from_blender`), so that bind became a 90°-about-X frame, while the loop's root
+keys are the game identity — the evaluator re-posed the root by the difference. Build root as
+`eb.matrix = convert.rowmat_to_blender(identity)` (SuperNova's `build_part` does, via its game-col
+binds) and read the exported bind back (`port_stage_asbr.export_part` asserts it). Related, from
+the same port: a q48 (`0x1C`) identity decodes 2e-5 off, 1 cm at a 250 m cloud ring — key a
+static root with an exact kind-1 float quaternion; and a decimated rotation track must not span
+≥ ~140°: slerp takes the short way round, so a full-turn sky ring reduced to two keys spins back.
+
+## nuccChunkAnm addresses its targets through the chunk REFERENCE table (2026-10-25)
+
+Every other NUCC chunk stores page-relative chunk indices; an Anm's clump / bone / model indices
+are into the page's slice of the (name, chunk map) reference pairs the chunk table keeps between
+the maps and the index list (`nuccChunkPage.reference_size`). Read through the chunk indices they
+"resolve" to plausible but wrong chunks (Page / Anm chunks as bones). The reference NAME is the
+instance, the map the template, so one coord can be animated as many differently named
+instances. `xfbin_dump` exposes them as `Page.refs` / `ChunkRef`.
+
+## A camera set without `_non` shots films straight through every dance-clip switch (2026-10-26)
+
+The director (`schedule.rs`, A3's CameraActor rule) hides each dance cut with a camera cut: at
+the cut it switches to the next `_non` shot and holds it 1–2 s. With an empty `_non` list the
+main shot just keeps running, so the dancer visibly snaps between clips on camera. Griffin House's
+hand-authored set (`_st01..04` only) and the two ASBR stages borrowing it all did this. Any custom
+camera set needs `_non` cut-aways; `scripts/gen_cutaway_shots.py` derives safe ones from the main
+shots. (Rocky Mountain Village's black tree boxes from the same round were first blamed on the
+skinned shader; the real cause was the DXT1 mip encoder — see the next entry.)
+
+## A DXT1 re-encoder must keep the punch-through mode, or every mip of a cut-out turns black (2026-10-26)
+
+`xfbin_dump.dxt_halve` (the block-space downsampler that builds the missing mip chains of the
+ASBR sheets) always wrote DXT1 blocks with c0 > c1 — the opaque 4-colour mode — so the levels it
+generated had no transparent texels. Level 0 came straight from the source, so close-up previews
+were perfect; in-game the distant backdrop trees sample the small levels and drew as black boxes
+(and "fixing" the shader changed nothing). Rule: a DXT1 block with any transparent texel must be
+written c0 <= c1 with index 3 for those texels; and when cut-outs go black only at a distance,
+check the mip levels before the material.

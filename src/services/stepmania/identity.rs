@@ -4,7 +4,7 @@
 //! `key = casefold(pack_folder) + "/" + casefold(song_folder)`;
 //! `h = fnv1a64(key)`; `basename = "z" + base36(h)[0..5]` (the 13-digit
 //! zero-padded base36 rendering of the u64, first five digits — the same
-//! derivation `tools/sm_pack_check` shipped as its Step 5 placeholder, kept
+//! derivation the dry-run tool shipped as its Step 5 placeholder, kept
 //! byte-identical so codes are stable across the move); `mcode = 9_000_000 +
 //! (h >> 40) % 1_000_000`.
 //!
@@ -25,7 +25,7 @@
 //! them with a WARN; never renumbered on the fly).
 //!
 //! Purity contract: `std` only; mounted by `scripts/validate_stepmania.sh`
-//! and `tools/sm_pack_check`.
+//! and `prep/` (the StepMania prep tool).
 
 use std::collections::HashSet;
 

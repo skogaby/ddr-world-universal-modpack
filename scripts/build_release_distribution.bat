@@ -1,11 +1,12 @@
 @echo off
 rem build_release_distribution.bat -- the Windows counterpart of
 rem scripts/build_release_archive.sh, minus the archive: builds the Windows 7
-rem hook DLL and auto-updater and stages a ready-to-copy game-folder image in
-rem release\ (gitignored):
+rem hook DLL, auto-updater and StepMania prep tool and stages a ready-to-copy
+rem game-folder image in release\ (gitignored):
 rem
 rem   release\ddr_world_hook.dll             Windows 7 build of the hook
 rem   release\ddr_world_hook_updater.exe     Windows 7 build of the updater
+rem   release\ddr_world_hook_prep.exe        Windows 7 build of the StepMania prep tool
 rem   release\mod-config.json, judgement_offsets.csv, README.md
 rem   release\data_mods\                     data_mods as checked in, with every
 rem                                          Background Dancers MODEL FOLDER
@@ -46,6 +47,7 @@ cd /d "%~dp0.." || goto :fail
 set "WIN7_TARGET=x86_64-win7-windows-msvc"
 set "DLL=target\%WIN7_TARGET%\release\ddr_world_hook.dll"
 set "UPDATER=updater\target\%WIN7_TARGET%\release\ddr_world_hook_updater.exe"
+set "PREP=prep\target\%WIN7_TARGET%\release\ddr_world_hook_prep.exe"
 set "RELEASE_DIR=release"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONDONTWRITEBYTECODE=1"
@@ -71,14 +73,23 @@ popd
 if not "%RC%"=="0" goto :fail
 if not exist "%UPDATER%" (echo ERROR: expected build output not found: %UPDATER% & goto :fail)
 
+echo ==^> Building Windows 7 StepMania prep tool
+pushd prep || goto :fail
+cargo build --release --target %WIN7_TARGET% -Z build-std=std,panic_abort
+set "RC=%errorlevel%"
+popd
+if not "%RC%"=="0" goto :fail
+if not exist "%PREP%" (echo ERROR: expected build output not found: %PREP% & goto :fail)
+
 echo ==^> Verifying Windows 7 compatibility
 call :assert_win7_safe "%DLL%" || goto :fail
 call :assert_win7_safe "%UPDATER%" || goto :fail
+call :assert_win7_safe "%PREP%" || goto :fail
 
 rem ---- stage -----------------------------------------------------------------
 echo ==^> Staging release contents into release\
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%" || goto :fail
-for %%F in ("%DLL%" "%UPDATER%" mod-config.json judgement_offsets.csv README.md) do (
+for %%F in ("%DLL%" "%UPDATER%" "%PREP%" mod-config.json judgement_offsets.csv README.md) do (
     copy /Y "%%~F" "%RELEASE_DIR%\" >nul || goto :fail
 )
 
@@ -112,7 +123,7 @@ call :to_crlf "scripts\ddr_selection\import_a3_assets.bat" "%IMPORT_DIR%\import_
 rem ---- summary ---------------------------------------------------------------
 echo.
 echo Done: release\ holds the game-folder image -- copy its contents into the game's contents\ folder.
-echo   ddr_world_hook.dll, ddr_world_hook_updater.exe  (Windows 7 builds)
+echo   ddr_world_hook.dll, ddr_world_hook_updater.exe, ddr_world_hook_prep.exe  (Windows 7 builds)
 %PY% -c "import os, sys; n = [f for _, _, fs in os.walk(sys.argv[1]) for f in fs]; a = sum(f.lower().endswith('.arc') for f in n); print('  data_mods\\  {} files, {} custom model arcs'.format(len(n), a))" "%RELEASE_DIR%\data_mods"
 echo   ddr_selection_import\
 if defined PAUSE_AT_END pause

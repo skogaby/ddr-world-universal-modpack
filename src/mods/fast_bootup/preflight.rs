@@ -10,10 +10,9 @@
 //! has not reached yet. It never waits: a slow thread costs the old inline
 //! time for its unfinished tail, never more.
 //!
-//! The file's identity cannot change between the two (the index has
-//! finished writing before the music DB is built, and nothing else rewrites
-//! materialised SSQs during boot), so a verdict taken here is the verdict
-//! the plan would have reached.
+//! The file's identity cannot change between the two (the prep tool wrote
+//! the SSQs before the game started and nothing in the game ever rewrites
+//! them), so a verdict taken here is the verdict the plan would have reached.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

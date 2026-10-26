@@ -21,7 +21,7 @@
 
 `cargo-features = ["trim-paths"]` together with `trim-paths = "all"` strips builder paths from the release binary. The release profile uses `lto = true` and `opt-level = 2`. `Cargo.lock` is committed.
 
-The three pack-conversion crates are pure Rust, so the pipeline they serve (`core/{sm,audio,sync}`) also compiles natively inside `tools/sm_pack_check` and the `validate_stepmania.sh` harness crate.
+The three pack-conversion crates are pure Rust, so the pipeline they serve (`core/{sm,audio,sync}`, plus `image`/`texpresso` for `core/art`) also compiles natively inside the prep tool `prep/` and the `validate_stepmania.sh` harness crate.
 
 ## Toolchain
 
@@ -34,8 +34,8 @@ The three pack-conversion crates are pure Rust, so the pipeline they serve (`cor
 | Crate | Notable deps | Notes |
 |---|---|---|
 | `updater/` | `ureq` (rustls + webpki roots, never OS TLS), `serde_json` (`preserve_order`), `sha2`, `zip`, `dunce`, `windows-sys` (console) | Not a workspace member. Release builds use the Win7 recipe only. |
+| `prep/` | `encoding_rs`, `symphonia` (same feature set as the DLL), `rustfft` (`sse`, `avx` — same recipe as the DLL), `image`, `texpresso`, `serde` + `serde_json` (two keys of `mod-config.json`), `dunce`, `windows-sys` (console + ToolHelp process snapshot, Windows only) | Not a workspace member (own `[workspace]`); `trim-paths = "all"`, `lto`. Mounts the DLL's pure `core::{audio,sm,ssq,sync,xact}`, `core::art::{jacket,placeholder,source,thumbnail}` and `services::stepmania::{cache,ceiling,convert,identity,model,musicdb,records,sync_state}` with `#[path]`; `prep/src/log.rs` shims the `log_*` macros. Host `cargo test` runs the mounted suites too; release builds use the Win7 recipe (`-Z build-std`) and must pass the same `ProcessPrng` import check as the DLL and updater. |
 | `tools/bot_sim/` | std only | Mounts the DLL's pure bot files with `#[path]` |
-| `tools/sm_pack_check/` | `encoding_rs`, `symphonia` (same feature set as the DLL), `rustfft` (default features — native host SIMD) | Not a workspace member. Mounts the DLL's pure `core::{sm,ssq,audio,sync,xact}` and `services::stepmania::{identity,convert,musicdb,model}` with `#[path]`. |
 
 ## Runtime game modules
 
@@ -77,11 +77,11 @@ graph LR
     CORE -.pure, external crates only.-> SMP[core/sm → encoding_rs<br/>core/audio → symphonia<br/>core/sync → rustfft<br/>core/art → image / texpresso]
     UPD[updater] -.mounts csv grammar.-> MODS
     SIM[tools/bot_sim] -.mounts pure bot files.-> MODS
-    SMC[tools/sm_pack_check] -.mounts pure pipeline + stepmania pure files.-> SMP
+    PREP[prep — ddr_world_hook_prep.exe] -.mounts pure pipeline + services/stepmania pure files.-> SMP
 ```
 
 ## Upgrade Considerations
 
 - `retour` is pinned to an alpha. Upgrading it means auditing `core/hooks.rs` and every `GenericDetour` site.
-- `symphonia` / `rustfft` upgrades must keep the no-default-features recipes (no `opt-simd`, x86 SIMD only) and be re-checked with `./build_win7.sh`; `core/audio`'s MP3/Vorbis parity rules depend on symphonia's gapless semantics, so re-run `scripts/validate_stepmania.sh` and the `sm_pack_check` auto-sync parity leg after a bump.
+- `symphonia` / `rustfft` upgrades must keep the no-default-features recipes (no `opt-simd`, x86 SIMD only) and be re-checked with `./build_win7.sh`; `core/audio`'s MP3/Vorbis parity rules depend on symphonia's gapless semantics, so re-run `scripts/validate_stepmania.sh` (incl. its auto-sync parity leg against `ddr-chart-tools`) and `scripts/validate_prep.sh` after a bump.
 - New game builds are handled by signature tolerance rather than code changes. Add the build to the sweep directory and run `scripts/validate_signatures.sh`.

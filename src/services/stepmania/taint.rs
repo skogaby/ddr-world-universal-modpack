@@ -22,10 +22,7 @@
 //!
 //! The same per-change edge drives the display-only scroll-gimmick tables
 //! (`super::on_gameplay_load` → `services::scroll_remap`): an injected
-//! basename publishes its tables, a stock one clears them — and is the
-//! auto-sync on-decide fallback (`sync_apply::request_on_decide`) for an
-//! injected song reached without a wheel highlight; it runs BEFORE the
-//! resolver serves the bank, so the bank serve's hold sees the request.
+//! basename publishes its tables, a stock one clears them.
 
 use std::sync::Mutex;
 

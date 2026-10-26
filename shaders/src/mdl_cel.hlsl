@@ -39,8 +39,10 @@
 //   c3 = (0, 0, 0, 1), drawn with CULL CCW (the inverted hull). In metres
 //   (0.0821 m per DSU world unit — the pelvis-height match of the port):
 //   world push = OUTLINE_BASE_M + OUTLINE_DEPTH_K · w, w = view depth (m).
-//   The push is applied in MODEL space along the unnormalised skinned
-//   normal, divided by the item's uniform World scale so it is metres in the
+//   The push is applied in MODEL space along the NORMALISED skinned normal
+//   (DSU's raw normal is unit on its unit-scale rigs; here a Big Head bone
+//   carries a 3x scale that would triple the push on the head — 2026-10-25),
+//   divided by the item's uniform World scale so it is metres in the
 //   world. ModelParameters.w (`item+0x4C`, read by no stock shader) is a
 //   multiplier the DLL writes (1.0 = DSU); 0 reads as 1.
 //   No cull-mode control here (render states come from the shared GPU
@@ -216,7 +218,9 @@ OutlineVSOut outline_out(float3 ps, float3 ns, float2 uv)
     float s = length(World0.xyz);
     float k = ModelParameters.w > 0.0 ? ModelParameters.w : 1.0;
     float push_m = (OUTLINE_BASE_M + OUTLINE_DEPTH_K * w) * k;
-    float3 pushed = ps + ns * (push_m / s);
+    // normalize: a skinned normal carries the bone's scale (Big Head's 3x on
+    // Head) and the push must stay metres whatever the head's size
+    float3 pushed = ps + normalize(ns) * (push_m / s);
 
     float4 clip  = to_clip(pushed);
     float4 nclip = to_clip_dir(ns);

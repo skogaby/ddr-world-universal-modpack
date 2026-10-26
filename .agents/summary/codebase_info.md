@@ -4,12 +4,13 @@
 
 ## What This Is
 
-A Rust hook DLL (`cdylib`, crate `ddr-world-hook`) for the DanceDanceRevolution World arcade game (64-bit). spice2x injects it into the live game process with `-k`. It installs inline detours and checked byte patches against `gamemdx.dll` and sibling Konami DLLs, and renders everything through the game's own UI and 3D pipelines. Widgets, option rows, previews and the 3D background are native engine objects, not an external overlay. It also converts content in-process: StepMania packs dropped into `stepmania/Songs/` become native songs at boot (charts, audio banks and art materialised into a cache the game reads like stock files).
+A Rust hook DLL (`cdylib`, crate `ddr-world-hook`) for the DanceDanceRevolution World arcade game (64-bit). spice2x injects it into the live game process with `-k`. It installs inline detours and checked byte patches against `gamemdx.dll` and sibling Konami DLLs, and renders everything through the game's own UI and 3D pipelines. Widgets, option rows, previews and the 3D background are native engine objects, not an external overlay. It also plays StepMania packs as native songs: the standalone prep tool (`prep/`, `ddr_world_hook_prep.exe`, run before the game) converts packs dropped into `stepmania/Songs/` into a cache (charts, sound banks, thumbnails), and the DLL reads that cache like stock files — the DLL itself never converts.
 
 The repository also holds:
 
 - **`updater/`** — a standalone auto-updater binary (separate crate).
-- **`tools/`** — a Blender add-on for the game's 3D formats, an offline bot simulator, a StepMania pack dry-run converter, and the pinned HLSL compiler.
+- **`prep/`** — the standalone StepMania prep tool (separate crate): indexes packs, measures auto-sync and offers a `--dry-run` converter; mounts the DLL's pure pipeline by `#[path]`.
+- **`tools/`** — a Blender add-on for the game's 3D formats, an offline bot simulator, and the pinned HLSL compiler.
 - **`scripts/`** — Python/bash tooling for asset generation, format work, host-test harnesses and cabinet automation.
 
 ## Technology Stack
@@ -17,12 +18,12 @@ The repository also holds:
 | Aspect | Value |
 |--------|-------|
 | Language | Rust nightly (pinned in `rust-toolchain.toml`; needed by `retour` static-detour and `trim-paths`) |
-| Targets | `x86_64-pc-windows-msvc`; `x86_64-win7-windows-msvc` (tier-3, `-Z build-std`) for release builds |
+| Targets | `x86_64-pc-windows-msvc`; `x86_64-win7-windows-msvc` (tier-3, `-Z build-std`) for release builds of the DLL, `updater/` and `prep/` |
 | Cross-compilation | `cargo-xwin` from macOS/Linux |
 | Hooking | `retour` `GenericDetour`; checked patch transactions in `src/core/memory_patch.rs` |
 | Win32 | `windows` 0.58 (curated feature list) |
 | Assets | `image`, `texpresso` (DXT5/BC1), in-crate ARC/IFS/AFP/AP2/kbin/AVSLZ/XACT/SSQ/ANM codecs |
-| Pack conversion | `encoding_rs` (simfile text), `symphonia` (OGG/Vorbis, MP3, WAV decode), `rustfft` (auto-sync onset analysis); in-crate SM/SSC parser, SSQ writer + self-check, XWB/XSB writers |
+| Pack conversion | `encoding_rs` (simfile text), `symphonia` (OGG/Vorbis, MP3, WAV decode), `rustfft` (auto-sync onset analysis); in-crate SM/SSC parser, SSQ writer + self-check, XWB/XSB writers — compiled into both the DLL (bank/jacket builds at play) and `prep/` (charts, thumbnails, auto-sync before the game) |
 | Config | `serde_json` over the single `mod-config.json` |
 | Auxiliary | Python 3 scripts, bash harnesses, HLSL built with fxc 9.29 under CrossOver, Blender add-on (Python) |
 
@@ -46,7 +47,7 @@ The repository also holds:
   - allocator matching across three heaps
   - no panics across `extern "C"`
   - one detour per target function, with shared dispatcher services where several features need the same hook
-- **Pure logic is split out** into dependency-free files that host tests mount through temp-crate harnesses (`scripts/validate_*.sh`). Engine-facing code is validated on a live cabinet. The whole StepMania conversion pipeline (`core/{sm,ssq,audio,sync,art,xact}`) is pure and doubles as the host CLI `tools/sm_pack_check`.
+- **Pure logic is split out** into dependency-free files that host tests mount through temp-crate harnesses (`scripts/validate_*.sh`). Engine-facing code is validated on a live cabinet. The whole StepMania conversion pipeline (`core/{sm,ssq,audio,sync,art,xact}` plus the pure half of `services/stepmania/`) is pure and is compiled natively into the prep tool `prep/` (`ddr_world_hook_prep.exe`, the only producer of the StepMania cache).
 
 ## Codebase Map
 
@@ -57,14 +58,15 @@ graph TD
         CORE[src/core/<br/>scanner, signatures, hooks, memory,<br/>frame pump, formats]
         PURE[src/core/sm, ssq, audio, sync, art, xact<br/>pure StepMania conversion pipeline]
         SVC[src/services/<br/>game-system integrations,<br/>single-owner hook services]
-        SMSVC[src/services/stepmania/<br/>index, resolver, scheduler,<br/>progressive banks, auto-sync, taint]
+        SMSVC[src/services/stepmania/<br/>index reader + validation, ceiling,<br/>resolver, scheduler, progressive banks,<br/>auto-sync apply, taint]
         MODS[src/mods/<br/>one module per mod + config]
         SMMOD[src/mods/stepmania_packs/]
         WID[src/widgets/<br/>TextWidget, ImageWidget]
         TYPES[src/types/<br/>scenes, buttons, GameNote]
     end
     UPD[updater/<br/>standalone auto-updater crate]
-    TOOLS[tools/<br/>blender_ddr_addon, bot_sim,<br/>sm_pack_check, fxc]
+    PREP[prep/<br/>standalone StepMania prep tool crate<br/>indexer, measure, dry_run]
+    TOOLS[tools/<br/>blender_ddr_addon, bot_sim, fxc]
     SCRIPTS[scripts/<br/>validate_*, sig_harness, gen_*,<br/>format tools, game_nav, release]
     SHADERS[shaders/src/<br/>HLSL]
     DATA[data_mods/<br/>shipped runtime assets<br/>incl. stepmania_packs/ art]
@@ -78,19 +80,21 @@ graph TD
     WID --> SVC
     SVC --> CORE & TYPES
     SMSVC --> PURE
-    SONGS -. indexed at boot .-> SMSVC
-    SMSVC -. writes data_mods/_cache/stepmania .-> DATA
+    SONGS -. indexed before the game .-> PREP
+    PREP -. writes index.bin, ssq/, xsb/, tn/, sync.bin<br/>under data_mods/_cache/stepmania .-> DATA
+    DATA -. index.bin + sync.bin read at boot .-> SMSVC
+    SMSVC -. writes xwb/, jacket/, lru.bin, thumbnail/ .-> DATA
     SHADERS -. build_shaders.sh .-> DATA
     SCRIPTS -. generate .-> DATA
     TOOLS -. bot_sim mounts pure mod files .-> MODS
-    TOOLS -. sm_pack_check mounts pure core + stepmania files .-> PURE
+    PREP -. mounts pure core + stepmania files by #[path] .-> PURE
     UPD -. mounts csv grammar .-> MODS
 ```
 
 ## Analysis Coverage
 
 - **Analyzed:**
-  - all Rust under `src/`, `updater/`, `tools/bot_sim/` and `tools/sm_pack_check/`
+  - all Rust under `src/`, `updater/`, `prep/` and `tools/bot_sim/`
   - `Cargo.toml` and `rust-toolchain.toml`
   - the build, deploy and release scripts
   - the harness mechanism of `scripts/validate_*.sh` and `scripts/sig_harness/`

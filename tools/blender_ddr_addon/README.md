@@ -853,6 +853,81 @@ GAME=hp2 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -
   --python tools/blender_ddr_addon/examples/port_stage_hottest2.py   # 59 stages; GAME=hp3 for 17
 ```
 
+### A JoJo's Bizarre Adventure: Eyes of Heaven (PS4) character (`examples/port_character_eoh.py`)
+
+CyberConnect2's XFBIN / NUD / NTP3 formats (shared with All Star Battle R), read straight from the
+CPK extraction by `examples/eoh_source.py` + `scripts/xfbin_dump.py`; RE and the content map in
+`docs/jojo_eoh_research.md`. Jotaro, Dio Brando, DIO, Star Platinum, The World and Gyro (2026-10-24)
+ship as `data_mods/custom_models/dancers/JOJO EOH/<Name>` (keys `eoh<code>`), round-trip previewed;
+not yet cabinet-tested. The donor-rig flow with a Biped-style source:
+
+* **Rig.** Z-up centimetres facing −Y, T-pose — Blender's and the donor's axes, so the conform is a
+  straight joint placement (trunk z-map thigh sockets → UpLeg, neck → Neck, `S = kz`); twist
+  helpers ride their limb, `cloth*` coat tails are `skirt`, collar / chain / scarf / cape `spine`,
+  the whole face rig rigid on Head. `HANG` drapes a chain authored streaming straight back (Dio's
+  muffler) before the bake; soles are stretched below the ankle to the stock height.
+* **Mesh.** NUD strips are clockwise from outside — the decoder reverses them. Unskinned models
+  (teeth) are moved to their coord's world and weighted to it. Source cull mode 0 → two-sided.
+* **Textures.** The `col<N>` file's `_d` diffuse (2048×1024 DXT5 → top mip dropped, copied as DDS)
+  and the iris sheet, which keeps the iris at UV (0, 0) for wrap sampling: `roll_half_dds` rolls
+  the DXT blocks by half and the eye UVs (set 1) shift by 0.5. `_n` / `_m` / `_s` are not used.
+* **Dynamic chains** (`DYN_CHAINS`: Jotaro's chain, Dio's muffler). The source chain becomes `DB_*`
+  bones appended after the 33 (a donor-rig first: untracked bones ride their parent at rest), posed
+  to drape before the bake, and `pl_<key>/dynbones.txt` hands them to the DLL's Winx-hair solver.
+
+```bash
+EOH_DIR=~/Desktop/EoH/cpk CHARA=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/port_character_eoh.py   # ~15 s for 6
+```
+
+### A dynamic chain on an already-exported dancer (`examples/add_dynchain_dancer.py`)
+
+When the source rip is gone, a scarf / tail can still get physics: the script imports the shipped
+`pl_<key>.model`, selects the strip's vertices by a box, fits joints along it, re-poses it to hang
+(that pose is the solver's rest), appends `DB_*` bones under a DDR bone, re-weights the strip along
+them and writes the model + `dynbones.txt` over the folder. Add a `CHAINS` entry per character
+(EoH Joseph's scarf is the first).
+
+```bash
+IN=<pl_key dir> OUT=<pl_key dir> CHAIN=joseph /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/add_dynchain_dancer.py
+```
+
+### A JoJo's Bizarre Adventure: All Star Battle R (PS4) stage (`examples/port_stage_asbr.py`)
+
+The 15 ASBR arenas (2026-10-25, `data_mods/custom_models/stages/JOJOS BZRRE ADV/<Label>`, keys
+`jj<id>`; RE in `docs/jojo_eoh_research.md` §3 "Anm" and §5). A stage xfbin is a flat list of
+clumps; each is baked through its coord chain (cm → m × 0.7, the fighting camera's side turned to
+the DDR camera with `FACING`) and joined per clump into `bg` (skydome) / `dec` / `add` / `ble`
+parts. Diffuse sheets only (lightmaps and normal maps dropped; vegetation keeps its leaf cut-out
+sheet on UV set 1) with the material's UV transform as m_vTexAnime, 2048² mip-less sheets
+downsampled in DXT block space (`xfbin_dump.dxt_chain`; cached in `<OUT_BASE>/_texcache`).
+
+* **Loops** (`ANIMATE=1`, the default): the stage's looping `nuccChunkAnm` clips (not the gimmick /
+  cut-in / hazard ones). UV offsets → `_play_loop.sanm` (crowd and flame flip-books stepped, water
+  and sky scrolls interpolated); animated coords (cloud rings, wave strips) → a flat rig +
+  `_play_loop.anm`, every clip checked against the source worlds. Only parts with animated
+  anchors are rigged; a part with just a `.sanm` stays static (`mdl_bg_*`). Sky / cloud loops play
+  at `SKY_SPEED` (0.1) in their own part `sky_bg`.
+* **Water** the source draws with a cube map + normal map is shown as its normal map shaded into a
+  tint sheet (`water_sheet`, colour from `WATER`), scrolled like the source.
+* **Battlefield's chariot** (`LAPS`): the horse / chariot / rider rigs of the gallop clip carried
+  around the rim by the route clip, parts `lap`, `lap2`, `lap3` (≤ 63 animated anchors per part).
+  Other drive-through gimmicks are not ported.
+* Cameras are borrowed (a stock set; Griffin House's for Kira Estate and Wall Eyes, scaled with the
+  stage) plus `_non` cut-aways from `scripts/gen_cutaway_shots.py`.
+
+**`_non` cut-aways.** The director hard-cuts to the next `_non` shot at every dance-clip change and
+holds it 1–2 s (A3's camera rule), which hides the switch. A camera set with only `_st` shots keeps
+filming through it. `python3 scripts/gen_cutaway_shots.py <camera dir> [--prefix KEY] [--scale S]`
+writes 8 slow push-ins on the dancer, each on the line from the dancer to one main shot's eye (so
+inside whatever room that shot fits).
+
+```bash
+ASBR_DIR=~/Desktop/ASBR/cpk STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/port_stage_asbr.py   # ~15 min for 15
+```
+
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 
 1. Evaluate every mesh with its modifiers (`bpy.data.meshes.new_from_object`), bake the

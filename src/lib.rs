@@ -92,14 +92,15 @@ fn init() {
     services::audio_clock::configure_from_config();
     profiling::tick("config_store");
 
-    // 0'. StepMania pack loader — config-gated. Spawns the pack index on
-    // worker threads and registers its LayeredFS resolver plus the
-    // `startup.arc` musicdb.xml member transform. Must sit AFTER the config
-    // store (it is gated on the `stepmania-packs` toggle and reads its own
-    // section) and BEFORE `avs_layeredfs::init` below: the game drains
-    // `startup.arc` within ms of gamemdx loading, and a transform registered
-    // after the hooks go live could miss that one open. Nothing here waits;
-    // the bounded wait for the index happens inside the game's own open.
+    // 0'. StepMania pack loader — config-gated. Loads the prep tool's
+    // `index.bin` (ms), starts the read-only validation thread and registers
+    // its LayeredFS resolver plus the `startup.arc` musicdb.xml member
+    // transform. Must sit AFTER the config store (it is gated on the
+    // `stepmania-packs` toggle and reads its own section) and BEFORE
+    // `avs_layeredfs::init` below: the game drains `startup.arc` within ms
+    // of gamemdx loading, and a transform registered after the hooks go live
+    // could miss that one open. Nothing here waits; the bounded wait for
+    // validation happens inside the game's own open.
     services::stepmania::early_init();
     profiling::tick("stepmania_early_init");
 

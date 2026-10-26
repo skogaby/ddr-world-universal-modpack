@@ -1,10 +1,13 @@
 //! StepMania pack loader — the game-facing service (design §3, §4.7).
 //!
-//! Operators drop StepMania packs into `./stepmania/Songs/<Pack>/<Song>/`;
-//! at boot this service indexes them, converts charts and audio into the
-//! game's own formats and injects them into the music database so they
-//! appear on the wheel in a STEPMANIA folder / VERSION series and play like
-//! stock songs — scores are never submitted (`taint.rs`).
+//! Operators drop StepMania packs into `./stepmania/Songs/<Pack>/<Song>/`
+//! and run the prep tool (`ddr_world_hook_prep.exe`, crate `prep/`) before
+//! the game; it converts charts and audio into the game's own formats under
+//! `data_mods/_cache/stepmania/`. At boot this service READS that cache,
+//! injects the songs into the music database so they appear on the wheel in
+//! a STEPMANIA folder / VERSION series and serves them like stock songs —
+//! scores are never submitted (`taint.rs`). The DLL never converts: the only
+//! way a song reaches the game is through a cache the tool produced.
 //!
 //! ## Boot timeline (why `early_init` sits where it does in `lib.rs`)
 //!
@@ -13,12 +16,15 @@
 //! 0   config::init
 //! 0'  stepmania::early_init                 …
 //!     ├ root + README, settings
-//!     ├ spawn index coordinator ──────────► workers convert songs (std::fs only)
 //!     ├ register resolver (mod_paths)
-//!     └ register startup.arc musicdb transform + fingerprint (arc_handler)
+//!     ├ register startup.arc musicdb transform + fingerprint (arc_handler)
+//!     ├ cache layout + LRU, index::load (index.bin → lookup maps, ms)
+//!     └ index::validate_async ──────────────► read-only stat thread
 //! 0b  avs_layeredfs::init (hooks live)
 //! 1-2 gamemdx wait, resolve_all …           avs_fs_open arc/startup.arc
-//!                                             fingerprint cb: wait_ready(≤ index_timeout_s)
+//!                                             pre-repack cb: arena patch
+//!                                             fingerprint cb: wait_validated(≤ VALIDATION_CAP)
+//!                                                             injectable (ceiling)
 //!                                                             ensure_registration (folder bit + series)
 //!                                                             thumbnail arc
 //!                                             transform cb:   musicdb::transform (inject)
@@ -26,7 +32,7 @@
 //!     slow-cabinet direction; listed BEFORE series/folder expansion —
 //!     and init_runtime → scheduler triggers: wheel_cards, highlight, scenes)
 //! 8   mods enable (series/folder expansion read the runtime registries;
-//!     StepmaniaPacksMod::enable → start_sync_sweep when auto_sync is on)
+//!     StepmaniaPacksMod::enable → auto-sync ledger when auto_sync is on)
 //! ```
 //!
 //! Audio delivery after boot (design §3.3): wheel-card binds and the
@@ -40,18 +46,12 @@
 //! to `services::scroll_remap` (`on_gameplay_load`; cleared on leaving
 //! scene 28 — Step 9).
 //!
-//! Auto-sync (Step 12; `sync_sweep.rs`, `sync_apply.rs`, `sync_state.rs`):
-//! nothing on disk changes after indexing. A below-normal-priority thread
-//! measures each injected song against its audio once per source
-//! fingerprint (`core::sync`) and records ONE delta per song in `sync.bin`;
-//! a song picked before it was measured is measured at song-selection time
-//! on a normal-priority thread, with the stage load (full-bank request) and
-//! the first judge dispatch held (bounded: 5 s / 3 s) until the result is
-//! in. The delta is applied at play time through the game's JUDGEMENT
-//! OFFSET by `per_song_judgement_offsets` (`applied = (player's per-song
-//! entry, else stock) + delta`, ±100) and frozen per song for the session,
-//! so two plays of one song in one session never differ. Off with
-//! `auto_sync: false` (no thread, no provider, nothing written).
+//! Auto-sync: the tool measures each song against its audio and records ONE
+//! delta per song in `sync.bin`; `sync_apply.rs` loads the ledger and applies
+//! the delta at play time through the game's JUDGEMENT OFFSET by
+//! `per_song_judgement_offsets` (`applied = (player's per-song entry, else
+//! stock) + delta`, ±100), frozen per song for the session. A song without a
+//! record plays as authored. Off with `auto_sync: false`.
 //!
 //! The two consumers of the folder bit and series value — the musicdb
 //! entries (written inside the `startup.arc` open) and the
@@ -59,13 +59,16 @@
 //! can come in either order depending on the cabinet (CrossOver reaches the
 //! `startup.arc` open seconds AFTER `resolve_all`; the Win7 tester before).
 //! `ensure_registration` is therefore idempotent and called from both: the
-//! first caller waits (bounded) for the index, picks the lowest free bit /
+//! first caller waits (bounded) for validation, picks the lowest free bit /
 //! series through task-01's APIs and builds the thumbnail arc; the second
 //! finds it done. Registration happens only when the index holds ≥ 1 song.
 //!
-//! The index decision is final at the `startup.arc` open: whatever finished
-//! by `index_timeout_s` is injected (one WARN on timeout); songs finishing
-//! later are cached for the next boot. Nothing here depends on `resolve_all`.
+//! ## Cache ownership
+//!
+//! Tool writes `index.bin`, `ssq/`, `xsb/`, `tn/`, `sync.bin`. DLL writes
+//! `xwb/`, `jacket/`, `lru.bin`, `thumbnail/`. Neither touches the other's
+//! files, and the tool refuses to run while the game is up — there is no
+//! second writer to race.
 //!
 //! ## The injection ceiling
 //!
@@ -85,11 +88,11 @@
 //!
 //! ## Release / update safety
 //!
-//! The release ships `stepmania/Songs/README.txt` only. The updater's plan
-//! (`updater/src/plan.rs`) writes release-owned files, prunes a path only
-//! when the previous manifest listed it AND its on-disk hash is unchanged,
-//! and never touches anything in neither set — so operator packs under
-//! `stepmania/Songs/` and the regenerable `data_mods/_cache/stepmania/`
+//! The release ships `stepmania/Songs/README.txt` and the prep tool. The
+//! updater's plan (`updater/src/plan.rs`) writes release-owned files, prunes
+//! a path only when the previous manifest listed it AND its on-disk hash is
+//! unchanged, and never touches anything in neither set — so operator packs
+//! under `stepmania/Songs/` and the tool-built `data_mods/_cache/stepmania/`
 //! survive every update.
 
 pub mod cache;
@@ -103,13 +106,14 @@ pub mod musicdb;
 pub mod progressive;
 pub mod progressive_logic;
 pub mod providers;
+pub mod records;
 pub mod scheduler;
 pub mod scheduler_logic;
 pub mod ssq_split;
 pub mod sync_apply;
 pub mod sync_state;
-pub mod sync_sweep;
 pub mod taint;
+pub mod validation;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,6 +147,11 @@ pub const SERIES_TEXTURE: &str = "stepmania";
 pub const FOLDER_KEY: &str = "stepmania";
 /// Operator note written into the songs root on first boot.
 const SONGS_README: &str = include_str!("songs_readme.txt");
+/// The tool that writes the cache this service reads.
+pub const PREP_TOOL: &str = "ddr_world_hook_prep.exe";
+/// How long the `startup.arc` open waits for the read-only validation pass
+/// (records it has not reached by then are dropped for this boot).
+pub const VALIDATION_CAP: Duration = Duration::from_secs(15);
 
 struct Settings {
     root: PathBuf,
@@ -152,7 +161,6 @@ struct Settings {
 static SETTINGS: OnceCell<Settings> = OnceCell::new();
 /// Set once the index holds at least one entry (the resolver's cheap gate).
 static SERVING: AtomicBool = AtomicBool::new(false);
-static TIMEOUT_WARNED: AtomicBool = AtomicBool::new(false);
 static CEILING_WARNED: AtomicBool = AtomicBool::new(false);
 /// The scroll-gimmick scene-exit clear is subscribed once.
 static SCROLL_SCENE_ARMED: AtomicBool = AtomicBool::new(false);
@@ -231,22 +239,50 @@ pub fn early_init() {
         musicdb_transform,
     );
 
-    let spawned = index::spawn(Arc::new(index::Settings {
-        root,
-        audio_cache_mb: cfg.audio_cache_mb,
-    }));
-    if !spawned {
-        log_warn!("StepMania: could not start the index thread -- nothing injected this boot");
+    // The cache the tool wrote. Layout + LRU are the DLL's (its own writes:
+    // banks, jackets, the thumbnail arc); `index.bin` and the per-song
+    // artefacts are read-only here.
+    if !cache::ensure_layout() {
+        log_warn!("StepMania: cache layout unavailable -- no songs this boot");
         return;
     }
-    log_info!(
-        "StepMania: indexing {} (timeout {} s, audio cache {} MiB, exclude_from_all_music={}, auto_sync={})",
-        SONGS_ROOT,
-        cfg.index_timeout_s,
-        cfg.audio_cache_mb,
-        cfg.exclude_from_all_music,
-        cfg.auto_sync
-    );
+    let swept = cache::sweep_tmp_files();
+    if swept > 0 {
+        log_info!("StepMania: swept {} stale .tmp file(s)", swept);
+    }
+    cache::init_lru(cfg.audio_cache_mb);
+    let report = index::load();
+    match report.source {
+        index::LoadSource::Missing => {
+            log_warn!(
+                "StepMania: no {} -- run {} before the game to index the packs in {}; nothing injected this boot",
+                cache::to_game_path(&cache::index_path()),
+                PREP_TOOL,
+                SONGS_ROOT
+            );
+        }
+        index::LoadSource::Corrupt => {
+            log_warn!(
+                "StepMania: {} is unreadable -- run {} again; nothing injected this boot",
+                cache::to_game_path(&cache::index_path()),
+                PREP_TOOL
+            );
+        }
+        index::LoadSource::Loaded => {
+            if report.songs > 0 {
+                index::validate_async(&root);
+            }
+            log_info!(
+                "StepMania: index.bin -- {} song(s), {} cached rejection(s){} (audio cache {} MiB, exclude_from_all_music={}, auto_sync={})",
+                report.songs,
+                report.rejects,
+                if report.songs > 0 { "; validating" } else { "" },
+                cfg.audio_cache_mb,
+                cfg.exclude_from_all_music,
+                cfg.auto_sync
+            );
+        }
+    }
 }
 
 /// Whether `early_init` armed the loader this boot.
@@ -303,14 +339,10 @@ pub fn auto_sync_enabled() -> bool {
 }
 
 /// Mod enable: arm auto-sync when armed and `auto_sync` is on — load the
-/// ledger and register the judgement-offset provider (`sync_apply.rs`),
-/// then start the sweep thread (`sync_sweep.rs`). `true` when the sweep
-/// runs. Idempotent.
-pub fn start_sync_sweep() -> bool {
-    if !is_armed() || !sync_apply::init() {
-        return false;
-    }
-    sync_sweep::start()
+/// ledger the prep tool wrote and register the judgement-offset provider
+/// (`sync_apply.rs`). `true` when the provider is live. Idempotent.
+pub fn init_sync() -> bool {
+    is_armed() && sync_apply::init()
 }
 
 /// The committed `#SCROLLS`/`#SPEEDS` tables of an injected basename and
@@ -325,13 +357,7 @@ pub fn scroll_tables_for(basename: &str) -> Option<(Arc<ScrollGimmicks>, i32)> {
 
 /// Gameplay-load signal from `taint::note_bank_request` (the full-bank
 /// serve): publish the song's tables, or clear for a stock / plain song.
-/// For an injected song this is also the auto-sync on-decide fallback
-/// (paths without a wheel highlight): an unmeasured song is measured now
-/// and the bank serve that follows this call holds for it (bounded).
 pub(crate) fn on_gameplay_load(basename: &str, injected: bool) {
-    if injected {
-        sync_apply::request_on_decide(basename);
-    }
     if !scroll_remap::is_available() {
         return;
     }
@@ -397,22 +423,10 @@ pub fn status() -> Option<IndexSnapshot> {
     Some(index::snapshot())
 }
 
-fn timeout() -> Duration {
-    Duration::from_secs(u64::from(
-        SETTINGS.get().map(|s| s.cfg.index_timeout_s).unwrap_or(30),
-    ))
-}
-
-/// Bounded wait for the index; one WARN when the deadline passes.
+/// Bounded wait for the validated index (the WARN for an expired wait is
+/// the index's own).
 fn wait_index() -> IndexSnapshot {
-    let snap = index::wait_ready(timeout());
-    if !snap.complete && !TIMEOUT_WARNED.swap(true, Ordering::AcqRel) {
-        log_warn!(
-            "StepMania: index not complete after {} s -- injecting the {} song(s) that finished; the rest next boot",
-            timeout().as_secs(),
-            snap.songs.len()
-        );
-    }
+    let snap = index::wait_validated(VALIDATION_CAP);
     if !snap.songs.is_empty() {
         SERVING.store(true, Ordering::Release);
     }
@@ -546,19 +560,6 @@ pub fn ensure_registration() -> Option<Registration> {
         build_thumbnail_arc(s, &snap);
     }
     Some(reg)
-}
-
-/// Called by the index coordinator when it finishes: refresh the thumbnail
-/// arc if a registration already exists (it may have been built from a
-/// partial index).
-pub(crate) fn on_index_complete() {
-    let snap = index::snapshot();
-    if !snap.songs.is_empty() {
-        SERVING.store(true, Ordering::Release);
-    }
-    if let Some(series) = registered_series() {
-        build_thumbnail_arc(series, &injectable(snap));
-    }
 }
 
 static THUMBNAIL_LOCK: Mutex<()> = Mutex::new(());

@@ -22,7 +22,7 @@
 //! immediately before the final `</mdb>`.
 //!
 //! Purity contract: `std` + `super::model` only; mounted by
-//! `scripts/validate_stepmania.sh` and `tools/sm_pack_check`.
+//! `scripts/validate_stepmania.sh` and `prep/` (the StepMania prep tool).
 
 use std::collections::HashSet;
 

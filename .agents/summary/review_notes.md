@@ -11,6 +11,7 @@ The generated documents were cross-checked against each other and against the so
 - **Config sections** in `data_models.md` match the structs in `src/mods/config.rs` and the section writers found by grepping `save_json_key` callers.
 - **Host-test claims** were verified on an arm64 host: plain `cargo test` of the DLL crate fails compiling `retour`. The previous AGENTS.md said `cargo test` ran host tests; that holds only on x86_64 hosts, and it was not verified there.
 - **StepMania loader (targeted refresh, 2026-10-24):** the module `//!` headers of `services/stepmania/*`, `core/{sm,ssq,audio,sync,art}`, `services/{ssq_path,wheel_cards,scroll_remap}.rs` and the `avs_layeredfs` extension points were taken as authoritative over the planning design where they differ. Differences recorded here rather than in the design: the auto-sync is measure-only (the design's SSQ `shift_seconds` rewrite was built and then superseded — the delta is applied through the judgement offset and frozen per session); the injected taint is level-written from the full-bank request stream and cleared by `reset_session`, not `reset_song_taint`; `exclude_from_all_music` defaults `true` (design text said `false`); the `startup.arc` fingerprint callback also performs the folder/series registration; `injected_entries()` falls back to the fingerprint snapshot on a warm boot whose arc cache skipped the transform; no per-mod splash line ships.
+- **StepMania prep tool (targeted refresh, 2026-10-25):** the summary was re-grounded on the source after the loader split into the standalone `prep/` crate (`ddr_world_hook_prep.exe`) and a reader-only DLL. Verified against `prep/src/*`, `prep/Cargo.toml`, `src/services/stepmania/{mod,index,validation,records,ceiling,sync_apply,providers,scheduler}.rs`, `src/mods/{config,song_limit_expansion}.rs`, `src/mods/stepmania_packs/mod.rs`, `scripts/{validate_prep.sh,validate_stepmania.sh,build_release_archive.sh,build_release_distribution.bat}` and `README.md`: the DLL never converts or measures (`index::load` + `validate_async` + `wait_validated(VALIDATION_CAP = 15 s)`; `sync_apply::init` loads the tool's `sync.bin` and the provider is a lookup + freeze with no wait); the tool is the only writer of `index.bin`/`ssq/`/`xsb/`/`tn/`/`sync.bin` and refuses to run while `spice64.exe`/`spice.exe` is up; `index_timeout_s` is a retired key; the arena is 1 MiB → 64 MiB (`ceiling::{STOCK,EXPANDED}_ARENA_BYTES`, imported by the patch); the injection ceiling is 4,000 songs by sorted pack/folder and nothing under a stock arena; `tools/sm_pack_check/` and `scripts/validate_sm_pack_check.sh` are gone (→ `--dry-run`, `scripts/validate_prep.sh`); `core/art/placeholder.rs` is split out. The planning docs under `.agents/planning/2026-10-24-stepmania-prep-tool/` were used for orientation only; where a module `//!` header still describes the pre-split behaviour (listed under stale strings below) the code was taken as authoritative.
 
 No contradictions remain between the generated files.
 
@@ -43,7 +44,10 @@ The stale and thin module docs from the previous pass have been rewritten. Every
 **Accepted limitations recorded for the StepMania loader** (maintainer decisions, not bugs)
 
 - `<lastplay><mcode>` carries the injected mcode and `mod_judge_offsets` lists tuned basenames; both are non-score profile fields and are left alone.
-- `auto_sync: false` has nothing to undo — measurement never writes a song file; it only stops the sweep, the on-decide thread and the provider.
+- `auto_sync: false` has nothing to undo — measurement never writes a song file; it stops the prep tool's measurement pass and keeps the DLL from loading `sync.bin` / registering the provider (`sync_apply::init` returns early).
+- Songs without a `sync.bin` record (never measured, `--no-sync`, or edited since the last tool run) play as authored for the session; the DLL does not measure on demand. The operator's remedy is a tool run.
+- The injection ceiling (`MAX_INJECTED_SONGS = 4_000`, first by pack/folder) has no operator knob by design; the tool's ceiling report names what is left out. With `song-limit-expansion` off nothing is injected at all.
+- BC1 thumbnail bytes (`tn/*.dds`) are not bit-reproducible across host architectures (an ARM-built tool vs the x86 DLL differ by one block endpoint ±1 LSB in ~40 % of files); fingerprints are over the sources, so the warm path is unaffected and on a Windows cabinet both sides are x86.
 - E8 (an extreme injected chart shrinking stock radars through the boot-computed maxima) was refuted on the 20260721 build — the maxima are reset to constants at scene 7 and every new game; the radar exclusion ships anyway as cheap insurance.
 - The estimator refuses roughly a quarter of ITG1-style charts with `halves_disagree`; those songs play as authored.
 - With split discovery active, an unknown basename resolves to `Choice::Base`, not the stock original (the discovery mod's documented behaviour); `chart_length` opens only `<b>.ssq`, so split-timing injected songs show no wheel LENGTH.
@@ -68,6 +72,7 @@ The stale and thin module docs from the previous pass have been rewritten. Every
   - `config.rs` `OverlayMenuConfig::animate_background`
 - `docs/per_song_judgement_offsets.md` gives a fixed `Option` offset; the code derives it per build.
 - `docs/premium_free_stale_record_bug.md` says `diag.rs` was removed.
+- Pre-split StepMania wording survives in three `//!` headers (the code is already the reader-only design): `services/stepmania/providers.rs` still describes a stage-load hold via `sync_apply::hold_for_measurement` and says a failed bank is flagged `audio_failed` "for the next boot" (the code calls `mark_audio_failed_session`, in-memory only); `services/stepmania/scheduler.rs` still lists a 25→26 `sync_apply::request_on_decide` trigger (no such function; the scene callback only manages the speculative bank); `mods/stepmania_packs/mod.rs` says `enable` "starts the auto-sync sweep" (it calls `stepmania::init_sync`, which loads the ledger). `docs/stepmania_runtime_packs_feasibility.md`'s "What shipped" table still maps §9.1 to `services/stepmania/sync_sweep.rs` (deleted; measurement lives in `prep/src/measure.rs`, application in `sync_apply.rs`).
 
 **Minor code-level items**
 
@@ -91,7 +96,7 @@ The stale and thin module docs from the previous pass have been rewritten. Every
 ## Recommendations
 
 1. Triage the code issues above, starting with the non-Wine-gated movie suppression and the unwraps in hook callbacks.
-2. Sweep the remaining step-journal wording in submodule/item docs.
+2. Sweep the remaining step-journal wording in submodule/item docs, and the three pre-split StepMania `//!` headers + the feasibility note's §9.1 row listed above.
 3. Consider a short `docs/README.md` index; the theme buckets in the analysis are a ready starting point.
 4. Keep feature-specific detail out of AGENTS.md. Cross-cutting rules belong there, mechanisms belong in module docs, and investigations belong in `docs/`.
 5. Follow up on the fast-bootup verifier race (see the issues table) — it costs a full stock boot pass on loaded hosts independent of the StepMania loader.

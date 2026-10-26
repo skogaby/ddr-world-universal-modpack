@@ -3,8 +3,8 @@
 //! Owns onset analysis of an [`AudioView`], the beat → audio-time mapping
 //! used for analysis ([`TimeMap`]), the weighted chart events the audio is
 //! correlated against ([`chart_events`]), the offset estimate itself
-//! ([`estimate`]) and the materialised-SSQ wrapper the runtime sweep and
-//! `tools/sm_pack_check` share ([`measure`]).
+//! ([`estimate`]) and the materialised-SSQ wrapper the prep tool's measurement pass and
+//! `prep/` (the StepMania prep tool) share ([`measure`]).
 //!
 //! Provenance: `onset`, `estimate`, `events`, `timemap` and this file are a
 //! port of `ddr-chart-tools` (a733404) `src/sync/` — every constant,
@@ -19,7 +19,7 @@
 //!
 //! Pure computation: no I/O, no logging, no game state; imports only
 //! `crate::core::{sm,ssq}` and `rustfft`. Harness-mounted by
-//! `scripts/validate_stepmania.sh` and `tools/sm_pack_check`.
+//! `scripts/validate_stepmania.sh` and `prep/` (the StepMania prep tool).
 //!
 //! Sign convention used throughout: a *measured offset* is audio onset
 //! time minus chart event time, in milliseconds; a *correction* is how
@@ -124,7 +124,7 @@ pub enum Refusal {
 
 impl Refusal {
     /// Stable machine-readable label, used as `reason=` in log lines so
-    /// batch runs can be grepped (and persisted by the runtime sweep).
+    /// batch runs can be grepped (and persisted by the prep tool).
     #[must_use]
     pub fn key(self) -> &'static str {
         match self {

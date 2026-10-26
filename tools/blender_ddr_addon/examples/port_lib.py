@@ -739,7 +739,8 @@ def export_and_check(env, arm):
             if abs(sum(v['WEIGHTS4']) - 1.0) > 2e-3:
                 bad += 1
     print('VERTS', n, 'bad weight sums', bad)
-    assert len(m['bones']) == 33
+    # the 33 DDR bones, plus any dynamic bones appended after them (dynbones.txt)
+    assert len(m['bones']) >= 33, len(m['bones'])
     assert bad == 0
     assert K.write_model(K.model_to_spec(m)) == data, 'codec round-trip mismatch'
     print('FILES', sorted(os.listdir(body_dir)))

@@ -1,0 +1,58 @@
+# StepMania prep tool for the modpack (ships as ddr_world_hook_prep.exe at the
+# root of every release zip). Like `updater/`, deliberately NOT a workspace
+# member of the hook DLL crate: a plain native crate whose host tests run
+# with `cargo test` and whose build never touches the DLL's.
+#
+# It mounts the DLL's pure StepMania pipeline from `src/` by `#[path]`
+# (see src/core/mod.rs and src/services/stepmania/mod.rs here), so the cache
+# it writes is byte-for-byte what the game expects.
+#
+# trim-paths is nightly-only; this repo is already nightly-pinned
+# (rust-toolchain.toml applies here too). It strips builder home/username
+# paths from the shipped binary.
+cargo-features = ["trim-paths"]
+
+[package]
+name = "ddr-world-hook-prep"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# snake_case to match the DLL (ddr_world_hook.dll → ddr_world_hook_prep.exe);
+# cargo's kebab-case warning for this target is expected.
+[lib]
+name = "ddr_world_hook_prep"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ddr_world_hook_prep"
+path = "src/main.rs"
+
+[dependencies]
+# The DLL's mounted pipeline, same versions/features as the root Cargo.toml.
+encoding_rs = "0.8"
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "vorbis", "wav", "pcm", "ogg"] }
+rustfft = { version = "6", default-features = false, features = ["sse", "avx"] }
+image = "0.25"
+texpresso = "2"
+# mod-config.json (two keys).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Readable canonical paths on Windows (no `\\?\` prefix); identity elsewhere.
+dunce = "1"
+
+# Double-click detection (console process count) and the running-game check
+# (process snapshot). Windows-only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+trim-paths = "all"

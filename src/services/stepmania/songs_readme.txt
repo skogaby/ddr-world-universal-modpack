@@ -5,11 +5,28 @@ Put StepMania packs here, one folder per pack, one folder per song:
 
   stepmania/Songs/<Pack Name>/<Song Name>/<song>.ssc (or .sm) + audio (+ art)
 
-At boot the modpack indexes this folder, converts every playable chart to the
-game's own formats and adds the songs to the music wheel in a STEPMANIA folder
-(and a STEPMANIA entry in the VERSION filter). They are kept out of ALL MUSIC
-unless "exclude_from_all_music" is set to false in mod-config.json. Scores for
-these songs are never submitted to the server.
+Then run ddr_world_hook_prep.exe (in the game folder, next to spice64.exe) --
+or let gamestart.bat run it on the line before spice64.exe, so every launch
+is up to date. The tool converts every playable chart to the game's own
+formats, measures each song's sync, and reports what it did; the game itself
+never converts, it only loads what the tool prepared. The songs then appear on
+the music wheel in a STEPMANIA folder (and a STEPMANIA entry in the VERSION
+filter). They are kept out of ALL MUSIC unless "exclude_from_all_music" is set
+to false in mod-config.json. Scores for these songs are never submitted to the
+server.
+
+Run the tool again after adding, removing or editing a pack. A run with
+nothing to do takes about a second; a new 1,000-song library takes about half
+a minute to convert and a couple of minutes to measure. It refuses to run
+while the game is running.
+
+What the game loads
+- At most 4,000 songs per boot: the first 4,000 by pack and song folder name.
+  The tool tells you how many you have and which packs are left out, so you
+  can trim before booting. (The game's song database has a fixed capacity;
+  the modpack's Song Limit Expansion mod must stay on.)
+- A song whose files changed since the last tool run is skipped by the game
+  (one line in the game log says how many, and to run the tool again).
 
 Notes
 - .ssc is preferred over .sm when a song has both.
@@ -27,18 +44,15 @@ Notes
 - Art: #JACKET, else #BACKGROUND, else #BANNER, else a file named *jacket*,
   *bg* or *bn*, else the pack's banner, else a placeholder. Non-square art is
   fitted on a blurred copy of itself.
-- Auto-sync: with "auto_sync": true (default) each song is measured once
-  against its audio and the result is applied through the game's own
-  per-song judgement offset -- nothing in this folder or in the cache is
-  edited. A song picked before it was measured is measured while the stage
-  loads (a short pause). The sweep runs in the background between songs.
-- Converted files live in data_mods/_cache/stepmania/ and are rebuilt when a
-  song changes; that folder can be deleted at any time (the next boot rebuilds
-  it and re-measures sync).
-- The first boot after adding many songs takes longer (conversion runs in the
-  background during startup, about 25 ms per song); later boots reuse the
-  cache. Very large libraries may finish injecting on the second boot.
-- Problems are reported in the game log as "StepMania: rejected '<Pack>/<Song>': <reason>".
-  Offline check before copying a pack to the cabinet: tools/sm_pack_check in
-  the modpack source.
-- Updates of the modpack never touch this folder.
+- Auto-sync: with "auto_sync": true (default) the tool measures each song once
+  against its audio and the game applies the result through its own per-song
+  judgement offset -- nothing in this folder or in the cache is edited. A song
+  the tool has not measured (run with --no-sync) plays as authored.
+- Converted files live in data_mods/_cache/stepmania/; that folder can be
+  deleted at any time (the next tool run rebuilds it). Interrupting the tool
+  is safe: it saves its progress as it goes.
+- Problems are reported by the tool as "rejected '<Pack>/<Song>': <reason>"
+  and in ddr_world_hook_prep.log in the game folder. To vet a pack before
+  copying it to the cabinet: ddr_world_hook_prep.exe --dry-run <song or pack
+  folder> --out <folder>.
+- Updates of the modpack never touch this folder or the cache.

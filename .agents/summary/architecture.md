@@ -26,10 +26,10 @@ graph TD
 
 Placement rules:
 
-- `core/` holds nothing game-policy-specific. Format code moves here once it has a second consumer (`core/ssq/` was promoted from a mod). The StepMania conversion pipeline — `core/sm/` (SM/SSC parser, scroll gimmicks, title glyph table), `core/ssq/{writer,check}.rs`, `core/audio/`, `core/sync/`, `core/art/`, `core/xact/{song_bank,xsb}.rs` — is pure and shared with `tools/sm_pack_check`.
+- `core/` holds nothing game-policy-specific. Format code moves here once it has a second consumer (`core/ssq/` was promoted from a mod). The StepMania conversion pipeline — `core/sm/` (SM/SSC parser, scroll gimmicks, title glyph table), `core/ssq/{writer,check}.rs`, `core/audio/`, `core/sync/`, `core/art/{jacket,placeholder,source,thumbnail}.rs`, `core/xact/{song_bank,xsb}.rs` — is pure and mounted by `#[path]` into the standalone prep tool (`prep/`, `ddr_world_hook_prep.exe`), which is the only thing that converts; the DLL only reads the cache the tool wrote.
 - A `services/` module owns each hooked game function. When several features need the same function, the service is a **dispatcher** (subscribe/acquire API), and features never install a second detour. See the ownership table in `interfaces.md`. `ssq_path`, `wheel_cards` and `scroll_remap` were promoted from mod-private hooks when the StepMania loader became a second consumer.
 - `mods/` implement `Mod`, consume services, and grow into a subdirectory once multi-file. `mods/stepmania_packs/` is deliberately thin: everything game-facing lives in `services/stepmania/`.
-- Pure decision and format logic sits in dedicated files with no `crate::` imports, so the harnesses can mount it (for example `lifecycle.rs`, `section_math.rs`, `logic.rs`, `model.rs`, `scheduler_logic.rs`, `progressive_logic.rs`, `sync_state.rs`, `compose.rs`).
+- Pure decision and format logic sits in dedicated files with no `crate::` imports, so the harnesses can mount it (for example `lifecycle.rs`, `section_math.rs`, `logic.rs`, `model.rs`, `scheduler_logic.rs`, `progressive_logic.rs`, `sync_state.rs`, `records.rs`, `validation.rs`, `ceiling.rs`, `compose.rs`). The same contract lets `prep/` compile `services/stepmania/{cache,ceiling,convert,identity,model,musicdb,records,sync_state}.rs` natively.
 
 ## Initialization Sequence
 
@@ -42,9 +42,9 @@ sequenceDiagram
     I->>I: panic hook, SEH crash handler, profiling
     I->>G: 0a ident_override (must beat the launcher to ea3_boot)
     I->>I: 0 config load (+ audio_clock config)
-    I->>I: 0' stepmania::early_init (spawn pack index; register LayeredFS resolver + startup.arc musicdb transform)
+    I->>I: 0' stepmania::early_init (load index.bin + spawn read-only validation; register LayeredFS resolver + startup.arc musicdb transform)
     I->>G: 0b LayeredFS install (must beat onBoot's startup.arc / shader.arc / musicdb reads)
-    G->>G: startup.arc open → wait_ready(≤ index_timeout_s) → inject <music> entries + arena patch
+    G->>G: startup.arc open → arena patch → wait_validated(≤ VALIDATION_CAP 15 s) → ceiling → inject <music> entries
     I->>G: 1 wait for gamemdx
     I->>G: 1b XACT factory hook (before XACT initializes)
     I->>I: 2 resolve_all (batch AOB scan)
@@ -61,13 +61,13 @@ Ordering constraints worth knowing:
 | Constraint | Reason |
 |---|---|
 | `ident_override` first | It must detour `ea3_boot` before the launcher calls it. It needs neither config nor gamemdx. |
-| `stepmania::early_init` after the config store, before LayeredFS | It is gated on the `stepmania-packs` toggle and reads its own section, and its `startup.arc` member transform + resolver must be registered before the hooks go live: the game drains `startup.arc` within ms of gamemdx loading, and a transform registered later misses that one open. Nothing in it waits; the bounded index wait happens inside the game's own open. |
+| `stepmania::early_init` after the config store, before LayeredFS | It is gated on the `stepmania-packs` toggle and reads its own section, and its `startup.arc` member transform + resolver must be registered before the hooks go live: the game drains `startup.arc` within ms of gamemdx loading, and a transform registered later misses that one open. It parses the prep tool's `index.bin` synchronously (ms) and spawns the read-only validation thread; the bounded wait on that validation happens inside the game's own open. |
 | LayeredFS before the gamemdx wait and the scan | `Application::onBoot` reads `startup.arc` (the music DB), `shader.arc` (its only shader read) and `musicdb.xml` within a few hundred ms of gamemdx loading. The `startup.arc` open also carries the XML-arena patch (`song_limit_expansion::register_startup_arc_hook`) so it lands regardless of which side wins the race. |
 | XACT factory hook before `resolve_all` | XACT audio threads are live after Initialize. |
 | `early_apply` before derivations/services | Patches must land before the game's first use (XML buffer size, FPS target). |
 | `stage_records` before persistence | The logout-save sanitiser uses the record layout. |
 | `judge_hook` → `foot_panel_swap` → `analyze_hook` / `render_notes_hook` → `scroll_remap` before mod init | Dispatchers must exist before subscribers register; `scroll_remap` subscribes to `render_notes_hook`. |
-| `stepmania-packs` registered before `series-expansion` / `folder-expansion` | Its `init` registers the STEPMANIA series value + folder bit (bounded wait on the index) when the `startup.arc` open has not done so yet; the two expansion mods merge the runtime registries in their own `init`. Idempotent — on a fast cabinet the open already did it. |
+| `stepmania-packs` registered before `series-expansion` / `folder-expansion` | Its `init` registers the STEPMANIA series value + folder bit (bounded wait on the index validation) when the `startup.arc` open has not done so yet; the two expansion mods merge the runtime registries in their own `init`. Idempotent — on a fast cabinet the open already did it. |
 | `mod-menu` last, then one label-atlas flush | It lists every registered mod and row, and the atlas is rebuilt exactly once. |
 
 ## Thread Model
@@ -75,15 +75,14 @@ Ordering constraints worth knowing:
 | Thread | Runs | Rules |
 |---|---|---|
 | Game frame seam | The one frame pump driven by `overlay_draw`'s layer-dispatcher detour. Per frame: `input_manager::poll` (all `on_frame` callbacks first, then input events), then the `run_on_render_thread` batch, then the original render | Engine mutation happens here. Never hold a state mutex across a scheduled closure. Each phase is panic-contained. `widget_renderer::is_render_thread()` identifies it. |
-| Game logic / judge / scene hooks | `judgeNotes` dispatch, scene callbacks, save/load trampolines; the per-note `get_offset_y` detour (`scroll_remap`, one atomic load when idle) | Tight, panic-free, allocation-averse. One sanctioned exception: the StepMania auto-sync delta provider may hold a side's first judge dispatch ≤ 3 s for a pending measurement. |
-| FileManager I/O worker | The game's single file-reading thread for post-boot assets: the LayeredFS resolvers on each intercepted open, progressive-bank read holds (≤ 5 s), the preview-ticket wait (≤ 300 ms) and the stage-load auto-sync hold (≤ 5 s). (The boot-time `startup.arc` open, with its bounded index wait and the musicdb transform, runs on the game's own `onBoot` thread.) | Never the render thread (`is_render_thread()` takes the fallback at once). Bounded waits only; a timeout passes through (silence), never hangs. |
+| Game logic / judge / scene hooks | `judgeNotes` dispatch, scene callbacks, save/load trampolines; the per-note `get_offset_y` detour (`scroll_remap`, one atomic load when idle) | Tight, panic-free, allocation-averse. The StepMania auto-sync delta provider is a map lookup + freeze (no wait: the ledger is fully loaded at enable). |
+| FileManager I/O worker | The game's single file-reading thread for post-boot assets: the LayeredFS resolvers on each intercepted open, progressive-bank read holds (≤ 5 s) and the preview-ticket wait (≤ 300 ms). (The boot-time `startup.arc` open, with its bounded validation wait and the musicdb transform, runs on the game's own `onBoot` thread.) | Never the render thread (`is_render_thread()` takes the fallback at once). Bounded waits only; a timeout passes through (silence), never hangs. |
 | XACT / audio render thread | audio_clock observers, song-rate IO serve | Lock- and allocation-free on the serve path |
 | Engine job-graph worker | scene3d node `visit`/dtor (background dancers) | No engine API, locks, allocation or logging |
 | libafp display pass | ddr_selection sound route | Lock-free, no logging |
 | DLL init thread | `init()` | May block/poll; ends after splash setup |
-| StepMania index workers | `available_parallelism().clamp(2, 6)` threads spawned at step 0': parse, convert, self-check, write SSQ/XSB/thumbnail per song | `std::fs` only (never AVS — the hooks are live); each song panic-contained; results land as they finish, final at the `startup.arc` open |
+| StepMania index validation | one read-only thread (`stepmania-validate`) spawned at step 0': stats each `index.bin` record's artefacts + source stamps (`records.rs` → `validation.rs` verdict) and drops failures; `wait_validated(VALIDATION_CAP = 15 s)` from the `startup.arc` fingerprint drops the records it has not reached | `std::fs` only (never AVS — the hooks are live); never writes `index.bin`. Conversion itself happens out of process, in `ddr_world_hook_prep.exe` before the game starts. |
 | StepMania scheduler pool | `max(3, hardware_threads / 2)` workers at below-normal priority: preview banks, jackets, the progressive full bank, driven by `wheel_cards` binds and the highlight | Pure CPU/IO; tickets handed to the resolver; one INFO per job |
-| StepMania auto-sync | one below-normal sweep thread (measures unmeasured songs outside scenes 26–28) plus one normal-priority on-decide thread (`stepmania-sync-decide`, the committed song) | Measure only — nothing on disk changes after indexing; results → `sync.bin` + the live delta map |
 | fast-bootup preflight | one thread at enable: re-reads every injected SSQ and runs `check_ssq`, publishing verdicts by file name before the boot pass | Never waited on — files it has not reached are checked inline at plan build |
 | Mod workers | song-rate generator, chart-length, SMX transport, tick synthesis, arc parse, cache writers, CSV writer, etc. | Pure CPU/IO. Results are handed back through atomics, seqlocks or queued closures. |
 
@@ -124,24 +123,27 @@ Deliberate fail-closed exceptions:
 
 ```mermaid
 flowchart LR
-    DROP[stepmania/Songs/Pack/Song] -->|0' index workers| IDX[index.bin + ssq/ xsb/ tn/]
-    IDX -->|startup.arc open: musicdb transform| DB[game music DB + STEPMANIA folder/series]
+    DROP[stepmania/Songs/Pack/Song] -->|ddr_world_hook_prep.exe, before the game| IDX[index.bin + ssq/ xsb/ tn/ + sync.bin]
+    IDX -->|0' index::load + validate thread| VAL[validated records]
+    VAL -->|startup.arc open: ceiling → musicdb transform| DB[game music DB + STEPMANIA folder/series]
     DB -->|boot pass| FB[fast_bootup preflight / quarantine]
     DB -->|wheel card bound| SCH[scheduler: preview bank + jacket]
     SCH -->|scene 25 open| RES[LayeredFS resolver → cache path]
-    DB -->|scene 26 commit| DEC[on-decide auto-sync measure]
-    DEC -->|full-bank request| PROG[progressive .part bank + taint + scroll tables]
+    IDX -->|mod enable: sync_apply::init| LED[sync.bin ledger → live delta map]
+    DB -->|full-bank request| PROG[progressive .part bank + taint + scroll tables]
     PROG -->|read hook holds at watermark| PLAY[gameplay]
-    DEC -->|first judge: entry + delta ±100| PLAY
+    LED -->|first judge: entry + delta ±100, frozen per session| PLAY
     PLAY -->|stage save suppressed, logout wiped| SAVE[no score leaves the cabinet]
 ```
+
+Cache ownership is the race-freedom argument: the tool writes `index.bin`, `ssq/`, `xsb/`, `tn/`, `sync.bin`; the DLL writes `xwb/`, `jacket/`, `lru.bin`, `thumbnail/<S>.arc`. Neither touches the other's files, and the tool refuses to run while `spice64.exe`/`spice.exe` is up.
 
 ## Cross-Cutting Systems
 
 | System | Home | Role |
 |---|---|---|
 | LayeredFS | `src/services/avs_layeredfs/` | Transparent file replacement from `data_mods/`: PNG→game texture, ARC overlay/repack, XML merge, atlas cloning, runtime shader synthesis; virtual-asset resolvers, arc member transforms + fingerprints, progressive (in-flight) reads |
-| StepMania pack loader | `src/services/stepmania/` + `src/core/{sm,ssq,audio,sync,art}/` + `src/mods/stepmania_packs/` | Boot-time index of `stepmania/Songs/`, music-DB injection through the `startup.arc` transform, cache-served charts/banks/art, prefetch scheduler, progressive gameplay bank, measure-only auto-sync applied through the judgement offset, score taint + fail-closed hiding |
+| StepMania pack loader | `src/services/stepmania/` + `src/core/{sm,ssq,audio,sync,art}/` + `src/mods/stepmania_packs/` + the standalone `prep/` tool | Out-of-process conversion of `stepmania/Songs/` into the cache (`ddr_world_hook_prep.exe`); in the DLL: `index.bin` load + read-only validation, the injection ceiling (`ceiling.rs`, 4,000 songs, nothing under a stock arena), music-DB injection through the `startup.arc` transform, cache-served charts/banks/art, prefetch scheduler, progressive gameplay bank, tool-measured auto-sync applied through the judgement offset, score taint + fail-closed hiding |
 | Option-row framework | `src/services/custom_options/` | Declarative per-player rows in the native options menu and the overlay menu, with persistence and conditional visibility |
 | Overlay mod menu | `src/mods/mod_menu/` + `src/services/overlay_draw/` | Pinpad 0-0-0 modal: mod toggles, cabinet-wide rows, themes with shader backgrounds |
 | Persistence + score policy | `custom_options_persistence.rs`, `score_guard.rs`, `stage_records.rs` | `mod_*` wire fields, JSON cache, `/data` node producers; taint → suppression/sanitisation |

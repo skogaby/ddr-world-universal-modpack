@@ -40,14 +40,15 @@ use crate::core::memory;
 use crate::core::module_resolver::GameModule;
 use crate::core::scanner::{scan_pattern_all, ScanResult};
 use crate::mods::mod_trait::{mod_enabled_in_config, EarlyContext, Mod, ModContext};
+use crate::services::stepmania::ceiling;
 use crate::{log_info, log_warn};
 
 pub const MOD_ID: &str = "song-limit-expansion";
 
-/// Stock arena size (the imm32 at every site).
-pub const STOCK_ARENA_BYTES: u32 = 0x0010_0000;
-/// Patched arena size.
-pub const EXPANDED_ARENA_BYTES: u32 = 0x0400_0000;
+/// Stock arena size (the imm32 at every site) — shared with the ceiling.
+pub const STOCK_ARENA_BYTES: u32 = ceiling::STOCK_ARENA_BYTES as u32;
+/// Patched arena size — shared with the ceiling.
+pub const EXPANDED_ARENA_BYTES: u32 = ceiling::EXPANDED_ARENA_BYTES as u32;
 
 /// XOR R8D,R8D; MOV EDX,0x100000; CALL ...
 /// The imm32 starts at pattern offset 4.

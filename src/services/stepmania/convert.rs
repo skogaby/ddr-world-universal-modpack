@@ -1,4 +1,4 @@
-//! Conversion glue shared by the runtime index and `tools/sm_pack_check` —
+//! Conversion glue shared by the runtime index and `prep/` (the StepMania prep tool) —
 //! pure (std + `crate::core`).
 //!
 //! Folder discovery (`find_simfile`, `find_audio`), the chart-timing read

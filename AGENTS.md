@@ -19,6 +19,7 @@ src/
 ├── widgets/      # TextWidget / ImageWidget (native game objects)
 └── types/        # scene ids, buttons, GameNote
 updater/          # standalone auto-updater crate (NOT a workspace member)
+prep/             # standalone StepMania prep tool crate (NOT a workspace member): indexes packs before the game; mounts src/ pure modules by #[path]
 tools/            # blender_ddr_addon, bot_sim (offline bot simulator), fxc (pinned HLSL compiler)
 shaders/src/      # HLSL → committed blobs in data_mods/shader_fixes/blobs/
 scripts/          # validate_* host harnesses, sig_harness, gen_* asset generators, format tools, game_nav, release
@@ -47,12 +48,13 @@ docs/             # RE research notes (addresses file-relative to 0x180000000)
 
 ```bash
 cargo check --target x86_64-pc-windows-msvc      # fast type check (works on any host)
-./build.sh                                       # release DLL (cargo-xwin)
-./build_win7.sh                                  # Windows 7 build (-Z build-std)
+./build.sh                                       # release builds of the DLL + updater + prep tool (cargo-xwin; ONLY=dll|updater|prep for one)
+./build_win7.sh                                  # Windows 7 builds of the DLL + updater + prep tool (-Z build-std; ONLY=dll|updater|prep for one)
 ./scripts/deploy.sh                              # build + scp to cabinet (/tmp/ssh{host,user,pass})
 ./scripts/build_release_archive.sh               # release/: zip + bare updater exe + tester install .bat
 scripts\build_release_distribution.bat           # Windows host: release\ = unzipped image (custom models pre-packed)
 cargo test --manifest-path updater/Cargo.toml    # updater tests (separate crate, runs natively)
+./scripts/validate_prep.sh                       # prep tool: cargo test (incl. mounted DLL suites) + smoke --dry-run
 ./scripts/validate_<area>.sh                     # host tests for pure modules (see below)
 ./scripts/validate_signatures.sh ~/Desktop/ddr_modules   # offline sweep over every supported gamemdx build
 ```

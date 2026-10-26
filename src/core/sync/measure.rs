@@ -1,6 +1,6 @@
 //! Measuring one materialised SSQ file against its song's decoded audio —
-//! the single code path the runtime sweep (`services::stepmania::
-//! sync_sweep`) and `tools/sm_pack_check --auto-sync` share.
+//! the single code path the prep tool's measurement pass and its
+//! `--dry-run --auto-sync` report (`prep/`) share.
 //!
 //! What is measured is what the game plays:
 //! - **timeline**: the `(tick, ms)` anchors and TPS of the file's own tempo

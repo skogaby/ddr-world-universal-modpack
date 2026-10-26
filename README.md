@@ -26,6 +26,7 @@ This modpack is also **datecode-agnostic**! Through memory scanning and pattern 
    - `mod-config.json` (a ready-to-go default configuration)
    - `judgement_offsets.csv` (optional but recommended — a community-sourced sync list for ~1,440 songs)
    - `ddr_world_hook_updater.exe` (optional — keeps all of the above current automatically; see [Automatic updates](#automatic-updates))
+   - `ddr_world_hook_prep.exe` (only if you use StepMania packs — indexes them before the game starts; see [StepMania Packs](#stepmania-packs))
 3. Add the hook to your spice2x launch options: `-z ddr_world_hook.dll` (in `gamestart.bat` as a new parameter to `spice2x.exe`).
 4. Launch the game. You'll see a splash message in the top-left confirming the modpack loaded.
 5. **First boot only:** if a red warning appears telling you to reboot, restart the game once — the modpack builds its menu textures on first launch.
@@ -40,10 +41,11 @@ The release zip ships a small updater, `ddr_world_hook_updater.exe`. Run it from
 @echo off
 cd /d %~dp0
 ddr_world_hook_updater.exe
+ddr_world_hook_prep.exe
 start spice64.exe -ddr -modules modules -z ddr_world_hook.dll
 ```
 
-Just the bare exe name — a plain `.exe` call blocks the batch file until the updater has finished, so the game never starts mid-update. What it does:
+Just the bare exe names — a plain `.exe` call blocks the batch file until the program has finished, so the game never starts mid-update or mid-index. (The `ddr_world_hook_prep.exe` line is only needed if you use [StepMania Packs](#stepmania-packs); it takes about a second when nothing changed.) What the updater does:
 
 - **Checks** the latest release on GitHub. Offline, rate-limited, or any other failure ⇒ game starts with what you have.
 - **Installs** the new `ddr_world_hook.dll`, `data_mods/`, `README.md` and the updater itself. Files a newer release stopped shipping are removed **only if you never modified them**; anything you added yourself under `data_mods/` (custom song packs, texture packs) and the modpack's own caches are never touched.
@@ -154,7 +156,9 @@ All the cosmetic customizations normally locked behind Konami's web portal — a
 **DDR A3-style instant bootup mod for DDR World**. This is accomplished by caching all of the data that DDR World normally analyzes from all charts during every bootup cycle. If a chart changes, the cache is updated, so the chart metadata never goes stale from an update.
 
 ### StepMania Packs
-Drop StepMania packs into `stepmania/Songs/<Pack>/<Song>/` and play them on the cabinet — no conversion tools, no repacking. At boot the modpack converts every `.sm`/`.ssc` chart to the game's own chart format, the OGG/MP3/WAV audio to the game's streaming bank format and the jacket/banner/background art to wheel thumbnails and jackets, all into a cache the game reads like stock content. The songs appear in a **STEPMANIA** folder (and VERSION filter entry), with proper jackets, previews, difficulty panels, BPM readouts and native titles where the game's fonts can draw them. Mines and ITG-style `#SPEEDS`/`#SCROLLS` gimmicks are reproduced; charts with warps or negative BPMs are left out rather than mis-played. Each song is auto-measured against its own audio and brought onto DDR World's timing convention through the game's per-song judgement offset (ITG packs are authored ~9 ms off DDR's), so they feel right at ×1.0 without hand tuning. Scores for these songs are **never submitted** to a server. See `stepmania/Songs/README.txt` in the release for the details and limits.
+Drop StepMania packs into `stepmania/Songs/<Pack>/<Song>/`, run **`ddr_world_hook_prep.exe`** (or let `gamestart.bat` run it before every launch — see [Automatic updates](#automatic-updates) for the snippet), and play them on the cabinet — no repacking. The prep tool converts every `.sm`/`.ssc` chart to the game's own chart format, the OGG/MP3/WAV audio to the game's streaming bank format and the jacket/banner/background art to wheel thumbnails and jackets, all into a cache the game reads like stock content; the game itself never converts, so adding 10 or 10,000 songs never slows a boot. The songs appear in a **STEPMANIA** folder (and VERSION filter entry), with proper jackets, previews, difficulty panels, BPM readouts and native titles where the game's fonts can draw them. Mines and ITG-style `#SPEEDS`/`#SCROLLS` gimmicks are reproduced; charts with warps or negative BPMs are left out rather than mis-played. The tool also measures each song against its own audio and brings it onto DDR World's timing convention through the game's per-song judgement offset (ITG packs are authored ~9 ms off DDR's), so they feel right at ×1.0 without hand tuning. Scores for these songs are **never submitted** to a server.
+
+The tool prints what it did (`N reused, M converted, K rejected` per pack, every rejection with its reason) and what the game will show: at most **4,000 songs** load per boot — the first 4,000 by pack and song folder name — and the tool lists the packs left out, so you can trim before booting. Run it again after adding, removing or editing a pack (a run with nothing to do takes about a second; a fresh 1,000-song library takes about half a minute to convert and a couple of minutes to measure). It refuses to run while the game is up, writes `ddr_world_hook_prep.log` next to itself, and `--help` lists its options (`--no-sync` skips the measurement pass; `--dry-run <folder> --out <dir>` converts a pack into a scratch folder with a per-chart report). Requires the **Song Limit Expansion** mod to stay on. See `stepmania/Songs/README.txt` in the release for the details and limits.
 
 ### StepManiaX Cabinet Support
 Native support for running on StepManiaX cabinets, with no configuration needed. Stage inputs and lights, as well as emulation of DDR Gold cabinet lights, are fully supported. There's even a touchscreen overlay to give you access to menu buttons, pinpads, and a card-in button.
@@ -207,7 +211,7 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **WebUI Options** | Web-portal cosmetics in-game with live previews, plus weight/calorie profile settings. |
 | **Split SSQ Auto-Discovery** | Finds split chart files (`<song>_N.ssq`) on disk instead of trusting the game's hardcoded per-version list — newer chart data loads correctly on older game builds. |
 | **Note Types Expansion** | New note types for custom charts — ITG-style **mines** are fully supported. |
-| **StepMania Packs** | Plays StepMania packs from `stepmania/Songs/` as native songs: charts, audio and art converted at boot into a cache, a STEPMANIA folder/series, mines and scroll gimmicks, auto-sync through the per-song judgement offset, score submission always suppressed. See above. |
+| **StepMania Packs** | Plays StepMania packs from `stepmania/Songs/` as native songs once `ddr_world_hook_prep.exe` has indexed them: a STEPMANIA folder/series, mines and scroll gimmicks, auto-sync through the per-song judgement offset, score submission always suppressed. See above. |
 | **Series Expansion** | Custom VERSION filter categories for custom song packs (config-driven). |
 | **Improved Song Title Sorting** | The song-select FILTER menu's MUSIC TITLE list gets one entry per letter — A to Z five per row, then OTHER — instead of three-letter groups, ahead of the unchanged kana lines. Pick one letter to see only the songs that start with it. On by default. |
 | **Folder Expansion** | Custom genre folders in the song wheel (config-driven). A folder can be marked `exclude_from_all_music` so its songs (e.g. long versions) stay out of ALL MUSIC and only appear in their own folder. |
@@ -247,7 +251,7 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
-| `stepmania_packs` | StepMania Packs: `exclude_from_all_music` (default `true` — songs only in the STEPMANIA folder), `audio_cache_mb` (converted-bank cache budget, default 1024), `auto_sync` (default `true`), `index_timeout_s` (how long the first boot waits for conversion before injecting what finished, default 30 — roughly 1,200 songs), `gimmick_policy` (`hide_chart`), `scroll_gimmicks` (default `true`). The mod toggle applies at the next launch |
+| `stepmania_packs` | StepMania Packs: `exclude_from_all_music` (default `true` — songs only in the STEPMANIA folder), `audio_cache_mb` (converted-bank cache budget, default 1024), `auto_sync` (default `true`), `gimmick_policy` (`hide_chart`), `scroll_gimmicks` (default `true`). The mod toggle applies at the next launch |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
 | `background_dancers` | Background Dancers: `style` (`stock` / `lit` / `cel` — LIGHTING STYLE), `outlines` (SCENE OUTLINES), `bpm_sync` (default `true` — dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats), `stop_slow` (default `true` — 1/12 speed through a chart STOP, as in DDR A3), `movie_mode` (`off` / `thumbnail` / `stage_screens` / `fullscreen` / `movie_only` — BACKGROUND MOVIES, default `stage_screens`, see above), `custom_content` (default `true` — also load the dancers/stages under `data_mods/custom_models/`, see above) and `big_head` (default `false` — BIG HEAD, every dancer's head at 3×). All seven are also rows under BACKGROUND DANCERS in the mod menu; the first five apply from the next song, `custom_content` at the next launch, `big_head` immediately. The former `outline_px` / `outline_px_stage` / `outline_style` / `outline_layer_colors` keys are ignored (the outline is Dancing Stage Unleashed's own) |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
@@ -316,14 +320,15 @@ The modpack is a Rust hook DLL (`cdylib`) injected into the live game process. T
 ```bash
 cargo check --target x86_64-pc-windows-msvc   # fast type check
 cargo test                                     # host tests (pure layers)
-./build.sh                                     # release build via cargo-xwin (macOS/Linux)
-./build_win7.sh                                # Windows 7-compatible build
+./build.sh                                     # release builds via cargo-xwin: DLL, updater and prep tool (ONLY=dll|updater|prep for one)
+./build_win7.sh                                # Windows 7-compatible builds: DLL, updater and prep tool (ONLY=dll|updater|prep for one)
 cargo test --manifest-path updater/Cargo.toml  # the auto-updater's host tests
-./scripts/build_release_archive.sh             # release/: zip (Win7 DLL + updater + data), bare updater exe, tester install .bat
-scripts\build_release_distribution.bat         # Windows: release\ = unzipped game-folder image (Win7 DLL + updater + data)
+./scripts/validate_prep.sh                     # the StepMania prep tool's tests (incl. the DLL's mounted suites) + a smoke dry-run
+./scripts/build_release_archive.sh             # release/: zip (Win7 DLL + updater + prep tool + data), bare exes, tester install .bat
+scripts\build_release_distribution.bat         # Windows: release\ = unzipped game-folder image (Win7 DLL + updater + prep tool + data)
 ```
 
-Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too. The auto-updater is a separate crate in `updater/` (plain Rust, no game dependencies); the release scripts build it with the same Windows 7 recipe and refuse to package any binary that would not load on Windows 7. Both release scripts ship the Background Dancers custom models pre-packed as `.arc` files (`scripts/pack_custom_models.py`); the checkout keeps them as loose folders.
+Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too. The auto-updater (`updater/`) and the StepMania prep tool (`prep/`, which mounts the DLL's own conversion code by `#[path]` so the cache it writes is exactly what the game validates) are separate crates; the release scripts build both with the same Windows 7 recipe and refuse to package any binary that would not load on Windows 7. Both release scripts ship the Background Dancers custom models pre-packed as `.arc` files (`scripts/pack_custom_models.py`); the checkout keeps them as loose folders.
 
 **Where to start reading:**
 

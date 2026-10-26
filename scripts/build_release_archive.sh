@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Build a release of the modpack: the Windows 7 builds of the hook DLL and the
-# auto-updater exe, plus the runtime data files an operator needs.
+# Build a release of the modpack: the Windows 7 builds of the hook DLL, the
+# auto-updater exe and the StepMania prep tool, plus the runtime data files an
+# operator needs.
 #
 # Output (all in release/, gitignored):
 #   ddr-world-universal-modpack-YYYYMMDD.zip   the GitHub release asset (flat:
 #                                              zip root = game folder; carries
 #                                              the updater exe so installs
-#                                              self-update)
+#                                              self-update, and the prep tool)
 #   ddr_world_hook_updater.exe                 bare copy for testers who do not
 #                                              have the updater yet
+#   ddr_world_hook_prep.exe                    bare copy of the StepMania prep tool
 #   install-update-YYYYMMDD.bat                tester one-click installer: runs
 #                                              the updater with --from-zip on
 #                                              THIS zip (same date), so private
@@ -25,10 +27,11 @@ cd "$REPO_ROOT"
 # causes the loader to reject the binary with "The procedure entry point
 # ProcessPrng could not be located". The x86_64-win7-windows-msvc target uses
 # RtlGenRandom instead. It's a tier 3 target, so std must be built from source
-# via -Z build-std. BOTH binaries below must use this recipe.
+# via -Z build-std. ALL THREE binaries below must use this recipe.
 WIN7_TARGET="x86_64-win7-windows-msvc"
 DLL="target/$WIN7_TARGET/release/ddr_world_hook.dll"
 UPDATER="updater/target/$WIN7_TARGET/release/ddr_world_hook_updater.exe"
+PREP="prep/target/$WIN7_TARGET/release/ddr_world_hook_prep.exe"
 
 RELEASE_DIR="release"
 STAMP="$(date +%Y%m%d)"
@@ -136,15 +139,27 @@ if [[ ! -f "$UPDATER" ]]; then
     exit 1
 fi
 
+echo "==> Building Windows 7 StepMania prep tool"
+(cd prep && cargo xwin build \
+    --release \
+    --target "$WIN7_TARGET" \
+    -Z build-std=std,panic_abort)
+
+if [[ ! -f "$PREP" ]]; then
+    echo "ERROR: expected build output not found: $PREP" >&2
+    exit 1
+fi
+
 echo "==> Verifying Windows 7 compatibility"
 assert_win7_safe "$DLL"
 assert_win7_safe "$UPDATER"
+assert_win7_safe "$PREP"
 
 echo "==> Staging release contents"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-cp "$DLL" "$UPDATER" "$STAGE/"
+cp "$DLL" "$UPDATER" "$PREP" "$STAGE/"
 cp mod-config.json judgement_offsets.csv README.md "$STAGE/"
 
 # data_mods/ as checked in, minus macOS metadata. Nothing else needs excluding:
@@ -183,8 +198,9 @@ sed 's/$/\r/' scripts/ddr_selection/import_a3_assets.bat \
 # StepMania packs: the empty songs root with the operator note the DLL would
 # otherwise write on first boot (same bytes — `include_str!` of this file —
 # so the updater never sees it as locally modified). Operator packs dropped
-# next to it are in neither the release nor a previous manifest, so the
-# updater's plan never touches them (updater/src/plan.rs).
+# next to it, and the cache the prep tool builds under data_mods/_cache/, are
+# in neither the release nor a previous manifest, so the updater's plan never
+# touches them (updater/src/plan.rs).
 mkdir -p "$STAGE/stepmania/Songs"
 cp src/services/stepmania/songs_readme.txt "$STAGE/stepmania/Songs/README.txt"
 
@@ -194,7 +210,7 @@ rm -f "$ARCHIVE" "$INSTALL_BAT"
 (cd "$STAGE" && zip -r -q "$REPO_ROOT/$ARCHIVE" .)
 
 echo "==> Writing tester files"
-cp "$UPDATER" "$RELEASE_DIR/"
+cp "$UPDATER" "$PREP" "$RELEASE_DIR/"
 write_install_bat "$INSTALL_BAT" "$ARCHIVE_NAME" "$BUILD_TAG"
 
 echo "Done: $RELEASE_DIR/"
