@@ -155,6 +155,27 @@ pub fn prep(argv: &[String], args: &cli::PrepArgs) -> u8 {
             }
         }
     }
+    // The series thumbnail arc for exactly the songs the game will inject
+    // (after the measurement pass: a decode failure changes the set) — the
+    // game would otherwise build it inside its first file open.
+    {
+        let budget = services::stepmania::ceiling::Budget::expanded();
+        let sel = services::stepmania::ceiling::select_loadable(&index_file.songs, &budget);
+        let kept: Vec<services::stepmania::model::SongEntry> = sel
+            .kept
+            .iter()
+            .filter_map(|&i| index_file.songs.get(i).cloned())
+            .collect();
+        match services::stepmania::thumbnail_arc::ensure_logged(&kept, "thumbnail") {
+            services::stepmania::thumbnail_arc::Outcome::UpToDate => {
+                log_info!("thumbnail arc up to date ({} member(s))", kept.len());
+            }
+            services::stepmania::thumbnail_arc::Outcome::Failed => {
+                log_warn!("could not write the thumbnail arc -- the game will build it at boot");
+            }
+            services::stepmania::thumbnail_arc::Outcome::Built { .. } => {}
+        }
+    }
     log_info!("done");
     EXIT_OK
 }

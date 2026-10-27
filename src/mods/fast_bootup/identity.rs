@@ -4,19 +4,23 @@
 //! Two responsibilities, both OFF the game thread:
 //!
 //! 1. [`resolve`] maps a registered game path (`data/mdb_apx/ssq/x.ssq`) to
-//!    its current [`Identity`] — the LayeredFS-resolved backing file's
-//!    size+mtime, or [`Identity::Absent`] — using host `std::fs` (never AVS,
-//!    which is game-thread-only) and the mod-folder override precedence via
+//!    its current [`Identity`]: for an injected StepMania SSQ the index
+//!    record's source fingerprint ([`Identity::Indexed`], no I/O); otherwise
+//!    the LayeredFS-resolved backing file's size+mtime, or
+//!    [`Identity::Absent`] — using host `std::fs` (never AVS, which is
+//!    game-thread-only) and the mod-folder override precedence via
 //!    `avs_layeredfs::mod_paths` (the established `chart_length` pattern).
 //! 2. [`spawn_verifier`] runs at mod enable: it reads + parses the bin, then
 //!    resolves + stats every cached file and publishes a
 //!    `game_path → verified?` verdict map behind a ready flag, plus stashes
 //!    the loaded [`CacheFile`] for the completion-time writer to merge over.
 //!
-//! The verifier races a ~100 ms stat sweep against the ~1 s before the boot
-//! actor's first `onUpdate`, so the map is ready by the time the pass starts
-//! (design §Error Handling: if not ready, the pass treats every item as a
-//! miss — still correct, just no replay that boot).
+//! The verifier races its stat sweep (~100 ms for the stock library, four
+//! workers) against the ~1 s before the boot actor's first `onUpdate`, so
+//! the map is normally ready by the time the pass starts. When it is not —
+//! a 14k-song library is ~15k stats, a minute or more under Wine — the pass
+//! starts with every item a miss and `mod.rs::late_replan` amends the plan
+//! for the files still ahead of the cursor the moment the map publishes.
 //!
 //! Fail-open: a missing/empty/corrupt bin publishes an empty cache + empty
 //! verdicts (full stock boot + rebuild). Pure identity/merge logic lives in
@@ -29,6 +33,7 @@ use std::time::UNIX_EPOCH;
 
 use super::cache::{self, CacheFile, CacheLoad, Identity, SlotPayload};
 use crate::services::avs_layeredfs::mod_paths;
+use crate::services::stepmania::index as stepmania_index;
 use crate::{log_info, log_warn};
 
 /// Cache directory + file (CWD-relative, like every other `data_mods/_cache`
@@ -59,10 +64,27 @@ pub fn resolve(game_path: &str) -> Identity {
         Some(r) => r,
         None => return Identity::Absent,
     };
+    // Injected StepMania SSQs: the index record's source fingerprint is the
+    // identity (see `cache::Identity::Indexed`) — no stat.
+    if let Some(basename) = cache::indexed_basename(&rel, stepmania_index::has_basename) {
+        if let Some(entry) = stepmania_index::entry_by_basename(&basename) {
+            return Identity::Indexed {
+                basename,
+                fingerprint: entry.fingerprint,
+            };
+        }
+    }
     let mod_hit =
         mod_paths::find_first_modfile(&rel).and_then(|p| stat_file(&p).map(|(s, m)| (p, s, m)));
-    let stock_path = format!("data/{}", rel);
-    let stock_hit = stat_file(&stock_path).map(|(s, m)| (stock_path.clone(), s, m));
+    // The override wins, so the stock stat is only paid when there is none
+    // (every injected StepMania SSQ resolves to its cache file; stat'ing a
+    // stock path that cannot exist doubled the verifier's work at 14k).
+    let stock_hit = if mod_hit.is_some() {
+        None
+    } else {
+        let stock_path = format!("data/{}", rel);
+        stat_file(&stock_path).map(|(s, m)| (stock_path.clone(), s, m))
+    };
     cache::resolve_identity(mod_hit, stock_hit)
 }
 
@@ -129,12 +151,15 @@ fn run_verify(stamp: u32, size: u32) {
         }
     };
 
+    // Resolve + stat every cached file on a few worker threads: one stat is
+    // ~3–10 ms under Wine, and a 14k-song library has ~15k cached files
+    // (single-threaded that is ~100 s — the pass starts ~10 s in).
+    let verdicts = verify_parallel(&loaded.entries);
+
     // Build the replay index (verdicts + payloads-by-difficulty) off-thread.
     let mut index: HashMap<String, ReplayFile> = HashMap::with_capacity(loaded.entries.len());
     let mut hits = 0usize;
-    for e in &loaded.entries {
-        let current = resolve(&e.game_path);
-        let verified = cache::identity_matches(&e.identity, &current);
+    for (e, &verified) in loaded.entries.iter().zip(&verdicts) {
         if verified {
             hits += 1;
         }
@@ -159,6 +184,66 @@ fn run_verify(stamp: u32, size: u32) {
         total,
         hits
     );
+}
+
+/// Workers for the identity sweep: a handful is plenty (the cost is
+/// per-stat latency, not CPU), and the StepMania validation sweep runs its
+/// own threads alongside.
+const VERIFY_WORKERS: usize = 4;
+
+/// `identity_matches` for every entry, in entry order, computed by
+/// [`VERIFY_WORKERS`] threads over interleaved slices. Falls back to the
+/// calling thread when a worker cannot be spawned.
+fn verify_parallel(entries: &[cache::FileEntry]) -> Vec<bool> {
+    let n = entries.len();
+    if n < VERIFY_WORKERS * 64 {
+        return entries
+            .iter()
+            .map(|e| cache::identity_matches(&e.identity, &resolve(&e.game_path)))
+            .collect();
+    }
+    let mut out = vec![false; n];
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(VERIFY_WORKERS);
+        for w in 0..VERIFY_WORKERS {
+            let entries = &entries;
+            let h = std::thread::Builder::new()
+                .name(format!("fast-bootup-verify-{w}"))
+                .spawn_scoped(scope, move || {
+                    let mut local: Vec<(usize, bool)> = Vec::with_capacity(n / VERIFY_WORKERS + 1);
+                    let mut i = w;
+                    while i < n {
+                        let e = &entries[i];
+                        local.push((
+                            i,
+                            cache::identity_matches(&e.identity, &resolve(&e.game_path)),
+                        ));
+                        i += VERIFY_WORKERS;
+                    }
+                    local
+                });
+            match h {
+                Ok(h) => handles.push(h),
+                Err(_) => {
+                    // No thread: do this worker's share inline.
+                    let mut i = w;
+                    while i < n {
+                        let e = &entries[i];
+                        out[i] = cache::identity_matches(&e.identity, &resolve(&e.game_path));
+                        i += VERIFY_WORKERS;
+                    }
+                }
+            }
+        }
+        for h in handles {
+            if let Ok(local) = h.join() {
+                for (i, v) in local {
+                    out[i] = v;
+                }
+            }
+        }
+    });
+    out
 }
 
 /// True once the verifier has published its replay index.

@@ -391,6 +391,11 @@ mod tests {
         assert_eq!(xml, expected);
         let with_bit = entry_xml(&entry(), 22, Some(10));
         assert!(with_bit.contains("<property __type=\"u32\">1024</property>"));
+        // Every opening tag is one AVS property node; the ceiling's node
+        // budget counts on this number (the yomi line is optional, so the
+        // full entry is the maximum).
+        let nodes = xml.matches('<').count() - xml.matches("</").count();
+        assert_eq!(nodes, super::super::ceiling::NODES_PER_SONG);
     }
 
     #[test]

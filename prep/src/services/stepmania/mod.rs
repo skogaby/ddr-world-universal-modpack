@@ -20,3 +20,5 @@ pub mod musicdb;
 pub mod records;
 #[path = "../../../../src/services/stepmania/sync_state.rs"]
 pub mod sync_state;
+#[path = "../../../../src/services/stepmania/thumbnail_arc.rs"]
+pub mod thumbnail_arc;

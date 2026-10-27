@@ -8,7 +8,7 @@
 //! ssq/<b>_N.ssq             per-level split files (per-chart timing songs; N = level + 1)
 //! xsb/<b>.xsb
 //! tn/<b>.dds                per-song thumbnail blob (re-packed into the arc)
-//! thumbnail/<S>.arc         ONE arc for the STEPMANIA series (+ <S>.digest)
+//! thumbnail/all.arc         ONE arc for the STEPMANIA series, built by the tool (+ all.digest)
 //! jacket/<b>_jk.arc         LRU (+ <b>_jk.ph marker when it holds the placeholder)
 //! xwb/<b>.xwb               full bank, LRU
 //! xwb/<b>.xwb.part          full bank being written progressively (ledgered under the final key)
@@ -94,13 +94,13 @@ pub fn tn_path(basename: &str) -> PathBuf {
 }
 
 #[must_use]
-pub fn thumbnail_arc_path(series: u8) -> PathBuf {
-    root().join("thumbnail").join(format!("{series}.arc"))
+pub fn thumbnail_arc_path() -> PathBuf {
+    root().join("thumbnail").join("all.arc")
 }
 
 #[must_use]
-pub fn thumbnail_digest_path(series: u8) -> PathBuf {
-    root().join("thumbnail").join(format!("{series}.digest"))
+pub fn thumbnail_digest_path() -> PathBuf {
+    root().join("thumbnail").join("all.digest")
 }
 
 /// Which bank a `sound/win/dance/<b>.xwb` open gets.

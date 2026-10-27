@@ -52,6 +52,16 @@ pub enum Identity {
     /// the zeroed/failed analysis. A file appearing later is an identity
     /// mismatch and the entry goes stale.
     Absent,
+    /// An injected StepMania SSQ: identified by its index record's source
+    /// fingerprint (`services::stepmania::model::SongEntry::fingerprint` —
+    /// simfile + audio + art stamps + the conversion format version), not
+    /// by a stat. The prep tool is the sole writer of these files and
+    /// re-converts exactly when that fingerprint changes, so the fingerprint
+    /// IS the file's identity, and verifying 15k of them costs no I/O (a
+    /// stat sweep lost the boot-pass race by a minute at 14k songs under
+    /// Wine). Corruption of the written SSQ with an unchanged index is
+    /// outside this check, as it is for the pre-flight (`quarantine.rs`).
+    Indexed { basename: String, fingerprint: u64 },
 }
 
 /// One SSQ file's cached outcomes, keyed by its registered game path
@@ -188,6 +198,14 @@ fn parse_inner(
                 }
             }
             1 => Identity::Absent,
+            2 => {
+                let basename = r.string().ok_or("bad indexed basename")?;
+                let fingerprint = r.u64().ok_or("truncated identity")?;
+                Identity::Indexed {
+                    basename,
+                    fingerprint,
+                }
+            }
             _ => return Err("unknown identity kind"),
         };
         let payload_count = r.u8().ok_or("truncated entry")?;
@@ -251,6 +269,14 @@ pub fn serialize(file: &CacheFile, gamemdx_stamp: u32, gamemdx_size: u32) -> Vec
                 out.extend_from_slice(&mtime_secs.to_le_bytes());
             }
             Identity::Absent => out.push(1),
+            Identity::Indexed {
+                basename,
+                fingerprint,
+            } => {
+                out.push(2);
+                push_string(&mut out, basename);
+                out.extend_from_slice(&fingerprint.to_le_bytes());
+            }
         }
         out.push(entry.payloads.len() as u8);
         for p in &entry.payloads {
@@ -334,8 +360,39 @@ pub fn identity_matches(cached: &Identity, current: &Identity) -> bool {
                 mtime_secs: mb,
             },
         ) => a == b && sa == sb && ma == mb,
+        (
+            Identity::Indexed {
+                basename: a,
+                fingerprint: fa,
+            },
+            Identity::Indexed {
+                basename: b,
+                fingerprint: fb,
+            },
+        ) => a == b && fa == fb,
         _ => false,
     }
+}
+
+/// The index basename an injected SSQ path refers to, given a lookup that
+/// says whether a basename is indexed: `mdb_apx/ssq/<b>.ssq` → `b`, and a
+/// split-timing file `<b>_<N>.ssq` → `b` when `b` itself is indexed (the
+/// `_N` is a level suffix only when the bare stem is a song). `None` for
+/// anything that is not an injected song's SSQ.
+pub fn indexed_basename(ssq_rel: &str, is_indexed: impl Fn(&str) -> bool) -> Option<String> {
+    let lower = ssq_rel.to_ascii_lowercase();
+    let stem = lower.strip_prefix("mdb_apx/ssq/")?.strip_suffix(".ssq")?;
+    if stem.is_empty() || stem.contains('/') {
+        return None;
+    }
+    if is_indexed(stem) {
+        return Some(stem.to_string());
+    }
+    let (base, level) = stem.rsplit_once('_')?;
+    if !level.is_empty() && level.bytes().all(|b| b.is_ascii_digit()) && is_indexed(base) {
+        return Some(base.to_string());
+    }
+    None
 }
 
 /// Merge freshly-captured entries over a loaded cache: fresh wins, keyed by
@@ -632,6 +689,20 @@ mod tests {
         assert!(!identity_matches(&a, &diff_path));
         assert!(!identity_matches(&a, &diff_size));
         assert!(!identity_matches(&a, &diff_mtime));
+        let ix = Identity::Indexed {
+            basename: "zab12c".into(),
+            fingerprint: 0xDEAD,
+        };
+        assert!(identity_matches(&ix, &ix.clone()));
+        assert!(!identity_matches(
+            &ix,
+            &Identity::Indexed {
+                basename: "zab12c".into(),
+                fingerprint: 0xBEEF,
+            }
+        ));
+        assert!(!identity_matches(&ix, &a));
+        assert!(!identity_matches(&ix, &Identity::Absent));
         assert!(identity_matches(&Identity::Absent, &Identity::Absent));
         // present↔absent never matches (either direction).
         assert!(!identity_matches(&a, &Identity::Absent));
@@ -777,6 +848,45 @@ mod tests {
                 size: 999,
                 mtime_secs: 200,
             }
+        );
+    }
+
+    #[test]
+    fn indexed_identity_round_trips_and_resolves_split_files() {
+        let file = CacheFile {
+            entries: vec![FileEntry {
+                game_path: "data/mdb_apx/ssq/zab12c.ssq".into(),
+                identity: Identity::Indexed {
+                    basename: "zab12c".into(),
+                    fingerprint: 0x0123_4567_89AB_CDEF,
+                },
+                payloads: Vec::new(),
+            }],
+        };
+        let bytes = serialize(&file, 7, 8);
+        match parse(&bytes, 7, 8) {
+            CacheLoad::Loaded(c) => assert_eq!(c, file),
+            CacheLoad::Empty { reason } => panic!("{reason}"),
+        }
+        let indexed = |b: &str| b == "zab12c" || b == "a_1";
+        assert_eq!(
+            indexed_basename("mdb_apx/ssq/zab12c.ssq", indexed).as_deref(),
+            Some("zab12c")
+        );
+        assert_eq!(
+            indexed_basename("mdb_apx/ssq/ZAB12C_3.ssq", indexed).as_deref(),
+            Some("zab12c")
+        );
+        // A song whose basename itself ends in `_<digit>` is matched whole.
+        assert_eq!(
+            indexed_basename("mdb_apx/ssq/a_1.ssq", indexed).as_deref(),
+            Some("a_1")
+        );
+        assert_eq!(indexed_basename("mdb_apx/ssq/puty.ssq", indexed), None);
+        assert_eq!(indexed_basename("mdb_apx/ssq/zab12c_x.ssq", indexed), None);
+        assert_eq!(
+            indexed_basename("sound/win/dance/zab12c.xsb", indexed),
+            None
         );
     }
 }

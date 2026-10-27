@@ -70,6 +70,10 @@ fn init() {
     if !services::ident_override::init() {
         log_warn!("ident_override unavailable -- the game will identify with its stock rev");
     }
+    // The step-data record-pool patch must precede `Application::onBoot`
+    // (the loader is built there); `ident_override`'s ea3_boot detour is the
+    // moment gamemdx is mapped but has not run (see song_limit_expansion).
+    mods::song_limit_expansion::register_ea3_boot_hook();
     profiling::tick("ident_override");
 
     // 0. Centralized config store. Must be loaded BEFORE the LayeredFS init

@@ -86,10 +86,16 @@ static CACHE_INDEX: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashS
 /// `_cache/<ifs_mod_path>/<file>`, with some nested arc/ifs subtrees), indexing
 /// every regular file by its full relative path.
 ///
-/// `_cache/custom_models/` is skipped: it holds the Background Dancers cache
-/// arcs (opened by the FileManager through the CRT, never through this
-/// texture path) and grows with the installed content — keeping it out keeps
-/// this race-critical walk independent of how many models are installed.
+/// `_cache/custom_models/` and `_cache/stepmania/` are skipped: the former
+/// holds the Background Dancers cache arcs (opened by the FileManager through
+/// the CRT, never through this texture path), the latter the StepMania pack
+/// cache (SSQ/XSB/XWB/thumbnails, served by the StepMania providers — ~3
+/// files per song, 42k at a 14k-song library). Both grow with the installed
+/// content; keeping them out keeps this race-critical walk — it runs before
+/// the AVS hooks install, and the game opens `startup.arc` ~3 s after the
+/// DLL loads — independent of how much content is installed (cabinet run
+/// 2026-10-26: a 1 s walk over the StepMania cache under Wine lost the
+/// `startup.arc` open, so nothing was injected).
 pub fn build_cache_index() {
     let mut index = CACHE_INDEX.lock().unwrap();
     index.clear();
@@ -103,7 +109,7 @@ pub fn build_cache_index() {
 }
 
 /// `_cache` subfolders [`build_cache_index`] never descends into.
-const CACHE_INDEX_SKIP: &[&str] = &["custom_models"];
+const CACHE_INDEX_SKIP: &[&str] = &["custom_models", "stepmania"];
 
 fn index_dir_recursive(dir: &std::path::Path, index: &mut HashSet<String>, count: &mut usize) {
     let entries = match std::fs::read_dir(dir) {

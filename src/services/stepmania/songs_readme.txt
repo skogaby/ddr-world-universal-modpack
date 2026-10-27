@@ -21,10 +21,17 @@ a minute to convert and a couple of minutes to measure. It refuses to run
 while the game is running.
 
 What the game loads
-- At most 4,000 songs per boot: the first 4,000 by pack and song folder name.
-  The tool tells you how many you have and which packs are left out, so you
-  can trim before booting. (The game's song database has a fixed capacity;
-  the modpack's Song Limit Expansion mod must stay on.)
+- There is a per-boot ceiling of 30,000 injected songs (the game's wheel
+  thumbnail table cannot hold more): the first N by pack and song folder
+  name. The tool tells you how many you have and which packs are left out,
+  so you can trim before booting. The modpack's Song Limit Expansion mod
+  must stay on: it lifts five of the game's fixed-size limits at boot, and
+  with it off nothing is injected.
+- Every thumbnail stays in video memory while the game runs (about 18 KB per
+  song, so a 14,000-song library takes ~250 MB), and the game's own
+  one-time analysis of newly indexed charts runs on the first boot after the
+  tool (about a minute per 10,000 songs); every boot after that replays it
+  from the modpack's cache and is as fast as a stock boot.
 - A song whose files changed since the last tool run is skipped by the game
   (one line in the game log says how many, and to run the tool again).
 

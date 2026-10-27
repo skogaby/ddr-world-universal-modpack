@@ -13,10 +13,26 @@
 //! Texture availability is checked lazily — if the PNG hasn't finished
 //! loading yet (async worker thread), the mine render pass is skipped
 //! that frame. No crash, no blocking.
+//!
+//! ## When the load request is issued
+//!
+//! The `FileManager::Load` calls are queued to the render thread
+//! (`widget_renderer::run_on_render_thread`), never made from the DLL's
+//! init thread. `enable()` can run while the game thread is still inside
+//! `Application::onBoot`'s blocking drain of the step-data manager (the
+//! `startup.arc` open; the DLL's own transforms hold it for seconds on a
+//! large StepMania library), and that drain pumps EVERY pending record —
+//! including ours. The PngFileCallback then creates the D3D texture, which
+//! takes the renderer's device mutex; before the device exists that handle
+//! is NULL and the callback spins on `WaitForSingleObject(NULL, 10)`
+//! forever, on the game thread, with no window (cabinet run 2026-10-26,
+//! deploy #7). The first frame dispatch cannot happen before the device
+//! exists, so a frame-pump job is the earliest safe moment.
 
 use std::cell::Cell;
 use std::ffi::CString;
 
+use crate::services::widget_renderer;
 use crate::{log_info, log_warn};
 
 /// Function-pointer types for the engine's file/resource API.
@@ -95,38 +111,62 @@ impl MineTextureLoader {
         }
     }
 
-    /// Request the engine to load all three mine PNG variants. Non-blocking —
-    /// the actual texture registration happens asynchronously on a worker
-    /// thread. Call once at mod enable time.
+    /// Request the engine to load all three mine PNG variants. Non-blocking:
+    /// the `Load` calls are queued to the render thread (see the module doc
+    /// for why they must not be made from here) and the texture
+    /// registration itself happens asynchronously on the engine's worker.
+    /// Call once at mod enable time.
     pub fn request_load_all(&mut self) {
         if self.file_manager_singleton.is_null() {
             log_warn!("MineTextureLoader: file manager singleton is null — skipping load");
             return;
         }
 
-        for (i, path) in MINE_TEX_PATHS.iter().enumerate() {
-            if self.load_requested[i] {
-                continue;
+        let mut pending: Vec<usize> = Vec::new();
+        for (i, requested) in self.load_requested.iter_mut().enumerate() {
+            if !*requested {
+                pending.push(i);
+                *requested = true;
             }
-            let c_path = match CString::new(*path) {
-                Ok(s) => s,
-                Err(_) => {
-                    log_warn!("MineTextureLoader: invalid path string for variant {}", i);
-                    continue;
-                }
-            };
-            let handle = unsafe { (self.file_load)(self.file_manager_singleton, c_path.as_ptr()) };
-            if handle == -1 {
-                log_warn!("MineTextureLoader: load returned -1 for {}", path);
-            } else {
-                log_info!(
-                    "MineTextureLoader: requested load for {} (handle={})",
-                    path,
-                    handle,
-                );
-            }
-            self.load_requested[i] = true;
         }
+        if pending.is_empty() {
+            return;
+        }
+
+        let file_load = self.file_load;
+        // Raw pointers are not `Send`; the singleton is a process-lifetime
+        // game object, so carrying its address through the queue is sound.
+        let manager = self.file_manager_singleton as usize;
+        log_info!(
+            "MineTextureLoader: {} load(s) queued for the first frame dispatch",
+            pending.len()
+        );
+        widget_renderer::run_on_render_thread(move || {
+            let manager = manager as *mut u8;
+            for i in pending {
+                let path = MINE_TEX_PATHS[i];
+                let c_path = match CString::new(path) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log_warn!("MineTextureLoader: invalid path string for variant {}", i);
+                        continue;
+                    }
+                };
+                // SAFETY: `manager` is the live FileManager singleton and
+                // `file_load` the AOB-resolved member with this prototype;
+                // this runs on the render thread, after the first frame.
+                let handle = unsafe { (file_load)(manager, c_path.as_ptr()) };
+                if handle == -1 {
+                    log_warn!("MineTextureLoader: load returned -1 for {}", path);
+                } else {
+                    log_info!(
+                        "MineTextureLoader: requested load for {} (handle={})",
+                        path,
+                        handle,
+                    );
+                }
+            }
+        });
         // NOTE: hashes are computed lazily on first texture lookup —
         // see `ensure_hashes`. Calling `texture_hash` here at enable time
         // can crash because the game's resource-manager global it reads

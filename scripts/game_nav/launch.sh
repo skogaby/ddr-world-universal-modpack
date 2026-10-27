@@ -34,11 +34,15 @@ cd "$DDR_DIR"
 # audio-renderer enumeration, crashing the first movie-graph build (stack:
 # winmm←devenum←quartz). Game audio is WASAPI and unaffected. Matches the
 # maintainer's run_ddr alias.
+# -z (not -k) loads the hook DLL EARLY, before the launcher boots ea3: with -k
+# the DLL arrives moments before `ea3_boot` and LayeredFS can miss the game's
+# `startup.arc` open (no injected music-DB content; FastBootup WARNs). -z is
+# what the README installs and what the maintainer's cabinet runs use.
 nohup "$WINE_BIN" --bottle bemani --wait-children \
   'C:\ddr_world\contents\spice64.exe' \
   -runas user -w -p 01201000026FDC3AB849 \
   -url http://127.0.0.1:5720 -api "$PORT" "${APIPASS_ARGS[@]}" \
-  -icmphook -K ddr_world_hook.dll -audiohookdisable > "$LOG" 2>&1 &
+  -icmphook -z ddr_world_hook.dll -audiohookdisable > "$LOG" 2>&1 &
 echo "Launched (pid $!). Wine output: $LOG"
 
 echo "Waiting for SpiceAPI..."

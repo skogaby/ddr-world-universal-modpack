@@ -7,15 +7,17 @@
 //! ## Boot
 //! [`load`] (step 0', `early_init`) parses `index.bin` synchronously — a few
 //! ms for thousands of records — and publishes every record to the lookup
-//! maps so the resolver and the mods can answer at once. [`validate_async`]
-//! then re-checks each record on a read-only thread against the disk
-//! (`records.rs`: the three artefacts exist, the simfile/audio/art stamps
-//! still hash to the record's fingerprint — `validation.rs` decides) and
-//! removes the failures; the `startup.arc` fingerprint waits for it through
-//! [`wait_validated`] (bounded; records not reached by the cap are dropped
-//! too) so the music DB never lists a song whose chart or audio changed
-//! under the cache. One WARN per boot tallies what was dropped and names
-//! the tool.
+//! maps; the `startup.arc` open injects from that set WITHOUT waiting (a
+//! 14,000-song library costs the open nothing beyond the transform itself).
+//! [`validate_async`] re-checks each record on read-only, below-normal
+//! worker threads against the disk (`records.rs`: the three artefacts exist,
+//! the simfile/audio/art stamps still hash to the record's fingerprint —
+//! `validation.rs` decides); when the pass finishes, the records that failed
+//! are removed from the maps and handed to `super::on_validation_complete`,
+//! which hides them in the music DB (corruption flag → gone at the next
+//! wheel rebuild) with one WARN naming the tool. The normal case — the tool
+//! just ran — therefore costs the boot nothing; the stale case converges a
+//! few seconds after boot instead of blocking it.
 //!
 //! Nothing here writes `index.bin`. A bank that fails to decode at play is
 //! flagged for the SESSION only ([`mark_audio_failed_session`]); the tool's
@@ -25,8 +27,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use crate::core::art;
 use crate::core::art::source::SourceKind;
@@ -46,45 +49,53 @@ pub const MAX_ART_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Default)]
 struct State {
     validated: bool,
-    /// Records validated and kept so far (final once `validated`).
+    /// The loaded records; the failed ones are removed when validation
+    /// completes.
     songs: Vec<Arc<SongEntry>>,
-    /// Loaded records the validation thread has not reached yet.
+    /// Loaded records the validation workers have not reached yet.
     pending: Vec<Arc<SongEntry>>,
+    /// Records that failed validation (removed from `songs` at completion).
+    dropped: Vec<Arc<SongEntry>>,
     tally: DropTally,
     packs: usize,
     rejected: usize,
+    /// Records `index.bin` held.
+    loaded: usize,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     validated: false,
     songs: Vec::new(),
     pending: Vec::new(),
+    dropped: Vec::new(),
     tally: DropTally {
         artefacts: 0,
         sources: 0,
         changed: 0,
-        unvalidated: 0,
     },
     packs: 0,
     rejected: 0,
+    loaded: 0,
 });
-static READY: Condvar = Condvar::new();
 static BY_BASENAME: RwLock<Option<HashMap<String, Arc<SongEntry>>>> = RwLock::new(None);
 static BY_MCODE: RwLock<Option<HashMap<u32, Arc<SongEntry>>>> = RwLock::new(None);
 /// Basenames whose bank build failed this session (never persisted).
 static AUDIO_FAILED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-/// A point-in-time view of the index.
+/// A point-in-time view of the index: every loaded record until validation
+/// completes, then the records that passed.
 #[derive(Clone, Debug)]
 pub struct IndexSnapshot {
     pub songs: Arc<Vec<Arc<SongEntry>>>,
-    /// The validation pass has finished (or been given up on).
+    /// The validation pass has finished.
     pub validated: bool,
     pub packs: usize,
     /// Rejections the tool cached (reported by the tool, counted here).
     pub rejected: usize,
     /// Records dropped by validation this boot.
     pub dropped: usize,
+    /// Records `index.bin` held.
+    pub loaded: usize,
 }
 
 impl IndexSnapshot {
@@ -102,10 +113,11 @@ fn snapshot_locked(st: &State) -> IndexSnapshot {
         packs: st.packs,
         rejected: st.rejected,
         dropped: st.tally.total(),
+        loaded: st.loaded,
     }
 }
 
-/// The index as it is right now (possibly not yet validated).
+/// The index as it is right now (the loaded set until validation finishes).
 #[must_use]
 pub fn snapshot() -> IndexSnapshot {
     match STATE.lock() {
@@ -117,37 +129,6 @@ pub fn snapshot() -> IndexSnapshot {
 #[must_use]
 pub fn is_validated() -> bool {
     STATE.lock().map(|s| s.validated).unwrap_or(false)
-}
-
-/// Block until validation finishes or `cap` passes; records the thread had
-/// not reached by then are dropped (counted in the WARN) so the snapshot
-/// returned is final for this boot either way.
-#[must_use]
-pub fn wait_validated(cap: Duration) -> IndexSnapshot {
-    let Ok(guard) = STATE.lock() else {
-        return snapshot();
-    };
-    let (mut st, _) = READY
-        .wait_timeout_while(guard, cap, |s| !s.validated)
-        .unwrap_or_else(|p| p.into_inner());
-    if !st.validated {
-        // The thread may still be running; it finds nothing left to take.
-        let pending: Vec<Arc<SongEntry>> = std::mem::take(&mut st.pending);
-        for e in &pending {
-            unpublish(e);
-        }
-        st.tally.unvalidated += pending.len();
-        st.validated = true;
-        if !st.tally.is_empty() {
-            log_warn!(
-                "StepMania: validation did not finish within {} s -- {}",
-                cap.as_secs(),
-                st.tally
-            );
-        }
-        READY.notify_all();
-    }
-    snapshot_locked(&st)
 }
 
 /// The entry for an injected basename.
@@ -268,7 +249,7 @@ pub fn load() -> LoadReport {
     };
     let rejects = file.rejects.len();
     // Rejected-on-an-earlier-run songs stay out; the tool reports them.
-    let mut songs: Vec<Arc<SongEntry>> = file
+    let songs: Vec<Arc<SongEntry>> = file
         .songs
         .into_iter()
         .filter(|s| !s.audio_failed)
@@ -282,13 +263,13 @@ pub fn load() -> LoadReport {
     if let Ok(mut st) = STATE.lock() {
         st.packs = packs.len();
         st.rejected = rejects;
-        // Reverse so `pop` validates in file (pack/folder) order.
-        songs.reverse();
-        st.pending = songs;
+        st.loaded = n;
+        // The workers `pop` the queue; reversed so they go in file order.
+        let mut pending = songs.clone();
+        pending.reverse();
+        st.pending = pending;
+        st.songs = songs;
         st.validated = n == 0;
-    }
-    if n == 0 {
-        READY.notify_all();
     }
     LoadReport {
         source: LoadSource::Loaded,
@@ -302,43 +283,119 @@ fn settle_empty() {
     if let Ok(mut st) = STATE.lock() {
         st.validated = true;
     }
-    READY.notify_all();
 }
 
-/// Spawn the read-only validation thread over the loaded records. No-op
-/// when nothing was loaded (then the index is already "validated").
+/// Validation worker count: CPU count clamped to 2..=6 (stat-bound work;
+/// under Wine a stat is several ms).
+fn validation_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 6)
+}
+
+/// Workers still running; the last one to finish settles the state.
+static VALIDATORS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static VALIDATION_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn lower_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+/// Spawn the read-only validation workers over the loaded records. Nothing
+/// waits on them; no-op when nothing was loaded.
 pub fn validate_async(root: &Path) {
     if is_validated() {
         return;
     }
-    let root = root.to_path_buf();
-    let spawned = std::thread::Builder::new()
-        .name("stepmania-validate".into())
-        .spawn(move || {
-            let result = panic::catch_unwind(AssertUnwindSafe(|| validate(&root)));
-            if result.is_err() {
-                log_warn!(
-                    "StepMania: validation panicked -- dropping every record not yet checked"
-                );
-                let _ = wait_validated(Duration::ZERO);
-            }
-        })
-        .is_ok();
-    if !spawned {
-        log_warn!("StepMania: could not start the validation thread -- nothing injected this boot");
-        let _ = wait_validated(Duration::ZERO);
+    let pending = STATE.lock().map(|st| st.pending.len()).unwrap_or(0);
+    let workers = validation_workers().min(pending.max(1));
+    if let Ok(mut s) = VALIDATION_STARTED.lock() {
+        *s = Some(Instant::now());
+    }
+    VALIDATORS_ACTIVE.store(workers, Ordering::Release);
+    let mut spawned = 0usize;
+    for i in 0..workers {
+        let root = root.to_path_buf();
+        let ok = std::thread::Builder::new()
+            .name(format!("stepmania-validate-{i}"))
+            .spawn(move || {
+                lower_priority();
+                if panic::catch_unwind(AssertUnwindSafe(|| validate(&root))).is_err() {
+                    log_warn!(
+                        "StepMania: a validation worker panicked -- the records it had not reached stay as loaded"
+                    );
+                }
+                validator_done();
+            })
+            .is_ok();
+        if ok {
+            spawned += 1;
+        }
+    }
+    for _ in spawned..workers {
+        validator_done(); // threads that never started
+    }
+    if spawned == 0 {
+        log_warn!("StepMania: could not start the validation threads -- records stay as loaded");
     }
 }
 
-/// Take the next unvalidated record, or `None` when the queue is empty (or
-/// the wait expired and emptied it).
+/// A worker finished; the last one removes the failed records, settles the
+/// state, logs, and hands the dropped mcodes to the service for hiding.
+fn validator_done() {
+    if VALIDATORS_ACTIVE.fetch_sub(1, Ordering::AcqRel) != 1 {
+        return;
+    }
+    let (dropped, kept, tally) = {
+        let Ok(mut st) = STATE.lock() else {
+            return;
+        };
+        if st.validated {
+            return;
+        }
+        let dropped = std::mem::take(&mut st.dropped);
+        if !dropped.is_empty() {
+            let gone: HashSet<&str> = dropped.iter().map(|e| e.basename.as_str()).collect();
+            st.songs.retain(|e| !gone.contains(e.basename.as_str()));
+        }
+        st.pending = Vec::new();
+        st.validated = true;
+        (dropped, st.songs.len(), st.tally)
+    };
+    let elapsed_ms = VALIDATION_STARTED
+        .lock()
+        .ok()
+        .and_then(|s| *s)
+        .map(|s| s.elapsed().as_millis())
+        .unwrap_or(0);
+    if !tally.is_empty() {
+        log_warn!("StepMania: {}", tally);
+    }
+    log_info!(
+        "StepMania: index validated -- {} song(s) kept, {} dropped, {} ms on {} thread(s)",
+        kept,
+        dropped.len(),
+        elapsed_ms,
+        validation_workers()
+    );
+    let mcodes: Vec<u32> = dropped.iter().map(|e| e.mcode).collect();
+    super::on_validation_complete(&mcodes);
+}
+
+/// Take the next unvalidated record, or `None` when the queue is empty.
 fn next_pending() -> Option<Arc<SongEntry>> {
     STATE.lock().ok()?.pending.pop()
 }
 
+/// One worker's loop: validate records until the queue is empty.
 fn validate(root: &Path) {
-    let started = Instant::now();
-    let (mut kept, mut dropped) = (0usize, 0usize);
     while let Some(entry) = next_pending() {
         let song_dir = song_dir_of(root, &entry);
         let simfile: Option<PathBuf> = convert::find_simfile(&song_dir);
@@ -349,50 +406,14 @@ fn validate(root: &Path) {
                 .as_deref()
                 .and_then(|sf| warm_fingerprint(root, &song_dir, sf, &entry)),
         };
-        let verdict = validation::verdict(&probe, entry.fingerprint);
-        if let Verdict::Dropped(_) = verdict {
+        if let Verdict::Dropped(cause) = validation::verdict(&probe, entry.fingerprint) {
             unpublish(&entry);
-        }
-        let Ok(mut st) = STATE.lock() else {
-            return;
-        };
-        if st.validated {
-            // The wait expired first and settled the state; the record in
-            // flight was already counted as unvalidated — take it out too.
-            drop(st);
-            unpublish(&entry);
-            return;
-        }
-        match verdict {
-            Verdict::Keep => {
-                st.songs.push(entry);
-                kept += 1;
-            }
-            Verdict::Dropped(cause) => {
+            if let Ok(mut st) = STATE.lock() {
                 st.tally.record(cause);
-                dropped += 1;
+                st.dropped.push(entry);
             }
         }
     }
-    let Ok(mut st) = STATE.lock() else {
-        return;
-    };
-    if st.validated {
-        return;
-    }
-    st.validated = true;
-    let tally = st.tally;
-    drop(st);
-    READY.notify_all();
-    if !tally.is_empty() {
-        log_warn!("StepMania: {}", tally);
-    }
-    log_info!(
-        "StepMania: index validated -- {} song(s) kept, {} dropped, {} ms",
-        kept,
-        dropped,
-        started.elapsed().as_millis()
-    );
 }
 
 // ---------------------------------------------------------------------

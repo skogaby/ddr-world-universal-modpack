@@ -17,6 +17,19 @@
 //!      that address lies inside our own DLL (so we know instantly whether the
 //!      fault is our code or the game's), then lets the default handler run.
 //!
+//!   3. [`install`] also registers a FIRST-CHANCE vectored handler that logs
+//!      the first few MSVC C++ throws (`0xE06D7363`) of the process with a
+//!      backtrace. The game's own `catch (...)` / libavs's thread-task
+//!      handler swallow those before any top-level filter sees them, and an
+//!      AVS thread task that throws takes the process down with nothing but
+//!      `W:EXCEPTION: thread-task.c:48` in the log (cabinet run 2026-10-26).
+//!      Bounded to [`MAX_CXX_LOGGED`] records so a game that throws for
+//!      control flow cannot flood the log.
+//!
+//! Both handlers append a `RtlCaptureStackBackTrace` of the faulting thread
+//! as `module+offset` frames (the filter runs on that thread, below the
+//! dispatcher, so the faulting frames are still on the stack).
+//!
 //! Everything here is best-effort and panic-free: the filter runs in a broken
 //! process, so it touches only raw pointers + a file handle, never allocates
 //! through paths that could re-fault, and never itself panics across the
@@ -60,8 +73,11 @@ type TopLevelFilter = Option<unsafe extern "system" fn(info: *const ExceptionPoi
 
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 
+type VectoredHandler = Option<unsafe extern "system" fn(info: *mut ExceptionPointers) -> i32>;
+
 extern "system" {
     fn SetUnhandledExceptionFilter(filter: TopLevelFilter) -> TopLevelFilter;
+    fn AddVectoredExceptionHandler(first: u32, handler: VectoredHandler) -> *mut c_void;
 }
 
 /// Write one line to the dedicated crash log with an explicit flush + fsync, so
@@ -138,7 +154,84 @@ unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i3
         thread.name().unwrap_or("<unnamed>"),
         thread.id(),
     ));
+    crash_log(&format!("[DDR-Hook]   backtrace: {}", backtrace_line()));
     EXCEPTION_CONTINUE_SEARCH
+}
+
+/// Most first-chance exceptions the vectored handler records per process.
+const MAX_CXX_LOGGED: usize = 8;
+static CXX_LOGGED: AtomicUsize = AtomicUsize::new(0);
+const EXCEPTION_CXX: u32 = 0xE06D7363;
+
+/// First-chance vectored handler: records the first [`MAX_CXX_LOGGED`]
+/// C++ throws / hardware faults with a backtrace, then stays out of the way.
+/// Never handles.
+unsafe extern "system" fn cxx_throw_logger(info: *mut ExceptionPointers) -> i32 {
+    if info.is_null() || (*info).exception_record.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    let rec = &*(*info).exception_record;
+    let code = rec.exception_code;
+    // C++ throws and the hardware faults a `__except` may swallow (libavs's
+    // thread-task handler turns an AV in a task into a re-raise with no
+    // trace of the original site). Breakpoints, thread-name and other
+    // informational codes stay out.
+    let interesting = matches!(
+        code,
+        EXCEPTION_CXX | 0xC0000005 | 0xC0000094 | 0xC000001D | 0xC00000FD | 0xC0000025
+    );
+    if !interesting {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    let n = CXX_LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n >= MAX_CXX_LOGGED {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    let addr = rec.exception_address as usize;
+    let site = match module_of(addr) {
+        Some((name, rva)) => format!("{name}+0x{rva:X}"),
+        None => format!("0x{addr:X}"),
+    };
+    let thread = std::thread::current();
+    crash_log(&format!(
+        "[DDR-Hook] first-chance {} (0x{:08X}) #{} at {} on thread '{}' ({:?}) -- backtrace: {}",
+        exception_name(code),
+        code,
+        n + 1,
+        site,
+        thread.name().unwrap_or("<unnamed>"),
+        thread.id(),
+        backtrace_line()
+    ));
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+/// The current thread's stack as `module+0xoff` frames (innermost first),
+/// skipping this function's own frames. Best-effort; empty when the unwinder
+/// gives nothing.
+fn backtrace_line() -> String {
+    use windows::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+    let mut frames = [std::ptr::null_mut::<c_void>(); 48];
+    let n = unsafe { RtlCaptureStackBackTrace(1, &mut frames, None) } as usize;
+    let mut out = String::new();
+    for &f in frames.iter().take(n) {
+        let addr = f as usize;
+        if !out.is_empty() {
+            out.push_str(" < ");
+        }
+        if in_our_dll(addr) {
+            out.push_str(&format!(
+                "ddr_world_hook+0x{:X}",
+                addr.wrapping_sub(DLL_BASE.load(Ordering::Relaxed))
+            ));
+        } else {
+            match module_of(addr) {
+                Some((name, rva)) => out.push_str(&format!("{name}+0x{rva:X}")),
+                None => out.push_str(&format!("0x{addr:X}")),
+            }
+        }
+    }
+    out
 }
 
 /// Best-effort: the module containing `addr` (file name only) and the
@@ -185,6 +278,9 @@ pub fn install() {
         record_dll_bounds();
         unsafe {
             SetUnhandledExceptionFilter(Some(exception_filter));
+            // Last in the chain (first = 0): spice2x's and the game's own
+            // vectored handlers keep their priority; we only observe.
+            AddVectoredExceptionHandler(0, Some(cxx_throw_logger));
         }
         // Announce via the durable log so a crash file always has a header line
         // with a timestamp-adjacent marker (the normal log carries the wall clock).

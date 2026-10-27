@@ -53,7 +53,7 @@ use crate::mods::mod_trait::ModContext;
 use crate::services::judge_hook::{self, Priority};
 use crate::services::{scene_manager, stage_records};
 use crate::types::scenes::scene;
-use crate::{log_info, log_warn};
+use crate::{log_debug, log_info, log_warn};
 
 // `ddr::player::Option` is inlined into the side context (PlayerWork) at a
 // BUILD-DEPENDENT offset (0xE0 on 20260324+, 0xF0 on 20250805 / 20260224) —
@@ -188,7 +188,10 @@ pub fn on_ssq_open(norm_path: &str) {
     };
     if let Ok(mut guard) = LOCKED_CODE.lock() {
         if guard.as_deref() != Some(basename) {
-            log_info!("judgement_offsets: song identity '{}' (ssq open)", basename);
+            // DEBUG: the boot pass opens every SSQ in the music DB (15k+
+            // lines at a 14k-song library); the dance-bank line below is the
+            // one per stage load that matters.
+            log_debug!("judgement_offsets: song identity '{}' (ssq open)", basename);
             *guard = Some(basename.to_string());
         }
     }

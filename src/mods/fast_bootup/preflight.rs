@@ -1,14 +1,15 @@
 //! Background pre-flight of injected (StepMania) SSQ files.
 //!
 //! The quarantine check (`quarantine.rs`, `mod.rs` → `preflight_injected`)
-//! reads and walks every injected file the step-data cache cannot vouch
-//! for. Done at plan build that is game-thread I/O on the loading screen —
-//! 636 files took 2.9 s on a cold-cache boot. This thread does the same
-//! check right after mod enable, from the songs' index records (no work list
-//! needed), and publishes one verdict per file name as it goes; the plan
-//! build only looks verdicts up and checks inline just the files the thread
-//! has not reached yet. It never waits: a slow thread costs the old inline
-//! time for its unfinished tail, never more.
+//! reads and walks injected files the step-data cache cannot vouch for.
+//! Done at plan build that would be game-thread I/O on the loading screen
+//! (636 files took 2.9 s on a cold-cache boot; 14,000 under Wine never
+//! finished). This thread does the check right after mod enable, from the
+//! songs' index records (no work list needed), and publishes one verdict
+//! per file name as it goes; the plan build only looks verdicts up and
+//! TRUSTS the files the thread has not reached — the index validated them
+//! at boot and the prep tool wrote them after the same `check_ssq`. It
+//! never waits and never costs the game thread anything.
 //!
 //! The file's identity cannot change between the two (the prep tool wrote
 //! the SSQs before the game started and nothing in the game ever rewrites

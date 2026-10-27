@@ -154,6 +154,12 @@ impl Mod for StepmaniaPacksMod {
 fn apply_visibility_guards(entries: &[std::sync::Arc<stepmania::model::SongEntry>]) {
     let mcodes: Vec<u32> = entries.iter().map(|e| e.mcode).collect();
     stepmania::hide::enforce(&mcodes);
+    // Records the background validation has dropped so far (later drops are
+    // hidden by the validator itself now that the DB exists).
+    let dropped = stepmania::take_validation_drops();
+    if !dropped.is_empty() {
+        stepmania::hide::hide_unservable(&dropped, "changed or missing since the last prep run");
+    }
     if !stepmania::ssq_split::is_registered() {
         let split: Vec<u32> = entries
             .iter()

@@ -36,6 +36,10 @@ impl Sink for ConsoleSink {
             .is_some_and(|n| self.converted.load(Ordering::Relaxed) >= n)
     }
 
+    fn scanning(&self, packs: usize, songs: usize) {
+        log_info!("scanning ... {songs} song(s) in {packs} pack(s) so far");
+    }
+
     fn discovered(&self, packs: usize, songs: usize, to_convert: usize) {
         self.packs_total.store(packs, Ordering::Relaxed);
         if to_convert == 0 {
@@ -216,13 +220,12 @@ pub fn index_summary(o: &Outcome) -> String {
 }
 
 /// What the game will inject from `entries`, as console lines, plus the
-/// selection itself (the measurement pass works on the same kept set).
+/// selection itself (the measurement pass and the thumbnail arc work on the
+/// same kept set). `audio_failed` records are excluded exactly as the DLL's
+/// loader excludes them, so both sides select the same set.
 pub fn ceiling_report(entries: &[SongEntry], song_limit_enabled: bool) -> (Vec<String>, Selection) {
-    let budget = Budget {
-        arena_bytes: ceiling::EXPANDED_ARENA_BYTES,
-        max_songs: ceiling::MAX_INJECTED_SONGS,
-    };
-    let sel = ceiling::select(entries, &budget);
+    let budget = Budget::expanded();
+    let sel = ceiling::select_loadable(entries, &budget);
     let mut lines = Vec::new();
     if entries.is_empty() {
         lines.push("the game will inject no StepMania songs (none indexed)".to_string());
@@ -234,21 +237,56 @@ pub fn ceiling_report(entries: &[SongEntry], song_limit_enabled: bool) -> (Vec<S
             entries.len()
         ));
     }
-    if sel.over_count == 0 {
+    if sel.left_out() == 0 {
         lines.push(format!(
-            "the game will inject all {} indexed song(s) (ceiling {})",
+            "the game will inject all {} indexed song(s) (ceiling {} songs / {} chart files)",
             sel.kept.len(),
-            budget.max_songs
+            budget.max_songs,
+            budget.file_budget()
         ));
         return (lines, sel);
     }
-    lines.push(format!(
-        "{} indexed song(s) exceed the {}-song ceiling: the game injects the first {} by pack/folder name and leaves {} out",
-        entries.len(),
-        budget.max_songs,
-        sel.kept.len(),
-        sel.over_count
-    ));
+    if sel.over_pool > 0 {
+        lines.push(format!(
+            "{} indexed song(s) register more chart files than the game's loader can hold ({} after the stock songs): the game injects the first {} by pack/folder name and leaves {} out",
+            entries.len(),
+            budget.file_budget(),
+            sel.kept.len(),
+            sel.left_out()
+        ));
+    } else if sel.over_textures > 0 {
+        lines.push(format!(
+            "{} indexed song(s) need more wheel thumbnails than the game's texture table holds ({} after the stock set): the game injects the first {} by pack/folder name and leaves {} out",
+            entries.len(),
+            budget.texture_budget(),
+            sel.kept.len(),
+            sel.left_out()
+        ));
+    } else if sel.over_arc > 0 {
+        lines.push(format!(
+            "{} indexed song(s) need a thumbnail-arc header larger than the game's arc loader reads ({} KiB): the game injects the first {} by pack/folder name and leaves {} out",
+            entries.len(),
+            budget.arc_chunk_bytes >> 10,
+            sel.kept.len(),
+            sel.left_out()
+        ));
+    } else if sel.over_nodes > 0 {
+        lines.push(format!(
+            "{} indexed song(s) exceed the music DB's {}-song node budget: the game injects the first {} by pack/folder name and leaves {} out",
+            entries.len(),
+            budget.node_budget(),
+            sel.kept.len(),
+            sel.left_out()
+        ));
+    } else {
+        lines.push(format!(
+            "{} indexed song(s) exceed the {}-song ceiling: the game injects the first {} by pack/folder name and leaves {} out",
+            entries.len(),
+            budget.max_songs,
+            sel.kept.len(),
+            sel.over_count
+        ));
+    }
     // Per pack: kept / total, for the packs that lost songs.
     let mut per_pack: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for e in entries {
@@ -310,11 +348,13 @@ mod tests {
 
     #[test]
     fn report_names_the_packs_left_out() {
-        // 4,010 songs: pack "A" 4,000 + pack "B" 10 → B wholly left out.
-        let mut e: Vec<SongEntry> = (0..4_000u32)
+        // ceiling + 10 songs: pack "A" fills the ceiling, pack "B" (10) is
+        // wholly left out.
+        let max = ceiling::MAX_INJECTED_SONGS as u32;
+        let mut e: Vec<SongEntry> = (0..max)
             .map(|i| entry("A", &format!("{i:05}"), i))
             .collect();
-        e.extend((0..10u32).map(|i| entry("B", &format!("{i}"), 5_000 + i)));
+        e.extend((0..10u32).map(|i| entry("B", &format!("{i}"), max + 1_000 + i)));
         let (lines, sel) = ceiling_report(&e, true);
         assert_eq!(sel.kept.len(), ceiling::MAX_INJECTED_SONGS);
         assert!(lines[0].contains("leaves 10 out"));

@@ -3842,6 +3842,52 @@ impl SignatureStore {
         // Same cross-checks (`filter_button_panel_config`, `string_assign`);
         // independent of the enhanced VERSION sites.
         self.derive_title_filter();
+        // Sweep coverage for the song-limit byte patches (the mod scans the
+        // same specs itself, earlier than this store exists).
+        self.derive_song_limit_sites();
+    }
+
+    /// Publish every `core::song_limit_sites` family as resolved addresses
+    /// (`song_limit_<family>` for one-hit families, `_<i>` for the three
+    /// parser sites, plus `song_limit_property_mode_<i>` derived from each
+    /// READ hit). `mods::song_limit_expansion` does NOT read these — it
+    /// scans the specs itself at `ea3_boot` / the `startup.arc` open,
+    /// before this store exists — they are here so the offline sweep
+    /// (`scripts/validate_signatures.sh`) proves every patch site, with its
+    /// stock immediate, on every supported build.
+    fn derive_song_limit_sites(&mut self) {
+        use crate::core::song_limit_sites as sites;
+        for spec in sites::ALL {
+            let hits = match sites::find(self.base, self.size, spec) {
+                Ok(h) => h,
+                Err(reason) => {
+                    log_warn!("  [-] {} -- {}", spec.name, reason);
+                    continue;
+                }
+            };
+            let several = hits.len() > 1;
+            for (i, hit) in hits.iter().enumerate() {
+                let name = if several {
+                    format!("{}_{}", spec.name, i)
+                } else {
+                    spec.name.to_string()
+                };
+                self.publish_value(&name, hit.offset);
+                if spec.name == sites::ARENA_READ.name {
+                    match sites::find_mode_site(self.base, hit) {
+                        Some(addr) => {
+                            let off = addr as usize - self.base as usize;
+                            self.publish_value(&format!("song_limit_property_mode_{}", i), off);
+                        }
+                        None => log_warn!(
+                            "  [-] song_limit_property_mode_{} -- no `MOV R8D, 0x11` within {} bytes before the read site",
+                            i,
+                            sites::MODE_SCAN_BACK
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     /// Derive the bottom-text service's two data addresses from the

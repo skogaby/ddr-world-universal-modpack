@@ -14,7 +14,7 @@
 //! | `sound/win/dance/<b>.xsb` | `xsb/<b>.xsb` (index time) |
 //! | `sound/win/dance/<b>.xwb` | `xwb/<b>.xwb` (full) or `xwb/<b>.p.xwb` (preview) — see below |
 //! | `arc/jacket/<b>_jk.arc` | `jacket/<b>_jk.arc` |
-//! | `arc/thumbnail/jacket_thumbnails_{ja,ua}_<S>.arc` | `thumbnail/<S>.arc` for our series S only |
+//! | `arc/thumbnail/jacket_thumbnails_{ja,ua}_<S>.arc` | `thumbnail/all.arc` (tool-built) for our series S only |
 //!
 //! Bank variant: preview while `scene_manager` reports the song wheel
 //! (scene 25 — the wheel-settle preview reads the whole XWB), full otherwise
@@ -189,7 +189,7 @@ fn resolve_inner(norm_path: &str) -> Option<String> {
         if n != series {
             return None;
         }
-        return existing(&cache::thumbnail_arc_path(series));
+        return existing(&cache::thumbnail_arc_path());
     }
     None
 }

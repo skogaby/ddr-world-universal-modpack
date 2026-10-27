@@ -160,7 +160,7 @@ done
 for f in mod.rs adpcm.rs resample.rs song_bank.rs xsb.rs xwb.rs; do
   [[ -r "$REPO_ROOT/src/core/xact/$f" ]] || die "module source missing: src/core/xact/$f"
 done
-for f in source.rs jacket.rs thumbnail.rs; do
+for f in source.rs jacket.rs thumbnail.rs placeholder.rs arcpack.rs; do
   [[ -r "$REPO_ROOT/src/core/art/$f" ]] || die "module source missing: src/core/art/$f"
 done
 for f in mod.rs onset.rs estimate.rs events.rs timemap.rs measure.rs; do
@@ -226,6 +226,8 @@ macro_rules! log_debug { (\$(\$arg:tt)*) => { eprintln!("DEBUG {}", format!(\$(\
 
 pub mod core {
     pub mod art {
+        #[path = "$REPO_ROOT/src/core/art/arcpack.rs"]
+        pub mod arcpack;
         #[path = "$REPO_ROOT/src/core/art/jacket.rs"]
         pub mod jacket;
         #[path = "$REPO_ROOT/src/core/art/placeholder.rs"]

@@ -150,9 +150,78 @@ pub fn compute(inputs: &[PlannedInput], final_neuter: bool) -> BootPlan {
     }
 }
 
+/// Files that a LATE verifier (ready only after the pass began) may still
+/// switch to replay: returns `(entry_index, item positions)` for every
+/// record whose items are ALL (a) at or past `cursor` (not yet processed),
+/// (b) currently `Stock`, (c) a cache hit, and (d) not the final item.
+/// `hits[i]` is the caller's verdict for item `i` (meaningful for
+/// `i >= cursor`; earlier entries are ignored). The caller flips each
+/// record only while its status is still 1 and then marks the positions
+/// `Replay`; a record already opened by the pump is left as planned.
+/// Invariants 1–3 of the module doc hold by construction: the final item
+/// and already-processed items are excluded, and a record is returned only
+/// when every one of its items would be `Replay`.
+pub fn late_replay_candidates(
+    items: &[ItemPlan],
+    inputs: &[PlannedInput],
+    hits: &[bool],
+    cursor: usize,
+) -> Vec<(i32, Vec<usize>)> {
+    let last = match items.len().checked_sub(1) {
+        Some(last) => last,
+        None => return Vec::new(),
+    };
+    // entry_index → (positions, eligible)
+    let mut files: HashMap<i32, (Vec<usize>, bool)> = HashMap::new();
+    for (i, input) in inputs.iter().enumerate() {
+        if input.entry_index <= 0 {
+            continue;
+        }
+        let e = files.entry(input.entry_index).or_insert((Vec::new(), true));
+        e.0.push(i);
+        let ok = i >= cursor
+            && i != last
+            && items.get(i) == Some(&ItemPlan::Stock)
+            && hits.get(i).copied().unwrap_or(false);
+        e.1 &= ok;
+    }
+    let mut out: Vec<(i32, Vec<usize>)> = files
+        .into_iter()
+        .filter_map(|(idx, (pos, ok))| ok.then_some((idx, pos)))
+        .collect();
+    out.sort_unstable_by_key(|(idx, _)| *idx);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_candidates_skip_processed_final_and_partial_files() {
+        // Three songs of 5 items; cursor inside song 1; song 3 holds the last item.
+        let mut inputs = Vec::new();
+        for idx in 1..=3 {
+            inputs.extend(song(idx, true));
+        }
+        let items = vec![ItemPlan::Stock; inputs.len()];
+        let hits = vec![true; inputs.len()];
+        let c = late_replay_candidates(&items, &inputs, &hits, 2);
+        // song 1: items 0,1 already processed → out; song 3: final item → out.
+        assert_eq!(c, vec![(2, vec![5, 6, 7, 8, 9])]);
+        // A single miss in the file disqualifies the whole record.
+        let mut hits2 = hits.clone();
+        hits2[7] = false;
+        assert!(late_replay_candidates(&items, &inputs, &hits2, 2).is_empty());
+        // Already-planned items (Replay/Quarantine) are never re-planned.
+        let mut items2 = items.clone();
+        items2[6] = ItemPlan::Quarantine;
+        assert!(late_replay_candidates(&items2, &inputs, &hits, 2).is_empty());
+        // Cursor at 0 with nothing processed: songs 1 and 2 qualify.
+        let c0 = late_replay_candidates(&items, &inputs, &hits, 0);
+        assert_eq!(c0.len(), 2);
+        assert_eq!(c0[0].0, 1);
+    }
 
     fn item(entry_index: i32, hit: bool) -> PlannedInput {
         PlannedInput {

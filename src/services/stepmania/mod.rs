@@ -19,11 +19,12 @@
 //!     ├ register resolver (mod_paths)
 //!     ├ register startup.arc musicdb transform + fingerprint (arc_handler)
 //!     ├ cache layout + LRU, index::load (index.bin → lookup maps, ms)
-//!     └ index::validate_async ──────────────► read-only stat thread
+//!     └ index::validate_async ──────────────► read-only, below-normal workers
+//!                                              (done → hide what changed)
 //! 0b  avs_layeredfs::init (hooks live)
 //! 1-2 gamemdx wait, resolve_all …           avs_fs_open arc/startup.arc
 //!                                             pre-repack cb: arena patch
-//!                                             fingerprint cb: wait_validated(≤ VALIDATION_CAP)
+//!                                             fingerprint cb: injectable (ceiling) -- no wait
 //!                                                             injectable (ceiling)
 //!                                                             ensure_registration (folder bit + series)
 //!                                                             thumbnail arc
@@ -59,9 +60,9 @@
 //! can come in either order depending on the cabinet (CrossOver reaches the
 //! `startup.arc` open seconds AFTER `resolve_all`; the Win7 tester before).
 //! `ensure_registration` is therefore idempotent and called from both: the
-//! first caller waits (bounded) for validation, picks the lowest free bit /
-//! series through task-01's APIs and builds the thumbnail arc; the second
-//! finds it done. Registration happens only when the index holds ≥ 1 song.
+//! first caller picks the lowest free bit / series through task-01's APIs
+//! and builds the thumbnail arc; the second finds it done. Registration
+//! happens only when the index holds ≥ 1 song.
 //!
 //! ## Cache ownership
 //!
@@ -113,16 +114,15 @@ pub mod ssq_split;
 pub mod sync_apply;
 pub mod sync_state;
 pub mod taint;
+pub mod thumbnail_arc;
 pub mod validation;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use once_cell::sync::OnceCell;
 
-use crate::core::art;
 use crate::core::sm::scroll::ScrollGimmicks;
 use crate::mods::config::{self, StepmaniaPacksConfig};
 use crate::mods::folder_expansion::{self, CustomFolderEntry};
@@ -149,9 +149,44 @@ pub const FOLDER_KEY: &str = "stepmania";
 const SONGS_README: &str = include_str!("songs_readme.txt");
 /// The tool that writes the cache this service reads.
 pub const PREP_TOOL: &str = "ddr_world_hook_prep.exe";
-/// How long the `startup.arc` open waits for the read-only validation pass
-/// (records it has not reached by then are dropped for this boot).
-pub const VALIDATION_CAP: Duration = Duration::from_secs(15);
+/// Songs the background validation dropped, waiting for a music DB to hide
+/// them in; `guards_ran` once the visibility guards have applied (the DB
+/// exists from then on, so later drops are hidden immediately).
+static VALIDATION_DROPS: Mutex<(Vec<u32>, bool)> = Mutex::new((Vec::new(), false));
+
+/// `index::validator_done` → hide the dropped songs now if the music DB is
+/// up (the guards ran), else park them for `take_validation_drops`.
+pub(crate) fn on_validation_complete(dropped: &[u32]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let hide_now = match VALIDATION_DROPS.lock() {
+        Ok(mut d) => {
+            if d.1 {
+                true
+            } else {
+                d.0.extend_from_slice(dropped);
+                false
+            }
+        }
+        Err(_) => false,
+    };
+    if hide_now {
+        hide::hide_unservable(dropped, "changed or missing since the last prep run");
+    }
+}
+
+/// The visibility guards are running (music DB built): hand over whatever
+/// validation dropped so far and mark the DB available.
+pub(crate) fn take_validation_drops() -> Vec<u32> {
+    match VALIDATION_DROPS.lock() {
+        Ok(mut d) => {
+            d.1 = true;
+            std::mem::take(&mut d.0)
+        }
+        Err(_) => Vec::new(),
+    }
+}
 
 struct Settings {
     root: PathBuf,
@@ -423,10 +458,10 @@ pub fn status() -> Option<IndexSnapshot> {
     Some(index::snapshot())
 }
 
-/// Bounded wait for the validated index (the WARN for an expired wait is
-/// the index's own).
+/// The loaded index (validation runs in the background and hides what it
+/// drops afterwards — nothing here waits).
 fn wait_index() -> IndexSnapshot {
-    let snap = index::wait_validated(VALIDATION_CAP);
+    let snap = index::snapshot();
     if !snap.songs.is_empty() {
         SERVING.store(true, Ordering::Release);
     }
@@ -435,11 +470,16 @@ fn wait_index() -> IndexSnapshot {
 
 /// This boot's injection budget: the arena the game's parsers will use
 /// (accurate from `early_apply` onwards and inside the `startup.arc` open,
-/// after its pre-repack hook) and the fixed count ceiling.
+/// after its pre-repack hook), whether their property trees are extended,
+/// the live step-data record pool and the fixed count ceiling.
 fn budget() -> ceiling::Budget {
     ceiling::Budget {
         arena_bytes: song_limit_expansion::arena_bytes(),
         max_songs: ceiling::MAX_INJECTED_SONGS,
+        record_pool: song_limit_expansion::record_pool(),
+        property_extended: song_limit_expansion::property_extended(),
+        arc_chunk_bytes: song_limit_expansion::arc_chunk_bytes(),
+        texture_slots: song_limit_expansion::texture_slots(),
     }
 }
 
@@ -449,13 +489,57 @@ fn budget() -> ceiling::Budget {
 fn injectable(snap: IndexSnapshot) -> IndexSnapshot {
     let b = budget();
     let sel = ceiling::select(&snap.songs, &b);
-    if (sel.arena_unpatched && !snap.songs.is_empty()) || sel.over_count > 0 {
+    if (sel.arena_unpatched && !snap.songs.is_empty()) || sel.left_out() > 0 {
         if !CEILING_WARNED.swap(true, Ordering::AcqRel) {
             if sel.arena_unpatched {
                 log_warn!(
                     "StepMania: the game's XML arena is stock-sized ({} MiB; Song Limit Expansion off or its patch failed) -- none of the {} indexed song(s) injected: the stock musicdb already fills it",
                     b.arena_bytes >> 20,
                     snap.songs.len()
+                );
+            } else if sel.over_pool > 0 {
+                log_warn!(
+                    "StepMania: the game's step-data record pool holds {} records this boot ({} for injected files) -- the first {} song(s) by pack/folder name are injected, {} left out{}",
+                    b.record_pool,
+                    b.file_budget(),
+                    sel.kept.len(),
+                    sel.left_out(),
+                    if b.record_pool <= ceiling::STOCK_RECORD_POOL {
+                        " (Song Limit Expansion's pool patch did not land before the game built its loader -- it applies from the next boot)"
+                    } else {
+                        ""
+                    }
+                );
+            } else if sel.over_textures > 0 {
+                log_warn!(
+                    "StepMania: the game's texture table holds {} textures this boot ({} for injected thumbnails) -- the first {} song(s) by pack/folder name are injected, {} left out{}",
+                    b.texture_slots,
+                    b.texture_budget(),
+                    sel.kept.len(),
+                    sel.left_out(),
+                    if b.texture_slots <= ceiling::STOCK_TEXTURE_SLOTS {
+                        " (Song Limit Expansion's texture-table patch did not land before the game built its renderer -- it applies from the next boot)"
+                    } else {
+                        ""
+                    }
+                );
+            } else if sel.over_arc > 0 {
+                log_warn!(
+                    "StepMania: the game's arc loader streams {} KiB chunks this boot and the thumbnail arc's header must fit one -- the first {} song(s) by pack/folder name are injected, {} left out{}",
+                    b.arc_chunk_bytes >> 10,
+                    sel.kept.len(),
+                    sel.left_out(),
+                    if b.arc_chunk_bytes <= ceiling::STOCK_ARC_CHUNK_BYTES {
+                        " (Song Limit Expansion's arc-chunk patch did not land before the game built its loader -- it applies from the next boot)"
+                    } else {
+                        ""
+                    }
+                );
+            } else if sel.over_nodes > 0 {
+                log_warn!(
+                    "StepMania: the game's music-DB property tree is in stock mode this boot (65,535-node cap; Song Limit Expansion could not derive the parser-mode sites) -- the first {} song(s) by pack/folder name are injected, {} left out",
+                    sel.kept.len(),
+                    sel.left_out()
                 );
             } else {
                 log_warn!(
@@ -564,61 +648,31 @@ pub fn ensure_registration() -> Option<Registration> {
 
 static THUMBNAIL_LOCK: Mutex<()> = Mutex::new(());
 
-/// Pack every indexed song's `tn/<b>.dds` into `thumbnail/<S>.arc`, skipping
-/// the work when the digest sidecar already matches.
+/// Confirm the series thumbnail arc the prep tool built (`thumbnail_arc.rs`);
+/// builds it only when the tool did not (digest mismatch), e.g. an older
+/// tool. Shared code with the tool, so the digest agrees.
 fn build_thumbnail_arc(series: u8, snap: &IndexSnapshot) {
     let _guard = THUMBNAIL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let entries = snap.entries();
-    let digest = format!("{:016x}:{}", model::index_digest(&entries), series);
-    let arc_path = cache::thumbnail_arc_path(series);
-    let digest_path = cache::thumbnail_digest_path(series);
-    if arc_path.is_file()
-        && std::fs::read_to_string(&digest_path)
-            .map(|d| d.trim() == digest)
-            .unwrap_or(false)
-    {
-        return;
-    }
-    let started = std::time::Instant::now();
-    let mut members = Vec::with_capacity(entries.len());
-    let mut regenerated = 0usize;
-    for e in &entries {
-        let path = cache::tn_path(&e.basename);
-        let dds = match std::fs::read(&path) {
-            Ok(d) if art::thumbnail::is_thumbnail_dds(&d) => d,
-            _ => {
-                regenerated += 1;
-                let dds = art::thumbnail_dds(&art::placeholder_jacket());
-                let _ = cache::write_atomic(&path, &dds);
-                dds
-            }
-        };
-        members.push((e.basename.clone(), dds));
-    }
-    let bytes = art::thumbnail_arc(members);
-    // Stale arcs for other series values (the lowest free value moved).
-    if let Ok(rd) = std::fs::read_dir(cache::root().join("thumbnail")) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p != arc_path && p != digest_path {
-                let _ = std::fs::remove_file(&p);
-            }
+    match thumbnail_arc::ensure_logged(&entries, "StepMania") {
+        thumbnail_arc::Outcome::UpToDate => {
+            log_info!(
+                "StepMania: thumbnail arc for series {} -- {} member(s), built by the prep tool",
+                series,
+                entries.len()
+            );
         }
-    }
-    if cache::write_atomic(&arc_path, &bytes) {
-        let _ = std::fs::write(&digest_path, &digest);
-        log_info!(
-            "StepMania: thumbnail arc for series {} -- {} member(s), {} KiB, {} ms{}",
-            series,
-            entries.len(),
-            bytes.len() / 1024,
-            started.elapsed().as_millis(),
-            if regenerated > 0 {
-                format!(" ({regenerated} placeholder(s) regenerated)")
-            } else {
-                String::new()
-            }
-        );
+        thumbnail_arc::Outcome::Built { .. } => {
+            log_warn!(
+                "StepMania: the prep tool had not built the thumbnail arc for this song set -- built at boot (run {} to avoid this)",
+                PREP_TOOL
+            );
+        }
+        thumbnail_arc::Outcome::Failed => {
+            log_warn!(
+                "StepMania: could not write the thumbnail arc -- wheel thumbnails will be missing"
+            );
+        }
     }
 }
 
@@ -632,16 +686,24 @@ fn startup_fingerprint() -> Option<String> {
     let snap = injectable(index::snapshot());
     let entries = snap.entries();
     let arena = song_limit_expansion::arena_bytes();
+    let pool = song_limit_expansion::record_pool();
+    let extended = song_limit_expansion::property_extended();
+    let chunk = song_limit_expansion::arc_chunk_bytes();
+    let textures = song_limit_expansion::texture_slots();
     if let Ok(mut slot) = STARTUP_SNAPSHOT.lock() {
         *slot = Some(snap);
     }
     Some(format!(
-        "stepmania:{:016x}:{:?}:{:?}:{}:{}",
+        "stepmania:{:016x}:{:?}:{:?}:{}:{}:{}:{}:{}:{}",
         model::index_digest(&entries),
         reg.and_then(|r| r.series),
         reg.and_then(|r| r.folder_bit),
         entries.len(),
-        arena
+        arena,
+        pool,
+        extended,
+        chunk,
+        textures
     ))
 }
 

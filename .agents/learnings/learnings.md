@@ -1963,8 +1963,9 @@ thumbnails (`tn/*.dds`, texpresso) differ by one block endpoint ±1 LSB between 
 and the x86 DLL — float rounding, invisible, irrelevant to the warm path (fingerprints cover
 sources). On a Windows cabinet both sides are x86.
 
-**Injection has a ceiling (`ceiling.rs`), never a knob.** `MAX_INJECTED_SONGS = 4_000`, first
-by `pack/folder` name, and NOTHING under a stock-sized XML arena. The arena is the AVS
+**Injection has a ceiling (`ceiling.rs`), never a knob.** `MAX_INJECTED_SONGS` (30,000 —
+just under the gs texture table's hard 30,208; tested to 14,138 on 2026-10-26), first by
+`pack/folder` name, and NOTHING under a stock-sized XML arena. The arena is the AVS
 property-tree arena (`song_limit_expansion`, now 64 MiB, defined once in `ceiling.rs`), not a
 text buffer; the stock 716 KB document fits 1 MiB, so text ≤ arena × 2/3 is the budget the
 transform enforces as a last net. Raise the constant by testing, never per cabinet; the tool
@@ -1983,6 +1984,75 @@ maxima are dead data on 20260721 (reset to constants at scene 7 and every new ga
 debughook attaches (LayeredFS install, index spawn, a fast cabinet's `startup.arc`
 transform) is invisible on the cabinet; prove early-boot behaviour with a later summary line
 or a marker file, not with an early INFO.
+
+**Never hand the game's FileManager a load from the init thread.** `Application::onBoot`
+drains the step-data manager with a blocking loop (`FUN_1801fe040`) right after it registers
+`startup.arc`, and that loop pumps EVERY pending record until the queue is empty — including
+anything the DLL's init thread registers meanwhile. A `.png` goes to the PngFileCallback, which
+creates a D3D texture under the renderer's device mutex; before the device exists the mutex
+handle is NULL and `FUN_1802392e0` spins on `WaitForSingleObject(NULL, 10)` forever, on the game
+thread, with no window and no crash (deploy #7 of the prep-tool work, 2026-10-26: 236 % CPU,
+`note_types_mine00_{s,m,l}.png` at records 1–3). The DLL's own `startup.arc` work (a 4 s
+thumbnail-arc fallback build) is what widened the race so that `enable()` landed inside the
+drain. Rule: `FileManager::Load` (and anything else that needs the device) is issued from the
+frame pump (`widget_renderer::run_on_render_thread`) or a scene callback, never from
+`init`/`enable`; `asset_loader` and `scene3d::arc_set` already follow it, `note_types_expansion`
+now does too. Diagnosing a silent boot hang on the CrossOver install: don't kill it — `CX_BOTTLE=
+bemani .../CrossOver/bin/wine winedbg --command "bt all" <wine pid>` (`--command "info proc"`
+lists pids) gives every thread's stack as `module+offset`, and `--command "print /x *(unsigned
+long long*)<addr>"` reads memory (gamemdx base = any `gamemdx (+off)` frame address minus the
+offset; `DAT_1806f2f48` = the step-data manager, records at `mgr+8`, names at `mgr+0x28`).
+
+**Step-data record status 5 is "loaded, no file-type callback", not "failed".** Live read of
+onBoot's records (20260915): `.rlist`/`.csv`/`.xml`/`.db` files sit at status 5 with their
+buffer and `+0x1c` = byte count; records a callback consumed (`startup.arc` → Archive,
+`.png` → Png) are status 4. `docs/ultrafast_boot_research.md` §3.2 is corrected; SSQs (no
+callback accepts `.ssq`) are the status-5 case, which is why onUpdate's status gate admits 5.
+
+**A 14,000-song library hits SIX fixed limits, one per boot, and five of them are silent
+(2026-10-26, deploys #6–#8i).** In the order they bite: (1) AVS property node cap — a tree
+created without `PROPERTY_MODE_EXTEND` refuses the 65,536th node (`W:prop: read error by
+mem[…](80092143)`), `createList` gets NULL and the music DB is EMPTY; the stock document is
+~16,200 nodes and each injected entry 12, so it binds near 3,800 songs. (2) Step-data record
+pool, 4,096 records, no overflow guard. (3) Arc loader chunk — `ArchiveFileCallback` parses the
+cue + name tables out of the FIRST 512 KiB chunk with no bounds check; ~10,500 thumbnail members
+overflow it and the name copy at `gamemdx+0x343D` faults. (4) GS texture table — 4,096 slots
+(`Renderer::initGs` config `0x1000`, also the TextureData pool), one per resident wheel
+thumbnail; when full, texture creation returns handle 0 and `FUN_18022f220 → FUN_180237630(0)`
+faults on the I/O worker. The handle packs the slot in 15 bits, so 32,768 is the format's
+ceiling — the texture table is THE ceiling on injected songs (30,208 after a 2,560 reserve).
+(5) LayeredFS's own `_cache` index walk: 42k StepMania cache files made it lose the
+`startup.arc` race (`CACHE_INDEX_SKIP`). (6) The 1 MiB XML arena (known). All patched from
+`song_limit_expansion` (`ea3_boot` for anything `onBoot`/`initGs` constructs; the arena and
+property-mode at the `startup.arc` open / `early_apply`), and `ceiling.rs` models every one of
+them from the LIVE patch state so a late patch degrades to fewer songs, never a crash.
+`scripts/aob_check.py --build … --pattern …` is the quick uniqueness sweep for a new AOB.
+
+**fast-bootup's cache is only as fast as its verifier, and a stat per cached file does not
+scale (2026-10-26).** At 14k songs the identity sweep (two `std::fs::metadata` per file,
+single-threaded, ~3–10 ms each under Wine) published 100 s after the boot pass had begun, so a
+fully-captured cache replayed nothing and every boot was the 2.5-minute first boot. Injected
+StepMania SSQs are now identified by their index record's source fingerprint
+(`cache::Identity::Indexed`, no I/O — the prep tool is the sole writer and re-converts exactly
+when that fingerprint changes), the stock files are stat'd on 4 workers, and a verifier that
+still publishes mid-pass amends the plan for the files ahead of the cursor (`late_replan`).
+Result: `replay plan -- 78109/78110`, pass 134 ms, title at +24 s. Rule: anything that gates
+replay must be O(1) per injected song or come from data the tool already wrote; never a stat
+storm racing the game thread.
+
+**Diagnosing a boot crash on the CrossOver install.** spice2x's stackwalker only prints when no
+debugger is attached and only for the SECOND-chance fault; libavs's thread-task handler
+(`thread-task.c:48`) swallows a hardware fault in an AVS-thread task and re-raises it as a C++
+throw with no trace of the original site (the visible fault is then `kernelbase+0xD8B7`,
+`RaiseException`, with a bogus record). `crash_handler.rs` now installs a first-chance vectored
+handler that logs the first 8 interesting exceptions (C++ throws + hardware faults) with a
+`RtlCaptureStackBackTrace` as `module+offset`, and the top-level filter appends the same
+backtrace — read `ddr_hook_crash.log`, the first `first-chance ACCESS_VIOLATION … at
+gamemdx.dll+0x…` line is the real site; map `gamemdx+off` in Ghidra (20260915 base
+0x180000000). winedbg (`CX_BOTTLE=bemani …/bin/wine winedbg --command "bt all" <pid>`) is for
+hangs; its `break <symbol>` did not work against this process. `scripts/game_nav/launch.sh`
+must pass `-z`, not `-k`: with `-k` the DLL arrives moments before `ea3_boot` and LayeredFS
+misses `startup.arc` (stock DB + `FastBootup: … LayeredFS never saw the startup.arc open`).
 
 ## A skinned normal carries the bone's scale — Big Head tripled the outline push on every head (2026-10-25)
 

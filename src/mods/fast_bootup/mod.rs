@@ -75,10 +75,12 @@
 //! declared slot analyse to zero steps → `ME1529`. So every injected file
 //! is re-read from its LayeredFS-resolved host path and run through
 //! `core::ssq::check::check_ssq` against the slots its items analyse — on
-//! a background thread started at enable (`preflight.rs`), so the plan
-//! build normally only looks verdicts up; files the thread has not reached
-//! yet are checked inline, and only those the cache cannot vouch for
-//! (`quarantine.rs`). A
+//! a background thread started at enable (`preflight.rs`), for as long as
+//! it has before the boot pass; the plan build only looks verdicts up, and
+//! TRUSTS files the thread did not reach (the index just validated them and
+//! the prep tool wrote them after the same self-check — re-reading
+//! thousands inline stalled a 14k boot, 2026-10-26). Only files the
+//! step-data cache cannot vouch for are considered (`quarantine.rs`). A
 //! failing file's items become `ItemPlan::Quarantine` (release + advance,
 //! never the original), its record is flipped 1→6 so it never loads, the
 //! song gets `+0x1B0` (hidden at the next active-list rebuild) and one WARN
@@ -324,8 +326,17 @@ static mut REPLAY_ARMED: bool = false;
 /// First-onUpdate latch for the boot-plan build + record flips.
 static mut PLAN_BUILT: bool = false;
 /// The per-item Replay/Stock plan for this boot, indexed by work-list
-/// position. Built once at the first hooked call; read-only afterward.
-static BOOT_PLAN: std::sync::OnceLock<Vec<plan::ItemPlan>> = std::sync::OnceLock::new();
+/// position. Built at the first hooked call; amended once more by
+/// [`late_replan`] when the cache verifier publishes after the pass began
+/// (a 14k-song library's verifier stats ~15k files and loses the race by a
+/// minute under Wine — without the amendment nothing ever replays).
+static BOOT_PLAN: std::sync::Mutex<Vec<plan::ItemPlan>> = std::sync::Mutex::new(Vec::new());
+/// The planning inputs the plan was built from (same indexing), kept for
+/// the late re-plan. Empty when no plan was built.
+static BOOT_INPUTS: std::sync::Mutex<Vec<plan::PlannedInput>> = std::sync::Mutex::new(Vec::new());
+/// Set when the plan was built without a ready verifier; cleared by the
+/// late re-plan.
+static mut REPLAN_PENDING: bool = false;
 /// One-shot latch for the null-mcode-during-replay WARN.
 static NULL_MCODE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -479,6 +490,24 @@ unsafe extern "C" fn update_hook(actor: *mut u8) {
         build_boot_plan(actor);
     }
 
+    // The verifier published after the plan was built: amend the plan once
+    // for the files still ahead of the cursor.
+    if REPLAN_PENDING && identity::is_ready() {
+        late_replan(actor);
+    }
+
+    // No work list (the game's onInit could not build one — an overflowed
+    // step-data record pool): never starve the game of its own onUpdate; let
+    // it run stock so it completes, errors or crashes with its own report
+    // instead of sitting at 0% behind our gate.
+    if work_list_missing(actor) {
+        if let Some(ref hook) = FAST_BOOTUP_HOOK {
+            hook.call(actor);
+        }
+        IN_HOOK = false;
+        return;
+    }
+
     // Process the work list from the cursor. Replay items apply cached writes
     // and advance the cursor with no per-frame cap (pure memory); Stock items
     // go through the existing settled-buffer gate and the original, bounded by
@@ -597,6 +626,13 @@ unsafe fn finish_cache_pass() {
     capture::spawn_writer(GAMEMDX_STAMP, GAMEMDX_SIZE);
 }
 
+/// The actor's work vector has no begin pointer (never allocated).
+unsafe fn work_list_missing(actor: *mut u8) -> bool {
+    let array = *(actor.add(ACTOR_WORK_BEGIN) as *const *const u8);
+    let end = *(actor.add(ACTOR_WORK_END) as *const *const u8);
+    array.is_null() || end.is_null()
+}
+
 /// Read the work item at the actor's current cursor and stash it for capture.
 /// Items with `entry_index <= 0` (unregistered charts) or an unresolvable
 /// name record clear the stash so a stray subscriber write can't attach to
@@ -713,9 +749,86 @@ unsafe fn boot_total_items(actor: *mut u8) -> u32 {
 /// behavior when replay is unarmed / the verifier wasn't ready).
 fn plan_for(pos: usize) -> plan::ItemPlan {
     BOOT_PLAN
-        .get()
+        .lock()
+        .ok()
         .and_then(|v| v.get(pos).copied())
         .unwrap_or(plan::ItemPlan::Stock)
+}
+
+/// The verifier came up after the plan was built: switch every file whose
+/// items are all still ahead of the cursor, all cache hits and whose record
+/// is still queued (status 1) to `Replay`, flipping the record exactly as
+/// the first build does. Runs once, on the game thread, between items.
+unsafe fn late_replan(actor: *mut u8) {
+    REPLAN_PENDING = false;
+    let Some(cursor) = boot_cursor_pos(actor) else {
+        return;
+    };
+    let inputs: Vec<plan::PlannedInput> = match BOOT_INPUTS.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return,
+    };
+    if inputs.is_empty() {
+        return;
+    }
+    let array = *(actor.add(ACTOR_WORK_BEGIN) as *const *const u8);
+    if array.is_null() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut hits = vec![false; inputs.len()];
+    for (pos, input) in inputs.iter().enumerate().skip(cursor) {
+        if input.entry_index <= 0 {
+            continue;
+        }
+        let item = array.add(pos * WORK_ITEM_STRIDE);
+        let difficulty = (item.add(4) as *const i32).read_unaligned();
+        hits[pos] = difficulty >= 0
+            && item_game_path(input.entry_index)
+                .map(|gp| identity::item_replayable(&gp, difficulty as u8))
+                .unwrap_or(false);
+    }
+    let mgr = manager();
+    if mgr.is_null() {
+        return;
+    }
+    let entries = *(mgr.add(0x08) as *const *const u8);
+    if entries.is_null() {
+        return;
+    }
+    let mut plan = match BOOT_PLAN.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let candidates = plan::late_replay_candidates(&plan, &inputs, &hits, cursor);
+    let mut flipped = 0usize;
+    let mut items_upgraded = 0usize;
+    let mut in_flight = 0usize;
+    for (ei, positions) in &candidates {
+        let record = entries.offset((*ei as isize) * (REC_STRIDE as isize));
+        let status = (record.add(REC_STATUS) as *const i32).read_unaligned();
+        if status != 1 {
+            in_flight += 1;
+            continue;
+        }
+        (record.add(REC_STATUS) as *mut i32).write_unaligned(6);
+        flipped += 1;
+        for &pos in positions {
+            if let Some(slot) = plan.get_mut(pos) {
+                *slot = plan::ItemPlan::Replay;
+                items_upgraded += 1;
+            }
+        }
+    }
+    log_info!(
+        "FastBootup: late re-plan at item {}/{} -- verifier ready after the pass began; {} more item(s) from cache, {} record(s) flipped, {} already in flight ({} ms)",
+        cursor,
+        inputs.len(),
+        items_upgraded,
+        flipped,
+        in_flight,
+        started.elapsed().as_millis()
+    );
 }
 
 /// Loop-control gate for both branches: the done-flag + cursor-bounds check
@@ -753,16 +866,26 @@ unsafe fn build_boot_plan(actor: *mut u8) {
     preflight::mark_plan_started();
     let replay_ok = REPLAY_ARMED && identity::is_ready();
     if REPLAY_ARMED && !replay_ok {
-        // Verifier lost the ~1 s race — no replay this boot.
-        log_info!("FastBootup: verifier not ready at plan build -- no replay this boot");
+        // Verifier lost the race — the plan is amended once it publishes
+        // (`late_replan`), for whatever is still ahead of the cursor then.
+        log_info!(
+            "FastBootup: verifier not ready at plan build -- replay starts when it publishes"
+        );
+        REPLAN_PENDING = true;
     }
 
     let array = *(actor.add(ACTOR_WORK_BEGIN) as *const *const u8);
     let end = *(actor.add(ACTOR_WORK_END) as *const *const u8);
     if array.is_null() || end.is_null() {
+        crate::log_warn!(
+            "FastBootup: the boot work list is empty (begin {:p}, end {:p}) -- no plan; the game's own onUpdate runs stock. This is what an overflowed step-data record pool looks like (SongLimitExpansion)",
+            array,
+            end
+        );
         return;
     }
     let total = (end as usize).saturating_sub(array as usize) / WORK_ITEM_STRIDE;
+    let plan_started = std::time::Instant::now();
 
     let mut inputs: Vec<plan::PlannedInput> = Vec::with_capacity(total);
     let mut q_inputs: Vec<quarantine::ItemInput> = Vec::with_capacity(total);
@@ -856,22 +979,36 @@ unsafe fn build_boot_plan(actor: *mut u8) {
 
     let replay_n = boot.replay_count();
     let quarantine_n = boot.quarantine_count();
-    let _ = BOOT_PLAN.set(boot.items);
+    if let Ok(mut g) = BOOT_PLAN.lock() {
+        *g = boot.items;
+    }
+    if let Ok(mut g) = BOOT_INPUTS.lock() {
+        *g = inputs;
+    }
     log_info!(
-        "FastBootup: replay plan -- {}/{} items from cache, {} quarantined, {} record(s) flipped, {} in-flight downgraded",
+        "FastBootup: replay plan -- {}/{} items from cache, {} quarantined, {} record(s) flipped, {} in-flight downgraded ({} ms)",
         replay_n,
         total,
         quarantine_n,
         flipped,
-        downgraded.len()
+        downgraded.len(),
+        plan_started.elapsed().as_millis()
     );
 }
 
-/// Re-check every injected file the cache cannot vouch for (host read of
-/// the LayeredFS-resolved file + `check_ssq` against the slots its items
-/// analyse). Failing files' songs get the music-DB corruption flag (hides
-/// them; never the reporter) and one WARN each. Returns `entry_index →
-/// failed`.
+/// Quarantine decision for every injected file the step-data cache cannot
+/// vouch for. The background pre-flight (`preflight.rs`) re-reads and walks
+/// files while it has time; a file it did not reach is TRUSTED, not checked
+/// inline: every injected record was just validated by
+/// `services::stepmania::index` (artefacts present, source stamps intact)
+/// and its SSQ was written atomically by the prep tool after passing the
+/// same `check_ssq` — re-reading 14,000 of them on the game thread (minutes
+/// under Wine, through the mod-folder lookup) stalled the boot at "NOW
+/// LOADING 0%" (2026-10-26). The residual risk — on-disk corruption of a
+/// cache file after the tool ran, with size and mtime unchanged — ends in
+/// the game's own `ME1529`, cured by deleting the cache and re-running the
+/// tool. Failing files' songs get the music-DB corruption flag (hides them;
+/// never the reporter) and one WARN each. Returns `entry_index → failed`.
 unsafe fn preflight_injected(
     items: &[quarantine::ItemInput],
     mcodes: &[i32],
@@ -884,7 +1021,7 @@ unsafe fn preflight_injected(
     let started = std::time::Instant::now();
     let mut warned: std::collections::HashSet<i32> = std::collections::HashSet::new();
     let mut bad = 0usize;
-    let mut inline = 0usize;
+    let mut trusted = 0usize;
     for (&ei, slots) in &files {
         let game_path = item_game_path(ei);
         let reason = match game_path.as_deref() {
@@ -894,8 +1031,9 @@ unsafe fn preflight_injected(
                 match preflight::lookup(name) {
                     Some(verdict) => verdict,
                     None => {
-                        inline += 1;
-                        preflight::check_file(gp, slots)
+                        let _ = slots;
+                        trusted += 1;
+                        None
                     }
                 }
             }
@@ -926,9 +1064,10 @@ unsafe fn preflight_injected(
         }
     }
     log_info!(
-        "FastBootup: injected pre-flight -- {} file(s) ({} checked inline) in {} ms, {} quarantined",
+        "FastBootup: injected pre-flight -- {} file(s) ({} checked by the background pass, {} trusted from the validated index) in {} ms, {} quarantined",
         files.len(),
-        inline,
+        files.len() - trusted,
+        trusted,
         started.elapsed().as_millis(),
         bad
     );

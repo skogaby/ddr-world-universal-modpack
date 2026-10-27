@@ -34,6 +34,7 @@ pub mod profiling;
 pub mod scanner;
 pub mod signatures;
 pub mod sm;
+pub mod song_limit_sites;
 pub mod ssq;
 pub mod sync;
 pub mod xact;

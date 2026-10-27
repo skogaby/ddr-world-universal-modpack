@@ -724,6 +724,37 @@ self-diagnosing like `shader_synthesis::status()` /
 the music DB is populated (`music_db_global` vector non-empty) while the flag is
 still clear.
 
+### 7.6 The other fixed limits (found with a 14,138-song synthetic library, 2026-10-26)
+
+The arena was the first of six. Each one below bit on a separate cabinet boot,
+silently or with a crash far from its cause; all are patched by
+`mods::song_limit_expansion` (byte sites in `core::song_limit_sites`, verified on every
+supported build by `scripts/validate_signatures.sh`) and modelled in
+`services::stepmania::ceiling` from the LIVE patch state, so a late or failed patch
+means fewer injected songs, never a broken boot. Addresses are 20260915.
+
+| # | Limit | Stock | Patched | Where it is set | How it fails unpatched |
+|---|---|---|---|---|---|
+| 1 | XML property arena (§4.1, §7.5) | 1 MiB | 64 MiB | `MOV EDX,0x100000` / `MOV [RSP+0x20],0x100000` in each parser | parse fails, music DB incomplete |
+| 2 | AVS property node cap | 65,535 nodes | unlimited (`PROPERTY_MODE_EXTEND`, mode `0x11 → 0x1011`) | `MOV R8D,0x11` before each `property_mem_read` call | `W:prop: read error by mem[…](80092143)`, `createList` gets NULL → EMPTY music DB → `CheckStepDataActor::onInit` builds no work list, stock `onUpdate` faults on it. Stock doc ≈ 16,200 nodes, each injected entry 12 → ~3,800 songs |
+| 3 | Step-data record pool (`docs/ultrafast_boot_research.md` §3.1) | 4,096 records | 131,072 | parameter block in `Application::onBoot` (`FUN_1800020d0`), consumed by the manager ctor `FUN_1801fd210` | register (`FUN_1801febf0`) has no free-list guard: record −1 is written into the heap header, "NOW LOADING 0%" forever |
+| 4 | Arc loader chunk | 512 KiB (4-slot pool, 2 MiB) | 4 MiB (16 MiB pool) | `agcs::ArchiveFileCallback` ctor `FUN_180207a40` | `FUN_180206f50` parses the cue + name tables out of the FIRST chunk with no bounds check; a thumbnail arc past ~10,500 members (header > 512 KiB) faults in the name copy (`FUN_180003420`) |
+| 5 | GS texture table (+ ResourceManager TextureData pool) | 4,096 | 32,768 | `Renderer::initGs` config field `0x1000` (`FUN_1801eff90` → `FUN_1802361c0` / `FUN_18022eee0`) | every wheel thumbnail is one resident texture; a full table hands the DDS callback handle 0 → `FUN_18022f220 → FUN_180237630(0)` NULL deref on the step-data I/O worker (an AVS thread; libavs re-raises it as a fatal C++ throw). A texture handle is `slot << 17 \| gen << 4 \| 7`: 32,768 slots is the format's ceiling, so this is THE ceiling on injected songs (30,208 after a 2,560-texture stock reserve → `MAX_INJECTED_SONGS` 30,000) |
+| 6 | (DLL-side) LayeredFS `_cache` index walk | — | `stepmania/` skipped | `ifs_textures::build_cache_index` | 42k StepMania cache files made the pre-hook walk lose the `startup.arc` open under Wine → stock DB |
+
+Timing: limits 3–5 are constructed by `onBoot`/`initGs` before the `startup.arc` open,
+so their patches land from `ident_override`'s `ea3_boot` detour (or `early_apply` when
+the scan beats the launcher there); limits 1–2 land at the `startup.arc` open as §7.5
+describes. Two more scaling costs are not limits but were fixed alongside: a
+`FileManager::Load` issued from the DLL's init thread while `onBoot` drains the
+step-data manager hangs the boot on a not-yet-created D3D device mutex
+(`note_types_expansion` now queues its loads to the frame pump), and `fast_bootup`'s
+cache verifier stat'd every cached SSQ (15k at 14k songs — it lost the pass by a
+minute); injected SSQs are now identified by their index record's fingerprint and the
+plan is amended if the verifier publishes mid-pass. Result at 14,138 songs: first boot
+after indexing ≈ 70 s (one capture pass), every boot after that replays 78,109/78,110
+items in 134 ms.
+
 ---
 
 ## 8. Charts: SM/SSC → SSQ

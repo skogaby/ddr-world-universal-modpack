@@ -2,8 +2,9 @@
 //!
 //! The DLL never converts; it trusts a record the prep tool wrote only while
 //! the record still describes the disk. The impure half (`index.rs`) stats
-//! the files and asks [`verdict`]; the per-cause tallies become one WARN
-//! that tells the operator to run the tool again.
+//! the files on background workers and asks [`verdict`]; the per-cause
+//! tallies become one WARN that tells the operator to run the tool again,
+//! and the failed songs are hidden in the music DB.
 
 use std::fmt;
 
@@ -57,8 +58,6 @@ pub struct DropTally {
     pub artefacts: usize,
     pub sources: usize,
     pub changed: usize,
-    /// Records the validation thread had not reached when the wait expired.
-    pub unvalidated: usize,
 }
 
 impl DropTally {
@@ -72,7 +71,7 @@ impl DropTally {
 
     #[must_use]
     pub fn total(&self) -> usize {
-        self.artefacts + self.sources + self.changed + self.unvalidated
+        self.artefacts + self.sources + self.changed
     }
 
     #[must_use]
@@ -82,25 +81,18 @@ impl DropTally {
 }
 
 impl fmt::Display for DropTally {
-    /// `N song(s) dropped -- changed or missing since the last prep run (a
-    /// artefact(s) missing, s source(s) missing, c changed)[, u not validated
-    /// in time] -- run ddr_world_hook_prep.exe`
+    /// `N song(s) hidden -- changed or missing since the last prep run (a
+    /// artefact(s) missing, s source(s) missing, c changed) -- run
+    /// ddr_world_hook_prep.exe`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} song(s) dropped -- ", self.total())?;
-        let checked = self.artefacts + self.sources + self.changed;
-        if checked > 0 {
-            write!(
-                f,
-                "changed or missing since the last prep run ({} artefact(s) missing, {} source(s) missing, {} changed)",
-                self.artefacts, self.sources, self.changed
-            )?;
-            if self.unvalidated > 0 {
-                write!(f, ", {} not validated in time", self.unvalidated)?;
-            }
-        } else {
-            write!(f, "{} not validated in time", self.unvalidated)?;
-        }
-        write!(f, " -- run ddr_world_hook_prep.exe")
+        write!(
+            f,
+            "{} song(s) hidden -- changed or missing since the last prep run ({} artefact(s) missing, {} source(s) missing, {} changed) -- run ddr_world_hook_prep.exe",
+            self.total(),
+            self.artefacts,
+            self.sources,
+            self.changed
+        )
     }
 }
 
@@ -151,17 +143,7 @@ mod tests {
         t.record(DropCause::ArtefactMissing);
         assert_eq!(
             t.to_string(),
-            "3 song(s) dropped -- changed or missing since the last prep run (1 artefact(s) missing, 0 source(s) missing, 2 changed) -- run ddr_world_hook_prep.exe"
-        );
-        t.unvalidated = 4;
-        assert!(t.to_string().contains(", 4 not validated in time -- run"));
-        let only = DropTally {
-            unvalidated: 9,
-            ..DropTally::default()
-        };
-        assert_eq!(
-            only.to_string(),
-            "9 song(s) dropped -- 9 not validated in time -- run ddr_world_hook_prep.exe"
+            "3 song(s) hidden -- changed or missing since the last prep run (1 artefact(s) missing, 0 source(s) missing, 2 changed) -- run ddr_world_hook_prep.exe"
         );
     }
 }

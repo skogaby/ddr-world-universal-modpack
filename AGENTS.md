@@ -34,7 +34,7 @@ docs/             # RE research notes (addresses file-relative to 0x180000000)
 |---|---|
 | Add a mod | `src/mods/mod_trait.rs`, then construct/register in `src/lib.rs`; `DEFAULT_OFF_MODS` for default-off |
 | Add a service | `src/services/mod.rs`, init call in `src/lib.rs` (order is load-bearing) |
-| Add/change a signature or derivation | `src/core/signatures.rs`, then the signature sweep below |
+| Add/change a signature or derivation | `src/core/signatures.rs` (byte-patch sites: `src/core/song_limit_sites.rs`, published by `derive_song_limit_sites`), then the signature sweep below |
 | Hook something already hooked | `.agents/summary/interfaces.md` → Hook Ownership; subscribe to / `acquire` from the owner |
 | Per-player option row | `src/services/custom_options/api.rs`; labels via `scripts/option_strings.py` → `scripts/gen_option_labels.py` |
 | Cabinet-wide overlay-menu row | `src/mods/mod_menu/rows.rs` |

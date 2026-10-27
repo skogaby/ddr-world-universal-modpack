@@ -202,6 +202,41 @@ struct PropertyApi {
 
 #[cfg(windows)]
 static mut PROPERTY_API: Option<PropertyApi> = None;
+
+/// Callbacks run inside the `ea3_boot` detour, BEFORE the original: the one
+/// moment where `gamemdx` is mapped (the launcher loads the game DLL before
+/// it boots ea3) but none of its code has run, so a byte patch that must
+/// precede `Application::onBoot` — the step-data record-pool size — lands
+/// deterministically. Each callback is panic-contained.
+static EA3_BOOT_CALLBACKS: std::sync::Mutex<Vec<fn(bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Register a callback for the `ea3_boot` moment (see
+/// [`EA3_BOOT_CALLBACKS`]). Call before the launcher reaches `ea3_boot`
+/// (`lib::init` step 0 is in time): the callback then runs inside the
+/// detour with `early = true`. Registered after the boot was observed (or
+/// when the detour never installed), it runs immediately with `early =
+/// false` — the game may already be running its own code.
+pub fn on_ea3_boot(cb: fn(bool)) {
+    if BOOT_OBSERVED.load(Ordering::Acquire) || !INSTALLED.load(Ordering::Acquire) {
+        cb(false);
+        return;
+    }
+    if let Ok(mut v) = EA3_BOOT_CALLBACKS.lock() {
+        v.push(cb);
+    }
+}
+
+fn run_ea3_boot_callbacks() {
+    let cbs: Vec<fn(bool)> = EA3_BOOT_CALLBACKS
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default();
+    for cb in cbs {
+        if std::panic::catch_unwind(|| cb(true)).is_err() {
+            log_warn!("ident_override: an ea3_boot callback panicked -- continuing the boot");
+        }
+    }
+}
 #[cfg(windows)]
 static mut EA3_BOOT_HOOK: Option<GenericDetour<Ea3BootFn>> = None;
 
@@ -481,6 +516,7 @@ unsafe extern "C" fn ea3_boot_hook(ea3: *mut u8) {
         return; // unreachable: store precedes enable
     };
     BOOT_OBSERVED.store(true, Ordering::Release);
+    run_ea3_boot_callbacks();
     // Everything before the original is best-effort and panic-contained:
     // the game must boot with its stock identity rather than not at all.
     match catch_unwind(AssertUnwindSafe(|| apply_override(ea3))) {

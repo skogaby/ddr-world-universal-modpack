@@ -127,7 +127,7 @@ NTX relies on for real mine injection) and `FUN_1801df160`.
 | `+0x14` | u32 length |
 | `+0x18` | u32 alloc size (len rounded up to 32) |
 | `+0x1C` | u32 last I/O result |
-| `+0x20` | u32 **status**: 0 idle, 1 queued, 2 opening/size-query, 3 reading, 4 alt-load, 5 failed, 6 **complete** (buf may be null for empty/absent data), 7 cleanup, 8 finalized |
+| `+0x20` | u32 **status**: 0 idle, 1 queued, 2 opening/size-query, 3 reading, 4 **consumed by a file-type callback** (Archive/Png/Dds/… — `FUN_1801ff540` picks the callback by extension), 5 **loaded, no callback accepted the extension** (raw buffer kept — `.ssq`/`.xml`/`.csv`/`.rlist` all land here; verified on a live 20260915 process), 6 **complete** with the buffer released (empty/absent data), 7 cleanup, 8 finalized |
 | `+0x24` | u32 refcount (register +1; 5 per song at boot — one per difficulty work item) |
 | `+0x28` | FileReader ptr |
 | `+0x30` | alt-load handle |

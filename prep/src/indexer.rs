@@ -102,6 +102,8 @@ pub struct PackStats {
 
 /// Progress events. All methods have no-op defaults.
 pub trait Sink: Sync {
+    /// Discovery heartbeat (every few seconds while walking a big library).
+    fn scanning(&self, _packs: usize, _songs: usize) {}
     /// Discovery finished: how many packs / songs / already-cached songs.
     fn discovered(&self, _packs: usize, _songs: usize, _to_convert: usize) {}
     fn pack_done(&self, _pack: &str, _stats: &PackStats) {}
@@ -603,7 +605,14 @@ pub fn discover(root: &Path, sink: &dyn Sink) -> (Vec<Job>, usize) {
         })
         .collect();
     pack_dirs.sort();
+    let mut last_beat = Instant::now();
+    let mut packs_seen = 0usize;
     for pack_dir in pack_dirs {
+        packs_seen += 1;
+        if last_beat.elapsed() >= Duration::from_secs(5) {
+            sink.scanning(packs_seen, found.len());
+            last_beat = Instant::now();
+        }
         let Some(pack) = pack_dir
             .file_name()
             .and_then(|n| n.to_str())
