@@ -425,6 +425,39 @@ PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup 
   --python tools/blender_ddr_addon/examples/port_character_ultramix4.py   # ~80 s for 10
 ```
 
+### A DanceDanceRevolution Universe (Xbox 360) dancer (`examples/port_character_universe.py`)
+
+Universe is the same KCEH K3D engine again, and its data is still little-endian on the 360, so
+this is the ULTRAMIX 4 port with HD rigs. All 25 ship as
+`data_mods/custom_models/dancers/UNIVERSE/<Name> <n>`: Emi, Rage, Lady, Afro, Honey and B in
+costumes 1–4 (every costume is its own model on the disc), plus Queen (keys `univ<type>0<n>`).
+RE note: `docs/dancing_stage_unleashed_dancers_port_feasibility.md` §14. Differences from UMX4:
+
+- **Getting the files.** The disc is an XGD2 image. `scripts/xdvdfs_extract.py` lists and extracts
+  XDVDFS images (Xbox and Xbox 360; plain XISOs and redump-style dumps), then
+  `scripts/extract_ultramix_data.py universe_us` unpacks `x_data_XENON_US.bin`.
+- **`.ddm` 0x112 with palette groups.** A material holds 1–7 groups, each with its own 30-bone
+  palette and index range, and an odd index count is padded to 4 bytes. `parse_ddm` reads both
+  UMX4 and Universe.
+- **Big rigs.** The male skeleton has 87 joints and the female 113: fingers, `*Roll` joints, hair
+  and tie chains (`HIERARCHY_UNIVERSE`). Earlier ports asserted ≤ 64 posed bones. The frame board
+  now holds 256, so this port checks that limit instead.
+- **Costume CSV quirks.** Materials match their row exactly or by a `_<cell>` suffix
+  (`cow_model_*`). `shoessshader` is a known typo. A texture that is not on the disc falls back to
+  the `.ddm`'s own texture name. Unlisted untextured `lambert1` slivers are dropped.
+- **Render styles.** `toon` / `toonSphere` → `mdl_ch_constant_vc`. `sphere` gets matcap UVs. The
+  `semitrans` sunglass lenses go to an alpha-blended slot with COLOR0 alpha `GLASS_ALPHA` (0.5,
+  a guess: the texture has no alpha).
+- **Clips.** The clips are 15 Hz, like UMX4's, so keys go every 4th frame. The pool is the
+  gender's group plus `unisex`.
+
+```bash
+python3 scripts/xdvdfs_extract.py extract ~/Desktop/ddr_universe/ddr_universe.iso ~/Desktop/ddr_universe/disc 'x_data_*'
+python3 scripts/extract_ultramix_data.py universe_us ~/Desktop/ddr_universe/disc ~/Desktop/ddr_universe/extracted
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe.py    # ~20 min for 25; DANCERS=lady:3 for one
+```
+
 ### A System 573 polygon dancer (`examples/port_character_sys573.py`)
 
 The same Omnimix path for the arcade dancers of DDR 3rdMIX PLUS / 4thMIX PLUS / 5thMIX (Konami

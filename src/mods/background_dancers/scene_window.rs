@@ -19,6 +19,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::services::avs_layeredfs::shader_layout::STYLE_TEXTURE_ARC;
+use crate::services::avs_layeredfs::shader_synthesis;
 use crate::services::scene3d::node_layout::SceneNode;
 use crate::services::scene3d::{arc_set, node, render_item, scene_graph, texture};
 use crate::{log_info, log_warn};
@@ -83,9 +85,20 @@ impl LoadedArcs {
     }
 }
 
-/// Game thread: hand the pick's arcs to the FileManager.
+/// Game thread: hand the pick's arcs to the FileManager — first the DDR
+/// Universe style-texture arc whenever dancers are picked and the Universe
+/// styles are served (any look may change to a texture style mid-scene:
+/// RANDOM, or a LIGHTING STYLE edit), so it registers before the dancers
+/// build; `style::effective` degrades the texture styles to CEL when it
+/// does not resolve.
 pub fn load_arcs(pick: &Pick, opts: &ParseOptions) -> LoadedArcs {
-    let arcs = pick.arcs_for(opts);
+    let mut arcs = pick.arcs_for(opts);
+    if !pick.dancers.is_empty()
+        && shader_synthesis::universe_available()
+        && arc_set::resolve_path(STYLE_TEXTURE_ARC).is_some()
+    {
+        arcs.insert(0, STYLE_TEXTURE_ARC.to_string());
+    }
     let arc_refs: Vec<&str> = arcs.iter().map(String::as_str).collect();
     let set = arc_set::load(&arc_refs);
     LoadedArcs {
@@ -361,17 +374,29 @@ impl SceneWindow {
         let Some(sess) = self.session.as_mut() else {
             return;
         };
+        // The live lighting style first (the owner set `style_bar`): looks
+        // switched this frame, STENCIL's tint ready for the publish.
+        sess.style_tick();
         director::produce(sess, t, real_s, visible, mask);
         // Every built instance has now been published at least once, so
         // its board slot — hidden bit included — is authoritative: drop
-        // the node-level "force hidden" it was attached with. Deploy #2:
-        // the flag was cleared only on the ONE frame `visible` first
-        // became true, so every node built after that frame (the dancer
-        // is always the last) stayed hidden for the whole song.
+        // the node-level "force hidden" it was attached with (a hull whose
+        // look has no outline keeps it — `Session::style_tick` owns it from
+        // here). Deploy #2: the flag was cleared only on the ONE frame
+        // `visible` first became true, so every node built after that frame
+        // (the dancer is always the last) stayed hidden for the whole song.
         for inst in sess.built_mut().filter(|i| !i.queued && !i.node_shown) {
             inst.node_shown = true;
+            let hide = match inst.style_rig.as_mut() {
+                Some(rig) if rig.hull => {
+                    let h = rig.applied.map_or(false, |l| l.hidden);
+                    rig.hidden_applied = Some(h);
+                    h
+                }
+                _ => false,
+            };
             // SAFETY: attached, dtor not run (scene Live).
-            unsafe { node::set_hidden(inst.node as *mut SceneNode, false) };
+            unsafe { node::set_hidden(inst.node as *mut SceneNode, hide) };
         }
     }
 

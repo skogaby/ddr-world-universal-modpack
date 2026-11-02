@@ -107,6 +107,7 @@ use crate::{log_info, log_warn};
 use super::cache_hasher::CACHE_FOLDER;
 use super::mod_paths;
 use super::shader_layout;
+use super::shader_layout::StyleFamily;
 
 /// Outcome of the session's single `shader.arc` open, as seen by this
 /// module. Read by the shader-fixes mod's enable line (honest status
@@ -169,6 +170,9 @@ static OUTLINE_PROGRAMS: AtomicBool = AtomicBool::new(false);
 /// The `shader_layout::WIPE_VARIANTS` containers (the Winx Club
 /// transformation wipe) are being served.
 static WIPES: AtomicBool = AtomicBool::new(false);
+/// The DDR Universe style containers (`<name>_u<family>`,
+/// `shader_layout::UniFamily`) are being served alongside `_lit` / `_cel`.
+static UNIVERSE: AtomicBool = AtomicBool::new(false);
 
 /// Every `MODEL_VARIANTS` `_lit`/`_cel` container is being served.
 pub fn variants_available() -> bool {
@@ -183,6 +187,11 @@ pub fn outline_programs_available() -> bool {
 /// See [`WIPES`]. `false` ⇒ the dancers mod crossfades instead (one WARN).
 pub fn wipes_available() -> bool {
     WIPES.load(Ordering::Acquire)
+}
+
+/// See [`UNIVERSE`]. `false` ⇒ the Universe Lighting Styles fall back to CEL.
+pub fn universe_available() -> bool {
+    UNIVERSE.load(Ordering::Acquire)
 }
 /// Mod-menu animated-background blobs (overlay-menu rewrite Step 8;
 /// Shadertoy theme pack 2026-08-25): one shared passthrough VS + one PS
@@ -223,6 +232,9 @@ struct Plan {
     /// The 3D scene's model style variants (Background Dancers "Scene
     /// Style"): every `MODEL_VARIANTS` name × {lit, cel}.
     variants: bool,
+    /// ... plus × the nine Universe families (`StyleFamily::served`); only
+    /// with `variants`.
+    universe: bool,
     /// The outline pair rides program 0 of every variant container.
     outlines: bool,
     /// The transformation-wipe containers (`shader_layout::WIPE_VARIANTS` ×
@@ -322,18 +334,33 @@ fn plan() -> Option<Plan> {
     // that forgot `data_mods/shader_fixes/blobs/` must not cost AA/persp).
     // A missing STYLE blob drops the whole variant set; a missing OUTLINE
     // blob drops only the outline pair.
+    // A missing UNIVERSE blob drops only the Universe families.
+    let mut universe = variants;
     if variants {
         let mut style_found = Vec::new();
         let mut outline_found = Vec::new();
+        let mut universe_found = Vec::new();
         for name in shader_layout::variant_blob_names() {
             let is_outline = name.contains("outline");
+            let is_universe = shader_layout::is_universe_blob(name);
             match mod_paths::find_first_modfile(&format!("blobs/{}", name)) {
                 Some(p) => {
                     if is_outline {
                         outline_found.push((name, p));
+                    } else if is_universe {
+                        universe_found.push((name, p));
                     } else {
                         style_found.push((name, p));
                     }
+                }
+                None if is_universe => {
+                    if universe {
+                        log_warn!(
+                            "shader_synthesis: Universe-style blob '{}' not found (deploy data_mods/shader_fixes/blobs/ with the DLL) — the DDR Universe lighting styles fall back to CEL",
+                            name
+                        );
+                    }
+                    universe = false;
                 }
                 None if is_outline => {
                     if outlines {
@@ -360,8 +387,12 @@ fn plan() -> Option<Plan> {
             if outlines {
                 blob_paths.extend(outline_found);
             }
+            if universe {
+                blob_paths.extend(universe_found);
+            }
         }
     }
+    universe &= variants;
     // Wipe blobs: soft-degrade on their own (the dancers mod crossfades).
     if !variants {
         wipes = false;
@@ -395,6 +426,7 @@ fn plan() -> Option<Plan> {
         persp,
         themes,
         variants,
+        universe,
         outlines,
         wipes,
         blob_paths,
@@ -442,6 +474,7 @@ fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
             return Vec::new();
         }
     };
+    // "v9": the DDR Universe style families (`<name>_u<family>`, 2026-11-02).
     // "v8": the transformation-wipe containers joined the set (2026-10-20).
     // "v7": the model containers became per-name style VARIANTS
     // (`<name>_lit` / `<name>_cel`, 2026-09-21; "v6" = cel + inverted hull
@@ -450,11 +483,12 @@ fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
     // when the packing recipe changes for identical config+blob inputs
     // ("v4" = the Shadertoy theme pack, 3 -> 6 -> 11 theme programs).
     let mut fp = format!(
-        "v8 aa={} persp={} themes={} variants={} outlines={} wipes={} arc={}",
+        "v9 aa={} persp={} themes={} variants={} universe={} outlines={} wipes={} arc={}",
         plan.aa,
         plan.persp,
         plan.themes,
         plan.variants,
+        plan.universe,
         plan.outlines,
         plan.wipes,
         {
@@ -496,11 +530,12 @@ fn synthesize_inner(original_path: &str) -> Vec<SynthEntry> {
     }
 
     log_info!(
-        "shader_synthesis: synthesizing (aa={}, persp={}, themes={}, scene variants={}, outlines={})",
+        "shader_synthesis: synthesizing (aa={}, persp={}, themes={}, scene variants={}, universe styles={}, outlines={})",
         plan.aa,
         plan.persp,
         plan.themes,
         plan.variants,
+        plan.universe,
         plan.outlines
     );
     match build_all(&plan, &stock_bytes, &dir) {
@@ -537,6 +572,7 @@ fn publish_outline_programs(plan: &Plan) {
     VARIANTS.store(plan.variants, Ordering::Release);
     OUTLINE_PROGRAMS.store(plan.variants && plan.outlines, Ordering::Release);
     WIPES.store(plan.variants && plan.wipes, Ordering::Release);
+    UNIVERSE.store(plan.variants && plan.universe, Ordering::Release);
 }
 
 /// The wipe container names (`<material>_wipe` / `_lit_wipe` / `_cel_wipe`).
@@ -550,14 +586,14 @@ fn wipe_names() -> Vec<String> {
     v
 }
 
-/// The 18 variant container names (`<material>_lit` / `<material>_cel`).
-fn variant_names() -> Vec<String> {
-    let mut v = Vec::with_capacity(shader_layout::MODEL_VARIANTS.len() * 2);
+/// The variant container names: every `MODEL_VARIANTS` shape × the served
+/// families (`<material>_lit` / `_cel` [/ `_u<family>`]).
+fn variant_names(universe: bool) -> Vec<String> {
+    let families = StyleFamily::served(universe);
+    let mut v = Vec::with_capacity(shader_layout::MODEL_VARIANTS.len() * families.len());
     for m in shader_layout::MODEL_VARIANTS.iter() {
-        for style in [SceneStyle::Lit, SceneStyle::Cel] {
-            if let Some(n) = shader_layout::variant_container_name(m, style) {
-                v.push(n);
-            }
+        for &f in &families {
+            v.push(shader_layout::family_container_name(m, f));
         }
     }
     v
@@ -576,7 +612,7 @@ fn planned_names(plan: &Plan) -> Vec<String> {
         v.push(DEFAULT.to_string());
     }
     if planned.model_variants {
-        v.extend(variant_names());
+        v.extend(variant_names(plan.universe));
         if plan.wipes {
             v.extend(wipe_names());
         }
@@ -738,7 +774,10 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<String>, St
     // dancers mod's bit-31 hull records — RE §4.6), else the style pair
     // again (4 identical entries, the stock shape). No stock header exists
     // for these names, so the hash is COMPUTED (RE §4.7). The dancers mod
-    // re-points its private material copies at them per song.
+    // re-points its private material copies at them per song. With
+    // `plan.universe`, also `<name>_u<family>` for the nine DDR Universe
+    // families (`mdl_universe.hlsl`: the shape's uni VS + the family PS;
+    // same program layout, so NEGATIVE / MONO / SEPIA get the outline).
     if plan.variants {
         let programs = shader_layout::model_programs(plan.outlines);
         let (want_vs, want_ps) = shader_layout::model_table_counts(plan.outlines);
@@ -751,7 +790,16 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<String>, St
             if !donor_cache.contains_key(m.lit_ps_donor) {
                 donor_cache.insert(m.lit_ps_donor, extract_stock(stock_arc, m.lit_ps_donor)?.ps);
             }
+            let families = StyleFamily::served(plan.universe);
             let mut needed = vec![m.lit_vs, m.cel_vs, m.cel_ps];
+            if plan.universe {
+                needed.push(m.uni_vs);
+                for &f in &families {
+                    if let StyleFamily::Uni(u) = f {
+                        needed.push(m.uni_ps(u));
+                    }
+                }
+            }
             if plan.outlines {
                 needed.push(m.outline_vs);
                 needed.push(m.outline_ps);
@@ -761,14 +809,12 @@ fn build_all(plan: &Plan, stock_arc: &[u8], dir: &str) -> Result<Vec<String>, St
                     blob_cache.insert(b, read_blob(b)?);
                 }
             }
-            for style in [SceneStyle::Lit, SceneStyle::Cel] {
-                let Some(name) = shader_layout::variant_container_name(m, style) else {
-                    continue;
-                };
-                let (style_vs, style_ps): (&[u8], &[u8]) = match style {
-                    SceneStyle::Lit => (&blob_cache[m.lit_vs], &donor_cache[m.lit_ps_donor]),
-                    SceneStyle::Cel => (&blob_cache[m.cel_vs], &blob_cache[m.cel_ps]),
-                    SceneStyle::Stock => continue,
+            for &family in &families {
+                let name = shader_layout::family_container_name(m, family);
+                let (style_vs, style_ps): (&[u8], &[u8]) = match family {
+                    StyleFamily::Lit => (&blob_cache[m.lit_vs], &donor_cache[m.lit_ps_donor]),
+                    StyleFamily::Cel => (&blob_cache[m.cel_vs], &blob_cache[m.cel_ps]),
+                    StyleFamily::Uni(u) => (&blob_cache[m.uni_vs], &blob_cache[m.uni_ps(u)]),
                 };
                 let mut vs_blobs: Vec<&[u8]> = vec![style_vs];
                 let mut ps_blobs: Vec<&[u8]> = vec![style_ps];

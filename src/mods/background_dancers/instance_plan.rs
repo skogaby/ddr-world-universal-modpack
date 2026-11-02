@@ -17,6 +17,7 @@
 use std::time::Instant;
 
 use super::selection::SHADOW_MODEL;
+use super::style_rig::StyleRig;
 
 /// `SceneNode.instance` value meaning "no board slot" — pinned equal to
 /// `scene3d::frame_board::NO_SLOT` by a `const` assertion in `session.rs`.
@@ -94,7 +95,7 @@ impl InstanceKind {
 /// and never a stage part whose model is the `_bg` skydome/backdrop (an
 /// inward-facing dome under a directional light gets a gradient across the
 /// sky). Hull twins inherit their body's verdict. Per-material blend-group
-/// exclusions are applied on top by `render_item::restyle_materials`.
+/// exclusions are applied on top by `render_item::restyle_candidates`.
 pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
     match kind {
         // The effect pools keep their unlit additive materials (no style,
@@ -139,6 +140,10 @@ pub struct Instance {
     pub material_count: usize,
     /// Texture-table entries still on the default texture (retry while > 0).
     pub textures_pending: usize,
+    /// The runtime look switch (`style_rig.rs`): captured at build for
+    /// every restyle-eligible instance, `None` otherwise (and for a Winx
+    /// body on the wipe containers).
+    pub style_rig: Option<StyleRig>,
     pub attached_at: Option<Instant>,
     /// The node-level "force hidden" it was attached with has been dropped
     /// (after the instance's first frame-board publish — the board's own
@@ -172,6 +177,7 @@ impl Instance {
             bone_count,
             material_count: 0,
             textures_pending: 0,
+            style_rig: None,
             attached_at: None,
             node_shown: false,
             queued: false,
@@ -295,6 +301,9 @@ pub struct Plan {
 /// - `slot_budget`: how many owners may hold a slot; the tail is `Skipped`
 ///   with [`NO_SLOT`] (the caller logs the WARN from `Plan::truncated`).
 /// - `hull_layers`: outline layers per restyle-eligible body (0 = none).
+/// - `hull_stage` / `hull_dancers`: which bodies get hulls — stage props /
+///   dancer bodies, parts and twins (the session shows or hides each hull
+///   per look, `style_rig.rs`).
 /// - `item_pass_mask`: `Some(m)` stamps every instance with `m` (hull twins
 ///   included); `None` = the stock `masks`.
 pub fn plan_instances(
@@ -303,6 +312,8 @@ pub fn plan_instances(
     slot_base: u32,
     slot_budget: usize,
     hull_layers: usize,
+    hull_stage: bool,
+    hull_dancers: bool,
     item_pass_mask: Option<u32>,
 ) -> Plan {
     let mask_of = |stock: u32| item_pass_mask.unwrap_or(stock);
@@ -475,11 +486,14 @@ pub fn plan_instances(
                 continue;
             }
             let eligible = match body.kind {
-                InstanceKind::StagePart(i) => hull_allowed_for_stage_part(
-                    &body.model_name,
-                    input.stage_parts.get(i).map_or(0.0, |p| p.extent_m),
-                ),
-                ref kind => restyle_allowed(kind, &body.model_name),
+                InstanceKind::StagePart(i) => {
+                    hull_stage
+                        && hull_allowed_for_stage_part(
+                            &body.model_name,
+                            input.stage_parts.get(i).map_or(0.0, |p| p.extent_m),
+                        )
+                }
+                ref kind => hull_dancers && restyle_allowed(kind, &body.model_name),
             };
             if !eligible {
                 continue;
@@ -593,7 +607,7 @@ mod tests {
                 bone_count: 244,
             },
         ];
-        let plan = plan_instances(&input, MASKS, 0, 64, 1, None);
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, true, true, None);
         let fx: Vec<usize> = (0..plan.instances.len())
             .filter(|&k| matches!(plan.instances[k].kind, InstanceKind::Fx { .. }))
             .collect();
@@ -634,7 +648,7 @@ mod tests {
 
     #[test]
     fn gameplay_plan_order_and_slots() {
-        let plan = plan_instances(&fixture(), MASKS, 0, 32, 0, None);
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 0, true, true, None);
         use InstanceKind::*;
         assert_eq!(
             kinds(&plan),
@@ -674,7 +688,7 @@ mod tests {
 
     #[test]
     fn slot_base_shifts_owner_slots() {
-        let plan = plan_instances(&fixture(), MASKS, 16, 16, 1, None);
+        let plan = plan_instances(&fixture(), MASKS, 16, 16, 1, true, true, None);
         let slots: Vec<u32> = owners(&plan).iter().map(|i| i.slot).collect();
         assert_eq!(slots, (16..25).collect::<Vec<u32>>());
         for h in plan.instances.iter() {
@@ -691,8 +705,54 @@ mod tests {
     }
 
     #[test]
+    fn dancer_only_hulls_skip_the_stage() {
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 1, false, true, None);
+        let bodies: Vec<&Instance> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(&plan.instances[of]),
+                _ => None,
+            })
+            .collect();
+        // 2 dancers + 3 parts, no stage part.
+        assert_eq!(bodies.len(), 5);
+        assert!(bodies
+            .iter()
+            .all(|b| !matches!(b.kind, InstanceKind::StagePart(_))));
+        assert!(plan.instances.iter().all(|i| i.style_rig.is_none()));
+    }
+
+    #[test]
+    fn stage_only_hulls_skip_every_dancer_body() {
+        // The Universe styles without an outline: the `_stage` part keeps
+        // its hull, dancers / parts get none.
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 1, true, false, None);
+        let hull_bodies: Vec<&Instance> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(&plan.instances[of]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hull_bodies.len(), 1);
+        assert!(matches!(hull_bodies[0].kind, InstanceKind::StagePart(_)));
+        // Everything else is identical to the full plan.
+        let full = plan_instances(&fixture(), MASKS, 0, 32, 1, true, true, None);
+        let bodies = |p: &Plan| -> Vec<(String, u32)> {
+            p.instances
+                .iter()
+                .filter(|i| !matches!(i.kind, InstanceKind::Hull { .. }))
+                .map(|i| (i.model_name.clone(), i.slot))
+                .collect()
+        };
+        assert_eq!(bodies(&plan), bodies(&full));
+    }
+
+    #[test]
     fn mask_override_covers_every_instance() {
-        let plan = plan_instances(&fixture(), MASKS, 0, 32, 2, Some(0x20));
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 2, true, true, Some(0x20));
         assert!(plan.instances.iter().all(|i| i.pass_mask == 0x20));
         let hulls: Vec<&Instance> = plan
             .instances
@@ -740,7 +800,7 @@ mod tests {
 
     #[test]
     fn budget_truncates_the_tail() {
-        let plan = plan_instances(&fixture(), MASKS, 16, 4, 1, None);
+        let plan = plan_instances(&fixture(), MASKS, 16, 4, 1, true, true, None);
         let owners = owners(&plan);
         assert_eq!(owners.len(), 9);
         for (i, inst) in owners.iter().enumerate() {
@@ -778,7 +838,7 @@ mod tests {
             bone_count: 1,
             extent_m: 631.567,
         });
-        let plan = plan_instances(&input, MASKS, 0, 32, 1, None);
+        let plan = plan_instances(&input, MASKS, 0, 32, 1, true, true, None);
         let hull_of: Vec<usize> = plan
             .instances
             .iter()
@@ -826,7 +886,7 @@ mod tests {
     fn no_shadow_when_skeleton_missing() {
         let mut input = fixture();
         input.shadow_bone_count = None;
-        let plan = plan_instances(&input, MASKS, 0, 32, 0, None);
+        let plan = plan_instances(&input, MASKS, 0, 32, 0, true, true, None);
         assert!(!plan
             .instances
             .iter()
@@ -839,7 +899,7 @@ mod tests {
     fn stage_only_and_dancer_only_shapes() {
         let mut stage_only = fixture();
         stage_only.dancers.clear();
-        let plan = plan_instances(&stage_only, MASKS, 0, 16, 1, Some(0x08));
+        let plan = plan_instances(&stage_only, MASKS, 0, 16, 1, true, true, Some(0x08));
         assert_eq!(
             kinds(&plan),
             vec![
@@ -855,7 +915,7 @@ mod tests {
         dancer_only.stage_parts.clear();
         dancer_only.dancers.truncate(1);
         dancer_only.shadow_bone_count = None; // previews parse no shadow
-        let plan = plan_instances(&dancer_only, MASKS, 16, 16, 0, Some(0x20));
+        let plan = plan_instances(&dancer_only, MASKS, 16, 16, 0, true, true, Some(0x20));
         assert_eq!(
             kinds(&plan),
             vec![
@@ -889,7 +949,7 @@ mod tests {
             ],
         });
         input.dancers[1].chara_pools = vec![(CHARA_BANK_WING, fx("fx_w_waa", 70))];
-        let plan = plan_instances(&input, MASKS, 0, 64, 1, None);
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, true, true, None);
         use InstanceKind::*;
         let k = kinds(&plan);
         let twin_at = k.iter().position(|x| *x == Twin(0)).unwrap();

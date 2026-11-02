@@ -1,8 +1,13 @@
 //! Scene style — the whole 3D scene's shading (stage props AND dancers):
-//! STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING (config `stock`/`lit`/`cel`),
-//! plus the inverted-hull outlines (on/off — since 2026-09-28 CEL and the
-//! outline are DANCING STAGE UNLEASHED's own toon shading and ink,
-//! `shaders/src/mdl_cel.hlsl`, `outline.rs`) and the two A3 tempo
+//! STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING (config `stock`/`lit`/`cel`)
+//! and, since 2026-11-02, fifteen DANCERS-ONLY DDR Universe render styles
+//! (CONTRAST … X-RAY and OUTLINE ONLY, `shader_layout::SceneStyle`,
+//! `docs/ddr_universe_render_styles_research.md`: the stage takes CEL in
+//! them, the dancers' own outline only with NEGATIVE / MONOCHROME / SEPIA)
+//! plus RANDOM (EVERY BAR) — the first row value: a different preset per
+//! chart bar — plus the inverted-hull outlines (on/off — since 2026-09-28
+//! CEL and the outline are DANCING STAGE UNLEASHED's own toon shading and
+//! ink, `shaders/src/mdl_cel.hlsl`, `outline.rs`) and the two A3 tempo
 //! switches. Owns the live values the session builder reads
 //! (`effective()`, `hull_plan()`, `tempo_options()`,
 //! and `movie_mode()` — the Background Movies choice the song window
@@ -13,27 +18,30 @@
 //! (`save_json_key` replaces the section, so every key is re-emitted from
 //! the live mirrors on each edit).
 //!
-//! Every row applies from the NEXT SONG: the style is applied at item build
-//! by re-pointing each render item's private material copies at the
-//! synthesized `<name>_lit` / `<name>_cel` variant containers
-//! (`render_item::restyle_materials`, RE §4.7), and the outline twins are
-//! created per session. Nothing here depends on a relaunch — every variant
-//! container is synthesized at boot whenever the two mods are on. The
-//! exceptions: CUSTOM DANCERS & STAGES (next launch — the catalog is built
-//! once) and BIG HEAD, the section's last row, which is LIVE — `head_scale()`
-//! is read by `director::produce` every frame (gameplay and previews), so a
-//! toggle shows on the next frame (`docs/big_head_mode_feasibility.md`).
-//!
-//! The three style values are the shape the maintainer intends to expose to
-//! players later (stock / enhanced lighting / enhanced lighting + cel);
-//! today they are operator experiment knobs (config + mod menu).
+//! LIGHTING STYLE is LIVE: every built instance captures a runtime look
+//! switch (`style_rig.rs` — the synthesized `<name>_lit` / `<name>_cel` /
+//! `<name>_u<family>` container of every family for each restyleable
+//! material copy, RE §4.7) and `session::Session::style_tick` applies the
+//! current style each frame — [`generation`] tells it an edit happened —
+//! in gameplay and in the song-select previews alike. The hulls are built
+//! per song (`hull_plan`: wherever a look MAY need one) and shown or hidden
+//! per look; SCENE OUTLINES shows / hides the built ones at once and
+//! decides what is built from the next song. The other rows apply from the
+//! NEXT SONG, except CUSTOM DANCERS & STAGES (next launch — the catalog is
+//! built once) and BIG HEAD, the section's last row, which is LIVE —
+//! `head_scale()` is read by `director::produce` every frame (gameplay and
+//! previews), so a toggle shows on the next frame
+//! (`docs/big_head_mode_feasibility.md`). Nothing here depends on a relaunch
+//! — every variant container is synthesized at boot whenever the two mods
+//! are on.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::mods::config;
-use crate::services::avs_layeredfs::shader_layout::SceneStyle;
+use crate::services::avs_layeredfs::shader_layout::{SceneStyle, STYLE_TEXTURE_ARC};
 use crate::services::avs_layeredfs::shader_synthesis;
+use crate::services::scene3d::arc_set;
 use crate::{log_info, log_warn};
 
 use super::director_math::BIG_HEAD_SCALE;
@@ -49,7 +57,7 @@ const ROW_KEY_CUSTOM_CONTENT: &str = "background-dancers-custom-content";
 const ROW_KEY_MOVIE_MODE: &str = "background-dancers-movie-mode";
 const ROW_KEY_BIG_HEAD: &str = "background-dancers-big-head";
 
-static LIVE_STYLE: AtomicU8 = AtomicU8::new(1); // SceneStyle::row_value
+static LIVE_STYLE: AtomicU8 = AtomicU8::new(2); // SceneStyle::row_value (LIT until init)
 static LIVE_OUTLINES: AtomicBool = AtomicBool::new(true);
 static LIVE_BPM_SYNC: AtomicBool = AtomicBool::new(true);
 static LIVE_STOP_SLOW: AtomicBool = AtomicBool::new(true);
@@ -97,13 +105,43 @@ pub struct Requested {
     pub outlines: bool,
 }
 
-/// What a session can actually build this boot: the requested style if
-/// the variant containers are being served (else STOCK, one WARN per
-/// change), outlines only with a non-stock style AND served outline programs.
+/// What a session can actually draw this boot: the requested style gated on
+/// what is served (`gate_style`), the live SCENE OUTLINES switch, and the
+/// served set (RANDOM's pool and the per-bar picks are gated by it too).
+/// Sessions re-read it whenever [`generation`] moves — every LIGHTING STYLE
+/// / SCENE OUTLINES edit applies at once (`session::Session::style_tick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Effective {
+    /// May be `Random` (resolved per bar by the session).
     pub style: SceneStyle,
-    pub hulls: bool,
+    /// SCENE OUTLINES on AND the outline pair served: the hulls of the looks
+    /// that outline are shown.
+    pub outlines: bool,
+    pub served: Served,
+}
+
+/// What this boot serves (the inputs of [`effective_for`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Served {
+    /// The `_lit` / `_cel` variant containers.
+    pub variants: bool,
+    /// The outline pair at program 0 of every variant container.
+    pub outlines: bool,
+    /// The DDR Universe `_u<family>` containers.
+    pub universe: bool,
+    /// `shader_layout::STYLE_TEXTURE_ARC` resolves.
+    pub style_textures: bool,
+}
+
+impl Effective {
+    /// RANDOM (EVERY BAR)'s presets this boot.
+    pub fn random_pool(&self) -> Vec<SceneStyle> {
+        SceneStyle::random_pool(
+            self.served.universe,
+            self.served.style_textures,
+            self.served.outlines,
+        )
+    }
 }
 
 pub fn requested() -> Requested {
@@ -113,49 +151,108 @@ pub fn requested() -> Requested {
     }
 }
 
-/// The hull layers a session being created now builds: nothing unless
-/// `eff.hulls`, else DSU's one black hull (`outline::HullPlan::ink`).
-pub fn hull_plan(eff: &Effective) -> HullPlan {
-    if !eff.hulls {
-        return HullPlan::none();
-    }
-    HullPlan::ink()
+/// Bumped by every LIGHTING STYLE / SCENE OUTLINES edit.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// See [`GENERATION`] (a live session re-reads [`effective`] when it moves).
+pub fn generation() -> u32 {
+    GENERATION.load(Ordering::Acquire)
 }
 
-/// Pure gate (host-tested in `pure.rs`-style: no engine reads).
-pub fn effective_for(req: Requested, variants_served: bool, outlines_served: bool) -> Effective {
-    let style = if variants_served {
-        req.style
-    } else {
+/// One style as this boot can draw it: STOCK without the variant containers;
+/// CEL for a DDR Universe style without its containers, for a texture style
+/// without the style-texture arc and for OUTLINE ONLY without the outline
+/// pair; RANDOM stays RANDOM (its pool is gated instead).
+pub fn gate_style(style: SceneStyle, served: Served) -> SceneStyle {
+    if !served.variants {
         SceneStyle::Stock
-    };
+    } else if style == SceneStyle::Random {
+        style
+    } else if style.is_universe() && !served.universe
+        || style.texture().is_some() && !served.style_textures
+        || style == SceneStyle::Outline && !served.outlines
+    {
+        SceneStyle::Cel
+    } else {
+        style
+    }
+}
+
+/// The hulls a session being created now builds — DSU's one black hull
+/// (`outline::HullPlan`) on each body whose look MAY need one this song;
+/// the session shows or hides every hull per look. Stage props: SCENE
+/// OUTLINES on with a shaded stage. Dancers: SCENE OUTLINES on with a
+/// shaded style, or OUTLINE ONLY / RANDOM (the hull IS the look). A dancer
+/// preview (`dancer_preview`) always builds them when served — every look
+/// follows the menu live there, so any may need one.
+pub fn hull_plan(eff: &Effective, dancer_preview: bool) -> HullPlan {
+    if !eff.served.outlines || !eff.served.variants {
+        return HullPlan::none();
+    }
+    if dancer_preview {
+        return HullPlan::ink_on(false, true);
+    }
+    let stage = eff.outlines && eff.style.stage_style() != SceneStyle::Stock;
+    let dancers = eff.outlines && eff.style != SceneStyle::Stock || eff.style.needs_hulls();
+    HullPlan::ink_on(stage, dancers)
+}
+
+/// Pure gate (host-tested: no engine reads).
+pub fn effective_for(req: Requested, served: Served) -> Effective {
     Effective {
-        style,
-        hulls: style != SceneStyle::Stock && req.outlines && outlines_served,
+        style: gate_style(req.style, served),
+        outlines: req.outlines && served.outlines,
+        served,
     }
 }
 
 static LAST_GATE_WARN: AtomicU8 = AtomicU8::new(0);
 
-/// The style/hull decision for a session being created now.
+/// The style/hull decision as of now (a session reads it at creation and
+/// whenever [`generation`] moves).
 pub fn effective() -> Effective {
     let req = requested();
-    let served = shader_synthesis::variants_available();
-    let outlines_served = shader_synthesis::outline_programs_available();
-    let eff = effective_for(req, served, outlines_served);
-    // One WARN per distinct degradation (the flags never change after boot).
-    let code: u8 = match (
-        req.style != SceneStyle::Stock && !served,
-        req.outlines && eff.style != SceneStyle::Stock && !outlines_served,
-    ) {
-        (true, _) => 1,
-        (false, true) => 2,
-        _ => 0,
+    let served = Served {
+        variants: shader_synthesis::variants_available(),
+        outlines: shader_synthesis::outline_programs_available(),
+        universe: shader_synthesis::universe_available(),
+        style_textures: arc_set::resolve_path(STYLE_TEXTURE_ARC).is_some(),
+    };
+    let eff = effective_for(req, served);
+    // One WARN per distinct degradation (the flags never change after boot;
+    // the arc check is per edit but a mid-boot change is an operator edit).
+    let code: u8 = if req.style != SceneStyle::Stock && !served.variants {
+        1
+    } else if req.style.is_universe() && !served.universe {
+        3
+    } else if (req.style.texture().is_some() || req.style == SceneStyle::Random)
+        && !served.style_textures
+    {
+        4
+    } else if req.style.needs_hulls() && !served.outlines {
+        5
+    } else if req.outlines && eff.style != SceneStyle::Stock && !served.outlines {
+        2
+    } else {
+        0
     };
     if code != 0 && LAST_GATE_WARN.swap(code, Ordering::Relaxed) != code {
         match code {
             1 => log_warn!(
                 "BackgroundDancers: scene style {} requested but the shader variants are not served (shader-fixes off / blobs missing / shader.arc not intercepted) -- stock this boot",
+                req.style.key()
+            ),
+            3 => log_warn!(
+                "BackgroundDancers: lighting style {} requested but the DDR Universe shader containers are not served (mdl_uni_* blobs missing from data_mods/shader_fixes/blobs/) -- CEL this boot",
+                req.style.key()
+            ),
+            4 => log_warn!(
+                "BackgroundDancers: lighting style {} needs {} (deploy data_mods/background_dancers/ with the DLL) -- CEL (RANDOM: the texture styles left out)",
+                req.style.key(),
+                STYLE_TEXTURE_ARC
+            ),
+            5 => log_warn!(
+                "BackgroundDancers: lighting style {} needs the outline programs, which are not served -- CEL (RANDOM: OUTLINE ONLY left out)",
                 req.style.key()
             ),
             _ => log_warn!(
@@ -179,8 +276,13 @@ pub fn init_from_config() {
         Ok(s) => s,
         Err(bad) => {
             log_warn!(
-                "BackgroundDancers: background_dancers.style = '{}' is not stock/lit/cel -- using lit",
-                bad
+                "BackgroundDancers: background_dancers.style = '{}' is not one of {} -- using lit",
+                bad,
+                SceneStyle::ALL
+                    .iter()
+                    .map(|s| s.key())
+                    .collect::<Vec<_>>()
+                    .join("/")
             );
             SceneStyle::Lit
         }
@@ -224,7 +326,7 @@ pub fn init_from_config() {
         BIG_HEAD_SCALE
     );
     log_info!(
-        "BackgroundDancers: scene style -- {} outlines={} (cel + outline = DSU toon; variants {}, outline programs {}; applies per song)",
+        "BackgroundDancers: scene style -- {} outlines={} (cel + outline = DSU toon; variants {}, outline programs {}, DDR Universe styles {}; applies per song)",
         style.key(),
         outlines,
         if shader_synthesis::variants_available() {
@@ -233,6 +335,11 @@ pub fn init_from_config() {
             "NOT served"
         },
         if shader_synthesis::outline_programs_available() {
+            "served"
+        } else {
+            "NOT served"
+        },
+        if shader_synthesis::universe_available() {
             "served"
         } else {
             "NOT served"
@@ -269,9 +376,10 @@ fn persist_section() {
 fn set_style(value: i32) {
     let style = SceneStyle::from_row_value(value);
     LIVE_STYLE.store(style.row_value() as u8, Ordering::Relaxed);
+    GENERATION.fetch_add(1, Ordering::AcqRel);
     persist_section();
     log_info!(
-        "BackgroundDancers: LIGHTING STYLE set to {} (applies from the next song)",
+        "BackgroundDancers: LIGHTING STYLE set to {} (applies now to live scenes and previews)",
         style.key().to_ascii_uppercase()
     );
 }
@@ -279,9 +387,10 @@ fn set_style(value: i32) {
 fn set_outlines(value: i32) {
     let on = value != 0;
     LIVE_OUTLINES.store(on, Ordering::Relaxed);
+    GENERATION.fetch_add(1, Ordering::AcqRel);
     persist_section();
     log_info!(
-        "BackgroundDancers: SCENE OUTLINES set to {} (applies from the next song)",
+        "BackgroundDancers: SCENE OUTLINES set to {} (shown/hidden now where the outlines were built; built from the next song)",
         if on { "ON" } else { "OFF" }
     );
 }
@@ -351,14 +460,10 @@ fn register_rows(
     register_enum_row(EnumRowSpec {
         key: ROW_KEY_STYLE.to_string(),
         label: "Lighting Style".to_string(),
-        hint: "Shading of the 3D stage and dancers: the game's unlit look, smooth key-light shading, or Dancing Stage Unleashed's two-band toon shading. Next song.".to_string(),
+        hint: "Shading of the 3D scene: unlit, smooth, Dancing Stage Unleashed toon, or a DDR Universe dancer effect (stage stays toon); RANDOM changes it every bar. Applies now.".to_string(),
         parent_row_key: Some(MOD_ID.to_string()),
-        values: vec![0, 1, 2],
-        labels: vec![
-            "STOCK (UNLIT)".to_string(),
-            "SMOOTH SHADING".to_string(),
-            "CEL SHADING".to_string(),
-        ],
+        values: SceneStyle::ALL.iter().map(|s| s.row_value()).collect(),
+        labels: SceneStyle::ALL.iter().map(|s| s.label().to_string()).collect(),
         initial_value: style.row_value(),
         on_change: Arc::new(set_style),
     });
@@ -438,43 +543,118 @@ mod tests {
     #[test]
     fn gate_matrix() {
         let req = |style, outlines| Requested { style, outlines };
-        // Served: requested style, hulls need non-stock + outlines + programs.
+        let all = Served {
+            variants: true,
+            outlines: true,
+            universe: true,
+            style_textures: true,
+        };
+        let e = effective_for(req(SceneStyle::Cel, true), all);
+        assert_eq!((e.style, e.outlines), (SceneStyle::Cel, true));
+        let e = effective_for(req(SceneStyle::Lit, false), all);
+        assert_eq!((e.style, e.outlines), (SceneStyle::Lit, false));
+        // Outline programs missing ⇒ style stays, outlines off, no hulls.
+        let no_ol = Served {
+            outlines: false,
+            ..all
+        };
+        let e = effective_for(req(SceneStyle::Cel, true), no_ol);
+        assert_eq!((e.style, e.outlines), (SceneStyle::Cel, false));
+        assert!(hull_plan(&e, false).is_none());
+        // Variants missing ⇒ stock, whatever was asked (RANDOM included).
+        let none = Served {
+            variants: false,
+            ..all
+        };
+        for s in [SceneStyle::Thermo, SceneStyle::Random, SceneStyle::Outline] {
+            assert_eq!(effective_for(req(s, true), none).style, SceneStyle::Stock);
+        }
+        assert!(hull_plan(&effective_for(req(SceneStyle::Cel, true), none), false).is_none());
+    }
+
+    #[test]
+    fn universe_gate() {
+        let all = Served {
+            variants: true,
+            outlines: true,
+            universe: true,
+            style_textures: true,
+        };
+        assert_eq!(gate_style(SceneStyle::Negative, all), SceneStyle::Negative);
+        assert_eq!(gate_style(SceneStyle::Random, all), SceneStyle::Random);
+        let no_uni = Served {
+            universe: false,
+            ..all
+        };
+        assert_eq!(gate_style(SceneStyle::Xray, no_uni), SceneStyle::Cel);
+        assert_eq!(gate_style(SceneStyle::Outline, no_uni), SceneStyle::Cel);
+        let no_tex = Served {
+            style_textures: false,
+            ..all
+        };
+        assert_eq!(gate_style(SceneStyle::Mercury, no_tex), SceneStyle::Cel);
         assert_eq!(
-            effective_for(req(SceneStyle::Cel, true), true, true),
-            Effective {
-                style: SceneStyle::Cel,
-                hulls: true
-            }
+            gate_style(SceneStyle::StencilRainbow, no_tex),
+            SceneStyle::Cel
         );
         assert_eq!(
-            effective_for(req(SceneStyle::Lit, false), true, true),
-            Effective {
-                style: SceneStyle::Lit,
-                hulls: false
-            }
+            gate_style(SceneStyle::Contrast, no_tex),
+            SceneStyle::Contrast
         );
+        assert_eq!(gate_style(SceneStyle::Lit, no_tex), SceneStyle::Lit);
+        let no_ol = Served {
+            outlines: false,
+            ..all
+        };
+        assert_eq!(gate_style(SceneStyle::Outline, no_ol), SceneStyle::Cel);
+        // RANDOM's pool follows the served set.
+        let r = |served| {
+            effective_for(
+                Requested {
+                    style: SceneStyle::Random,
+                    outlines: true,
+                },
+                served,
+            )
+        };
+        assert!(r(all).random_pool().contains(&SceneStyle::Thermo));
+        assert!(!r(no_tex).random_pool().contains(&SceneStyle::Thermo));
+        assert!(!r(no_ol).random_pool().contains(&SceneStyle::Outline));
         assert_eq!(
-            effective_for(req(SceneStyle::Stock, true), true, true),
-            Effective {
+            r(no_uni).random_pool(),
+            vec![SceneStyle::Lit, SceneStyle::Cel]
+        );
+    }
+
+    #[test]
+    fn hull_plans() {
+        let all = Served {
+            variants: true,
+            outlines: true,
+            universe: true,
+            style_textures: true,
+        };
+        let plan = |style, outlines| {
+            let p = hull_plan(&effective_for(Requested { style, outlines }, all), false);
+            (p.stage, p.dancers, p.is_none())
+        };
+        // Outlines on: shaded stage + dancers (hidden per look at runtime).
+        assert_eq!(plan(SceneStyle::Cel, true), (true, true, false));
+        assert_eq!(plan(SceneStyle::Thermo, true), (true, true, false));
+        assert_eq!(plan(SceneStyle::Stock, true), (false, false, true));
+        // Outlines off: only the looks that ARE the hull build dancer hulls.
+        assert_eq!(plan(SceneStyle::Cel, false), (false, false, true));
+        assert_eq!(plan(SceneStyle::Outline, false), (false, true, false));
+        assert_eq!(plan(SceneStyle::Random, false), (false, true, false));
+        // A dancer preview always builds dancer hulls (looks follow the menu).
+        let e = effective_for(
+            Requested {
                 style: SceneStyle::Stock,
-                hulls: false
-            }
+                outlines: false,
+            },
+            all,
         );
-        // Outline programs missing ⇒ style stays, no hulls.
-        assert_eq!(
-            effective_for(req(SceneStyle::Cel, true), true, false),
-            Effective {
-                style: SceneStyle::Cel,
-                hulls: false
-            }
-        );
-        // Variants missing ⇒ stock, no hulls, regardless of the request.
-        assert_eq!(
-            effective_for(req(SceneStyle::Cel, true), false, true),
-            Effective {
-                style: SceneStyle::Stock,
-                hulls: false
-            }
-        );
+        let p = hull_plan(&e, true);
+        assert!(p.dancers && !p.stage);
     }
 }

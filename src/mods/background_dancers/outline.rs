@@ -37,6 +37,13 @@ pub struct HullLayer {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct HullPlan {
     pub layers: Vec<HullLayer>,
+    /// Stage props get hulls.
+    pub stage: bool,
+    /// Dancers (bodies, parts, Winx twins) get hulls. Each hull is shown or
+    /// hidden per look at runtime (`style_rig.rs`): a dancer hull exists
+    /// whenever its look MAY need one (OUTLINE ONLY / RANDOM, or SCENE
+    /// OUTLINES on).
+    pub dancers: bool,
 }
 
 impl HullPlan {
@@ -44,13 +51,27 @@ impl HullPlan {
         HullPlan::default()
     }
 
-    /// The DSU outline: one black hull at DSU's push.
+    /// The DSU outline: one black hull at DSU's push, on every eligible mesh.
     pub fn ink() -> HullPlan {
         HullPlan {
             layers: vec![HullLayer {
                 rgba: [INK_RGB[0], INK_RGB[1], INK_RGB[2], 1.0],
                 push_scale: PUSH_SCALE,
             }],
+            stage: true,
+            dancers: true,
+        }
+    }
+
+    /// [`HullPlan::ink`] on the chosen bodies (both `false` ⇒ none).
+    pub fn ink_on(stage: bool, dancers: bool) -> HullPlan {
+        if !stage && !dancers {
+            return HullPlan::none();
+        }
+        HullPlan {
+            stage,
+            dancers,
+            ..HullPlan::ink()
         }
     }
 
@@ -80,7 +101,13 @@ mod tests {
         );
         assert_eq!(p.layers[0].push_scale, 1.0);
         assert!(!p.is_none());
+        assert!(p.dancers && p.stage);
         assert_eq!(hex(p.layers[0].rgba), "#000000");
+        let s = HullPlan::ink_on(true, false);
+        assert_eq!(s.layers, p.layers);
+        assert!(s.stage && !s.dancers);
+        assert!(HullPlan::ink_on(false, false).is_none());
+        assert!(!HullPlan::ink_on(false, true).is_none());
     }
 
     #[test]

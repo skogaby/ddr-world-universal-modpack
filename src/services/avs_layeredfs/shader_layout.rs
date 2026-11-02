@@ -25,7 +25,12 @@
 //!   `(0, 0, 0)` entries — the model pass binds `programs[stage]` with
 //!   `stage ∈ {0, 2}` in production and NO bounds check
 //!   (`docs/background_dancers_research.md` §4.2), exactly like every
-//!   stock `gs_model_*` / `mdl_*` container.
+//!   stock `gs_model_*` / `mdl_*` container;
+//! - the model VARIANT containers are `<material_name><suffix>` for every
+//!   [`MODEL_VARIANTS`] shape × [`StyleFamily`] (lit, cel, and the nine DDR
+//!   Universe families — [`StyleFamily::served`]); the six sphere-map styles
+//!   share one family, so the Lighting Style count and the container count
+//!   differ by design.
 
 /// The player-perspective program's index in every container that has
 /// one — a positional contract with `pass_rewrite` (never move it).
@@ -51,52 +56,385 @@ pub const MODEL_HULL_PROGRAM_INDEX: u8 = 0;
 /// applies a fixed world-space key light smoothly per vertex; `Cel` is
 /// Dancing Stage Unleashed's toon shading (its 2-band `toon.tga` ramp on
 /// per-vertex N·L under its default light, `shaders/src/mdl_cel.hlsl`), plus
-/// DSU's black hull outlines when enabled.
+/// DSU's black hull outlines when enabled. The rest are DanceDanceRevolution
+/// Universe's per-song character render styles
+/// (`docs/ddr_universe_render_styles_research.md`, `shaders/src/mdl_universe.hlsl`):
+/// they restyle DANCERS only ([`SceneStyle::stage_style`] = CEL), some bind a
+/// style texture ([`SceneStyle::texture`]) and some draw additively
+/// ([`SceneStyle::additive`]). `Outline` (Universe's OUTLINE: only the black
+/// ink, the body invisible but writing depth) needs the dancers' hulls.
+/// `Random` is not a look of its own: the dancers take a different preset
+/// every chart bar ([`SceneStyle::random_pool`]; the session picks).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SceneStyle {
+    Random,
     Stock,
     Lit,
     Cel,
+    Contrast,
+    Highlight,
+    Shadow,
+    Negative,
+    Mono,
+    Sepia,
+    Outline,
+    Stencil,
+    StencilRainbow,
+    Thermo,
+    Mercury,
+    Candy,
+    Bubble,
+    Crystal,
+    Xray,
 }
 
 /// Historical alias (the first cabinet builds called it the dancers' style).
 pub type DancerStyle = SceneStyle;
 
+/// The program family a style draws with — one synthesized container per
+/// (model shape, family), named `<material_name><suffix>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleFamily {
+    Lit,
+    Cel,
+    Uni(UniFamily),
+}
+
+/// The Universe pixel-shader families (`mdl_universe.hlsl` `UNI_*`). The six
+/// sphere-map styles share [`UniFamily::Sphere`] and STENCIL RAINBOW is
+/// [`UniFamily::ScreenTex`]: they differ only in the style texture the DLL
+/// binds and (for four of them) the additive record flags. `Invisible` is
+/// OUTLINE ONLY's depth-only body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UniFamily {
+    Contrast,
+    Highlight,
+    Shadow,
+    Negative,
+    Mono,
+    Sepia,
+    Stencil,
+    ScreenTex,
+    Sphere,
+    Invisible,
+}
+
+impl UniFamily {
+    pub const ALL: [UniFamily; 10] = [
+        UniFamily::Contrast,
+        UniFamily::Highlight,
+        UniFamily::Shadow,
+        UniFamily::Negative,
+        UniFamily::Mono,
+        UniFamily::Sepia,
+        UniFamily::Stencil,
+        UniFamily::ScreenTex,
+        UniFamily::Sphere,
+        UniFamily::Invisible,
+    ];
+
+    /// The blob / container tag (`mdl_uni_<tag>.ps.d3dbc`, `_u<tag>`).
+    pub fn tag(self) -> &'static str {
+        match self {
+            UniFamily::Contrast => "con",
+            UniFamily::Highlight => "hil",
+            UniFamily::Shadow => "sha",
+            UniFamily::Negative => "neg",
+            UniFamily::Mono => "mon",
+            UniFamily::Sepia => "sep",
+            UniFamily::Stencil => "ste",
+            UniFamily::ScreenTex => "scr",
+            UniFamily::Sphere => "sph",
+            UniFamily::Invisible => "inv",
+        }
+    }
+
+    /// Whether the family shades the material colour (and so has a `_c`
+    /// constant-colour PS variant).
+    pub fn uses_material_colour(self) -> bool {
+        matches!(
+            self,
+            UniFamily::Negative | UniFamily::Mono | UniFamily::Sepia
+        )
+    }
+}
+
+impl StyleFamily {
+    /// Every family a model container exists for.
+    pub fn all() -> Vec<StyleFamily> {
+        Self::served(true)
+    }
+
+    /// The families synthesized this boot: lit + cel always, the Universe
+    /// ones only when their blobs resolved (`universe`).
+    pub fn served(universe: bool) -> Vec<StyleFamily> {
+        let mut v = vec![StyleFamily::Lit, StyleFamily::Cel];
+        if universe {
+            v.extend(UniFamily::ALL.iter().map(|&f| StyleFamily::Uni(f)));
+        }
+        v
+    }
+
+    /// Container-name suffix.
+    pub fn suffix(self) -> String {
+        match self {
+            StyleFamily::Lit => "_lit".to_string(),
+            StyleFamily::Cel => "_cel".to_string(),
+            StyleFamily::Uni(f) => format!("_u{}", f.tag()),
+        }
+    }
+}
+
+/// A texture a Universe style samples at PS s1 (material slot 1). The DLL
+/// loads [`STYLE_TEXTURE_ARC`] with the dancers when the style needs one and
+/// binds the texture the game registered under FNV-1 of the stem (lower-case,
+/// no `_` — `scripts/gen_universe_style_textures.py` writes exactly these).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleTexture {
+    Rainbow,
+    Thermo,
+    Chrome,
+    Crystal,
+    Xray,
+}
+
+/// The style-texture arc (`data_mods/background_dancers/arc/bdfxuniverse.arc`).
+pub const STYLE_TEXTURE_ARC: &str = "data/arc/bdfxuniverse.arc";
+
+impl StyleTexture {
+    pub const ALL: [StyleTexture; 5] = [
+        StyleTexture::Rainbow,
+        StyleTexture::Thermo,
+        StyleTexture::Chrome,
+        StyleTexture::Crystal,
+        StyleTexture::Xray,
+    ];
+
+    pub fn stem(self) -> &'static str {
+        match self {
+            StyleTexture::Rainbow => "bdfxunirainbow",
+            StyleTexture::Thermo => "bdfxunithermo",
+            StyleTexture::Chrome => "bdfxunichrome",
+            StyleTexture::Crystal => "bdfxunicrystal",
+            StyleTexture::Xray => "bdfxunixray",
+        }
+    }
+}
+
 impl SceneStyle {
-    /// Config spelling (`"stock"` / `"lit"` / `"cel"`, case-insensitive).
-    /// Unknown ⇒ `None` (the caller WARNs and falls back).
+    /// Row order (= `row_value`).
+    pub const ALL: [SceneStyle; 19] = [
+        SceneStyle::Random,
+        SceneStyle::Stock,
+        SceneStyle::Lit,
+        SceneStyle::Cel,
+        SceneStyle::Contrast,
+        SceneStyle::Highlight,
+        SceneStyle::Shadow,
+        SceneStyle::Negative,
+        SceneStyle::Mono,
+        SceneStyle::Sepia,
+        SceneStyle::Outline,
+        SceneStyle::Stencil,
+        SceneStyle::StencilRainbow,
+        SceneStyle::Thermo,
+        SceneStyle::Mercury,
+        SceneStyle::Candy,
+        SceneStyle::Bubble,
+        SceneStyle::Crystal,
+        SceneStyle::Xray,
+    ];
+
+    /// Config spelling (`"stock"` / `"lit"` / `"cel"` / the Universe names,
+    /// case-insensitive, Universe's aliases accepted). Unknown ⇒ `None` (the
+    /// caller WARNs and falls back).
     pub fn parse(s: &str) -> Option<SceneStyle> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let k = s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        match k.as_str() {
+            "random" | "random_every_bar" | "random_(every_bar)" => Some(SceneStyle::Random),
             "stock" | "off" | "none" => Some(SceneStyle::Stock),
             "lit" | "lambert" | "enhanced" => Some(SceneStyle::Lit),
             "cel" | "toon" | "enhanced_cel" => Some(SceneStyle::Cel),
+            "contrast" => Some(SceneStyle::Contrast),
+            "highlight" => Some(SceneStyle::Highlight),
+            "shadow" => Some(SceneStyle::Shadow),
+            "negative" | "blackgloss" => Some(SceneStyle::Negative),
+            "mono" | "monochrome" => Some(SceneStyle::Mono),
+            "sepia" => Some(SceneStyle::Sepia),
+            "outline" | "outline_only" | "line_art" | "pencil" => Some(SceneStyle::Outline),
+            "stencil" | "fill_in" => Some(SceneStyle::Stencil),
+            "stencil_rainbow" => Some(SceneStyle::StencilRainbow),
+            "thermo" => Some(SceneStyle::Thermo),
+            "mercury" | "t1000" => Some(SceneStyle::Mercury),
+            "candy" => Some(SceneStyle::Candy),
+            "bubble" | "stone" => Some(SceneStyle::Bubble),
+            "crystal" => Some(SceneStyle::Crystal),
+            "xray" | "x_ray" | "alpha_light" => Some(SceneStyle::Xray),
             _ => None,
         }
     }
 
     pub fn key(self) -> &'static str {
         match self {
+            SceneStyle::Random => "random",
             SceneStyle::Stock => "stock",
             SceneStyle::Lit => "lit",
             SceneStyle::Cel => "cel",
+            SceneStyle::Contrast => "contrast",
+            SceneStyle::Highlight => "highlight",
+            SceneStyle::Shadow => "shadow",
+            SceneStyle::Negative => "negative",
+            SceneStyle::Mono => "mono",
+            SceneStyle::Sepia => "sepia",
+            SceneStyle::Outline => "outline",
+            SceneStyle::Stencil => "stencil",
+            SceneStyle::StencilRainbow => "stencil_rainbow",
+            SceneStyle::Thermo => "thermo",
+            SceneStyle::Mercury => "mercury",
+            SceneStyle::Candy => "candy",
+            SceneStyle::Bubble => "bubble",
+            SceneStyle::Crystal => "crystal",
+            SceneStyle::Xray => "xray",
         }
     }
 
-    /// Overlay-row value (row index) — STOCK / LIT / CEL.
-    pub fn row_value(self) -> i32 {
+    /// The LIGHTING STYLE row text.
+    pub fn label(self) -> &'static str {
         match self {
-            SceneStyle::Stock => 0,
-            SceneStyle::Lit => 1,
-            SceneStyle::Cel => 2,
+            SceneStyle::Random => "RANDOM (EVERY BAR)",
+            SceneStyle::Stock => "STOCK (UNLIT)",
+            SceneStyle::Lit => "SMOOTH SHADING",
+            SceneStyle::Cel => "CEL SHADING",
+            SceneStyle::Contrast => "CONTRAST",
+            SceneStyle::Highlight => "HIGHLIGHT",
+            SceneStyle::Shadow => "SHADOW",
+            SceneStyle::Negative => "NEGATIVE",
+            SceneStyle::Mono => "MONOCHROME",
+            SceneStyle::Sepia => "SEPIA",
+            SceneStyle::Outline => "OUTLINE ONLY",
+            SceneStyle::Stencil => "STENCIL",
+            SceneStyle::StencilRainbow => "STENCIL RAINBOW",
+            SceneStyle::Thermo => "THERMO",
+            SceneStyle::Mercury => "MERCURY",
+            SceneStyle::Candy => "CANDY",
+            SceneStyle::Bubble => "BUBBLE",
+            SceneStyle::Crystal => "CRYSTAL",
+            SceneStyle::Xray => "X-RAY",
         }
+    }
+
+    /// Overlay-row value (row index in [`SceneStyle::ALL`]).
+    pub fn row_value(self) -> i32 {
+        SceneStyle::ALL
+            .iter()
+            .position(|&s| s == self)
+            .map_or(0, |i| i as i32)
     }
 
     pub fn from_row_value(v: i32) -> SceneStyle {
-        match v {
-            1 => SceneStyle::Lit,
-            2 => SceneStyle::Cel,
-            _ => SceneStyle::Stock,
+        usize::try_from(v)
+            .ok()
+            .and_then(|i| SceneStyle::ALL.get(i).copied())
+            .unwrap_or(SceneStyle::Stock)
+    }
+
+    /// A DDR Universe render style (dancers only). `Random` counts: it
+    /// restyles the dancers only too.
+    pub fn is_universe(self) -> bool {
+        !matches!(self, SceneStyle::Stock | SceneStyle::Lit | SceneStyle::Cel)
+    }
+
+    /// The program family a DANCER is drawn with (`None` = stock shaders, and
+    /// `Random`, which resolves to a preset per bar first).
+    pub fn family(self) -> Option<StyleFamily> {
+        Some(match self {
+            SceneStyle::Stock | SceneStyle::Random => return None,
+            SceneStyle::Lit => StyleFamily::Lit,
+            SceneStyle::Cel => StyleFamily::Cel,
+            SceneStyle::Contrast => StyleFamily::Uni(UniFamily::Contrast),
+            SceneStyle::Highlight => StyleFamily::Uni(UniFamily::Highlight),
+            SceneStyle::Shadow => StyleFamily::Uni(UniFamily::Shadow),
+            SceneStyle::Negative => StyleFamily::Uni(UniFamily::Negative),
+            SceneStyle::Mono => StyleFamily::Uni(UniFamily::Mono),
+            SceneStyle::Sepia => StyleFamily::Uni(UniFamily::Sepia),
+            SceneStyle::Outline => StyleFamily::Uni(UniFamily::Invisible),
+            SceneStyle::Stencil => StyleFamily::Uni(UniFamily::Stencil),
+            SceneStyle::StencilRainbow => StyleFamily::Uni(UniFamily::ScreenTex),
+            SceneStyle::Thermo
+            | SceneStyle::Mercury
+            | SceneStyle::Candy
+            | SceneStyle::Bubble
+            | SceneStyle::Crystal
+            | SceneStyle::Xray => StyleFamily::Uni(UniFamily::Sphere),
+        })
+    }
+
+    /// The style STAGE props take (and the Winx Club wipe containers, which
+    /// exist for stock / lit / cel only): CEL for every Universe style.
+    pub fn stage_style(self) -> SceneStyle {
+        if self.is_universe() {
+            SceneStyle::Cel
+        } else {
+            self
         }
+    }
+
+    /// The style texture a dancer material samples at s1.
+    pub fn texture(self) -> Option<StyleTexture> {
+        match self {
+            SceneStyle::StencilRainbow => Some(StyleTexture::Rainbow),
+            SceneStyle::Thermo | SceneStyle::Candy => Some(StyleTexture::Thermo),
+            SceneStyle::Mercury | SceneStyle::Bubble => Some(StyleTexture::Chrome),
+            SceneStyle::Crystal => Some(StyleTexture::Crystal),
+            SceneStyle::Xray => Some(StyleTexture::Xray),
+            _ => None,
+        }
+    }
+
+    /// Universe draws these additively (blend ONE/ONE, z-write off, no cull):
+    /// the dancer's restyled records are rewritten
+    /// (`render_item_layout::additive_record_flags`).
+    pub fn additive(self) -> bool {
+        matches!(
+            self,
+            SceneStyle::Candy | SceneStyle::Bubble | SceneStyle::Crystal | SceneStyle::Xray
+        )
+    }
+
+    /// Whether dancers get the black hull outline (when SCENE OUTLINES is on):
+    /// the World styles, and the three Universe styles that draw Universe's
+    /// outline pass (NEGATIVE / MONOCHROME / SEPIA). OUTLINE ONLY's hull is
+    /// the style itself ([`SceneStyle::needs_hulls`]), not this switch.
+    pub fn outlines(self) -> bool {
+        matches!(
+            self,
+            SceneStyle::Lit
+                | SceneStyle::Cel
+                | SceneStyle::Negative
+                | SceneStyle::Mono
+                | SceneStyle::Sepia
+        )
+    }
+
+    /// The dancers must have hulls whatever SCENE OUTLINES says: OUTLINE ONLY
+    /// is nothing but the hull (and RANDOM may pick it).
+    pub fn needs_hulls(self) -> bool {
+        matches!(self, SceneStyle::Outline | SceneStyle::Random)
+    }
+
+    /// The presets RANDOM (EVERY BAR) picks from, in row order: every look
+    /// except STOCK and RANDOM itself, minus what this boot cannot serve —
+    /// the DDR Universe containers (`universe`), the style-texture arc
+    /// (`textures`), the dancers' hulls (`hulls`, OUTLINE ONLY).
+    pub fn random_pool(universe: bool, textures: bool, hulls: bool) -> Vec<SceneStyle> {
+        SceneStyle::ALL
+            .iter()
+            .copied()
+            .filter(|s| !matches!(s, SceneStyle::Random | SceneStyle::Stock))
+            .filter(|s| universe || !s.is_universe())
+            .filter(|s| textures || s.texture().is_none())
+            .filter(|s| hulls || *s != SceneStyle::Outline)
+            .collect()
     }
 }
 
@@ -119,6 +457,9 @@ pub struct ModelVariant {
     pub lit_ps_donor: &'static str,
     pub cel_vs: &'static str,
     pub cel_ps: &'static str,
+    /// The Universe-style VS of this shape (`mdl_universe.hlsl`); the PS is
+    /// per family ([`ModelVariant::uni_ps`]).
+    pub uni_vs: &'static str,
     pub outline_vs: &'static str,
     pub outline_ps: &'static str,
 }
@@ -141,6 +482,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "gs_model_default",
         cel_vs: "mdl_bg_cel.vs.d3dbc",
         cel_ps: "mdl_cel.ps.d3dbc",
+        uni_vs: "mdl_bg_uni.vs.d3dbc",
         outline_vs: "mdl_bg_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -151,6 +493,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "gs_model_default", // byte-identical to the skinning one's
         cel_vs: "mdl_ch_cel.vs.d3dbc",
         cel_ps: "mdl_cel.ps.d3dbc",
+        uni_vs: "mdl_ch_uni.vs.d3dbc",
         outline_vs: "mdl_ch_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -161,6 +504,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_bg_constant",
         cel_vs: "mdl_bg_cel.vs.d3dbc",
         cel_ps: "mdl_cel.ps.d3dbc",
+        uni_vs: "mdl_bg_uni.vs.d3dbc",
         outline_vs: "mdl_bg_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -171,6 +515,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_bg_constant_vc",
         cel_vs: "mdl_bg_cel_vc.vs.d3dbc",
         cel_ps: "mdl_cel.ps.d3dbc",
+        uni_vs: "mdl_bg_uni_vc.vs.d3dbc",
         outline_vs: "mdl_bg_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -181,6 +526,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_bg_constant_c_vc",
         cel_vs: "mdl_bg_cel_vc.vs.d3dbc",
         cel_ps: "mdl_cel_c.ps.d3dbc",
+        uni_vs: "mdl_bg_uni_vc.vs.d3dbc",
         outline_vs: "mdl_bg_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -191,6 +537,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_ch_constant_vc",
         cel_vs: "mdl_ch_cel_vc.vs.d3dbc",
         cel_ps: "mdl_cel.ps.d3dbc",
+        uni_vs: "mdl_ch_uni_vc.vs.d3dbc",
         outline_vs: "mdl_ch_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -201,6 +548,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_ch_constant_c_vc",
         cel_vs: "mdl_ch_cel_vc.vs.d3dbc",
         cel_ps: "mdl_cel_c.ps.d3dbc",
+        uni_vs: "mdl_ch_uni_vc.vs.d3dbc",
         outline_vs: "mdl_ch_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -211,6 +559,7 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_ch_constant_c",
         cel_vs: "mdl_ch_cel.vs.d3dbc",
         cel_ps: "mdl_cel_c.ps.d3dbc",
+        uni_vs: "mdl_ch_uni.vs.d3dbc",
         outline_vs: "mdl_ch_outline.vs.d3dbc",
         outline_ps: "mdl_outline.ps.d3dbc",
     },
@@ -221,23 +570,71 @@ pub const MODEL_VARIANTS: [ModelVariant; 9] = [
         lit_ps_donor: "mdl_ch_constant_vc_notex",
         cel_vs: "mdl_ch_cel_vc.vs.d3dbc",
         cel_ps: "mdl_cel_notex.ps.d3dbc",
+        uni_vs: "mdl_ch_uni_vc.vs.d3dbc",
         outline_vs: "mdl_ch_outline.vs.d3dbc",
         outline_ps: "mdl_outline_notex.ps.d3dbc",
     },
 ];
 
-/// Suffix of a style-variant container name: `<material_name><suffix>`.
-pub fn variant_suffix(style: DancerStyle) -> Option<&'static str> {
-    match style {
-        DancerStyle::Stock => None,
-        DancerStyle::Lit => Some("_lit"),
-        DancerStyle::Cel => Some("_cel"),
-    }
+/// Suffix of a style-variant container name: `<material_name><suffix>`
+/// (`None` for stock — no container).
+pub fn variant_suffix(style: DancerStyle) -> Option<String> {
+    style.family().map(StyleFamily::suffix)
 }
 
 /// The synthesized container name for `variant` in `style` (`None` for stock).
 pub fn variant_container_name(variant: &ModelVariant, style: DancerStyle) -> Option<String> {
-    variant_suffix(style).map(|sfx| format!("{}{}", variant.material_name, sfx))
+    style.family().map(|f| family_container_name(variant, f))
+}
+
+/// The synthesized container name for `variant` drawn with `family`.
+pub fn family_container_name(variant: &ModelVariant, family: StyleFamily) -> String {
+    format!("{}{}", variant.material_name, family.suffix())
+}
+
+impl ModelVariant {
+    /// The untextured shape (`_notex`).
+    pub fn is_notex(&self) -> bool {
+        self.material_name.ends_with("_notex")
+    }
+
+    /// A constant-colour shape (`_c` — `vConstatntColor` / `vOffsetColor`).
+    pub fn is_const_colour(&self) -> bool {
+        self.material_name.contains("_c_") || self.material_name.ends_with("_c")
+    }
+
+    /// The Universe PS of this shape for `family`: the `_notex` variant for
+    /// the untextured shape, the `_c` one where the family shades the
+    /// material colour of a constant-colour shape, else the base one.
+    pub fn uni_ps(&self, family: UniFamily) -> &'static str {
+        let notex = self.is_notex();
+        let c = self.is_const_colour() && family.uses_material_colour();
+        match (family, notex, c) {
+            (UniFamily::Contrast, true, _) => "mdl_uni_con_notex.ps.d3dbc",
+            (UniFamily::Contrast, false, _) => "mdl_uni_con.ps.d3dbc",
+            (UniFamily::Highlight, true, _) => "mdl_uni_hil_notex.ps.d3dbc",
+            (UniFamily::Highlight, false, _) => "mdl_uni_hil.ps.d3dbc",
+            (UniFamily::Shadow, true, _) => "mdl_uni_sha_notex.ps.d3dbc",
+            (UniFamily::Shadow, false, _) => "mdl_uni_sha.ps.d3dbc",
+            (UniFamily::Negative, true, _) => "mdl_uni_neg_notex.ps.d3dbc",
+            (UniFamily::Negative, false, true) => "mdl_uni_neg_c.ps.d3dbc",
+            (UniFamily::Negative, false, false) => "mdl_uni_neg.ps.d3dbc",
+            (UniFamily::Mono, true, _) => "mdl_uni_mon_notex.ps.d3dbc",
+            (UniFamily::Mono, false, true) => "mdl_uni_mon_c.ps.d3dbc",
+            (UniFamily::Mono, false, false) => "mdl_uni_mon.ps.d3dbc",
+            (UniFamily::Sepia, true, _) => "mdl_uni_sep_notex.ps.d3dbc",
+            (UniFamily::Sepia, false, true) => "mdl_uni_sep_c.ps.d3dbc",
+            (UniFamily::Sepia, false, false) => "mdl_uni_sep.ps.d3dbc",
+            (UniFamily::Stencil, true, _) => "mdl_uni_ste_notex.ps.d3dbc",
+            (UniFamily::Stencil, false, _) => "mdl_uni_ste.ps.d3dbc",
+            (UniFamily::ScreenTex, true, _) => "mdl_uni_scr_notex.ps.d3dbc",
+            (UniFamily::ScreenTex, false, _) => "mdl_uni_scr.ps.d3dbc",
+            (UniFamily::Sphere, true, _) => "mdl_uni_sph_notex.ps.d3dbc",
+            (UniFamily::Sphere, false, _) => "mdl_uni_sph.ps.d3dbc",
+            (UniFamily::Invisible, true, _) => "mdl_uni_inv_notex.ps.d3dbc",
+            (UniFamily::Invisible, false, _) => "mdl_uni_inv.ps.d3dbc",
+        }
+    }
 }
 
 /// The variant whose STOCK container (or fallback) hashes to `stock_hash` —
@@ -254,13 +651,30 @@ pub fn variant_for_stock_hash(stock_hash: u32) -> Option<&'static ModelVariant> 
 pub fn variant_blob_names() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = Vec::new();
     for m in MODEL_VARIANTS.iter() {
-        for b in [m.lit_vs, m.cel_vs, m.cel_ps, m.outline_vs, m.outline_ps] {
+        let mut blobs = vec![
+            m.lit_vs,
+            m.cel_vs,
+            m.cel_ps,
+            m.uni_vs,
+            m.outline_vs,
+            m.outline_ps,
+        ];
+        blobs.extend(UniFamily::ALL.iter().map(|&f| m.uni_ps(f)));
+        for b in blobs {
             if !v.contains(&b) {
                 v.push(b);
             }
         }
     }
     v
+}
+
+/// A Universe-style blob (`uni_vs` / `uni_ps`) — these soft-degrade on their
+/// own: a missing one drops only the Universe families.
+pub fn is_universe_blob(name: &str) -> bool {
+    MODEL_VARIANTS
+        .iter()
+        .any(|m| m.uni_vs == name || UniFamily::ALL.iter().any(|&f| m.uni_ps(f) == name))
 }
 
 /// A model shader NAME whose materials can take the Winx Club
@@ -291,12 +705,13 @@ pub const WIPE_VARIANTS: [WipeVariant; 1] = [WipeVariant {
     cel_ps: "mdl_cel_wipe.ps.d3dbc",
 }];
 
-/// Suffix of a wipe container: `_wipe` / `_lit_wipe` / `_cel_wipe`.
+/// Suffix of a wipe container: `_wipe` / `_lit_wipe` / `_cel_wipe` (a
+/// Universe style takes the CEL wipe — [`SceneStyle::stage_style`]).
 pub fn wipe_suffix(style: DancerStyle) -> &'static str {
-    match style {
-        DancerStyle::Stock => "_wipe",
+    match style.stage_style() {
         DancerStyle::Lit => "_lit_wipe",
         DancerStyle::Cel => "_cel_wipe",
+        _ => "_wipe",
     }
 }
 
@@ -314,10 +729,10 @@ pub fn wipe_variant_for_stock_hash(stock_hash: u32) -> Option<&'static WipeVaria
 
 /// The `(VS, PS)` blobs of a wipe container.
 pub fn wipe_blobs(variant: &WipeVariant, style: DancerStyle) -> (&'static str, &'static str) {
-    match style {
-        DancerStyle::Stock => (variant.stock_vs, variant.uv3_ps),
+    match style.stage_style() {
         DancerStyle::Lit => (variant.lit_vs, variant.uv3_ps),
         DancerStyle::Cel => (variant.cel_vs, variant.cel_ps),
+        _ => (variant.stock_vs, variant.uv3_ps),
     }
 }
 
@@ -340,7 +755,7 @@ pub struct PlannedContainers {
     pub arrow: bool,
     pub judge: bool,
     pub default: bool,
-    /// Every `MODEL_VARIANTS` × {lit, cel} container.
+    /// Every `MODEL_VARIANTS` × [`StyleFamily::all`] container.
     pub model_variants: bool,
 }
 
@@ -540,6 +955,18 @@ mod tests {
                 "{}",
                 v.material_name
             );
+            assert_eq!(
+                v.uni_vs.starts_with("mdl_ch_"),
+                skinned,
+                "{}",
+                v.material_name
+            );
+            assert_eq!(
+                v.uni_vs,
+                v.cel_vs.replace("_cel", "_uni"),
+                "{}",
+                v.material_name
+            );
             // `_vc` names take VCOLOR blobs; `_c` names take the `_c` cel PS;
             // `_notex` the notex PS pair.
             let vc = v.material_name.contains("_vc");
@@ -579,8 +1006,189 @@ mod tests {
             variant_container_name(&MODEL_VARIANTS[1], SceneStyle::Stock),
             None
         );
-        // 18 committed blob files are referenced.
-        assert_eq!(variant_blob_names().len(), 18);
+        // 18 lit / cel / outline blobs + 4 Universe VS + 23 Universe PS.
+        assert_eq!(variant_blob_names().len(), 45);
+    }
+
+    #[test]
+    fn universe_styles_are_dancer_only_with_their_own_families() {
+        for s in SceneStyle::ALL {
+            match s {
+                SceneStyle::Stock => {
+                    assert_eq!(s.family(), None);
+                    assert_eq!(s.stage_style(), SceneStyle::Stock);
+                }
+                SceneStyle::Random => {
+                    // Resolved per bar by the session: no look of its own.
+                    assert_eq!(s.family(), None);
+                    assert_eq!(s.texture(), None);
+                    assert!(!s.additive() && !s.outlines() && s.needs_hulls());
+                    assert_eq!(s.stage_style(), SceneStyle::Cel);
+                }
+                SceneStyle::Lit | SceneStyle::Cel => {
+                    assert!(!s.is_universe());
+                    assert_eq!(s.stage_style(), s);
+                    assert!(s.outlines());
+                }
+                _ => {
+                    assert!(s.is_universe(), "{:?}", s);
+                    assert!(matches!(s.family(), Some(StyleFamily::Uni(_))), "{:?}", s);
+                    assert_eq!(s.stage_style(), SceneStyle::Cel);
+                }
+            }
+            // Additive styles always sample a sphere map; every texture
+            // style draws one of the two texture-reading families.
+            if s.additive() {
+                assert_eq!(s.family(), Some(StyleFamily::Uni(UniFamily::Sphere)));
+                assert!(!s.outlines());
+            }
+            match s.texture() {
+                Some(StyleTexture::Rainbow) => {
+                    assert_eq!(s.family(), Some(StyleFamily::Uni(UniFamily::ScreenTex)))
+                }
+                Some(_) => assert_eq!(s.family(), Some(StyleFamily::Uni(UniFamily::Sphere))),
+                None => assert!(!matches!(
+                    s.family(),
+                    Some(StyleFamily::Uni(UniFamily::Sphere | UniFamily::ScreenTex))
+                )),
+            }
+        }
+        // Universe draws its outline pass only with NORMAL / NEGATIVE / MONO / SEPIA.
+        let outlined: Vec<SceneStyle> = SceneStyle::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.is_universe() && s.outlines())
+            .collect();
+        assert_eq!(
+            outlined,
+            vec![SceneStyle::Negative, SceneStyle::Mono, SceneStyle::Sepia]
+        );
+        let additive: Vec<SceneStyle> = SceneStyle::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.additive())
+            .collect();
+        assert_eq!(
+            additive,
+            vec![
+                SceneStyle::Candy,
+                SceneStyle::Bubble,
+                SceneStyle::Crystal,
+                SceneStyle::Xray
+            ]
+        );
+        // OUTLINE ONLY is the hull alone: no outline switch, no texture, not additive.
+        assert_eq!(
+            SceneStyle::Outline.family(),
+            Some(StyleFamily::Uni(UniFamily::Invisible))
+        );
+        assert!(SceneStyle::Outline.needs_hulls() && !SceneStyle::Outline.outlines());
+        assert!(SceneStyle::ALL
+            .iter()
+            .filter(|s| s.needs_hulls())
+            .all(|s| matches!(s, SceneStyle::Outline | SceneStyle::Random)));
+        // RANDOM's pool: every preset but STOCK / RANDOM, gated by what is served.
+        let full = SceneStyle::random_pool(true, true, true);
+        assert_eq!(full.len(), SceneStyle::ALL.len() - 2);
+        assert!(!full.contains(&SceneStyle::Stock) && !full.contains(&SceneStyle::Random));
+        assert_eq!(
+            SceneStyle::random_pool(false, true, true),
+            vec![SceneStyle::Lit, SceneStyle::Cel]
+        );
+        let no_tex = SceneStyle::random_pool(true, false, true);
+        assert!(no_tex.iter().all(|s| s.texture().is_none()));
+        assert!(no_tex.contains(&SceneStyle::Stencil) && no_tex.contains(&SceneStyle::Outline));
+        assert!(!SceneStyle::random_pool(true, true, false).contains(&SceneStyle::Outline));
+        // Style-texture stems are registry-key-safe (lower-case, no `_`).
+        for t in [
+            StyleTexture::Rainbow,
+            StyleTexture::Thermo,
+            StyleTexture::Chrome,
+            StyleTexture::Crystal,
+            StyleTexture::Xray,
+        ] {
+            let stem = t.stem();
+            assert!(
+                stem.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{}",
+                stem
+            );
+        }
+        assert_eq!(STYLE_TEXTURE_ARC, "data/arc/bdfxuniverse.arc");
+    }
+
+    #[test]
+    fn family_containers_and_blobs() {
+        // 2 + 9 families, distinct suffixes.
+        let fams = StyleFamily::all();
+        assert_eq!(fams.len(), 12);
+        let mut sfx: Vec<String> = fams.iter().map(|f| f.suffix()).collect();
+        sfx.sort();
+        sfx.dedup();
+        assert_eq!(sfx.len(), 12);
+        assert_eq!(
+            StyleFamily::served(false),
+            vec![StyleFamily::Lit, StyleFamily::Cel]
+        );
+        assert_eq!(StyleFamily::served(true), fams);
+        // Exactly the 27 mdl_universe blobs classify as Universe blobs.
+        let uni: Vec<&str> = variant_blob_names()
+            .into_iter()
+            .filter(|b| is_universe_blob(b))
+            .collect();
+        assert_eq!(uni.len(), 27);
+        assert!(uni.iter().all(|b| b.contains("_uni")));
+        assert!(!is_universe_blob("mdl_ch_unlit_uv3_vc_wipe.vs.d3dbc"));
+        assert!(!is_universe_blob("mdl_cel.ps.d3dbc"));
+        assert_eq!(StyleFamily::Uni(UniFamily::Sphere).suffix(), "_usph");
+        // The six sphere styles share one container per shape.
+        let ch = &MODEL_VARIANTS[1];
+        for s in [
+            SceneStyle::Thermo,
+            SceneStyle::Mercury,
+            SceneStyle::Candy,
+            SceneStyle::Bubble,
+            SceneStyle::Crystal,
+            SceneStyle::Xray,
+        ] {
+            assert_eq!(
+                variant_container_name(ch, s).as_deref(),
+                Some("mdl_ch_lambert_usph")
+            );
+        }
+        assert_eq!(
+            variant_container_name(ch, SceneStyle::Lit).as_deref(),
+            Some("mdl_ch_lambert_lit")
+        );
+        // PS selection: `_notex` shape → notex PS, `_c` shapes → `_c` PS only
+        // for the material-colour families.
+        let notex = MODEL_VARIANTS
+            .iter()
+            .find(|v| v.material_name == "mdl_ch_constant_vc_notex")
+            .unwrap();
+        let c = MODEL_VARIANTS
+            .iter()
+            .find(|v| v.material_name == "mdl_ch_constant_c_vc")
+            .unwrap();
+        for f in UniFamily::ALL {
+            assert!(notex.uni_ps(f).ends_with("_notex.ps.d3dbc"), "{:?}", f);
+            assert!(notex.uni_ps(f).contains(f.tag()));
+            assert_eq!(
+                c.uni_ps(f).ends_with("_c.ps.d3dbc"),
+                f.uses_material_colour()
+            );
+            assert_eq!(ch.uni_ps(f), format!("mdl_uni_{}.ps.d3dbc", f.tag()));
+        }
+        assert!(notex.is_notex() && !notex.is_const_colour());
+        assert!(c.is_const_colour() && !ch.is_const_colour());
+        // Universe styles take the CEL wipe.
+        let w = &WIPE_VARIANTS[0];
+        assert_eq!(
+            wipe_container_name(w, SceneStyle::Thermo),
+            "mdl_ch_constant_vc_cel_wipe"
+        );
+        assert_eq!(wipe_blobs(w, SceneStyle::Xray), (w.cel_vs, w.cel_ps));
     }
 
     #[test]
@@ -612,10 +1220,32 @@ mod tests {
 
     #[test]
     fn scene_style_round_trips() {
-        for s in [SceneStyle::Stock, SceneStyle::Lit, SceneStyle::Cel] {
-            assert_eq!(SceneStyle::parse(s.key()), Some(s));
-            assert_eq!(SceneStyle::from_row_value(s.row_value()), s);
+        for (i, s) in SceneStyle::ALL.iter().enumerate() {
+            assert_eq!(SceneStyle::parse(s.key()), Some(*s));
+            if s.is_universe() {
+                // Universe's own CSV spelling is the row label.
+                assert_eq!(SceneStyle::parse(s.label()), Some(*s), "{}", s.label());
+            }
+            assert_eq!(s.row_value(), i as i32);
+            assert_eq!(SceneStyle::from_row_value(s.row_value()), *s);
         }
+        assert_eq!(SceneStyle::parse("T1000"), Some(SceneStyle::Mercury));
+        assert_eq!(SceneStyle::parse("STONE"), Some(SceneStyle::Bubble));
+        assert_eq!(SceneStyle::parse("Alpha Light"), Some(SceneStyle::Xray));
+        assert_eq!(SceneStyle::parse("blackgloss"), Some(SceneStyle::Negative));
+        assert_eq!(SceneStyle::parse("FILL IN"), Some(SceneStyle::Stencil));
+        assert_eq!(
+            SceneStyle::parse("stencil-rainbow"),
+            Some(SceneStyle::StencilRainbow)
+        );
+        assert_eq!(SceneStyle::from_row_value(-1), SceneStyle::Stock);
+        // RANDOM is the first row; the presets follow.
+        assert_eq!(SceneStyle::ALL[0], SceneStyle::Random);
+        assert_eq!(
+            SceneStyle::parse("RANDOM (EVERY BAR)"),
+            Some(SceneStyle::Random)
+        );
+        assert_eq!(SceneStyle::parse("pencil"), Some(SceneStyle::Outline));
         assert_eq!(SceneStyle::parse(" CEL "), Some(SceneStyle::Cel));
         assert_eq!(SceneStyle::parse("toon"), Some(SceneStyle::Cel));
         assert_eq!(SceneStyle::parse("enhanced"), Some(SceneStyle::Lit));

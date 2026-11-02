@@ -114,6 +114,37 @@ BLOBS=(
   "mdl_lambert:ps_3_0:ps_uv3_wipe_main:mdl_uv3_wipe.ps.d3dbc:UV3 VCOLOR WIPE"
   "mdl_cel:vs_3_0:vs_cel_ch_main:mdl_ch_cel_vc_wipe.vs.d3dbc:VCOLOR WIPE"
   "mdl_cel:ps_3_0:ps_cel_main:mdl_cel_wipe.ps.d3dbc:WIPE"
+  # DDR Universe render styles (2026-11-02; docs/ddr_universe_render_styles_research.md):
+  # `<name>_u<family>` containers (shader_layout::StyleFamily) — one VS per material shape
+  # (the `_notex` shape takes the `_vc` one) + one PS per family, NOTEX / CCOLOR variants as
+  # the cel set. The outline pair at program 0 is the cel one above.
+  "mdl_universe:vs_3_0:vs_uni_bg_main:mdl_bg_uni.vs.d3dbc"
+  "mdl_universe:vs_3_0:vs_uni_ch_main:mdl_ch_uni.vs.d3dbc"
+  "mdl_universe:vs_3_0:vs_uni_bg_main:mdl_bg_uni_vc.vs.d3dbc:VCOLOR"
+  "mdl_universe:vs_3_0:vs_uni_ch_main:mdl_ch_uni_vc.vs.d3dbc:VCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_con.ps.d3dbc:UNI_CONTRAST"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_con_notex.ps.d3dbc:UNI_CONTRAST NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_hil.ps.d3dbc:UNI_HIGHLIGHT"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_hil_notex.ps.d3dbc:UNI_HIGHLIGHT NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sha.ps.d3dbc:UNI_SHADOW"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sha_notex.ps.d3dbc:UNI_SHADOW NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_neg.ps.d3dbc:UNI_NEGATIVE"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_neg_c.ps.d3dbc:UNI_NEGATIVE CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_neg_notex.ps.d3dbc:UNI_NEGATIVE NOTEX CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_mon.ps.d3dbc:UNI_MONO"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_mon_c.ps.d3dbc:UNI_MONO CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_mon_notex.ps.d3dbc:UNI_MONO NOTEX CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sep.ps.d3dbc:UNI_SEPIA"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sep_c.ps.d3dbc:UNI_SEPIA CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sep_notex.ps.d3dbc:UNI_SEPIA NOTEX CCOLOR"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_ste.ps.d3dbc:UNI_STENCIL"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_ste_notex.ps.d3dbc:UNI_STENCIL NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_inv.ps.d3dbc:UNI_INVISIBLE"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_inv_notex.ps.d3dbc:UNI_INVISIBLE NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_scr.ps.d3dbc:UNI_SCREENTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_scr_notex.ps.d3dbc:UNI_SCREENTEX NOTEX"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sph.ps.d3dbc:UNI_SPHERE"
+  "mdl_universe:ps_3_0:ps_uni_main:mdl_uni_sph_notex.ps.d3dbc:UNI_SPHERE NOTEX"
 )
 
 die() { echo "error: $*" >&2; exit 1; }

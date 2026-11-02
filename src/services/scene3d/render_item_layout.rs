@@ -118,6 +118,53 @@ pub fn hull_record_flags(body_flags: u32) -> u32 {
     f
 }
 
+/// `REC_FLAGS` low-byte bits (the loader's folded mask,
+/// `docs/3d_model_format_research.md` "Flag word → render states"): drawn by
+/// the TRANS passes instead of OPACITY, two-sided, z-write off, and the
+/// ADDITIVE blend group (`SRCALPHA, ONE`).
+pub const REC_TRANSPARENT_BIT: u32 = 0x01;
+pub const REC_TWO_SIDED_BIT: u32 = 0x02;
+pub const REC_ZWRITE_OFF_BIT: u32 = 0x08;
+pub const REC_BLEND_ADDITIVE: u32 = 0x40;
+
+/// Flags of a restyled dancer record in the additive DDR Universe styles
+/// (CANDY / BUBBLE / CRYSTAL / X-RAY — Universe draws them blend ONE/ONE,
+/// z-write off, cull none; `docs/ddr_universe_render_styles_research.md`
+/// §2): transparent + two-sided + z-write off + the additive group, every
+/// other bit (hidden, hull, z-test, alpha test, the top nibble) kept. With
+/// an opaque texture `SRCALPHA, ONE` is Universe's `ONE, ONE`; cut-out texels
+/// (alpha 0) add nothing.
+pub fn additive_record_flags(flags: u32) -> u32 {
+    (flags & !REC_BLEND_GROUP_MASK)
+        | REC_TRANSPARENT_BIT
+        | REC_TWO_SIDED_BIT
+        | REC_ZWRITE_OFF_BIT
+        | REC_BLEND_ADDITIVE
+}
+
+/// Flags of a restyled body record in OUTLINE ONLY (Universe's OUTLINE:
+/// the body drawn with colour writes off, then the ink hull): additive
+/// group (its PS outputs rgb 0 — adds nothing) with z-WRITE forced on, so
+/// the hull drawn after it shows only where it is not behind the body. The
+/// culling / z-test / alpha-test bits stay as built. `trans` = the TRANS-type
+/// collectors take it (the record's bit 0): in gameplay the body's node
+/// mask is LOWPRIO_TRANS, which runs after OPACITY and before TRANS
+/// (World `FUN_1801f2c30`: 0x66 / 0x67 / 0x68).
+pub fn invisible_depth_record_flags(flags: u32, trans: bool) -> u32 {
+    let f = (flags & !(REC_BLEND_GROUP_MASK | REC_ZWRITE_OFF_BIT | REC_TRANSPARENT_BIT))
+        | REC_BLEND_ADDITIVE;
+    if trans {
+        f | REC_TRANSPARENT_BIT
+    } else {
+        f
+    }
+}
+
+/// A HULL record moved to the TRANS pass (drawn after OUTLINE ONLY's body).
+pub fn trans_record_flags(flags: u32) -> u32 {
+    flags | REC_TRANSPARENT_BIT
+}
+
 // ── GPU resource pieces the builder reads ────────────────────────────
 
 /// GPU draw record stride (`res+0x68` array).
@@ -207,6 +254,21 @@ pub const fn mat_tex_index(slot: usize) -> usize {
 pub const fn mat_tex_ptr(slot: usize) -> usize {
     0xA8 + slot * 0x18
 }
+/// The two `f32` pairs after a slot's pointer the converter initialises
+/// (`+8/+0xC = 1.0`, `+0x10/+0x14 = 0`, RE §2.1).
+pub const fn mat_tex_scale(slot: usize) -> usize {
+    mat_tex_ptr(slot) + 8
+}
+pub const fn mat_tex_offset(slot: usize) -> usize {
+    mat_tex_ptr(slot) + 0x10
+}
+/// Table index the DLL writes into a slot it binds itself (a DDR Universe
+/// style texture): out of range for every resource table, so the texture
+/// re-resolve and `materials_sampling` skip the slot.
+pub const MAT_TEX_INDEX_NONE: u16 = 0xFFFF;
+/// The material slot (and PS sampler) a DDR Universe style texture uses —
+/// `mdl_universe.hlsl` `StyleTexture : register(s1)`.
+pub const STYLE_TEXTURE_SLOT: usize = 1;
 
 // ── Resource texture table (RE §2.1) ─────────────────────────────────
 
@@ -561,6 +623,51 @@ mod tests {
         assert_eq!(mat_tex_ptr(0), 0xA8);
         assert_eq!(mat_tex_ptr(7), 0xA8 + 7 * 0x18);
         assert_eq!(mat_tex_index(3), 6);
+        // The converter's slot-0 writes (`mat+0xB0/+0xB8`, RE §2.1).
+        assert_eq!(mat_tex_scale(0), 0xB0);
+        assert_eq!(mat_tex_offset(0), 0xB8);
+        assert_eq!(mat_tex_scale(1), 0xC8);
+        // Slot 7's offset pair ends inside the material record.
+        assert!(mat_tex_offset(MAT_TEX_SLOTS - 1) + 8 <= MATERIAL_SIZE);
+        assert!(STYLE_TEXTURE_SLOT < MAT_TEX_SLOTS);
+    }
+
+    #[test]
+    fn additive_flags_keep_everything_but_the_blend_group() {
+        // Opaque culled record → transparent, two-sided, z-write off, additive.
+        assert_eq!(additive_record_flags(0x0000_0000), 0x4B);
+        // An alpha-blended record's group is REPLACED, not or-ed (0x20|0x40
+        // would be the subtractive group 0x60).
+        assert_eq!(
+            additive_record_flags(0x0000_0020) & REC_BLEND_GROUP_MASK,
+            0x40
+        );
+        // Hidden / hull / z-test-off / alpha-test-off / the top nibble survive.
+        let keep = REC_HIDDEN_BIT | REC_HULL_BIT | 0x04 | 0x10 | 0x1000_0000;
+        assert_eq!(additive_record_flags(keep) & keep, keep);
+        // Idempotent.
+        let once = additive_record_flags(0x0000_0013);
+        assert_eq!(additive_record_flags(once), once);
+        // Every rewritten record is no longer restyle-eligible: the restyle
+        // must run BEFORE the rewrite.
+        assert_ne!(once & REC_BLEND_GROUP_MASK, 0);
+    }
+
+    #[test]
+    fn invisible_depth_writes_depth_and_adds_nothing() {
+        // z-write OFF / transparent / alpha group cleared, additive set.
+        let built = REC_ZWRITE_OFF_BIT | REC_TRANSPARENT_BIT | 0x20 | REC_TWO_SIDED_BIT;
+        let f = invisible_depth_record_flags(built, false);
+        assert_eq!(f & REC_ZWRITE_OFF_BIT, 0);
+        assert_eq!(f & REC_TRANSPARENT_BIT, 0);
+        assert_eq!(f & REC_BLEND_GROUP_MASK, REC_BLEND_ADDITIVE);
+        assert_ne!(f & REC_TWO_SIDED_BIT, 0, "culling as built");
+        assert_eq!(invisible_depth_record_flags(0, true), 0x41);
+        // Hidden / hull bits survive.
+        let keep = REC_HIDDEN_BIT | REC_HULL_BIT | 0x04 | 0x10;
+        assert_eq!(invisible_depth_record_flags(keep, true) & keep, keep);
+        assert_eq!(trans_record_flags(REC_HULL_BIT), REC_HULL_BIT | 1);
+        assert_eq!(trans_record_flags(trans_record_flags(4)), 5);
     }
 
     #[test]

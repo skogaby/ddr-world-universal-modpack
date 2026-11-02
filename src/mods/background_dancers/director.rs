@@ -330,11 +330,14 @@ pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: Sce
         }
         let wipe = look.and_then(|l| l.wipe);
         let twin_present = sess.parsed.dancers.get(i).is_some_and(|d| d.twin.is_some());
+        // STENCIL's per-bar fill rides the tint (white otherwise —
+        // `Session::style_tick`).
+        let st = sess.dancer_tint;
         if body_built {
             let n = body_bone_count.min(sess.bones.len());
             let shown = outfit_play.is_some() && !me_hidden_by_other;
             let (alpha, aux) = wipe_terms(sess, &body_world, wipe, true);
-            let tint = [colour, colour, colour, alpha];
+            let tint = [colour * st[0], colour * st[1], colour * st[2], alpha];
             let mats = body_material_params(sess, i, false, real_s);
             frame_board::publish_aux(
                 body_slot,
@@ -391,7 +394,7 @@ pub fn produce(sess: &mut Session, t: f32, real_s: f32, visible: bool, mask: Sce
                     };
                     let bone = sess.bones.get(p.attach).copied().unwrap_or(IDENTITY);
                     let world = part_world(p.mirror, &bone, &body_world);
-                    let tint = [colour, colour, colour, 1.0];
+                    let tint = [colour * st[0], colour * st[1], colour * st[2], 1.0];
                     frame_board::publish(
                         slot,
                         &world,

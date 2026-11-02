@@ -63,6 +63,7 @@ use super::selection::{
 use super::session::{assemble_pick, make_pick, CameraSet, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
 use super::tempo_source;
+use super::universe_logic;
 
 /// The music count the scene is posed at before the run anchors (a few
 /// frames between the DPS step-5 edge and the `0x1044` anchor): close to
@@ -1206,20 +1207,21 @@ fn drive_live(w: &mut Window) {
     let since_request_ms = w.scene.since_request_ms();
 
     // Parse result → session (once), build what is resident, residency
-    // timeout — the shared machinery; the session's style / outline plan is
-    // decided here, when the parse lands: the operator's request gated on
-    // what the synthesis actually serves this boot (a bit-31 twin against a
-    // stock 4×(0,0,0) container would just draw the body twice). The hull
-    // plan (DSU's one black hull) is frozen per song.
+    // timeout — the shared machinery; the session's hull plan is decided
+    // here, when the parse lands: the operator's request gated on what the
+    // synthesis actually serves this boot (a bit-31 twin against a stock
+    // 4×(0,0,0) container would just draw the body twice). The hulls (DSU's
+    // one black hull) are built per song; the looks — and which hulls show —
+    // follow LIGHTING STYLE live (`Session::style_tick`).
     let has_built = w.scene.drive_assets(|pick, parsed, requested_at| {
         let eff = super::style::effective();
-        let hulls = super::style::hull_plan(&eff);
+        let hulls = super::style::hull_plan(&eff, false);
         Session::new(
             pick.clone(),
             parsed,
             requested_at,
             tempo_options(),
-            eff.style,
+            eff,
             hulls,
             0,
             None,
@@ -1461,6 +1463,15 @@ fn drive_live(w: &mut Window) {
     // camera (`Session::fx_camera`, read by the publish).
     camera_tick(w, t, mask);
     if publish {
+        // The chart bar RANDOM / STENCIL change on: the tempo map's measure
+        // position, else a 120-BPM bar of music time.
+        let bar = match w.tempo.as_ref() {
+            Some(map) => universe_logic::bar_at_ticks(map.tick_at(mc_ms as f64)),
+            None => universe_logic::bar_at_seconds(mc_ms as f64 / 1000.0),
+        };
+        if let Some(sess) = w.scene.session_mut() {
+            sess.style_bar = bar;
+        }
         w.scene.publish(t, real_s, visible, mask);
     }
     if let Some(sess) = w.scene.session_mut() {

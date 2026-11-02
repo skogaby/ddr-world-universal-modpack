@@ -364,6 +364,10 @@ fn drive_live_window(slot: &mut PreviewSlot, menu_open: bool) {
         }
         w.scene.park_engine_destroyed();
         let t = w.t();
+        // RANDOM / STENCIL bars: 2 s (a 120-BPM bar of the preview's clock).
+        if let Some(sess) = w.scene.session_mut() {
+            sess.style_bar = super::universe_logic::bar_at_seconds(t as f64);
+        }
         w.scene.publish(t, t, true, SceneMask::ALL);
         if let Some(passes) = slot.passes.as_mut() {
             let f = camera::frustum_for(w, t, slot.aspect);

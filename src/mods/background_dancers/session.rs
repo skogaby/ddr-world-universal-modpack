@@ -24,10 +24,12 @@ use std::time::Instant;
 use crate::core::anm::pose::{seed_local_trs, Skeleton, Trs};
 use crate::core::anm::{anm as anmfile, b2it, ktmdl, sanm, Anm, Mat4};
 use crate::core::arc as arcfile;
-use crate::services::avs_layeredfs::shader_layout::{self, SceneStyle};
+use crate::services::avs_layeredfs::shader_layout::{self, SceneStyle, StyleFamily, StyleTexture};
 use crate::services::scene3d::frame_board::{self, MatParam, NO_SLOT};
+use crate::services::scene3d::node_layout::SceneNode;
 use crate::services::scene3d::render_item_layout::{
-    scale_translation, IDENTITY, PASS_MASK_DANCER, PASS_MASK_LOWPRIO, PASS_MASK_STAGE,
+    additive_record_flags, invisible_depth_record_flags, scale_translation, trans_record_flags,
+    IDENTITY, PASS_MASK_DANCER, PASS_MASK_LOWPRIO, PASS_MASK_STAGE,
 };
 use crate::services::scene3d::{
     arc_set, model_registry, node, pure, render_item, scene_graph, texture,
@@ -51,6 +53,9 @@ use super::selection::{
     DancerCandidate, Sex, GROUND_BONES, HEAD_BONE, HIPS_BONE, MIRROR_ATTACH_BONE, MIRROR_PART,
     POSE_CLIP, SHADOW_ARC, SHADOW_MODEL, TRANSFORM_CLIP,
 };
+use super::style::{self as style_cfg, Effective};
+use super::style_rig::{Look, RecordMode, RigMaterial, StyleRig, FAMILY_SLOTS};
+use super::universe_logic;
 use super::{chara_fx, dynbones_logic, transform_logic};
 
 /// The wing-tip joints the sparkle trail rides (`CtsCharaAtc`
@@ -1281,11 +1286,30 @@ pub struct BuildProgress {
 pub struct Session {
     pub pick: Pick,
     pub parsed: Parsed,
-    /// The scene style every eligible material is re-pointed at (per song).
-    pub style: SceneStyle,
-    /// The outline layers built for every restyle-eligible instance (empty =
-    /// no hulls; the DSU ink = one black hull — `outline.rs`). Frozen per
-    /// song.
+    /// The lighting style as of the last `style::generation` this session
+    /// saw — [`style_tick`](Self::style_tick) re-reads it on every edit, so
+    /// LIGHTING STYLE applies at once. May be `Random`.
+    pub eff: Effective,
+    style_gen: Option<u32>,
+    /// RANDOM (EVERY BAR)'s presets (cached with `eff`).
+    random_pool: Vec<SceneStyle>,
+    /// The chart bar of this frame — set by the owner before `publish`
+    /// (RANDOM and STENCIL change on it).
+    pub style_bar: i64,
+    /// The dancers' concrete look last applied (`None` before the first
+    /// tick).
+    pub dancer_style: Option<SceneStyle>,
+    /// The `(bar, generation)` the per-bar choice below was made for.
+    style_key: Option<(i64, u32)>,
+    dancer_now: SceneStyle,
+    /// STENCIL's fill this frame (the director multiplies it into the
+    /// dancers' tints; white otherwise).
+    pub dancer_tint: [f32; 3],
+    /// A song-select preview (private OPACITY + TRANS clones, no LOWPRIO).
+    pub preview: bool,
+    style_logs: u32,
+    /// The outline layers and which bodies have them (`outline.rs`); built
+    /// per song, each hull shown or hidden per look at runtime.
     pub hulls: HullPlan,
     pub schedule: Option<DanceSchedule>,
     /// The stage is a FLIGHT stage (`StageCandidate::flight`): its `pre_` /
@@ -1388,12 +1412,11 @@ pub struct TransformRun {
     pub switch_real: Option<f32>,
 }
 impl Session {
-    /// `style`: the scene style applied at item build (materials re-pointed
-    /// at the `<name>_<style>` variant containers, RE §4.7). `hulls`: the
-    /// inverted-hull outline layers to build for every restyle-eligible
-    /// instance — empty when SCENE OUTLINES is off, the style is stock or the
-    /// synthesized containers lack the outline pair (`style::hull_plan`
-    /// decides; the DSU ink is one black hull).
+    /// `eff`: the lighting style as of now (`style::effective`); every
+    /// restyle-eligible instance captures a runtime look switch at build
+    /// (`style_rig.rs`) and [`style_tick`](Self::style_tick) applies the live
+    /// style each frame. `hulls`: the inverted-hull outline layers and which
+    /// bodies get them (`style::hull_plan`; the DSU ink is one black hull).
     /// `slot_base`: the first frame-board slot (gameplay 0; P1 previews 0,
     /// P2 previews 16 — design §5.3); the owner budget is what remains of
     /// the board above it. `item_pass_mask`: `Some(bit)` stamps every
@@ -1404,7 +1427,7 @@ impl Session {
         parsed: Parsed,
         requested_at: Instant,
         tempo_opts: TempoOptions,
-        style: SceneStyle,
+        eff: Effective,
         hulls: HullPlan,
         slot_base: u32,
         item_pass_mask: Option<u32>,
@@ -1589,6 +1612,8 @@ impl Session {
             slot_base,
             slot_budget,
             hulls.layers.len(),
+            hulls.stage,
+            hulls.dancers,
             item_pass_mask,
         );
         if plan.truncated > 0 {
@@ -1619,7 +1644,16 @@ impl Session {
         Session {
             pick,
             parsed,
-            style,
+            eff,
+            style_gen: None,
+            random_pool: eff.random_pool(),
+            style_bar: 0,
+            dancer_style: None,
+            style_key: None,
+            dancer_now: SceneStyle::Stock,
+            dancer_tint: [1.0; 3],
+            preview: item_pass_mask.is_some(),
+            style_logs: 0,
             hulls,
             schedule,
             flight_stage,
@@ -1835,6 +1869,111 @@ impl Session {
         }
     }
 
+    /// Whether instance `idx` takes the STAGE look (a stage prop or a stage
+    /// prop's hull): `SceneStyle::stage_style` of the live style — CEL for
+    /// a DDR Universe style and RANDOM. Everything else takes the dancers'.
+    fn is_stage_look(&self, idx: usize) -> bool {
+        let kind = match self.instances.get(idx).map(|i| i.kind) {
+            Some(InstanceKind::Hull { of, .. }) => self.instances.get(of).map(|b| b.kind),
+            k => k,
+        };
+        matches!(kind, Some(InstanceKind::StagePart(_)))
+    }
+
+    /// The style instance `idx` is built under (the wipe containers' style,
+    /// the style-texture wait): the stage style or the session style.
+    fn build_style(&self, idx: usize) -> SceneStyle {
+        if self.is_stage_look(idx) {
+            self.eff.style.stage_style()
+        } else {
+            self.eff.style
+        }
+    }
+
+    /// Game thread, once per frame before the director's publish (the owner
+    /// set [`style_bar`](Self::style_bar)): resolve the live lighting style —
+    /// re-read on every edit; RANDOM picks a preset per bar, STENCIL a
+    /// palette colour per bar — and switch every built instance whose look
+    /// changed (`style_rig.rs`). Cheap when nothing changed: one compare per
+    /// instance.
+    pub fn style_tick(&mut self) {
+        let gen = style_cfg::generation();
+        if self.style_gen != Some(gen) {
+            self.style_gen = Some(gen);
+            self.eff = style_cfg::effective();
+            self.random_pool = self.eff.random_pool();
+        }
+        let bar = self.style_bar;
+        // The per-bar choices only move with the bar or an edit.
+        if self.style_key != Some((bar, gen)) {
+            self.style_key = Some((bar, gen));
+            let seed = self.pick.seed;
+            let mut dancer = match self.eff.style {
+                SceneStyle::Random => match self.random_pool.len() {
+                    0 => SceneStyle::Cel,
+                    n => self.random_pool[universe_logic::shuffled_pick(seed, bar, n)],
+                },
+                s => s,
+            };
+            // OUTLINE ONLY is the hull alone: without dancer hulls this song
+            // it would draw nothing.
+            if dancer == SceneStyle::Outline && !self.hulls.dancers {
+                dancer = SceneStyle::Cel;
+            }
+            self.dancer_tint = if dancer == SceneStyle::Stencil {
+                universe_logic::stencil_colour(seed, bar)
+            } else {
+                [1.0; 3]
+            };
+            self.dancer_now = dancer;
+        }
+        let dancer = self.dancer_now;
+        let stage = self.eff.style.stage_style();
+        if self.dancer_style != Some(dancer) {
+            self.dancer_style = Some(dancer);
+            if self.style_logs < STYLE_LOG_LIMIT && !self.parsed.dancers.is_empty() {
+                self.style_logs += 1;
+                log_info!(
+                    "BackgroundDancers: dancers' look -> {} (bar {}{}){}",
+                    dancer.key(),
+                    bar,
+                    if self.eff.style == SceneStyle::Random {
+                        ", RANDOM (EVERY BAR)"
+                    } else {
+                        ""
+                    },
+                    if self.style_logs == STYLE_LOG_LIMIT {
+                        " -- further changes not logged"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        let outlines = self.eff.outlines;
+        let preview = self.preview;
+        for inst in self.instances.iter_mut() {
+            if inst.status != InstanceStatus::Built || inst.queued || inst.freed {
+                continue;
+            }
+            let (item, node, pass_mask, sort_key, shown) = (
+                inst.item as *mut u8,
+                inst.node as *mut SceneNode,
+                inst.pass_mask,
+                inst.sort_key,
+                inst.node_shown,
+            );
+            let Some(rig) = inst.style_rig.as_mut() else {
+                continue;
+            };
+            let style = if rig.stage { stage } else { dancer };
+            let look = look_for(rig, style, outlines, preview, pass_mask, sort_key);
+            // SAFETY: Built and not queued ⇒ attached, dtor not run; game
+            // thread, mid-frame (the workers are drained).
+            unsafe { apply_look(rig, &look, item, node, shown, &inst.model_name) };
+        }
+    }
+
     /// `diag(s) · T(x, 0, 0)` for dancer `i` (A3 placement).
     pub fn dancer_body_world(&self, i: usize) -> Mat4 {
         let n = self.parsed.dancers.len();
@@ -1889,6 +2028,32 @@ impl Session {
                 progress.pending += 1;
                 continue; // wait for the DDS (Step 3 cold-load finding)
             }
+            // A DDR Universe style texture rides its own arc: wait for it too
+            // (same budget; past it the look switch keeps retrying the bind).
+            let style = self.build_style(idx);
+            let inst = &self.instances[idx];
+            let wanted: &[StyleTexture] = match (style, style.texture()) {
+                (SceneStyle::Random, _) => &StyleTexture::ALL,
+                (_, Some(t)) => match StyleTexture::ALL.iter().position(|x| *x == t) {
+                    Some(k) => &StyleTexture::ALL[k..k + 1],
+                    None => &[],
+                },
+                _ => &[],
+            };
+            if !wanted.is_empty()
+                && self.eff.served.style_textures
+                && self.eff.served.universe
+                && !matches!(inst.kind, InstanceKind::Hull { .. })
+                && restyle_allowed(&inst.kind, &inst.model_name)
+                && since_request_ms < TEXTURE_WAIT_TIMEOUT_MS
+                && wanted.iter().any(|t| {
+                    render_item::registered_texture(pure::fnv1_name_hash(t.stem())).is_none()
+                })
+            {
+                progress.pending += 1;
+                continue;
+            }
+            let stage_look = self.is_stage_look(idx);
             if ready.still_default > 0 {
                 log_warn!(
                     "BackgroundDancers: {} -- {} of {} texture(s) still unregistered after {} ms, building anyway (per-frame retry)",
@@ -1911,11 +2076,14 @@ impl Session {
                 &view,
                 &world,
                 since_request_ms,
-                self.style,
+                style,
                 &self.hulls,
                 wipe,
             ) {
                 (true, w) => {
+                    if let Some(rig) = self.instances[idx].style_rig.as_mut() {
+                        rig.stage = stage_look;
+                    }
                     progress.built_now += 1;
                     if wipe && !w {
                         self.wipe_ok = false;
@@ -2024,20 +2192,45 @@ fn build_one(
             kept
         );
     }
-    // Whole-scene restyle (RE §4.7): re-point eligible material copies at the
-    // `<name>_<style>` variant objects. Hull twins ALWAYS restyle (their
-    // program 0 is the outline pair) and then hide every record whose
-    // material stayed stock.
+    // Whole-scene restyle (RE §4.7), switchable at runtime (`style_rig.rs`):
+    // every eligible material copy's container in EVERY style family is
+    // captured now; the first `Session::style_tick` applies the live look
+    // (the item is attached hidden until its first publish). Hull twins point
+    // their materials at an outline-pair container for life (program 0 is
+    // the same pair in every family) and hide every record whose material
+    // stayed stock; the tick shows / hides the whole hull per look.
     if wiped {
         // (done above)
-    } else if style != SceneStyle::Stock && allows {
-        let variant_for = |stock_hash: u32| -> Option<*mut u8> {
-            let v = shader_layout::variant_for_stock_hash(stock_hash)?;
-            let name = shader_layout::variant_container_name(v, style)?;
-            texture::lookup_shader(shader_layout::fnv1_32(&name))
-        };
+    } else if allows {
         // SAFETY: our own fresh block, not yet attached.
-        let st = unsafe { item.restyle_materials(true, screen_hash, &variant_for) };
+        let (cands, kept) = unsafe { item.restyle_candidates(screen_hash) };
+        let families = StyleFamily::all();
+        let mut mats: Vec<RigMaterial> = Vec::with_capacity(cands.len());
+        let mut no_variant = kept.kept_no_variant;
+        for (mi, obj, hash) in cands {
+            let Some(v) = shader_layout::variant_for_stock_hash(hash) else {
+                no_variant += 1;
+                continue;
+            };
+            let mut family = [0usize; FAMILY_SLOTS];
+            for (k, f) in families.iter().enumerate().take(FAMILY_SLOTS) {
+                let name = shader_layout::family_container_name(v, *f);
+                family[k] =
+                    texture::lookup_shader(shader_layout::fnv1_32(&name)).map_or(0, |p| p as usize);
+            }
+            if family.iter().all(|&p| p == 0) {
+                no_variant += 1;
+                continue;
+            }
+            mats.push(RigMaterial {
+                index: mi,
+                stock: obj as usize,
+                family,
+            });
+        }
+        let material_count = item.counts().materials;
+        // SAFETY: as above.
+        let rec_mat = unsafe { item.record_materials() };
         if let InstanceKind::Hull { layer, .. } = inst.kind {
             // The layer's colour rides the records (collector → c23 → the
             // outline PS emits it verbatim); `ModelParameters.w` is the
@@ -2055,36 +2248,64 @@ fn build_one(
                 inst.status = InstanceStatus::Skipped;
                 return (false, false);
             };
+            for m in &mats {
+                let obj = std::iter::once(FAMILY_SLOT_CEL)
+                    .chain(0..FAMILY_SLOTS)
+                    .map(|k| m.family[k])
+                    .find(|&p| p != 0)
+                    .unwrap_or(0);
+                // SAFETY: as above.
+                unsafe {
+                    render_item::set_material_shader_raw(
+                        item.ptr(),
+                        material_count,
+                        m.index,
+                        obj as *mut u8,
+                    )
+                };
+            }
+            let mut rig = StyleRig::new(true, mats, material_count, Vec::new(), &rec_mat);
             // SAFETY: as above.
             let (marked, hidden) = unsafe {
                 item.set_outline_push_scale(spec.push_scale);
                 item.set_record_colors(spec.rgba);
-                item.mark_hull_records(&st.record_restyled)
+                item.mark_hull_records(&rig.record_styled)
             };
+            // SAFETY: as above.
+            rig.record_base = unsafe { item.record_flags() };
             log_info!(
-                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), push x{:.2}; materials restyled={} kept: blend={} no-variant={} screen={}",
+                "BackgroundDancers: {} [hull L{} {}] {} record(s) marked bit-31 (program 0 = outline pair), {} hidden (blended / stock material), push x{:.2}; materials on the outline pair={} kept: blend={} no-variant={} screen={}",
                 inst.model_name,
                 layer,
                 outline::hex(spec.rgba),
                 marked,
                 hidden,
                 spec.push_scale,
-                st.restyled,
-                st.kept_blend,
-                st.kept_no_variant,
-                st.kept_screen
+                rig.materials.len(),
+                kept.kept_blend,
+                no_variant,
+                kept.kept_screen
             );
+            if rig.has_styled_records() {
+                inst.style_rig = Some(rig);
+            }
         } else {
+            // SAFETY: as above.
+            let base = unsafe { item.record_flags() };
+            let rig = StyleRig::new(false, mats, material_count, base, &rec_mat);
             log_info!(
-                "BackgroundDancers: {} [{}] style {} -- materials restyled={} kept: blend={} no-variant={} screen={}",
+                "BackgroundDancers: {} [{}] look switch -- {} material(s) restyleable ({} families) kept: blend={} no-variant={} screen={}",
                 inst.model_name,
                 inst.kind.tag(),
-                style.key(),
-                st.restyled,
-                st.kept_blend,
-                st.kept_no_variant,
-                st.kept_screen
+                rig.materials.len(),
+                families.len().min(FAMILY_SLOTS),
+                kept.kept_blend,
+                no_variant,
+                kept.kept_screen
             );
+            if !rig.materials.is_empty() {
+                inst.style_rig = Some(rig);
+            }
         }
     } else if matches!(inst.kind, InstanceKind::Hull { .. }) {
         // A hull whose body cannot be restyled must not draw at all.
@@ -2186,6 +2407,161 @@ fn build_one(
     inst.attached_at = Some(Instant::now());
     inst.status = InstanceStatus::Built;
     (true, wiped)
+}
+
+/// Dancers' look changes logged per session (RANDOM changes every bar).
+const STYLE_LOG_LIMIT: u32 = 8;
+/// `StyleFamily::all()` slot of CEL (the hull's outline-pair container).
+const FAMILY_SLOT_CEL: usize = 1;
+/// OUTLINE ONLY's body sorts after every LOWPRIO stage part (`:N`), so its
+/// depth never hides one drawn after it.
+const OUTLINE_BODY_SORT_KEY: i32 = 0x4000_0000;
+/// Frames a wanted style texture may stay unregistered before one WARN.
+const STYLE_TEXTURE_MISS_LIMIT: u32 = 20 * 60;
+
+/// What instance `rig` looks like under `style` (see `style_rig::Look`).
+/// `outlines` = SCENE OUTLINES on and served; `preview` = a song-select
+/// preview (OPACITY + TRANS clones only); `pass_mask` / `sort_key` = the
+/// instance's own.
+fn look_for(
+    rig: &StyleRig,
+    style: SceneStyle,
+    outlines: bool,
+    preview: bool,
+    pass_mask: u32,
+    sort_key: i32,
+) -> Look {
+    if rig.hull {
+        // Stage hulls: SCENE OUTLINES with a shaded stage. Dancer hulls: the
+        // looks that outline, and OUTLINE ONLY, which is nothing else.
+        let visible = if rig.stage {
+            outlines && style != SceneStyle::Stock
+        } else {
+            outlines && style.outlines() || style == SceneStyle::Outline
+        };
+        return Look {
+            family: None,
+            records: if style == SceneStyle::Outline {
+                RecordMode::Trans
+            } else {
+                RecordMode::Base
+            },
+            texture: None,
+            pass_mask,
+            sort_key,
+            hidden: !visible,
+        };
+    }
+    let family = style
+        .family()
+        .and_then(|f| StyleFamily::all().iter().position(|x| *x == f));
+    // OUTLINE ONLY's body writes depth before its hull draws: gameplay puts
+    // it in LOWPRIO_TRANS (after the opaque stage, before TRANS — where the
+    // hull goes); a preview has no LOWPRIO clone and no stage, so its body
+    // stays in the OPACITY clone.
+    let outline_body = style == SceneStyle::Outline;
+    let lowprio = outline_body && !preview;
+    Look {
+        family,
+        records: if outline_body {
+            RecordMode::InvisibleDepth { trans: !preview }
+        } else if style.additive() {
+            RecordMode::Additive
+        } else {
+            RecordMode::Base
+        },
+        texture: style.texture().map(|t| pure::fnv1_name_hash(t.stem())),
+        pass_mask: if lowprio {
+            PASS_MASK_LOWPRIO
+        } else {
+            pass_mask
+        },
+        sort_key: if lowprio {
+            OUTLINE_BODY_SORT_KEY
+        } else {
+            sort_key
+        },
+        hidden: false,
+    }
+}
+
+/// A styled record's flags under `mode`, from its build flags.
+fn record_flags_for(base: u32, mode: RecordMode) -> u32 {
+    match mode {
+        RecordMode::Base => base,
+        RecordMode::Additive => additive_record_flags(base),
+        RecordMode::InvisibleDepth { trans } => invisible_depth_record_flags(base, trans),
+        RecordMode::Trans => trans_record_flags(base),
+    }
+}
+
+/// Switch one attached instance to `look` — only what differs from the
+/// applied look is written. A hull's node-level hidden flag is written once
+/// the instance has been published (`shown`; before that it stays hidden
+/// from attach and `SceneWindow::publish` applies the look's flag).
+///
+/// # Safety
+/// `item` / `node` belong to a Built, not-queued instance (attached, dtor
+/// not run); game thread, mid-frame.
+unsafe fn apply_look(
+    rig: &mut StyleRig,
+    look: &Look,
+    item: *mut u8,
+    node: *mut SceneNode,
+    shown: bool,
+    name: &str,
+) {
+    if rig.hull && shown && rig.hidden_applied != Some(look.hidden) {
+        node::set_hidden(node, look.hidden);
+        rig.hidden_applied = Some(look.hidden);
+    }
+    let prev = rig.applied;
+    if prev.map_or(true, |p| p.texture != look.texture) {
+        rig.texture_misses = 0;
+    }
+    let texture_done = look.texture.is_none()
+        || rig.texture_bound == look.texture
+        || rig.texture_misses > STYLE_TEXTURE_MISS_LIMIT;
+    if prev.as_ref() == Some(look) && texture_done {
+        return;
+    }
+    if !rig.hull && prev.map_or(true, |p| p.family != look.family) {
+        for (mi, obj) in rig.material_writes(look.family) {
+            render_item::set_material_shader_raw(item, rig.material_count, mi, obj as *mut u8);
+        }
+    }
+    if prev.map_or(true, |p| p.records != look.records) {
+        let flags = rig.record_flags(look.records, record_flags_for);
+        render_item::set_record_flags_raw(item, rig.record_base.len(), &flags);
+    }
+    if prev.map_or(true, |p| p.pass_mask != look.pass_mask) {
+        node::set_item_pass_mask(node, look.pass_mask);
+    }
+    if prev.map_or(true, |p| p.sort_key != look.sort_key) {
+        node::set_sort_key(node, look.sort_key);
+    }
+    if let (Some(hash), Some(family), false) = (look.texture, look.family, texture_done) {
+        let mats = rig.styled_materials(family);
+        match render_item::bind_style_texture(item, rig.material_count, &mats, hash) {
+            Some(_) => {
+                rig.texture_bound = Some(hash);
+                rig.texture_misses = 0;
+            }
+            None => {
+                rig.texture_misses += 1;
+                if rig.texture_misses == STYLE_TEXTURE_MISS_LIMIT {
+                    log_warn!(
+                        "BackgroundDancers: {} -- style texture 0x{:08X} ({}) still unregistered after {} frames -- the look samples nothing",
+                        name,
+                        hash,
+                        shader_layout::STYLE_TEXTURE_ARC,
+                        STYLE_TEXTURE_MISS_LIMIT
+                    );
+                }
+            }
+        }
+    }
+    rig.applied = Some(*look);
 }
 
 /// A Winx body's joint-bound effect pools `(bank, spec)`: the wing

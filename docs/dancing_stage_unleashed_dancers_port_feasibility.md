@@ -12,8 +12,9 @@ approach?
 use DSU's toon ramp and black hull for the whole scene. The six DSU2 / ULTRAMIX 2 dancers followed
 (§11, `data_mods/custom_models/dancers/UMX2 *`, `port_character_ultramix2.py`; not yet
 cabinet-tested). Then the eight DSU3 dancers (§12, `data_mods/custom_models/dancers/UMX3 *`,
-`port_character_ultramix3.py`; not yet cabinet-tested). The rest of this note is the original
-research.
+`port_character_ultramix3.py`; not yet cabinet-tested). ULTRAMIX 4 (§13) and DDR Universe on the
+Xbox 360 (§14, 25 dancers in `data_mods/custom_models/dancers/UNIVERSE/`,
+`port_character_universe.py`) came later. The rest of this note is the original research.
 
 **Scope.** RE of the game rip plus a feasibility and approach write-up. Decoders were written and
 checked, and one Blender verification render was made (§3.4). Nothing is implemented in the DLL,
@@ -1114,3 +1115,162 @@ and Robo −0.09 (base below the ankles, as DSU3's robo) — kept as the data ha
 **Not ported:** costumes 2–4, the FACE swaps (blink / smile / wink), the toon ramp and outline, the
 sphere maps' view dependence, `specularTrans` translucency, the step-move clips, the 50/50 group
 weighting, and (above) the Quest city map and the dance mat.
+
+## 14. Addendum (2026-11-01): DanceDanceRevolution Universe (Xbox 360) — ported
+
+The 25 Universe dancers are ported the Path B way into a new source folder,
+`data_mods/custom_models/dancers/UNIVERSE/`. The port script is
+`tools/blender_ddr_addon/examples/port_character_universe.py`. Universe runs the same KCEH K3D
+engine as ULTRAMIX 4, and **its data files are still little-endian on the 360**, so no
+byte-swapping is needed. Everything below was decoded from the data and checked against its own
+invariants: layouts end exactly at EOF, palette groups tile the index list, weights sum to 1, and
+clips reproduce through the World `.anm` evaluator. `default.xex` (XEX2) was not analysed.
+
+**Sources.**
+- The disc image is `~/Desktop/ddr_universe/ddr_universe.iso`: NTSC-U, a redump-style XGD2 dump
+  (7.8 GB) whose XDVDFS game partition starts at `0x0FD90000`. `scripts/xdvdfs_extract.py` (new)
+  lists and extracts XDVDFS images (Xbox and Xbox 360; plain XISOs and the XGD1/2/3 partition
+  offsets).
+- `scripts/extract_ultramix_data.py universe_us` unpacks `x_data_XENON_US.bin` (1785 files) into
+  `~/Desktop/ddr_universe/extracted/`.
+
+**Disc layout** (3.2 GB of files):
+
+| Path | Contents | Used |
+|---|---|---|
+| `x_data_XENON_US.hbn` / `.bin` | the KCEH `x_bincat` archive (DSU2-style `.hbn` TOC, magic header): models, clips, CSVs, DDS / TGA / BMP textures, charts | yes |
+| `resource_XENON_US.krc` / `.krh` | an Xbox 360 **XPR2** bundle (big-endian, tiled) of UI textures; the `.krh` is 800 placeholder lines with no names | no |
+| `bank0..3.kab`, `streambank*.kas` | audio | no |
+| `movies/*.sfd` (450) | Sofdec background movies (2.2 GB) | no |
+| `default.xex`, `media/`, `$SystemUpdate/` | executable, Live UI, system update | no |
+
+**No 3D stages.** The `mrdd` models are UI and Quest mode: `z_panel` (the dance mat),
+`z_icon_*`, `z_result*`, `z_quest_map_*` / `city_*` / `tree_*` / transporters. The 26
+`z_quest_animal_*` models are `srdd` but have 3-bone rigs and are map props. There are no
+gameplay stage models.
+
+**`.ddm` revision 0x112 with palette groups.** The UMX4 layout (§13), generalised:
+
+| Offset | Size | Field |
+|---|---|---|
+| material `+0x18C` | 4 | u32 **palette-group count** *g*. UMX4 always has 1 here, which §13 read as a constant; Universe has 1–7 |
+| material `+0x190` | 0x48·*g* | groups: u32 palette size (≤ 30), u16[30] palette, u32 first index, u32 triangle count |
+
+- A material record is therefore `0x190 + 0x48·g` bytes. Groups are contiguous index ranges, in
+  order across all materials.
+- A vertex's 4 bone slots index the palette of the GROUP that owns it. No vertex is shared between
+  groups.
+- An odd index count is padded with 2 zero bytes before the vertex count (`z_B_Rig_D`,
+  `z_Lady_Rig_c`).
+- Three models carry a few zero-length normals: Afro 3 (2), Lady 2 (10) and Queen (14).
+  `game_mesh` gives each one the mean normal of its triangle neighbours.
+- Material flags at `+0x40`: `0x143` on the three glasses materials (Honey 2's and Queen's
+  `semitrans` lenses, B 2's `sphere` glasses), `0x43` on Rage 1's ear hair, `0` on the untextured
+  `lambert1` slivers, `3` elsewhere. `0xA0000005` at `+0x44` marks most env-map materials, but four
+  CSV `sphere` materials carry `…02`, so the port follows the CSV's RENDER column.
+- `ultramix_k3d_dump.parse_ddm` reads UMX4 and Universe alike (`materials[i]["groups"]`).
+
+**Dancer table** `z_default_models.csv` (`TYPE, NAME, HIDDEN, COSTUME, GENDER`): emi (girl), rage
+(male), lady (woman), afro (male), honey (woman), b (male), queen (woman, hidden).
+
+**Costumes.** Unlike UMX4, each costume is its own model: `z_<name>_rig_a..d.ddm`, with 87 /
+113-joint rigs and about 4–11 k vertices and 6.7–10.9 k triangles each. Queen has one model and
+the same texture set in all four columns. `<COSTUME>.csv` is
+`SHADERS, SHADERS1, TEXTURES1, RENDER1, …, SHADERS4, TEXTURES4, RENDER4, FACE`:
+- the `<RIG/PLATE>` row gives a material count (blank for some characters, and not always the
+  `.ddm`'s), the model file and the select-plate texture;
+- every other row maps a `.ddm` material (SHADERSn) to a texture and a RENDER style: `toon`,
+  `toonSphere`, `sphere` or `semitrans`.
+
+The data has rough edges; this is how the port resolves each one:
+
+| Case | Where | Resolution |
+|---|---|---|
+| material names carry a `cow_model_` prefix | Emi 4 | match a `_<cell>` suffix |
+| `buttonshader` has no CSV row but its own texture on disc | Emi 4 | kept with the `.ddm` texture |
+| CSV says `shoessshader`, the material is `shoesshader` | Lady 4 | typo table |
+| CSV texture not on the disc (`z_metal_a`, `z_lady_shoes_bd`) | Lady 2 | the `.ddm`'s own texture field |
+| CSV-only row `china_body_shoesshader` | Lady 3 | ignored |
+| untextured `lambert1` slivers (2–22 triangles, no CSV row) | 10 models | dropped |
+
+All dancer textures are DXT1, 64² to 512 × 1024, three quarters of them without mips. The exporter
+re-encodes them as A8R8G8B8 with 3 mips.
+
+**Skeleton** (`ultramix_k3d_dump.HIERARCHY_UNIVERSE`). The HumanIK names of UMX4, extended. The male
+skeleton has 87 joints:
+- five 4-joint fingers per hand;
+- `*ForearmRoll` between forearm and hand, and `*LegRoll` between leg and foot;
+- `*UpLegTwistLocked`, and `*ArmTwistLocked` without UMX4's `*ArmHalf`;
+- four 4-joint hair chains: front, back and both sides. The side chains' `*SIdeHairKnotA` is
+  spelled that way in the data.
+
+The female skeleton has 113 joints: the male set plus breasts, a 4-joint tie and three 3-joint
+skirt chains per side. `leftHand` hangs off `leftForearmRoll` and the side hair off `Head`, so the
+UMX4 table cannot be reused; `k3d_hierarchy` picks the right table from the joint names.
+
+The parents were found by searching for each joint's most rigid parent over the 34 listed clips,
+then checked with `hierarchy`. Every joint is rigid to its parent to ≤ 2e-5 units except the
+`*TwistLocked` pair (≤ 2.4e-2; it slides along the limb as in UMX4). Unlike UMX4's simulated
+cloth, the hair, tie and skirt chains are rigid as well: they move only by rotating. Every model
+carries its gender's whole skeleton, including the back-up dancers' body and head parts, so no
+helper bones are needed. World role bones `Hips`, `Spine2` and `Head` exist; Left/RightToeBase
+alias `left/rightFootIndex1`.
+
+**Bone count.** 87 / 113 posed bones is more than any earlier port (≤ 59). The DLL sizes its pose
+buffers from the rig, the frame board holds 256 bones per instance, and the HOTTEST PARTY flight
+effect pools already run 131–244-bone models through the engine's own loader. The exporter splits
+each mesh into palette blocks of ≤ 52 bones (Universe bodies come out at 6–12 KTMDL meshes).
+**Not yet cabinet-tested at this size.**
+
+**Clips.** `animations.csv` is UMX4's table (`NUM, FEMALENAME, MALENAME, SPEED, SKIP, GROUP`, 26
+rows): woman 9, girl 3, male 6, unisex 8. Each dancer gets its gender's group plus `unisex`: male
+14 clips, woman 17, girl 11. **15 Hz**, like UMX4. `ultramix_k3d_dump.py match` against World's
+`mc_male` / `mc_female` / `mc_bpm120` takes finds the World take for 31 of the 34 listed clips at
+factor 4 (r 0.78–0.96), while at factor 2 the best scores are 0.44–0.89 and mostly against the
+wrong take. Examples: `Z_M_hh01` = `mc_male_hh01_exec` 0.96, `Z_F_soul01` = `mc_female_sf01_exec`
+0.94, `Z_M_BRK02` = `mc_male_br01_exec` 0.94. The three without a World take are
+`Z_F_house01..03`, as in UMX4. Keys therefore land on every 4th World frame (`FRAME_STEP_UMX4`).
+Clips play whole from frame 0; Universe's own play window was not traced.
+
+The other 223 `.ani` files are not in the table and are not ported:
+- the panel-to-panel step moves `Z_F_<foot>_<foot>_*` (about 150);
+- 36 `Z_F/M_pr_*` moves and the two `ex_normal` idles;
+- `Z_F_break01` and `Z_F_Z_F_LC_RC_LC_RR`;
+- the back-up dancers' `Z_M/W_back_idle00/01/run/shrug` (12–29 frames);
+- the 26 quest-animal loops.
+
+**Back-up dancers (not ported).** `z_bf_body` / `z_bm_body` (female 113 / male 87 joints, one blue
+suit each; BMP textures) take a head from `z_b[fm]_head00..04` (five hair styles) or
+`head20..24` (the same geometry with a second texture set). That makes 20 combinations, and they
+skin correctly with the main clips. They were skipped by the maintainer's choice (2026-11-01).
+
+**Result.** 25 dancers: Emi, Rage, Lady, Afro, Honey and B in costumes 1–4, plus Queen. 365 clips,
+max joint error 0.14 mm. Rigs have 87 / 113 bones and 6–12 World meshes, with palettes ≤ 52. The
+lowest skinned vertex over the clips has a median of −0.025 to −0.055 m (shoe soles; the minimum
+is −0.146 m, Rage 4 at the bottom of a move), kept as the data has it. Size: 203 MB, of which
+125 MB is textures (A8R8G8B8 with 3 mips), 75 MB clips (110–260 KB each) and 11 MB models.
+All 25 were round-trip previewed (re-imported export + an exported clip); not yet cabinet-tested.
+
+**Not ported:** the FACE swaps (`clsface` blink, `smlface`, `sadface`), the toon ramp and outline,
+the sphere maps' view dependence, the `semitrans` shader's own alpha (`GLASS_ALPHA` 0.5 is a guess:
+the lens textures are opaque DXT1), the step-move clips, the back-up dancers, and Queen's costumes
+2–4 (identical to costume 1).
+
+**Open items for the XEX** (`default.xex`; Ghidra needs an XEX2 loader):
+- the `semitrans` alpha;
+- the play window and clip weighting;
+- whether `lambert1` slivers and unlisted materials are drawn;
+- what the game does with CSV textures that are missing from the disc.
+
+```bash
+python3 scripts/xdvdfs_extract.py list ~/Desktop/ddr_universe/ddr_universe.iso
+python3 scripts/xdvdfs_extract.py extract ~/Desktop/ddr_universe/ddr_universe.iso ~/Desktop/ddr_universe/disc 'x_data_*'
+python3 scripts/extract_ultramix_data.py universe_us ~/Desktop/ddr_universe/disc ~/Desktop/ddr_universe/extracted
+./scripts/validate_k3d_tools.sh ~/Desktop/ddr_universe/extracted   # host tests + survey
+D=~/Desktop/ddr_universe/extracted
+python3 scripts/ultramix_k3d_dump.py ddm $D/z_Lady_Rig_a.ddm        # groups, palettes
+python3 scripts/ultramix_k3d_dump.py hierarchy $D/Z_[FM]_*.ani       # HIERARCHY_UNIVERSE check
+python3 scripts/ultramix_k3d_dump.py match <dir of the 34 listed clips> <unpacked mc_* arcs> 4
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe.py
+```

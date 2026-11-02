@@ -68,6 +68,12 @@ with its own TOC at 0x800; their tags are disjoint, so all streams land in one d
 sng_manifest.csv records the source archive per stream. The voice bank sits at the disc root
 (`VCLIP_M.BKT`).
 
+DDR Universe (universe_us, Xbox 360) keeps the x_data .hbn/.bin pair (`*_XENON_US.*`; still
+little-endian, still KCEH's x_bincat). Only x_data is extracted: its audio moved to `.kas` /
+`.kab` banks, and `resource_XENON_US.krc` is an Xbox 360 XPR2 bundle (big-endian, tiled
+textures, a placeholder `.krh`) holding UI art only. Pull the files off the disc image first
+with scripts/xdvdfs_extract.py.
+
 Usage:
     extract_ultramix_data.py <game> <game_dir> <out_dir>
 
@@ -76,6 +82,7 @@ Examples:
     extract_ultramix_data.py dsu2_eu ~/Desktop/dsu2 ./extracted_dsu2
     extract_ultramix_data.py dsu3_eu ~/Desktop/dsu3 ~/Desktop/dsu3/extracted_full
     extract_ultramix_data.py ultramix4_us ~/Desktop/"DDR ISOs"/ultramix_4 ~/Desktop/"DDR ISOs"/ultramix_4/extracted_full
+    extract_ultramix_data.py universe_us ~/Desktop/ddr_universe/disc ~/Desktop/ddr_universe/extracted
 """
 
 import argparse
@@ -89,7 +96,8 @@ from pathlib import Path
 #   xdata_toc_offset / xdata_count: [xbe only] TOC file offset and entry count in the XBE
 #   xdata_hbn:                      [hbn only] TOC sidecar filename in game dir
 #   xdata_bin:                      x_data bin filename in game dir
-#   sng:                            music .sng filename in game dir, or a list of them (one TOC each)
+#   sng:                            music .sng filename in game dir, or a list of them (one TOC each;
+#                                   empty for a game without .sng music)
 #   sng_toc_offset:                 file offset of the .sng TOC (u32 count + entries)
 #   magic:                          [optional] header the game checks at offset 0 of the
 #                                   bin and .sng before trusting them
@@ -141,6 +149,13 @@ GAMES = {
         "magic": b"Konami Computer Entertainment Hawaii, Inc.",
         "krc": ("resource_XBOX_US.krc", "resource_XBOX_US.krh"),
         "voice_banks": ["VCLIP_M.BKT"],
+    },
+    "universe_us": {
+        "xdata_toc": "hbn",
+        "xdata_hbn": "x_data_XENON_US.hbn",
+        "xdata_bin": "x_data_XENON_US.bin",
+        "sng": [],
+        "magic": b"Konami Computer Entertainment Hawaii, Inc.",
     },
 }
 

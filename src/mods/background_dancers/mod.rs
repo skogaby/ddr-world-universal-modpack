@@ -197,10 +197,12 @@ pub mod session;
 pub mod song_movie;
 pub mod sources;
 pub mod style;
+pub mod style_rig;
 pub mod tempo;
 pub mod tempo_source;
 pub mod texture_wrap;
 pub mod transform_logic;
+pub mod universe_logic;
 pub mod viewport_smoke;
 
 use std::sync::atomic::{AtomicBool, Ordering};

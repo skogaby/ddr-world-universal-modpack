@@ -279,6 +279,30 @@ pub unsafe fn set_hidden(node: *mut SceneNode, hidden: bool) {
     (*node).hidden.store(hidden as u8, Ordering::Relaxed);
 }
 
+/// The pass mask `visit(4)` stamps into the item from the next update on
+/// (which model passes draw it). Game thread, mid-frame.
+/// # Safety
+/// As [`set_enabled`].
+pub unsafe fn set_item_pass_mask(node: *mut SceneNode, mask: u32) {
+    if node.is_null() {
+        return;
+    }
+    (*node).item_pass_mask.store(mask, Ordering::Relaxed);
+}
+
+/// The node's sort key (`+0xE8`, the visible vector's ascending order — the
+/// order the unsorted LOWPRIO_TRANS pass draws in). Game thread, mid-frame:
+/// the engine reads it only inside `SceneGraph::update`, which the frame-end
+/// dispatch has drained by then.
+/// # Safety
+/// As [`set_enabled`].
+pub unsafe fn set_sort_key(node: *mut SceneNode, key: i32) {
+    if node.is_null() {
+        return;
+    }
+    std::ptr::write_volatile(std::ptr::addr_of_mut!((*node).sort_key), key);
+}
+
 /// Whether the engine's flush has run our dtor on this node (the item is
 /// freed, the node block is still ours to free with [`free_node_block`]).
 /// # Safety

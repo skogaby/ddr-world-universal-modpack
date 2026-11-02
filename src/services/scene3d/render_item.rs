@@ -259,70 +259,56 @@ impl RenderItem {
         None
     }
 
-    /// Whole-scene restyle (RE §4.7): re-point eligible PRIVATE material
-    /// copies at style-variant shader objects. `variant_for(stock_hash)`
-    /// returns the replacement `gs::Shader*` for a material whose current
-    /// object hashes to `stock_hash` (`None` = leave stock). Eligibility =
+    /// Whole-scene restyle (RE §4.7): the PRIVATE material copies a style
+    /// may re-point at its variant shader objects — eligibility =
     /// `layout::restyle_eligible_materials` (every record using the material
-    /// opaque/alpha-tested, and the instance allows it) and the material does
-    /// not sample `keep_stock_texture` (`layout::materials_sampling` — the
-    /// `offscreen1` stage screens stay unlit in every style). Returns the
-    /// counts; the per-record `restyled` mask is what a HULL twin needs to
-    /// hide the records whose material stayed stock (their program 0 would
-    /// be the body again) — so a kept screen gets no outline either.
+    /// opaque / alpha-tested; blended ones keep their authored look) and not
+    /// sampling `keep_stock_texture` (`layout::materials_sampling` — the
+    /// `offscreen1` stage screens stay unlit in every style), with a readable
+    /// shader object — as `(index, shader object, its name hash)`, plus the
+    /// counts of what was kept. The runtime look switch
+    /// (`background_dancers::style_rig`) captures them at build; a HULL twin
+    /// hides the records whose material is not among them (their program 0
+    /// would be the body again), so a kept screen gets no outline either.
     /// # Safety
-    /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
-    pub unsafe fn restyle_materials(
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn restyle_candidates(
         &self,
-        instance_allows: bool,
         keep_stock_texture: u32,
-        variant_for: &dyn Fn(u32) -> Option<*mut u8>,
-    ) -> RestyleStats {
+    ) -> (Vec<(usize, *mut u8, u32)>, RestyleStats) {
         let mut st = RestyleStats::default();
+        let mut out = Vec::new();
         let mats = memory::read_ptr(self.ptr.add(layout::ITEM_MATERIALS)) as *mut u8;
         if mats.is_null() {
-            return st;
+            return (out, st);
         }
         let (rec_mat, rec_flags) = self.record_material_map();
-        let eligible = layout::restyle_eligible_materials(
-            self.counts.materials,
-            &rec_mat,
-            &rec_flags,
-            instance_allows,
-        );
+        let eligible =
+            layout::restyle_eligible_materials(self.counts.materials, &rec_mat, &rec_flags, true);
         let screens = self.materials_sampling(keep_stock_texture);
-        let mut restyled_mat = vec![false; self.counts.materials];
         for (mi, ok) in eligible.iter().enumerate() {
-            let mat = mats.add(mi * layout::MATERIAL_SIZE);
-            let obj_slot = mat.add(layout::MAT_SHADER_OBJ);
-            let obj = memory::read_ptr(obj_slot);
+            let obj = memory::read_ptr(
+                mats.add(mi * layout::MATERIAL_SIZE)
+                    .add(layout::MAT_SHADER_OBJ),
+            ) as *mut u8;
             if screens.get(mi).copied().unwrap_or(false) {
                 st.kept_screen += 1;
-                continue;
-            }
-            if !*ok {
+            } else if !*ok {
                 st.kept_blend += 1;
-                continue;
-            }
-            if obj.is_null() || !memory::is_readable(obj, layout::SHADER_PROGRAMS + 8) {
+            } else if obj.is_null() || !memory::is_readable(obj, layout::SHADER_PROGRAMS + 8) {
                 st.kept_no_variant += 1;
-                continue;
-            }
-            let hash = memory::read_u32(obj.add(layout::SHADER_NAME_HASH));
-            match variant_for(hash) {
-                Some(v) if !v.is_null() => {
-                    memory::write_ptr(obj_slot, v);
-                    restyled_mat[mi] = true;
-                    st.restyled += 1;
-                }
-                _ => st.kept_no_variant += 1,
+            } else {
+                out.push((mi, obj, memory::read_u32(obj.add(layout::SHADER_NAME_HASH))));
             }
         }
-        st.record_restyled = rec_mat
-            .iter()
-            .map(|&mi| mi < restyled_mat.len() && restyled_mat[mi])
-            .collect();
-        st
+        (out, st)
+    }
+
+    /// Every draw record's `REC_FLAGS` now.
+    /// # Safety
+    /// As [`set_world`](Self::set_world).
+    pub unsafe fn record_flags(&self) -> Vec<u32> {
+        record_flags_raw(self.ptr, self.counts.draw_records)
     }
 
     /// Re-point EVERY private material copy (blended ones included — the
@@ -376,7 +362,9 @@ impl RenderItem {
     /// [`layout::REC_HULL_BIT`] (the model pass then binds PROGRAM 0 of the
     /// material's container — the synthesized outline pair); alpha-blended
     /// records (`layout::hull_record_flags`) and records whose material was
-    /// NOT restyled (`record_restyled` from [`restyle_materials`]) are hidden.
+    /// NOT restyled (`record_restyled`: not among the
+    /// [`restyle_candidates`](Self::restyle_candidates) the caller re-pointed)
+    /// are hidden.
     /// Returns `(records marked, records hidden)`.
     /// # Safety
     /// As [`set_world`](Self::set_world); call BEFORE the item is attached.
@@ -712,10 +700,9 @@ pub fn build(res: &ResourceView, pass_mask: u32) -> Result<RenderItem, BuildErro
     }
 }
 
-/// Outcome of [`RenderItem::restyle_materials`].
+/// What [`RenderItem::restyle_candidates`] left out.
 #[derive(Default, Clone, Debug)]
 pub struct RestyleStats {
-    pub restyled: usize,
     /// Materials kept stock because a record using them is blended (or the
     /// instance vetoed the restyle).
     pub kept_blend: usize,
@@ -724,8 +711,6 @@ pub struct RestyleStats {
     /// Materials kept stock because they sample the kept texture (the
     /// `offscreen1` stage screens) — counted before the blend rule.
     pub kept_screen: usize,
-    /// Per draw record: its material was restyled.
-    pub record_restyled: Vec<bool>,
 }
 
 /// Re-run the material-texture resolve on a BUILT item (game thread), for
@@ -746,6 +731,110 @@ pub unsafe fn retry_texture_resolve(item: *mut u8, material_count: usize) -> Tex
         return TextureStats::default();
     }
     resolve_material_textures(res, mats, material_count, texture::lookup_available())
+}
+
+/// Point material copy `index` at shader object `obj` (the runtime look
+/// switch; an out-of-range index or a null object is ignored).
+///
+/// # Safety
+/// `item` is a live block from [`build`] whose node dtor has not run;
+/// `material_count` is its own count. Game thread, mid-frame.
+pub unsafe fn set_material_shader_raw(
+    item: *mut u8,
+    material_count: usize,
+    index: usize,
+    obj: *mut u8,
+) {
+    let mats = memory::read_ptr(item.add(layout::ITEM_MATERIALS)) as *mut u8;
+    if mats.is_null() || index >= material_count || obj.is_null() {
+        return;
+    }
+    memory::write_ptr(
+        mats.add(index * layout::MATERIAL_SIZE)
+            .add(layout::MAT_SHADER_OBJ),
+        obj,
+    );
+}
+
+/// The first `record_count` draw records' `REC_FLAGS`.
+///
+/// # Safety
+/// As [`set_material_shader_raw`]; `record_count` is the item's own count.
+pub unsafe fn record_flags_raw(item: *mut u8, record_count: usize) -> Vec<u32> {
+    let recs = memory::read_ptr(item.add(layout::ITEM_DRAW_RECORDS)) as *const u8;
+    if recs.is_null() {
+        return Vec::new();
+    }
+    (0..record_count)
+        .map(|i| memory::read_u32(recs.add(i * layout::REC_SIZE + layout::REC_FLAGS)))
+        .collect()
+}
+
+/// Write `flags[i]` into draw record `i` (at most the item's own count).
+///
+/// # Safety
+/// As [`record_flags_raw`].
+pub unsafe fn set_record_flags_raw(item: *mut u8, record_count: usize, flags: &[u32]) {
+    let recs = memory::read_ptr(item.add(layout::ITEM_DRAW_RECORDS)) as *mut u8;
+    if recs.is_null() {
+        return;
+    }
+    for (i, &f) in flags.iter().enumerate().take(record_count) {
+        memory::write_u32(recs.add(i * layout::REC_SIZE + layout::REC_FLAGS), f);
+    }
+}
+
+/// Bind the registered gs texture `hash` into [`layout::STYLE_TEXTURE_SLOT`]
+/// of the item's material copies `materials` (a DDR Universe style texture,
+/// PS s1 of the `_u<family>` containers): the slot's pointer and the
+/// converter's slot defaults, then [`layout::MAT_TEX_INDEX_NONE`] as its
+/// table index (the re-resolve skips it), then the mask bit — in that order,
+/// so a draw racing a retry on an attached item never binds a half-written
+/// slot. `None` = the registry does not hold the texture (yet): nothing is
+/// written. Returns the materials bound. GAME THREAD ONLY (registry lookup).
+///
+/// # Safety
+/// `item` is a live block from [`build`] whose node dtor has not run.
+pub unsafe fn bind_style_texture(
+    item: *mut u8,
+    material_count: usize,
+    materials: &[usize],
+    hash: u32,
+) -> Option<usize> {
+    let mats = memory::read_ptr(item.add(layout::ITEM_MATERIALS)) as *mut u8;
+    if mats.is_null() {
+        return None;
+    }
+    let tex = registered_texture(hash)?;
+    let slot = layout::STYLE_TEXTURE_SLOT;
+    let mut bound = 0usize;
+    for &mi in materials {
+        if mi >= material_count {
+            continue;
+        }
+        let mat = mats.add(mi * layout::MATERIAL_SIZE);
+        memory::write_ptr(mat.add(layout::mat_tex_ptr(slot)), tex);
+        memory::write_f32(mat.add(layout::mat_tex_scale(slot)), 1.0);
+        memory::write_f32(mat.add(layout::mat_tex_scale(slot) + 4), 1.0);
+        memory::write_f32(mat.add(layout::mat_tex_offset(slot)), 0.0);
+        memory::write_f32(mat.add(layout::mat_tex_offset(slot) + 4), 0.0);
+        (mat.add(layout::mat_tex_index(slot)) as *mut u16)
+            .write_unaligned(layout::MAT_TEX_INDEX_NONE);
+        let mask = mat.add(layout::MAT_TEX_MASK);
+        memory::write_u32(mask, memory::read_u32(mask) | (1u32 << slot));
+        bound += 1;
+    }
+    Some(bound)
+}
+
+/// The gs registry's `TextureData*` for `hash`, confirmed to BE that texture
+/// (the lookup is a binary search; the default texture never counts).
+/// `None` = not registered (yet). GAME THREAD ONLY.
+pub fn registered_texture(hash: u32) -> Option<*const u8> {
+    let tex = texture::lookup_gs_texture(hash)?;
+    // SAFETY: `pointee_hash` probes the pointer before reading it.
+    let h = unsafe { pointee_hash(tex, texture::default_texture()) };
+    (h == Some(hash)).then_some(tex)
 }
 
 /// How the resource's texture table resolves RIGHT NOW without touching any
