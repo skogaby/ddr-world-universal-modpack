@@ -11,7 +11,7 @@ Design: `.agents/planning/2026-11-11-optional-content-packs/design/detailed-desi
 - [x] Step 1: Resumable downloads, proven against GitHub
 - [x] Step 2: Move the ported models to the assets repository
 - [x] Step 3: Pack build tool
-- [ ] Step 4: Publish packs to the shelf
+- [x] Step 4: Publish packs to the shelf
 - [x] Step 5: Catalog, markers and selection in the updater
 - [x] Step 6: Pack transactions
 - [x] Step 7: Packs in every run

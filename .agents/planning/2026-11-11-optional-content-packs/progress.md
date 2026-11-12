@@ -1,12 +1,12 @@
 # Progress: Optional Content Packs
 
 Updated: 2026-11-12
-Status: Step 13 of 13 — in progress. Steps 1–3 and 5–12 are code complete and tested on
-the host; Step 4 (publishing) and the hardware checks are waiting on the maintainer.
-NEXT ACTION (maintainer): run `scripts/publish_packs.sh` (uploads 23 zips, about 1 GB,
-and `catalog.json` to the assets repository's `packs` release). Then build a release
-with `./scripts/build_release_archive.sh` — without `PACKS_CATALOG` it embeds the
-published catalog — and run the checks under "Still to validate" below.
+Status: Step 13 of 13 — in progress. Everything is implemented, the packs are published
+and `v1_5` has been squashed into `main`. Remaining: the hardware checks and the v1.5
+release itself.
+NEXT ACTION (maintainer): run the checks under "Still to validate", then build with
+`./scripts/build_release_archive.sh` (it embeds the published catalog) and publish v1.5
+from `main`.
 
 Resume protocol: read `summary.md` → `implementation/plan.md` (checklist) →
 `design/detailed-design.md` for the section a step cites. Decisions are in
@@ -32,16 +32,18 @@ Resume protocol: read `summary.md` → `implementation/plan.md` (checklist) →
 - Step 12: `build_packs.py base-image`; both release scripts; base zip 30.5 MB.
 - Step 13 (agent part): `README.md`, `AGENTS.md` Custom Instructions,
   `.agents/learnings/learnings.md`, `release-notes-draft.md`.
+- Step 4: packs published by the maintainer (2026-11-12). The catalog downloads
+  anonymously (23 packs, 1 036.4 MB) and all 23 pack URLs answer with the catalog's
+  sizes.
+- Step 13, history: `v1_5` (52 commits, tip `d837389e`) squashed into `main` as
+  `1390301a`, pushed; `v1_5` deleted locally and on GitHub; local stashes cleared. A
+  fresh clone is 103 MiB (was about 615 MiB) and holds no ported-model history.
 
 Per-step working records: `.agents/scratchpad/2026-11-11-optional-content-packs/<task>/`.
 
 ## In flight
 
-Uncommitted in the code repository, for the maintainer to commit:
-`updater/` (sources, tests, fixtures, `Cargo.toml`, `Cargo.lock`), `scripts/`
-(`build_packs.py`, `test_build_packs.py`, `publish_packs.sh`, both release scripts,
-`validate_background_dancers.sh`), `README.md`, `AGENTS.md`, `.gitattributes`,
-`.agents/` (learnings, this planning folder, tasks, scratchpad).
+Uncommitted on `main`: this file and the Step 4 tick in `implementation/plan.md`.
 
 ## Deploy & test log
 
@@ -56,13 +58,17 @@ Uncommitted in the code repository, for the maintainer to commit:
   ./scripts/build_release_archive.sh` OK; the zip was installed into a scratch game
   folder with the host-built updater, two real packs installed from `release/packs`,
   then one swapped for another through the chooser with scripted input.
+- 2026-11-12, host: a real pack download from GitHub by the host-built updater
+  (`--packs-install stages-x-x2`, no `--packs-dir`): downloaded, verified against the
+  catalog's digest and installed.
 - No cabinet or Windows run yet.
 
 ## Still to validate (maintainer; nothing below has been run)
 
-1. `scripts/publish_packs.sh` for real, then a release build without `PACKS_CATALOG`.
-2. A real pack download from GitHub by the Win7 updater build, including pulling the
-   network mid-download and relaunching.
+1. A full release build without `PACKS_CATALOG` (only its catalog step was run against
+   the published catalog).
+2. A pack download by the Win7 updater build on Windows, including pulling the network
+   mid-download and relaunching (the host build has downloaded one pack from GitHub).
 3. On a real console — Windows 10/11, Windows 7, CrossOver: the countdown and the
    progress bar redraw in place; Enter opens the chooser; a double-click opens it
    directly; the wording reads well.
@@ -97,10 +103,12 @@ Uncommitted in the code repository, for the maintainer to commit:
 ## Key facts for a cold resume
 
 - Assets repository: `skogaby/ddr-world-universal-modpack-assets`, public, a sibling
-  checkout (`DDR_WORLD_ASSETS` overrides). Its `packs` release does not exist until the
-  first publish.
-- Working branch `v1_5`; `main` equals the v1.4 tag. `v1_5` reaches `main` only by
-  `git merge --squash` (plan Step 13) — never rebase, fast-forward or an ordinary merge.
+  checkout (`DDR_WORLD_ASSETS` overrides). Its `packs` release holds the 23 pack zips
+  and `catalog.json`.
+- `main` is the working branch and holds v1.5 development as one commit on top of the
+  v1.4 tag. `v1_5` no longer exists. The local checkout still stores the old objects
+  until the reflog expires or `git gc --prune=now` is run after
+  `git reflog expire --expire=now --all`; until then `d837389e` is recoverable locally.
 - The updater on v1.3 / v1.4 cabinets performs the next update: the base asset keeps its
   name pattern and stays under 2 GiB uncompressed (enforced by `base-image`).
 - Updater tests: `cargo test --manifest-path updater/Cargo.toml`. The agent never
