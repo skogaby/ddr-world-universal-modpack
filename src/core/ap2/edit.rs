@@ -31,7 +31,7 @@ use super::model::{
     read_i32, read_u16, read_u32, Ap2Doc, FrameSpan, Label, PlaceObject, PlaceObjectParams,
     PlaceObjectView, Shape, SpritePath, Tag, TagSection, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_FONT,
     TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_SPRITE, TAG_DEFINE_TEXT, TAG_DO_ACTION, TAG_IMAGE,
-    TAG_SHAPE,
+    TAG_REMOVE_OBJECT, TAG_SHAPE,
 };
 
 /// Options for the extended placements-only segment clone
@@ -113,6 +113,24 @@ pub struct WordSegmentClone {
     /// Number of records zeroed in the SOURCE (stock) chain by
     /// `mute_source_additive_glow` (0 when that option is off).
     pub muted_source_records: usize,
+}
+
+/// The instance [`Ap2Doc::clone_segment_with_extra_instance`] adds to the
+/// cloned segment: a copy of one of the segment's own named placements under
+/// a new name, depth and position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtraInstance<'a> {
+    /// Instance name of the placement to copy (exactly one create record of
+    /// the source segment carries it).
+    pub donor_name: &'a str,
+    /// Instance name of the copy; interned into the string table. No
+    /// placement of the source segment may already carry it.
+    pub name: &'a str,
+    /// Depth of the copy — unused by every placement of the source segment
+    /// (duplicate depths silently overwrite, docs/afp_system.md §9).
+    pub depth: u16,
+    /// Position of the copy, raw fixed-point (/20) integers.
+    pub translate: (i32, i32),
 }
 
 /// Inputs for [`Ap2Doc::add_place_object_named`]: a create-mode placement
@@ -1453,10 +1471,12 @@ fn mute_additive_in_section(sec: &mut TagSection) -> Option<usize> {
     Some(edited)
 }
 
-/// Byte offsets of the two PlaceObject fields the editing surface splices.
+/// Byte offsets of the PlaceObject fields the editing surface splices.
 struct PlaceFieldOffsets {
     /// Offset of the u16 source character id (flag 0x2).
     source_tag_id: Option<usize>,
+    /// Offset of the u16 instance-name string offset (flag 0x20).
+    movie_name: Option<usize>,
     /// Offset of the i32 tx/ty pair (flag 0x400).
     translate: Option<usize>,
 }
@@ -1483,9 +1503,13 @@ fn place_field_offsets(d: &[u8]) -> Option<PlaceFieldOffsets> {
         source_tag_id = Some(p);
         p += 2;
     }
+    let mut movie_name = None;
     for bit in [0x10u64, 0x20, 0x40] {
         if flags & bit != 0 {
             read_u16(d, p)?;
+            if bit == 0x20 {
+                movie_name = Some(p);
+            }
             p += 2;
         }
     }
@@ -1509,6 +1533,7 @@ fn place_field_offsets(d: &[u8]) -> Option<PlaceFieldOffsets> {
     }
     Some(PlaceFieldOffsets {
         source_tag_id,
+        movie_name,
         translate,
     })
 }
@@ -2191,5 +2216,159 @@ impl Ap2Doc {
             self.clone_labeled_segment_placements_only_ex(&p, src_label, new_label, &remap, opts)?;
         }
         Some(result)
+    }
+}
+
+impl Ap2Doc {
+    /// Clone the labeled segment `src_label` of the section at `path` as
+    /// `new_label` with ONE MORE named instance in it — the "same layout,
+    /// one element wider" recipe (the five-digit combo counter: World's
+    /// `loop_1000` digit row cloned as `loop_10000` with a `10000_usr`
+    /// digit).
+    ///
+    /// 1. Placements-only clone of the segment
+    ///    ([`Ap2Doc::clone_labeled_segment_placements_only_ex`], DoAction
+    ///    label loops retargeted at `new_label`, object ids rebased to the
+    ///    appended frames).
+    /// 2. Every cloned placement record that carries a translate moves by
+    ///    `shift` (raw /20 units) — the row re-centres around the wider set.
+    /// 3. The cloned create record named `extra.donor_name` is copied
+    ///    byte for byte (source character, rotation origin, triggers, object
+    ///    id) directly after itself, with its depth, instance name and
+    ///    translate replaced by `extra`'s.
+    /// 4. Every cloned `RemoveObject` of the donor's depth gets a twin for
+    ///    `extra.depth`, so the copy leaves the display list exactly where
+    ///    the donor does.
+    ///
+    /// Atomic: the edit runs on a scratch copy that replaces the document
+    /// only when every step succeeded.
+    ///
+    /// Rejects (`None`, doc unchanged): everything the clone rejects; a
+    /// cloned placement that does not decode; no — or more than one —
+    /// create record named `donor_name`; a donor without an instance-name or
+    /// translate field; `extra.depth` or `extra.name` already used by a
+    /// placement of the segment; a translate that would overflow.
+    pub fn clone_segment_with_extra_instance(
+        &mut self,
+        path: &SpritePath,
+        src_label: &str,
+        new_label: &str,
+        shift: (i32, i32),
+        extra: &ExtraInstance<'_>,
+    ) -> Option<()> {
+        let mut scratch = self.clone();
+        let (first_tag, first_frame) = {
+            let sec = scratch.section(path)?;
+            (sec.tags.len(), sec.frames.len())
+        };
+        scratch.clone_labeled_segment_placements_only_ex(
+            path,
+            src_label,
+            new_label,
+            &TagRemap::new(),
+            SegmentCloneOpts {
+                retarget_actions: true,
+                ..SegmentCloneOpts::default()
+            },
+        )?;
+
+        // Read-only pass over the cloned tags: the donor, the names and
+        // depths in use, and the removes to twin.
+        let mut donor: Option<(usize, u16)> = None;
+        let mut removes: Vec<usize> = Vec::new();
+        {
+            let sec = scratch.section(path)?;
+            for (index, tag) in sec.tags.iter().enumerate().skip(first_tag) {
+                let Tag::PlaceObject(p) = tag else { continue };
+                let view = p.view()?;
+                if view.depth == extra.depth {
+                    return None;
+                }
+                let name = match view.movie_name_offset {
+                    Some(offset) => scratch.strings.get(offset)?,
+                    None => continue,
+                };
+                if name == extra.name {
+                    return None;
+                }
+                if name == extra.donor_name && view.flags & 0x1 == 0 {
+                    if donor.is_some() {
+                        return None; // ambiguous donor
+                    }
+                    donor = Some((index, view.depth));
+                }
+            }
+            let (_, donor_depth) = donor?;
+            for (index, tag) in sec.tags.iter().enumerate().skip(first_tag) {
+                let Tag::Opaque(o) = tag else { continue };
+                if o.tag_id == TAG_REMOVE_OBJECT && read_u16(&o.data, 2) == Some(donor_depth) {
+                    removes.push(index);
+                }
+            }
+        }
+        let (donor_index, _) = donor?;
+        let name_offset = scratch.strings.intern(extra.name)?;
+
+        let sec = scratch.section_mut(path)?;
+        // Step 2 — re-centre the cloned row.
+        for tag in sec.tags.iter_mut().skip(first_tag) {
+            let Tag::PlaceObject(p) = tag else { continue };
+            let Some(at) = place_field_offsets(&p.data)?.translate else {
+                continue;
+            };
+            let tx = read_i32(&p.data, at)?.checked_add(shift.0)?;
+            let ty = read_i32(&p.data, at + 4)?.checked_add(shift.1)?;
+            let dst = p.data.get_mut(at..at + 8)?;
+            dst[..4].copy_from_slice(&tx.to_le_bytes());
+            dst[4..].copy_from_slice(&ty.to_le_bytes());
+        }
+
+        // Step 3 — the copy of the donor record.
+        let mut inserts: Vec<(usize, Tag)> = Vec::with_capacity(removes.len() + 1);
+        {
+            let Tag::PlaceObject(src) = sec.tags.get(donor_index)? else {
+                return None;
+            };
+            let mut copy = src.clone();
+            let offsets = place_field_offsets(&copy.data)?;
+            let (name_at, translate_at) = (offsets.movie_name?, offsets.translate?);
+            copy.data
+                .get_mut(4..6)?
+                .copy_from_slice(&extra.depth.to_le_bytes());
+            copy.data
+                .get_mut(name_at..name_at + 2)?
+                .copy_from_slice(&name_offset.to_le_bytes());
+            let dst = copy.data.get_mut(translate_at..translate_at + 8)?;
+            dst[..4].copy_from_slice(&extra.translate.0.to_le_bytes());
+            dst[4..].copy_from_slice(&extra.translate.1.to_le_bytes());
+            inserts.push((donor_index, Tag::PlaceObject(copy)));
+        }
+        // Step 4 — the remove twins.
+        for &index in &removes {
+            let Tag::Opaque(src) = sec.tags.get(index)? else {
+                return None;
+            };
+            let mut copy = src.clone();
+            copy.data
+                .get_mut(2..4)?
+                .copy_from_slice(&extra.depth.to_le_bytes());
+            inserts.push((index, Tag::Opaque(copy)));
+        }
+
+        // Insert each copy directly after its original, highest index first
+        // so the remaining indices stay valid.
+        inserts.sort_by(|a, b| b.0.cmp(&a.0));
+        for (index, tag) in inserts {
+            let frame = (first_frame..sec.frames.len()).find(|&f| {
+                sec.frames.get(f).is_some_and(|span| {
+                    let start = span.start_tag as usize;
+                    index >= start && index - start < span.tag_count as usize
+                })
+            })?;
+            insert_tags_in_frame(sec, frame, index + 1, vec![tag])?;
+        }
+
+        *self = scratch;
+        Some(())
     }
 }

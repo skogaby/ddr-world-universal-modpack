@@ -22,11 +22,17 @@
 //! score sanitisation is unavailable; hide per-chart-timing songs when the
 //! `ssq_path` chain is not up) — deferred to the first scene change when the
 //! music DB is not built yet — and loads the auto-sync ledger when
-//! `auto_sync` is on. `disable` only logs. No signatures are required.
+//! `auto_sync` is on. `disable` only logs. No signatures are required;
+//! when the loader is armed, `init` installs the two things a long chart
+//! needs and no stock chart does — the stage-save skip
+//! (`stepmania::stage_save`; a chart over 8,192 notes cannot be marshalled
+//! for a save) and the five-digit combo display (`services::combo_digits`;
+//! the stock counter shows at most 9,999) — each fail-open on its own
+//! signatures.
 
 use crate::log_info;
 use crate::mods::mod_trait::{Mod, ModContext};
-use crate::services::{avs_layeredfs, scroll_remap, stepmania};
+use crate::services::{avs_layeredfs, combo_digits, scroll_remap, stepmania};
 
 pub struct StepmaniaPacksMod;
 
@@ -65,6 +71,11 @@ impl Mod for StepmaniaPacksMod {
             log_info!("StepmaniaPacks: loader not armed this boot (disabled in config or root unavailable)");
             return true;
         }
+        // An injected song never requests its per-stage save (and a chart
+        // over 8,192 notes could not survive the request).
+        let _ = stepmania::stage_save::install(ctx.signatures);
+        // Long charts pass 9,999 combo: give the counter its fifth digit.
+        let _ = combo_digits::enable();
         if avs_layeredfs::is_available() {
             // Slow-cabinet direction: the game's startup.arc open may still be
             // ahead of us, and series/folder expansion initialise right after

@@ -7,10 +7,8 @@
 # (see src/core/mod.rs and src/services/stepmania/mod.rs here), so the cache
 # it writes is byte-for-byte what the game expects.
 #
-# trim-paths is nightly-only; this repo is already nightly-pinned
-# (rust-toolchain.toml applies here too). It strips builder home/username
-# paths from the shipped binary.
-cargo-features = ["trim-paths"]
+# The release profile's `trim-paths` strips builder home/username paths from
+# the shipped binary — see the root Cargo.toml for the same setting.
 
 [package]
 name = "ddr-world-hook-prep"

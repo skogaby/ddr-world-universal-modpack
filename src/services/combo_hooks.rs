@@ -12,13 +12,16 @@
 //!
 //! Subscribers:
 //!
+//! * combo_digits — refresh EXTEND (the fifth digit: runs after World's
+//!   refresh and before every POST subscriber, so a POST repaint lands on
+//!   the digit row the player sees);
 //! * s_marvelous — refresh POST (the all-S-Marvelous digit / tint repaint);
 //! * ddr_selection — refresh OVERRIDE, init PRE (may skip) / POST, msg OVERRIDE, update
 //!   OVERRIDE, finalize POST (a legacy actor never reaches World's refresh,
 //!   msg-0x1033 case or update, so s_marvelous' repaint never runs for it).
 //!
 //! An OVERRIDE returning `true` / `Some(ret)` skips the original (and, for
-//! the refresh, the POST subscribers). Detours install on the first
+//! the refresh, the EXTEND and POST subscribers). Detours install on the first
 //! `acquire_*` and stay installed for the session; subscribers gate
 //! themselves. Game thread only (actor callbacks). Callbacks are plain `fn`
 //! pointers run under `catch_unwind`.
@@ -52,6 +55,7 @@ static mut MSG_HOOK: Option<GenericDetour<MsgRawFn>> = None;
 struct Sites {
     refresh: Option<*const u8>,
     actor: Option<ComboActorSites>,
+    root1_off: Option<usize>,
 }
 unsafe impl Send for Sites {}
 unsafe impl Sync for Sites {}
@@ -63,6 +67,7 @@ static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 struct Subscribers {
     refresh_override: Vec<OverrideFn>,
+    refresh_extend: Vec<ActorFn>,
     refresh_post: Vec<ActorFn>,
     init_pre: Vec<OverrideFn>,
     init_post: Vec<ActorFn>,
@@ -73,6 +78,7 @@ struct Subscribers {
 
 static SUBSCRIBERS: Mutex<Subscribers> = Mutex::new(Subscribers {
     refresh_override: Vec::new(),
+    refresh_extend: Vec::new(),
     refresh_post: Vec::new(),
     init_pre: Vec::new(),
     init_post: Vec::new(),
@@ -99,13 +105,23 @@ pub fn init(signatures: &SignatureStore) -> bool {
         }
     );
     let any = refresh.is_some() || actor.is_some();
-    let _ = SITES.set(Sites { refresh, actor });
+    let _ = SITES.set(Sites {
+        refresh,
+        actor,
+        root1_off: signatures.combo_actor_root1_off(),
+    });
     any
 }
 
 /// The actor's functions and counter fields, if derived.
 pub fn actor_sites() -> Option<ComboActorSites> {
     SITES.get()?.actor
+}
+
+/// The actor field holding root 1 of the three clip wrappers (roots 2 and 3
+/// follow at stride 8), if derived.
+pub fn root1_off() -> Option<usize> {
+    SITES.get()?.root1_off
 }
 
 /// Install the digit-refresh detour (idempotent). `false` when unresolved or
@@ -222,6 +238,13 @@ fn snapshot<T: Copy>(pick: fn(&Subscribers) -> &Vec<T>) -> [Option<T>; MAX_PER_L
     out
 }
 
+/// Run `f(actor)` after World's digit refresh and BEFORE the POST
+/// subscribers — for a subscriber that changes what the refresh laid out
+/// (the digit row itself), so POST repaints see the final row.
+pub fn subscribe_refresh_extend(f: ActorFn) {
+    subscribe(|s| &mut s.refresh_extend, f);
+}
+
 /// Run `f(actor)` after World's digit refresh.
 pub fn subscribe_refresh_post(f: ActorFn) {
     subscribe(|s| &mut s.refresh_post, f);
@@ -279,6 +302,7 @@ unsafe extern "C" fn refresh_hook(actor: *mut u8) {
         return;
     }
     hook.call(actor);
+    run_actor(snapshot(|s| &s.refresh_extend), actor);
     run_actor(snapshot(|s| &s.refresh_post), actor);
 }
 

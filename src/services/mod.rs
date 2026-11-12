@@ -172,6 +172,8 @@ pub mod bottom_text;
 pub mod cabinet;
 pub mod call_voice_hooks;
 pub mod chart_length;
+pub mod combo_digits;
+pub mod combo_digits_math;
 pub mod combo_hooks;
 pub mod cull_window;
 pub mod custom_options;

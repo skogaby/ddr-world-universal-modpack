@@ -1,9 +1,10 @@
 # Progress: StepMania Pack Loader
 
-Updated: 2026-10-24
+Updated: 2026-11-12
 Status: ALL 13 STEPS DONE (2026-10-24) — Step 13 readiness gate green; `.agents/summary/` refresh by subagent (check its report), then hand back to the maintainer for commit
 
-NEXT ACTION: Nothing in-feature. Maintainer reviews + commits (~70 paths, all uncommitted).
+NEXT ACTION: Nothing in-feature. The 2026-11-12 long-chart work (stage-save skip, five-digit
+combo) passed its CrossOver run (deploy #19); maintainer reviews + commits.
 Readiness gate (2026-10-24): `cargo check` clean, `cargo fmt --check` clean, `./build.sh` +
 `./build_win7.sh` clean, `validate_signatures.sh ~/Desktop/ddr_modules` ALL GREEN (only a
 description string changed in `signatures.rs`), `gen_title_glyph_table.py --check` up to date,
@@ -16,6 +17,23 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 ## Done
 
+- **Long charts (2026-11-12, after a tester's marathon crashed at the end of the song with the
+  combo stuck at 9999)** — RE + mechanisms in `docs/stepmania_runtime_packs_feasibility.md`
+  §20. (1) Crash: the record's ghost stream is one byte per chart note and the save format
+  holds 8,192; the stage-save marshal overruns its staging field and arkmdxbio2's
+  `strcpy_s(…, 0x2001, …)` faults (`0xC0000417`) before the ess sender is reached.
+  `services/stepmania/stage_save.rs` detours the per-stage save request (new signature
+  `stage_save_request`, whole-function pattern, resolves on all six sweep builds) and skips it
+  while the injected-song taint is set. (2) Combo: the counter is uncapped, the display is not
+  (refresh clamp + four digit sprites). `services/combo_digits{,_math}.rs`: an AFP patch adds
+  a `loop_10000` row + `10000_usr` digit to `dance_combo_root1..3`
+  (`Ap2Doc::clone_segment_with_extra_instance`, new), and a new EXTEND slot on
+  `combo_hooks` (after World's refresh, before POST) shows it past 9,999; s_marvelous' violet
+  digits follow. Cap 99,999 ≥ the 65,535-step chart maximum. DDR SELECTION legacy combos keep
+  9,999. Both installed from `StepmaniaPacksMod::init` when armed. Host:
+  `scripts/validate_combo_digits.sh` (pure tests, the recipe on the real templates,
+  bemaniutils cross-check, rendered preview), ap2 suite via `validate_s_marvelous.sh`. Repro
+  songs: `scripts/gen_stepmania_marathon_test.py`.
 - **Hand-over (2026-10-25)**: indexing, conversion and sync measurement moved OUT of the DLL
   into the standalone prep tool (`prep/`, `ddr_world_hook_prep.exe`); the DLL is a reader of
   the tool's cache (`index.rs` load/validate/publish, `validation.rs`, `records.rs`;
@@ -237,6 +255,7 @@ Resume protocol: read `implementation/plan.md` (checklist), `design/detailed-des
 
 | # | Date | Build / fixture | Observation |
 |---|---|---|---|
+| 19 | 2026-11-12 | long-chart DLL (stage-save skip + five-digit combo) in the CrossOver bottle; `Marathon Test` pack, Autoplay | **PASS.** Baseline on the previous DLL (02:37): `Marathon Test 20000` → `HARD FAULT 0xC0000417 in arkmdxbio2.dll+0xA7DA8` from `SavePlayerDataActor::onUpdate` right after `STAGE_RESULT → RESULTS_DETAIL`. New DLL: `AfpPatcher: patched "dance_combo_root1..3" (8460 -> 9724 bytes)` at every gameplay load; `Marathon Test 20000` (09:52) and `Marathon Test 10500` (10:00) both reach RESULTS_DETAIL with `StepMania: P1 stage 0 save request skipped (injected song)`, no fault. `Marathon Test 10500` (40 steps/s — at 120 steps/s Autoplay drops arrows under host load): `ComboDigits: five-digit combo display live (combo 10000)`, counter read 10500 at the end (maintainer). Not exercised: S-Marvelous violet digits past 9,999, 2P, a combo break past 10,000. |
 | 18 | 2026-10-24 | same DLL, `auto_sync: false` (boot 3) | **PASS.** `StepmaniaPacks: auto-sync off (config) -- songs play as authored`; zero `StepMania[sync]` lines; Anubis played (a few arrows): no `override applied` line at all (provider unregistered, no per-song entry → stock applies, nothing written). Fast-bootup replay 8109/8110, boot pass 44 ms (host idle → the run #15/#17 verifier losses were load). Run #17 note: Spaceman was loaded but no arrow was hit, so no judge dispatch → no override line (expected). |
 | 17 | 2026-10-24 | same DLL, WARM (boot 2) | **Sync warm path PASS.** `sync.bin holds 60 song(s); 60 live for this boot` (the 60 run #16's sweep reached before the game was quit), sweep resumed with the remaining 78 (`already known` skipped), no re-measurement. Index warm 2.1 s (1 worker). Caveat (pre-existing, 2nd time in 4 boots): `cache verifier not ready at boot pass start` → full stock boot pass (10.4 s); verifier ready at the same second with 1665/2164 verified. Host under load again (pre-flight 1952 ms vs 420 ms). No gameplay this boot (no judge lines). |
 | 16 | 2026-10-24 | same DLL, `sync.bin` deleted, warm index | **On-decide PASS.** Sweep started 02:16:35 (ITG1 alphabetical). Maintainer picked ITG2 "We Know What To Do" at 02:16:53: `committed before it was measured -- measuring now`, `on-decide measurement done in 740 ms` (`measured -1.82 ms -> delta 0`), the full bank was requested at 02:16:54 — already measured, so NO hold line; judge `P1 override applied (0 ms = stock 0 +0 for 'z2t30t')`; replay identical; stock restored at exit. Value equals run #15's sweep result for the same song (deterministic). Sweep yielded to the on-decide thread and paused through both plays. |

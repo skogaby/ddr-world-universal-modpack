@@ -1,13 +1,10 @@
 # Standalone auto-updater for the modpack (ships as ddr_world_hook_updater.exe
 # at the root of every release zip). Deliberately NOT a workspace member of the
-# hook DLL crate: the root manifest is a plain package with unstable
-# cargo-features, and keeping this crate independent means its host tests run
+# hook DLL crate: keeping this crate independent means its host tests run
 # with a plain `cargo test` and the DLL build is never affected.
 #
-# trim-paths is nightly-only; this repo is already nightly-pinned
-# (rust-toolchain.toml applies here too). It strips builder home/username
-# paths from the shipped binary — see the root Cargo.toml for the same setting.
-cargo-features = ["trim-paths"]
+# The release profile's `trim-paths` strips builder home/username paths from
+# the shipped binary — see the root Cargo.toml for the same setting.
 
 [package]
 name = "ddr-world-hook-updater"

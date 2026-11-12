@@ -41,8 +41,8 @@ mod tests;
 // pattern per se_bank_synth/custom_options.
 #[allow(unused_imports)]
 pub use edit::{
-    scale_field, MultiShapeSegmentClone, NamedPlacement, ScaleField, ScaleRemap, SegmentCloneOpts,
-    SegmentScaleEdit, TagRemap, WordCloneOpts, WordSegmentClone,
+    scale_field, ExtraInstance, MultiShapeSegmentClone, NamedPlacement, ScaleField, ScaleRemap,
+    SegmentCloneOpts, SegmentScaleEdit, TagRemap, WordCloneOpts, WordSegmentClone,
 };
 #[allow(unused_imports)]
 pub use model::{

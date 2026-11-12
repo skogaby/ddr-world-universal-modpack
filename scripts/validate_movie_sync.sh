@@ -42,6 +42,9 @@ EOF
 
 mkdir -p "$TMP/src"
 cat >"$TMP/src/lib.rs" <<EOF
+// The engine-facing half of the module is cfg(windows): what is left of
+// it on the host is only partly used.
+#![allow(dead_code)]
 #[path = "$SRC"]
 mod movie_sync;
 EOF

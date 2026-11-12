@@ -4093,3 +4093,265 @@ fn edit_clone_segment_and_rescale_is_atomic_on_refusal() {
     );
     assert_eq!(d.serialize().unwrap(), once);
 }
+
+// ---------------------------------------------------------------------------
+// clone_segment_with_extra_instance — the "same layout, one element wider"
+// recipe (the five-digit combo row). Fixture: a digit-row sprite shaped like
+// the real `number` sprite — two labeled rows of named instances, each with
+// a looping DoAction and RemoveObjects at its end.
+// ---------------------------------------------------------------------------
+
+/// `RemoveObject` payload: object id (0 = depth-keyed) + depth.
+fn remove_payload(depth: u16) -> [u8; 4] {
+    let d = depth.to_le_bytes();
+    [0, 0, d[0], d[1]]
+}
+
+/// DoAction payload with a one-entry string table (`gotoAndPlay(label)`'s
+/// shape as far as the retarget cares): sentinel, flags&1, count, offset.
+fn loop_action(label_offset: u16) -> Vec<u8> {
+    let mut d = vec![0xFF, 0x01, 0x01, 0x00];
+    d.extend_from_slice(&label_offset.to_le_bytes());
+    d.extend_from_slice(&[0x00, 0x00]);
+    d
+}
+
+fn digit_row_fixture() -> (Ap2Doc, SpritePath) {
+    let mut b = FixtureBuilder::new("row_fx");
+    b.push_shape(&[], 7, 12);
+    let row = b.push_sprite(&[], 30);
+    // `one`: a single digit, frames 0..=2.
+    b.push_place(
+        &[row],
+        PlaceObjectParams {
+            depth: 9,
+            object_id: 2,
+            source_tag_id: Some(12),
+            translate: Some((3800, 1660)),
+            ..Default::default()
+        },
+        Some("1_usr"),
+    );
+    let one = b.intern("one");
+    b.push_opaque(&[row], TAG_DO_ACTION, &loop_action(one));
+    b.push_opaque(&[row], TAG_REMOVE_OBJECT, &remove_payload(9));
+    // `two`: two digits, frames 3..=5.
+    b.push_place(
+        &[row],
+        PlaceObjectParams {
+            depth: 5,
+            object_id: 5,
+            source_tag_id: Some(12),
+            translate: Some((4440, 1560)),
+            ..Default::default()
+        },
+        Some("1_usr"),
+    );
+    b.push_place(
+        &[row],
+        PlaceObjectParams {
+            depth: 4,
+            object_id: 5,
+            source_tag_id: Some(12),
+            translate: Some((3120, 1800)),
+            ..Default::default()
+        },
+        Some("10_usr"),
+    );
+    let two = b.intern("two");
+    b.push_opaque(&[row], TAG_DO_ACTION, &loop_action(two));
+    b.push_opaque(&[row], TAG_REMOVE_OBJECT, &remove_payload(5));
+    b.push_opaque(&[row], TAG_REMOVE_OBJECT, &remove_payload(4));
+    b.push_frame(&[row], 0, 1);
+    b.push_frame(&[row], 1, 1);
+    b.push_frame(&[row], 2, 1);
+    b.push_frame(&[row], 3, 2);
+    b.push_frame(&[row], 5, 1);
+    b.push_frame(&[row], 6, 2);
+    b.add_label(&[row], "one", 0);
+    b.add_label(&[row], "two", 3);
+    // Root: the sprite placed once.
+    b.push_place(
+        &[],
+        PlaceObjectParams {
+            depth: 1,
+            object_id: 100,
+            source_tag_id: Some(30),
+            ..Default::default()
+        },
+        Some("number_usr"),
+    );
+    b.push_frame(&[], 0, 3);
+    (
+        b.finish(),
+        SpritePath {
+            tag_indices: vec![row],
+        },
+    )
+}
+
+const WIDER: ExtraInstance<'static> = ExtraInstance {
+    donor_name: "10_usr",
+    name: "100_usr",
+    depth: 3,
+    translate: (1800, 2040),
+};
+
+#[test]
+fn edit_clone_segment_with_extra_instance() {
+    let (mut doc, path) = digit_row_fixture();
+    let before = doc.section(&path).unwrap().clone();
+    doc.clone_segment_with_extra_instance(&path, "two", "three", (660, -120), &WIDER)
+        .expect("clones");
+
+    let sec = doc.section(&path).unwrap();
+    // The stock rows are untouched; the clone is appended.
+    assert_eq!(&sec.tags[..8], before.tags.as_slice());
+    assert_eq!(&sec.frames[..6], before.frames.as_slice());
+    assert_eq!(sec.label_frame("three"), Some(6));
+    assert_eq!(sec.label_frame("two"), Some(3));
+    // 5 cloned tags + the extra placement + its remove twin.
+    assert_eq!(sec.tags.len(), 8 + 7);
+    assert_eq!(
+        &sec.frames[6..],
+        &[
+            FrameSpan {
+                start_tag: 8,
+                tag_count: 3
+            },
+            FrameSpan {
+                start_tag: 11,
+                tag_count: 1
+            },
+            FrameSpan {
+                start_tag: 12,
+                tag_count: 3
+            },
+        ]
+    );
+
+    let name = |v: &PlaceObjectView| {
+        doc.strings
+            .get(v.movie_name_offset.unwrap())
+            .unwrap()
+            .to_string()
+    };
+    // The cloned row moved by the shift; ids rebased by the frame distance
+    // (frame 3 → frame 6).
+    let ones = place_view(&sec.tags[8]);
+    assert_eq!(name(&ones), "1_usr");
+    assert_eq!(ones.translate, Some((4440 + 660, 1560 - 120)));
+    assert_eq!((ones.depth, ones.object_id), (5, 8));
+    let tens = place_view(&sec.tags[9]);
+    assert_eq!(name(&tens), "10_usr");
+    assert_eq!(tens.translate, Some((3120 + 660, 1800 - 120)));
+    assert_eq!((tens.depth, tens.object_id), (4, 8));
+    // The extra instance: the donor's record under a new name / depth /
+    // position, directly after it.
+    let extra = place_view(&sec.tags[10]);
+    assert_eq!(name(&extra), "100_usr");
+    assert_eq!(extra.translate, Some((1800, 2040)));
+    assert_eq!((extra.depth, extra.object_id), (3, 8));
+    assert_eq!(extra.source_tag_id, tens.source_tag_id);
+    assert_eq!(extra.flags, tens.flags);
+
+    // The loop action targets the new label; the stock one is unchanged.
+    let action_target = |tag: &Tag| match tag {
+        Tag::Opaque(o) if o.tag_id == TAG_DO_ACTION => doc
+            .strings
+            .get(u16::from_le_bytes([o.data[4], o.data[5]]))
+            .unwrap()
+            .to_string(),
+        other => panic!("expected DoAction, got {other:?}"),
+    };
+    assert_eq!(action_target(&sec.tags[11]), "three");
+    assert_eq!(action_target(&sec.tags[5]), "two");
+
+    // Removes: the donor's twin follows the donor's remove.
+    let removed: Vec<u16> = sec.tags[12..]
+        .iter()
+        .map(|t| match t {
+            Tag::Opaque(o) if o.tag_id == TAG_REMOVE_OBJECT => {
+                u16::from_le_bytes([o.data[2], o.data[3]])
+            }
+            other => panic!("expected RemoveObject, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(removed, [5, 4, 3]);
+
+    // Round trip + fixed point.
+    let bytes = doc.serialize().expect("serializes");
+    let re = Ap2Doc::parse(&bytes).expect("re-parses");
+    assert_eq!(re.section(&path).unwrap().label_frame("three"), Some(6));
+    assert_eq!(re.serialize().unwrap(), bytes, "fixed point");
+}
+
+#[test]
+fn edit_clone_segment_with_extra_instance_failures() {
+    let (doc, path) = digit_row_fixture();
+    let baseline = doc.serialize().unwrap();
+    let refused_with = |what: &str, src: &str, new: &str, shift, extra: ExtraInstance<'_>| {
+        let mut d = doc.clone();
+        assert_eq!(
+            d.clone_segment_with_extra_instance(&path, src, new, shift, &extra),
+            None,
+            "{what}"
+        );
+        assert_unchanged(&d, &baseline, what);
+    };
+    let refused = |what: &str, src: &str, new: &str, extra: ExtraInstance<'_>| {
+        refused_with(what, src, new, (660, -120), extra)
+    };
+    refused("unknown source label", "nope", "three", WIDER);
+    refused("new label already present", "two", "one", WIDER);
+    refused(
+        "donor absent from the segment",
+        "two",
+        "three",
+        ExtraInstance {
+            donor_name: "1000_usr",
+            ..WIDER
+        },
+    );
+    refused(
+        "depth already used by the segment",
+        "two",
+        "three",
+        ExtraInstance { depth: 5, ..WIDER },
+    );
+    refused(
+        "name already used by the segment",
+        "two",
+        "three",
+        ExtraInstance {
+            name: "1_usr",
+            ..WIDER
+        },
+    );
+    refused_with("translate overflow", "two", "three", (i32::MAX, 0), WIDER);
+    // Unknown path.
+    let mut d = doc.clone();
+    assert_eq!(
+        d.clone_segment_with_extra_instance(
+            &SpritePath {
+                tag_indices: vec![0]
+            },
+            "two",
+            "three",
+            (0, 0),
+            &WIDER
+        ),
+        None
+    );
+    assert_unchanged(&d, &baseline, "path through a non-sprite tag");
+    // Applying twice refuses and leaves the first application intact.
+    let mut d = doc.clone();
+    d.clone_segment_with_extra_instance(&path, "two", "three", (660, -120), &WIDER)
+        .unwrap();
+    let once = d.serialize().unwrap();
+    assert_eq!(
+        d.clone_segment_with_extra_instance(&path, "two", "three", (660, -120), &WIDER),
+        None
+    );
+    assert_eq!(d.serialize().unwrap(), once);
+}

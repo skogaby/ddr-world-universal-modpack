@@ -366,7 +366,7 @@ pub fn run(
     out: &mut dyn Write,
     idle: Duration,
 ) -> Decision {
-    let mut ask = |out: &mut dyn Write, prompt: &str| -> Option<String> {
+    let ask = |out: &mut dyn Write, prompt: &str| -> Option<String> {
         let _ = write!(out, "{prompt}");
         let _ = out.flush();
         match input.read(idle) {

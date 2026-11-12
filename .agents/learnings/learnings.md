@@ -2146,3 +2146,17 @@ check the mip levels before the material.
   files to the assets repository.
 - **macOS and Windows file systems fold case**: a test that creates `Custom/` and `CUSTOM/`
   as two folders gets one. Compare by slug instead of creating both.
+
+## A chart over 8,192 notes cannot be saved — the attempt kills the game before any save hook runs (2026-11-12)
+
+A stage record's ghost stream (`rec+0xB8`) has one byte per note of the CHART, allocated up
+front, and the save format gives it 8,192 characters. `ReflectSavePlayerData` copies all of it
+into a `0x2004`-byte staging field with no bound, and arkmdxbio2 then `strcpy_s(…, 0x2001, …)`s
+it into its job: `0xC0000417` in arkmdxbio2 from `SavePlayerDataActor::onUpdate`, at the end of
+the song. Both copies are UPSTREAM of the ess `save_sender` detour, so "the save is suppressed"
+protects nothing here — suppression only stops the send. Rules: a policy that must stop a save
+from being *built* belongs on the request (`stage_save_request`; an idle save state reads as
+"finished, success" to the actor's poll), not on the sender; and when a custom chart crashes
+only at song end, suspect a per-note stream meeting a fixed-size save field before the results
+screen. `scripts/gen_stepmania_marathon_test.py` makes the repro (20,000 steps in three
+minutes). RE: `docs/stepmania_runtime_packs_feasibility.md` §20.

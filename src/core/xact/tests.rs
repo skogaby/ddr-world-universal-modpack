@@ -1261,8 +1261,6 @@ fn streamed_bank_bytes(
     entries: &[xwb::StreamedEntry],
     payloads: &[Vec<u8>],
 ) -> Vec<u8> {
-    use std::io::Write;
-
     let mut output = Vec::new();
     xwb::write_song_bank_streaming(bank, entries, &mut output, |index, out| {
         out.write_all(&payloads[index])
@@ -2220,8 +2218,6 @@ fn replay_fixture_with_main_loop(preview_first: bool, main_loop: (u32, u32)) -> 
 /// through VERBATIM (the preview passthrough) → stream write. The byte
 /// authority every replay leg compares against.
 fn transform_bank_oracle(source: &[u8], percent: u32) -> Vec<u8> {
-    use std::io::Write;
-
     let bank = xwb::parse_song_bank(source).expect("oracle parse");
     let layout = virtual_bank::plan_virtual_bank(&bank, percent, virtual_bank::StretchTarget::Main)
         .expect("oracle plan");

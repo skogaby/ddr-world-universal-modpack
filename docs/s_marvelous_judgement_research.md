@@ -1077,7 +1077,7 @@ courses):
 | `score` / `exscore` / `maxcombo` | `rec+0x10` / `+0x14` / `+0x20` | |
 | `judge_marv..ng` | `rec+0x28,+0x2C,+0x30,+0x34,+0x3C,+0x40,+0x44` | the `+0x38` Boo slot is never sent |
 | `fastcount` / `slowcount` | `rec+0x6C` / `+0x70` | grades 1..=4 only (stock rule) |
-| `ghost` / `ghostsize` | EVERY element of the `rec+0xB8..+0xC0` byte vector, each `+ '0'`; size = its length | **no judged filtering** — a failed-out song emits the unjudged tail as `'0'`; staging cap `0x2004` chars |
+| `ghost` / `ghostsize` | EVERY element of the `rec+0xB8..+0xC0` byte vector, each `+ '0'`; size = its length | **no judged filtering** — a failed-out song emits the unjudged tail as `'0'`; the staging field is `0x2004` chars and the copy is UNBOUNDED — a chart over 8,192 notes overruns it and the ark job copy faults (`stepmania_runtime_packs_feasibility.md` §20.1) |
 
 Ghost alphabet (decoder `ark::network::GetGhostData`, `FUN_18001e1d0`:
 `c − 0x30`): `'0'..'7'` = grade class 0..7 (M, P, Gr, Gd, Boo, Miss, O.K.,

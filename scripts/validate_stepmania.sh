@@ -216,14 +216,6 @@ cat >"$TMP/src/lib.rs" <<EOF
 //! scripts/validate_stepmania.sh; never committed.
 #![allow(dead_code)]
 
-// The DLL's log macros, for mounted files that log (cache.rs).
-#[macro_export]
-macro_rules! log_info { (\$(\$arg:tt)*) => { eprintln!("INFO  {}", format!(\$(\$arg)*)) }; }
-#[macro_export]
-macro_rules! log_warn { (\$(\$arg:tt)*) => { eprintln!("WARN  {}", format!(\$(\$arg)*)) }; }
-#[macro_export]
-macro_rules! log_debug { (\$(\$arg:tt)*) => { eprintln!("DEBUG {}", format!(\$(\$arg)*)) }; }
-
 pub mod core {
     pub mod art {
         #[path = "$REPO_ROOT/src/core/art/arcpack.rs"]
@@ -277,6 +269,17 @@ pub mod services {
         pub mod validation;
     }
 }
+
+// The DLL's log macros, for mounted files that log (cache.rs). Declared
+// AFTER the modules so they reach them the way the DLL's do: by path
+// (`use crate::{log_info, log_warn}`), not by textual scope, which would
+// make those imports "unused".
+#[macro_export]
+macro_rules! log_info { (\$(\$arg:tt)*) => { eprintln!("INFO  {}", format!(\$(\$arg)*)) }; }
+#[macro_export]
+macro_rules! log_warn { (\$(\$arg:tt)*) => { eprintln!("WARN  {}", format!(\$(\$arg)*)) }; }
+#[macro_export]
+macro_rules! log_debug { (\$(\$arg:tt)*) => { eprintln!("DEBUG {}", format!(\$(\$arg)*)) }; }
 EOF
 
 # The legs binary. Quoted heredoc: no shell substitution inside; runtime

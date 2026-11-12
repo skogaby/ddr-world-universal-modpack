@@ -1,9 +1,3 @@
-# trim-paths is an unstable Cargo feature (nightly-only). This project is
-# already nightly-pinned (build_win7.sh needs -Z build-std), so opting in is
-# safe. It strips builder home/username paths from the release binary; see the
-# [profile.release] trim-paths setting below.
-cargo-features = ["trim-paths"]
-
 [package]
 name = "ddr-world-hook"
 version = "0.1.0"
@@ -61,4 +55,6 @@ lto = true
 # from the binary. Rust bakes file!()/panic-location strings as literals; this
 # remaps the workspace, ~/.cargo registry deps, and (for the win7 -Z build-std
 # build) the ~/.rustup std source to placeholder prefixes. See build_win7.sh.
+# (Stable in Cargo since 1.101 — an older toolchain rejects the key; run
+# `rustup update`.)
 trim-paths = "all"

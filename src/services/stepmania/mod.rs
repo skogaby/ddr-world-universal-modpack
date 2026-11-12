@@ -6,8 +6,10 @@
 //! `data_mods/_cache/stepmania/`. At boot this service READS that cache,
 //! injects the songs into the music database so they appear on the wheel in
 //! a STEPMANIA folder / VERSION series and serves them like stock songs —
-//! scores are never submitted (`taint.rs`). The DLL never converts: the only
-//! way a song reaches the game is through a cache the tool produced.
+//! scores are never submitted (`taint.rs`; the per-stage save is not even
+//! requested, `stage_save.rs`, which is also what lets a chart longer than
+//! the save format's 8,192-note ghost field finish). The DLL never converts:
+//! the only way a song reaches the game is through a cache the tool produced.
 //!
 //! ## Boot timeline (why `early_init` sits where it does in `lib.rs`)
 //!
@@ -111,6 +113,7 @@ pub mod records;
 pub mod scheduler;
 pub mod scheduler_logic;
 pub mod ssq_split;
+pub mod stage_save;
 pub mod sync_apply;
 pub mod sync_state;
 pub mod taint;

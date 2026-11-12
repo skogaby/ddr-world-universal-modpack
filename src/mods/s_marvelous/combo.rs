@@ -18,7 +18,9 @@
 //!    (`afp_layer_mc_refer` on `combo_usr/number_usr/%d_usr`, then every
 //!    same-name sibling via `afp_mc_traversal(id, 6)`). The ONES place
 //!    stays stock-unsuffixed (stock quirk — layer 0's ones place always
-//!    uses `daco_combo_%d`).
+//!    uses `daco_combo_%d`). Past 9,999 the five-digit row
+//!    (`services::combo_digits`, an EXTEND subscriber that runs before
+//!    this one) adds place 10000 to the list.
 //! 2. layers root2/root3 (`this+0x78/+0x80`): apply the S-Marvelous tint
 //!    pair through the wrapper's SetColor vfunc (+0x98,
 //!    `float[4]{r,g,b,1.0}`), overriding the just-applied Marvelous pair.
@@ -36,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
 
 use crate::core::signatures::SignatureStore;
-use crate::services::{bm2d_api, combo_hooks};
+use crate::services::{bm2d_api, combo_digits, combo_digits_math, combo_hooks};
 use crate::{log_info, log_warn};
 
 use super::state;
@@ -66,6 +68,8 @@ const TINT_ROOT3: u32 = 0xB05CE0; // saturated violet (root3 = the deeper)
 /// Digit places re-loaded on root1. The ones place (1) is intentionally
 /// absent — stock leaves layer 0's ones place unsuffixed (RE §6 quirk).
 const PLACES: [u32; 3] = [10, 100, 1000];
+/// The same on the five-digit row (`services::combo_digits`).
+const PLACES_FIVE: [u32; 4] = [10, 100, 1000, 10_000];
 
 pub fn set_assets_ready(ready: bool) {
     ASSETS_READY.store(ready, Ordering::Release);
@@ -198,12 +202,21 @@ fn override_if_all_smarv(actor: *mut u8) {
         // 1. Digit art on root1, places {10,100,1000} — traversal-6 walk
         // (the stock refresh's own shape: `afp_layer_mc_refer` then every
         // same-name sibling; digit value per place from the display-clamped
-        // combo, exactly like the stock `min(combo, 9999)` loop).
+        // combo, exactly like the stock `min(combo, 9999)` loop). When the
+        // five-digit row is up (`services::combo_digits`, which ran before
+        // this POST callback) the ten-thousands place joins and the clamp
+        // is that row's.
         let combo_raw = (actor.add(0x68) as *const i32).read_unaligned();
-        let combo = combo_raw.clamp(0, 9999) as u32;
+        let five = combo_digits::five_digits_shown(actor);
+        let combo = if five {
+            combo_digits_math::shown(combo_raw)
+        } else {
+            combo_raw.clamp(0, 9999) as u32
+        };
+        let places: &[u32] = if five { &PLACES_FIVE } else { &PLACES };
         let root1 = (actor.add(ACTOR_ROOT1) as *const *const u8).read_unaligned();
         if let Some(layer_id) = wrapper_layer(root1) {
-            for place in PLACES {
+            for &place in places {
                 let digit = (combo / place) % 10;
                 let name = format!("daco_combo_smarvelous_{}", digit);
                 let path = format!("combo_usr/number_usr/{}_usr", place);

@@ -57,13 +57,6 @@ mkdir -p "$TMP/src"
   echo "//! scripts/validate_custom_options.sh; never committed."
   echo "#![allow(dead_code)]"
   echo ""
-  echo "// No-op stubs for the DLL's logging macros (the real ones route to"
-  echo "// OutputDebugStringA); mounted modules import them via crate::log_*."
-  echo '#[macro_export] macro_rules! log_warn { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
-  echo '#[macro_export] macro_rules! log_info { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
-  echo '#[macro_export] macro_rules! log_debug { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
-  echo '#[macro_export] macro_rules! log_error { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
-  echo ""
   for f in "${MODULES[@]}"; do
     name="${f%.rs}"
     echo "#[path = \"$MOD_SRC/$f\"]"
@@ -77,6 +70,15 @@ mkdir -p "$TMP/src"
     echo "#[path = \"$MOD_SRC/$f\"]"
     echo "mod $name;"
   done
+  echo ""
+  echo "// No-op stubs for the DLL's logging macros (the real ones route to"
+  echo "// OutputDebugStringA). Declared AFTER the modules so they reach them"
+  echo "// the way the DLL's do: by path (use crate::log_warn), not by textual"
+  echo "// scope, which would make those imports unused."
+  echo '#[macro_export] macro_rules! log_warn { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
+  echo '#[macro_export] macro_rules! log_info { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
+  echo '#[macro_export] macro_rules! log_debug { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
+  echo '#[macro_export] macro_rules! log_error { ($($t:tt)*) => {{ let _ = format!($($t)*); }} }'
 } >"$TMP/src/lib.rs"
 
 note "running pure module tests (${MODULES[*]} + ${TEST_MODULES[*]})"

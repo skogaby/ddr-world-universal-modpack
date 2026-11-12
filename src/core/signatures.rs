@@ -1280,6 +1280,30 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "40 53 56 57 48 81 EC 80 00 00 00 80 B9 ?? ?? 00 00 00 48 8B F1 0F 85 ?? ?? ?? ?? 8B 81 94 01 00 00 03 81 9C 01 00 00 75 ?? 48 8D 0D ?? ?? ?? ?? 33 D2 FF 15 ?? ?? ?? ?? 48 83 BE ?? ?? 00 00 00",
         description: "GamePlayActor result commit (vtable +0x28) — writes the per-stage play record at song end. Detoured by the premium-free ghost cache + diagnostic.",
     },
+    // The per-stage save request, `bool request(int side, int stage)`
+    // (20260915 `FUN_18001eed0`; 20250805 `0x18001e720`, 20260224
+    // `0x18001e510`, 20260721 `0x18001ec60`, 20260825 `0x18001ecf0`, 20261027
+    // `0x18001ea70`), called once per side by `SavePlayerDataActor::onUpdate`
+    // after each song. The WHOLE function is the pattern (every RIP disp /
+    // rel32 wildcarded), so the match is the request and nothing else:
+    //
+    //   48 8D 2D d32; 48 63 D9; 8B F2      LEA RBP,[state table]; side; stage
+    //   44 8B 4C 9D 00; 45 85 C9; 74 1E    state[side] != 0 → log, return 0
+    //   …                                  (timeout bookkeeping, 10000 ms)
+    //   44 8B C6; BA 02 00 00 00; 8B CB    marshal(side, savekind 2, stage)
+    //   E8 rel32                           ReflectSavePlayerData
+    //   C7 44 9D 00 0F 00 00 00; B0 01     state[side] = 0xF; return 1
+    //
+    // The actor's poll of the same state table reports "finished, success"
+    // for a side whose state is still 0, so skipping the request skips the
+    // marshal and the ark save job without stalling the actor
+    // (`docs/stepmania_runtime_packs_feasibility.md` §20.1). Detoured by
+    // `services::stepmania::stage_save`. Unique on all six builds.
+    SignatureDefinition {
+        name: "stage_save_request",
+        pattern: "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8D 2D ? ? ? ? 48 63 D9 8B F2 44 8B 4C 9D 00 45 85 C9 74 1E 48 8D 15 ? ? ? ? 48 8D 0D ? ? ? ? 44 8B C3 FF 15 ? ? ? ? 32 C0 E9 ? ? ? ? B9 01 00 00 00 FF 15 ? ? ? ? 4C 8B 05 ? ? ? ? 4C 8B C8 4C 2B 0D ? ? ? ? 4D 3B C1 0F 96 C0 84 C0 74 4E 48 8D 15 ? ? ? ? 48 8D 0D ? ? ? ? FF 15 ? ? ? ? B9 01 00 00 00 FF 15 ? ? ? ? 48 8D 15 ? ? ? ? 48 8D 0D ? ? ? ? 41 B9 10 27 00 00 4C 8B C0 48 C7 05 ? ? ? ? 10 27 00 00 48 89 05 ? ? ? ? FF 15 ? ? ? ? 44 8B C6 BA 02 00 00 00 8B CB E8 ? ? ? ? C7 44 9D 00 0F 00 00 00 B0 01",
+        description: "Per-stage save request: bool request(int side, int stage). Marshals the stage record into the save staging buffer (savekind 2) and arms the side's save state machine. Detoured by the StepMania stage-save skip (an injected song's save is never sent, and a chart over 8,192 notes cannot be marshalled).",
+    },
     // The in-song speed-mod adjustment window's kill gate, inside
     // `sequence::dance::ControlSpeedActor`'s message handler (vtable+0x40).
     // Each frame the gameplay sequence broadcasts msg 0x1045 with the elapsed
@@ -8135,6 +8159,13 @@ impl SignatureStore {
                 self.publish_value(name, v);
             }
         }
+    }
+
+    /// The `ComboActor` field holding root 1 of its three clip wrappers
+    /// (roots 2 and 3 follow at stride 8) — published by
+    /// [`derive_ddr_sel_combo`] from the init's three-root loop head.
+    pub fn combo_actor_root1_off(&self) -> Option<usize> {
+        self.published_value("ddr_sel_combo_root1_off")
     }
 
     /// Everything [`derive_combo_actor`] produced, or `None`.
