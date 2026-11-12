@@ -11,7 +11,7 @@ cargo-features = ["trim-paths"]
 
 [package]
 name = "ddr-world-hook-updater"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -42,9 +42,10 @@ dunce = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Detecting a double-click launch (the updater is the console's only process)
-# so the window can wait for Enter instead of vanishing. Windows-only.
+# so the window can wait for Enter instead of vanishing; free disk space
+# before a pack download. Windows-only.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 opt-level = 2

@@ -67,6 +67,22 @@ yourself. This is why the old `register_arc` (active `arc_load` of a real on-dis
 container) was the only way to register textures with no host IFS, and why
 removing it means demo-only textures with no host get dropped rather than ported.
 
+### Some IFSes serve textures per IMAGE — a cloned-atlas blob alone renders blank
+
+**Context:** series_expansion's enhanced layout (2026-09-27) declares per-width
+VERSION labels whose source PNGs live outside the IFS mod folder.
+
+`select_music_option_v3.ifs` (and its lang siblings) store one `tex/md5(<image
+name>)` file per `<image>`, not one per atlas: the package loader opens a file per
+image and builds the atlas itself, so the atlas blob `atlas_cloner` writes is never
+opened. A declared name is served from `_cache/<ifs>/md5(name)` or from a PNG at
+`<mod>/<ifs>/tex/<name>.png`; the legacy series labels only worked because their
+PNGs sat at that path. For sources kept elsewhere (to avoid loose-PNG
+auto-injection of unused variants), write the per-image blob yourself
+(`ifs_textures::prebuild_texture`) and declare the name through the merged
+texturelist. The server rejects a PNG larger than the declared size (blank) and
+pads a smaller one — normalise first.
+
 ---
 
 ## Rendering
@@ -925,6 +941,46 @@ Rules:
   each costs a full 19 MB scan; if boot-time races reappear, the scan cost
   is the lever (batch scanning / early-out on build fingerprint).
 
+### Nothing on the boot path may scale with installed CONTENT — and under CrossOver every file syscall is ~0.4 ms (2026-10-04)
+
+**Symptom:** with ~540 custom dancers/stages (2.2 GB, 20k files, 2.2k dirs
+under `data_mods/custom_models/`) Custom Resolution logged `display init
+already ran (screen_w != 0) -- nothing applied this boot` and the splash
+appeared ~12 s after launch. Neither feature had changed.
+
+**Measured on the maintainer's CrossOver bottle** (a throwaway Windows bench
+exe run with `wine --bottle bemani`, CWD = the game's `contents/`):
+
+| operation | cost |
+|---|---|
+| `fs::read_dir` of one directory (enumerate + close) | ~0.43 ms |
+| `DirEntry::metadata()` / `file_type()` during that enumeration | ~free (FindNextFile already returned size + mtime) |
+| `fs::metadata(path)` (open + query + close) | ~0.40 ms |
+| `Path::is_file()` | ~0.39 ms |
+| small `fs::read` (16-byte sidecar) | ~0.36 ms |
+| 64 KiB prefix read of an arc | ~0.49 ms |
+
+Two linear costs had crept in: LayeredFS's step-0b mod-path index walked
+`custom_models/` (~1 s, ON the race path that ends at `early_apply` — Custom
+Resolution's display-init check lost), and the Background Dancers enable
+stat'ed all 20k inputs to fingerprint its cache arcs (8.1 s) plus one
+`.hashed` read + one `is_file` per model, on the init thread ahead of every
+later mod and the splash.
+
+Rules:
+- Folders that are not LayeredFS overlays go in `mod_paths::PRIVATE_FOLDERS`
+  (never indexed). Anything that walks user content runs after
+  `early_apply` (`custom_scan::prefetch`), never before.
+- Budget per DIRECTORY, not per file: take mtimes/sizes from the listing you
+  already did (`CacheHasher::add_stamped`), never `fs::metadata` per file;
+  keep one index file instead of N sidecar reads (`scan_index.rs`); confirm
+  cache-file existence from one listing of the cache dir, not N `is_file`.
+- `DirEntry::metadata` mtimes == `fs::metadata` mtimes under Wine (verified
+  0 mismatches over 19,993 files), so switching is fingerprint-compatible.
+- Benchmark filesystem patterns under CrossOver before assuming a walk is
+  cheap — host-side timings of the same code say nothing about wineserver
+  round trips.
+
 ## 2026-09-03 — `musicdb.merged.xml` fragments do NOT reach the game's music DB
 
 While setting up the Split SSQ Auto-Discovery cabinet test (a cloned song
@@ -1521,3 +1577,572 @@ display is a `sequence::SpriteLayer` of per-character bitmaps
 the atlas only ships A–Z, 0–9, `& $ ! - . ?` and `blank` — `(`, `)`, `[`, `]`
 render as blanks. Extra text next to a plate = a second SpriteLayer on the same
 parent clip + anchor (`multiplayer_bot::plate_label`).
+
+## FilterButton visuals are lazy and on-screen-gated — scrolling BM2D layers can't reveal an unbuilt row (2026-09-27)
+
+`FilterButton::CreateVisual` never runs inside the builder or factory. The generic
+Component tick calls it (vtable slot 3) when `visible && on_screen` flips, and
+`on_screen` tests the button's **layout** rect against the 1280×720 virtual screen
+with a 20 % margin (top < 864). `series_filter_scroll` scrolls by offsetting BM2D
+layer Y in `set_position`, leaving layout untouched, so a cell laid out below the
+band never gets a movie no matter how far you scroll. It can also re-run with a new
+layer id. Track buttons by `this` (registered from the builder), refresh the
+layer id on every CreateVisual, and cap grid rows (series_expansion enhanced mode:
+24 below the tab row).
+
+## `CMP r64, imm8` sign-extends: a loop bound of 128+ with an unsigned `JBE` never ends (2026-09-27)
+
+The jacket-thumbnail ARC loop is `INC RSI; CMP RSI,imm8; JBE`. Patching the imm8
+to 0x80..0xFF compares against `0xFFFF…FF80+`, so the loop runs until the 4096-slot
+resource pool is exhausted and then writes at negative indices — the real cause
+of the old "bound 255 crashed AVS" report. Clamp any imm8 bound patched into a
+`CMP r64` to 127 (series_expansion does, in both modes).
+
+
+## The FPS target is a fullscreen refresh REQUEST, not a frame cap — windowed ignores it, sub-60 bricks fullscreen (2026-09-27)
+
+`fps_target_imm32` ends up as `D3DPRESENT_PARAMETERS.FullScreen_RefreshRateInHz`
+with `PresentationInterval = ONE`: the game renders at whatever vsync paces it at.
+In windowed mode (spice2x `-w`, the CrossOver dev loop) both the game's gd layer and
+spice2x force the rate to 0, so EVERY preset renders at the desktop refresh (120 on
+a ProMotion Mac) — testing fps-unlock windowed proves nothing. In fullscreen a rate
+the monitor doesn't enumerate (any 20/30) fails all three `CreateDevice` attempts →
+no renderer, and the persisted selection can't be undone from the menu. Sub-60
+targets therefore never touch the imm; `fps_unlock/limiter.rs` paces the loop and
+raises the game's 2/59.94 s per-frame dt clamp (`docs/fps_frame_limiter.md`).
+
+## A filter cell's layout box is not spacing — its movie is centred in it; force line breaks with a FilterHeader (2026-09-27)
+
+`GridPanel` wraps only on overflow, so a narrow cell followed by a wide-enough gap keeps
+the next item on the same row (MUSIC TITLE: Z 42 + OTHER 108 + ア 54 = 204 ≤ 216).
+Widening a button's `+0xA0` size to eat the rest of the row does NOT work: the per-frame
+update places the movie at `pos + size × 0.5`, so the visual slides to the middle of the
+enlarged box. The real break is the stock `FilterHeader` (grid-wide, 1 px, not focusable).
+Only the VERSION builder builds one, but its construction is a short fixed sequence
+(`filter_header_alloc`: `operator new(0xF8)`, Component ctor, two vtables, field inits,
+`children.push_back`, `+0x60` = grid) that a builder detour can replay —
+`improved_song_title_sorting/hooks.rs::push_row_break`.
+
+## A pack's decoded offsets may count the chunk header you stripped; node kinds can share a record and differ in the links (2026-09-30)
+
+SuperNova's `.TZM` MODEL / MOTION offsets are relative to the chunk WITH its header
+(0x30 / 8 bytes) in front of the decompressed data — every section landed 0x30
+"inside" its first record until the header size was subtracted, which is what made
+the 0xD0 node record look name-last and conjured a 23rd unnamed bone that overran the
+file by 0x50. When a layout hypothesis leaves a record straddling EOF, shift the base,
+don't invent a field. The same 0xD0 record serves objects and joints but its
+`links[8]` differ: joints `{parent, first_child, next_sibling, prev_sibling, 0, 3,
+0, 0}`, objects `{mesh_slot, 0x80000000, parent, first_child, next_sibling,
+prev_sibling, 0, 0}` — reading the joint layout on objects gave a plausible-looking
+chain (each object "parented" to the previous) that only the stages exposed. Verify
+a hierarchy read against geometry (a rotated part must land where the art needs it),
+not against whether the indices look sane. And a uniform `SCALE` node folded into the
+unit scale must be dropped from the world composition too, or it applies twice
+(`tzm_dump.unscaled_bones`): the check that catches it is a clip re-evaluation
+against the source pose, which the port runs on every clip.
+
+## An fcurve key's "zero" float is an int; a camera FOV is only a number until you know its axis (2026-09-30)
+
+SuperNova's MOTION fcurve keys (`flag 3`, 7 floats) carry the interpolation TYPE in the
+4th slot as a raw u32 (1 linear, 2 Bezier) — printed as a float it is `1.4e-45` and
+rounds to 0, which made the whole slot look like padding. Any "always 0" float in a
+record of otherwise sensible floats deserves a `view(uint32)` before it is declared
+unused (`tzm_dump.fcurve_interpolation`). The binder that settled it was found by
+searching the ELF for the track KIND constants (`li v0,0x516`), not the key layout.
+Likewise the camera's kind-7 "FOV 0.936 rad" only became actionable once its axis was
+pinned: 0.93616 = 53.638° = XSI's default (HORIZONTAL) camera FOV, and exactly the
+horizontal angle of A3's stock Maya cameras (41.53° vertical at aspect 1.333) — two
+independent tools agreeing on one number is the evidence, not the value itself. For a
+16:9 port keep the VERTICAL extent; World's camanm recipe then yields a legitimately
+NEGATIVE slot-2 degrees for game hFOVs past 90° (`atan2` handles it in the game, the
+DLL and the add-on alike) — don't "fix" the sign.
+
+## World's `.sanm` is alive in the DLL now; its tracks are packed but file-aligned (2026-09-30)
+
+The engine never played `*_play_loop.sanm` (registry collision, format doc §8), but the
+data in the stock arcs is real: `gm_boom00_bg` scrolls its sky, `gm_dawnstreet00_glo`
+pulses its `_c` glow. The Background Dancers director now samples a part's `.sanm` on
+the stage clock into the item's private material copies (`core::anm::sanm`, frame-board
+material lane, `render_item::set_material_params_raw`), so those stock effects PLAY as
+well as the SuperNova port's — a fidelity change to stock stages worth knowing when a
+sky or glow "suddenly moves". Writer trap: the stock type-14 chunk pads its offset list
+so every track's times / values sit 16-byte aligned in the FILE while the tracks
+themselves are packed back to back; `anm_dump._layout_tracks`'s relative alignment only
+matches when the first track starts aligned (`write_anm` pads the list for that).
+Anything that reads material copies per frame must not `is_readable`-probe (a
+VirtualQuery per part per frame); the resource header was probed at build.
+
+## A sequel's "same" assets are not byte-identical, and "identical" is not "complete" (2026-10-03)
+
+SuperNova 2's costume-01 skins looked like re-exports of SuperNova's (same sheets, same
+rigs) yet every body had ~25 % more strip vertices and 10 % fewer unique triangles: the
+re-export packed the strips better AND cut the eyes / mouth out of the body, moving them
+to a per-skin `_face.TZM` mask the game hangs off the Head. A port that skipped the
+"optional expression overlay" would have shipped sixteen faceless dancers — the body
+textures still carried a painted face, so a texture-level check said "fine". Verify
+geometry equivalence by the set of unique triangles (positions rounded, sorted triples),
+not by vertex / triangle counts, and when a pack carries meshes you plan to drop,
+render the body WITHOUT them first. Two more traps from the same packs: the rig root is
+named after the pack (`afro01`, not `globalSRT`) while the clips keep the original
+rig's root track, and CONCENT's root carries a pose offset its object chain cancels —
+the game binds the clip root by position and discards that offset (with it the
+character hovers 4 cm; `tzm_dump.clip_worlds` now does the same). And `gus02.TZM`
+lists a stray 128² face sheet FIRST: never take "the pack's texture" by position when a
+MATERIALLIST says which sheet a mesh uses. On the product side, two games' content
+that is byte-identical (the 20 stage packs) belongs in one merged source folder — a
+renamed source changes the option-row id (`background_stage_ddr_suprnva_1_2`), so a
+persisted pick is orphaned once; say so in the hand-back.
+
+## An accessory's own loop rides on every dance clip as an extra joint (2026-10-03)
+
+SuperNova 2 spins CONCENT's chest fan from a 4 s record in the FACE pack (`fan01`, a
+kind-2 Q T track), independent of whichever routine plays. World has one `.anm` per
+routine and no second clip lane, so the port gives the fan a joint of its own under
+`Spine1` (pose = the pack's object chain below its root, bind = the joint's bind × that
+chain — the same place `part_overlay` puts the vertices) and resamples the loop onto
+each clip's key frames, wrapping on the loop's period (`tzm_dump.attach_part_bone` /
+`part_spin_track`). Two things made it exact rather than approximate: an object's T is
+applied before its own R (`local = T · R`), so the composed joint's translation is the
+chain's and only the orientation carries the spin; and a 30 fps dance clip keyed at odd
+scene frames sits half a key off a 30 fps loop keyed at even ones — slerp the fractional
+index, don't snap. The `.anm` evaluator then reproduces the record (3°/frame) with no
+new runtime code.
+
+## Content folder names must be legal on the Windows cabinet, not just on the Mac (2026-10-03)
+
+A source or friendly folder under `data_mods/custom_models/` IS the menu label, so it is
+tempting to spell game names verbatim. macOS accepts names that Windows cannot hold. A
+trailing dot or space (the requested `DDR PARTY COLL.`) is silently stripped by Windows
+extraction / scp, and Git for Windows (`core.protectNTFS`) refuses to check it out.
+`< > : " / \ | ? *` are invalid outright, and Party Collection's own names carry `:` and `/`
+(`KONSENTO:01(1st)`, `KONSENTO:03/2(4th)`). The tree then checks out fine on the Mac and breaks
+only on the cabinet or a tester's PC. Spell labels from the allowed set (letters, digits,
+space, `-`, `.` mid-name), ≤ 15 bytes, and check the whole tree before handing back:
+`find data_mods/custom_models -name '*[. ]' -o -name '*[:<>|?*"\\]*'` must print nothing. The
+slug (`sources::slug`) ignores punctuation, so renaming the folder for Windows keeps the same
+option-row id.
+
+## Hudson HSF key arrays are not sorted, and "codec 1" is not "stored" (2026-10-03)
+
+Two traps from the Hottest Party (Wii) port, both silent:
+- **HSF curve keys are unsorted.** MayaConverter writes pre-roll keys at NEGATIVE times right
+  after key 0. One stg23 UV track has key times `0, -84, 12, 112, …`. The game scans: the first
+  key with `t < time` for step / linear, and the first segment `k[i-1] <= t < k[i]` for Hermite.
+  A `searchsorted` evaluator returns plausible but wrong values, with no error. Use
+  `hsf_dump.sample_curve`, which mirrors `hsfmotion.c`. The dance clips happen to be sorted,
+  so a clip-only check does not catch this.
+- **HuData codec 1 is Hudson LZ.** It is not raw bytes, even though the header looks like a
+  stored entry (`{size, 1}` + data). Check it: the entry's span is smaller than `size`
+  (0x2476 bytes for 0x8080).
+- **Read a pack whole before you sanity-check its offsets.** `is_pack` on the first 64 KiB
+  rejected every pack whose last offset lies beyond that, and 185 of 197 packs were skipped
+  without a word.
+- **A white-textured stage is not broken.** Its colour comes from the vertex colours
+  (vtxMode 5), which the `_vc` shader multiplies in. Workbench's TEXTURE mode ignores them, so
+  render the preview with a texture × COLOR0 emission material before you judge it.
+
+## Blender's `color` accessor re-encodes vertex colours; a PSX flat colour is not 0x80-scaled (2026-10-04)
+
+Two colour traps, both silent, both found on shipped content:
+- **Write COLOR0 with `color_srgb`, never `color`.** A BYTE_COLOR attribute stores sRGB-encoded
+  bytes and the add-on exporter writes those stored bytes (`color_srgb`) as the D3DCOLOR.
+  `foreach_set('color', …)` takes LINEAR values and encodes them: a source 0.5 ships as 188,
+  0.2 as 124. Every stage port and the SuperNova/X dancer port did this, so 726k stage vertices
+  shipped too bright and desaturated. White and black are fixed points, so an all-white
+  dancer looks fine and hides the bug. Alpha is stored linearly (probe-verified, Blender 5.2.1).
+  Check a port by comparing the exported bytes with the source bytes, not by eye. Every affected
+  source was re-ported. `scripts/fix_vertex_colour_srgb.py` undoes the encoding in place (±1 byte)
+  for a model from an older checkout, and refuses to write without `--legacy-port`: running it on
+  a correct port darkens it a second time.
+- **The 573 dancers' untextured polygons are drawn at face value.** They are libgs TMD lit
+  primitives: the GTE lights the RGB and the GPU draws it as is (`0xFF` = 1.0). Only a TEXTURED
+  primitive modulates with `0x80` = 1.0. The ports doubled the flat colours and clamped at 255,
+  which is how FESTIVAL's Rage 1 got salmon hair beside a brown-haired face texture.
+  The tell: ~40 % of the doubled swatch channels sat at 255. When a "0x80 = 1.0" rule clamps
+  that often, the rule is wrong.
+
+## `port_lib.conform` assumed a T-pose, metre-scaled source (2026-10-04)
+
+The Ironmouse port, a UE5 Fortnite rip, broke three silent assumptions:
+- **Terminal bones keep their REST orientation.** `conform` reads every direction from rest
+  data, and a bone with no `next_of` gets an identity rotation. On an A-pose source the forearm
+  swings ~45° up to the T-pose while the hand stays as it was, bent 45° down at the wrist. Pass
+  `follow_parent_rot=(hands, toes)`. The older Peter script did not hit this because it read the
+  current POSED matrix instead of the rest one.
+- **`terminal_len` is wrong on a centimetre FBX.** The FBX imports with armature object scale
+  0.01, and `L / pb.bone.length` divides world metres by armature-space centimetres, which makes
+  the stretch 100× too large. Leave `terminal_len` out and let `s` keep the size.
+- **The stretch axis is the bone's Y, and on a UE rig Y runs across the limb.** `conform` printed
+  "Y axis is 90 deg off its child" and would have thickened the limbs instead of lengthening them.
+  Blender's automatic bone orientation fixes most bones but aims thigh / `spine_04` at a helper
+  child. `align_chain_bones(fa, next_of)` re-aims the chain in edit mode. Always read the
+  conform WARN lines. A clean preview does not show this when the stretch factors happen to be
+  near 1.
+
+## A persistence mode that exists for one topology is a hole in every other (2026-10-08)
+
+`PersistMode::SaveOnly` (WebUI cosmetics, VIDEO SIZE, weight/calorie) was designed around a
+server that honours the injected `mod_*` fields: send on save, let the game's own `<customize>`
+load bring it back, mirror game → menu at SONG_SELECT. The JSON cache was deliberately skipped
+to keep that load path the single source of truth. But the JSON leg exists *precisely* for
+servers that don't honour the injected fields — and a user running `persist_network=false`
+had NO persistence path at all for those rows: nothing emitted, nothing cached, and the
+scene-25 mirror faithfully re-copied the server's defaults into the menu every card-in.
+The log looked healthy (`save — wrote 23 option(s)`), it just never wrote the 9 that mattered.
+
+- When a mode opts a row OUT of a persistence leg "because another channel covers it", check
+  what happens when the operator turns that other channel off. The gates are independent
+  config keys; every cell of the (mode × gate) matrix must persist somewhere or be documented
+  as intentionally volatile.
+- Fix shape: the framework raises `custom_options::save_only_json_fallback()` when
+  `persist_network=false && persist_json=true`; `SaveOnly` rows then join the JSON cache in
+  both directions, and the owner's scene-25 sync flips from mirror (game → menu) to drive
+  (menu → game) for rows the cache or player chose (`value_is_authoritative`). Untouched rows
+  keep mirroring so a server/web-UI value isn't clobbered by a stale default on first boot.
+- A `SaveOnly` row with a non-identity wire mapping needs BOTH persist transforms now; a
+  `save_transform` alone leaves the JSON prime writing raw wire values into the registry.
+- Side lesson: the one-shot `option_menu_settings` "no registered option" WARN was computed
+  against a menu's filtered snapshot, so the first mod-menu open listed every in-game-only row
+  as a typo — a decoy that pointed exactly at the rows under investigation. Compute "unknown"
+  against the full registry, never a view.
+
+## "Hold the last music count" freezes every animation driven by it (2026-10-08)
+
+- Background Dancers' scene time is a pure function of the music count. `song_reset::
+  first_anchored_frame()` reads false from DPS step 8 (song-end tail) while the music is still
+  playing, and the clock "held the last count" there — intended as "A3 keeps dancing through
+  the tail", it actually posed every dancer/camera at one instant: testers saw the dancers stop
+  just before the song ended.
+- Fix: `clock.rs` extrapolates the last anchored count on wall time at the count/wall slope
+  measured since the latch / last rewind (so song-rate mods stay in step; < 1 s baseline or an
+  out-of-range slope ⇒ 1:1). Any consumer that "holds" a clock across an anchor loss should ask
+  whether it means "frozen" or "still running".
+
+## A "latest result" cell keyed by parse completion is not "the current selection" (2026-10-09)
+
+- `chart_length::latest()` was written only when the worker FINISHED a parse. Cache hits never
+  touched it, so scrolling back to an already-parsed song left `latest` on whatever song was
+  last parsed cold. Training Mode's highlight seeder keys off `latest`, so a revisited song kept
+  the previous song's SONG END TIME max while the wheel (which reads the per-code cache) showed
+  the right length. Testers blamed London EVOLVED because its three A/B/C entries sit adjacent on
+  the wheel — the natural place to bounce back and forth between already-parsed songs.
+- Fix: `latest` tracks the most recently REQUESTED code; a cache hit republishes immediately and
+  a parse landing for a superseded code is dropped. Any "most recent X" cell consumed by a
+  second module must be updated on every consumer-visible event (request), not only on the
+  producer's expensive path (parse) — and the fallback gate that used to read `latest().is_none()`
+  as "service not driven" needs an explicit `is_driven()`.
+
+## Joint-local meshes may live in ROTATED joint frames; a translation-only bind twists them (2026-10-10)
+
+The DDR for Windows (2002) port looked right in the clip check (joint positions within 0.1 mm)
+and wrong on screen: every arm and leg segment pointed the way it was modelled, not the way the
+joint sat. The 573 bakes its meshes in untransformed joint space, so its port could use
+identity-rotation binds at the rest offsets. The PC bake pre-rotated each joint's vertices into
+the joint's `GsCOORDINATE2` frame, so the mesh only reads correctly under that joint's full rest
+MATRIX. Rule: when a format stores one mesh per joint plus per-frame joint matrices, the bind is
+the rest-pose MATRIX of that joint (`rest_matrices`), never just its translation — and a joint
+error metric cannot catch this, because the joints are in the right place either way. Look at
+the rest render before trusting the numbers; a limb sticking out sideways is this bug.
+
+Two smaller traps from the same port: a background Blender batch started from a tool shell dies
+when that shell call is reaped (run it under `nohup … &` and poll the log), and `.data` pointers
+can land in `.bss` — they read 0 at run time, and the raw file bytes there are garbage, so a PE
+reader for compiled-in game data must return zeros past a section's raw size.
+
+## The outline hull z-fights any skydome it is allowed to twin, and only in gameplay (2026-10-10)
+
+SuperNova stage020's sky dissolved into black hatched blocks during play but previewed clean in
+the options box. Not a texture or format problem (the DDS and `.model` were fine); it was the
+DSU inverted-hull outline. The port script's `SKY_NAMES` heuristic had left the sphere in the
+`dec` layer, so `restyle_allowed` (which exempts only `*_bg`) gave it a black hull twin. From
+inside the sphere every fragment reads as back-facing, so the whole sky got a shell pushed
+`0.00308 + 0.000375 · depth` m behind it — 0.24 m at 631 m, which is exactly the 24-bit depth
+quantum there (`z² / (0.1 · 2²⁴)`). Preview never builds hulls (`HullPlan::none()`), hence the
+"only in gameplay" split; the other SN skies are `bg:-2` and were name-exempt by luck.
+Two fixes: the data (part renamed to `bg:-2` like its siblings) and a geometric safety net —
+`instance_plan::HULL_MAX_EXTENT_M` (150 m, from `ktmdl::bbox_extent`) skips the hull for any
+stage part that reaches that far, whatever its layer name; the push is sub-pixel past ~200 m
+anyway. Rules: a visual bug that is gameplay-only but preview-clean is one of the gameplay-only
+layers (hulls, stock pass sort modes, the real camera set, dancers) — diff that table first
+(`.agents/summary` / this file) before suspecting the asset; and never gate a geometric
+mechanism on a naming convention alone when the geometry is available to check.
+
+## "Can not find" for EVERY injected texture means LayeredFS isn't reaching the game — and one loader can't survive that (2026-10-18)
+
+A Windows tester crashed at `gamemdx+0x1ac452` (`bm2d::data::Manager::Update`, null write at
+`+0x308`) whenever a BACKGROUND customize row got focus; the maintainer's identical 20260915
+install never did. The crash itself was the documented class (`docs/bm2d_background_preview_research.md`):
+Update treats a *failed* FileManager load as finished and dereferences the inner-IFS object
+that was never registered. What was new was the diagnosis path: the same logs were full of
+`afpu-render: get_bitmap_info[seop_item_*] can not find` — the Mods tab title, every option
+label, preview images, S-Marvelous and song-length textures — i.e. **nothing LayeredFS
+generates at runtime was being served**, while `avs_fs_lstat` of the alias arcs still
+succeeded (the registry entries had a valid arc index). On a healthy install there are zero
+`seop_item` misses, so any miss is a serving failure, not a label bug. Nothing in our log said
+so, because the redirected `avs_fs_open` failing inside AVS was silent; the tester's 55-char
+install root (`C:\Games\<long name>\contents`) put every served path at 127–140 chars, right
+across libavs's 128-byte `GetLongPathNameA` buffer in its native open (`FUN_1800082c0`, which
+also `strcmp`s the input against the long form — case-sensitive).
+
+Rules: (1) when a report shows "can not find" for assets that are atlas-cloned or cache-served,
+stop debugging the asset and check the serving layer first — the tester's actual complaint
+("I don't see Peter or CJ") was unlabeled rows, not missing dancers. (2) Any game loader we
+feed generated names into must be proven loadable *through the game's own open* before the
+request (`avs_layeredfs::read_mod_file_as_game`), because Konami loaders assume their own data
+and have no failure path. (3) A redirected open that AVS refuses must WARN with the native path
+and its length — install path length and casing are real-world variables CrossOver never
+exercises. (4) The `GetLongPathNameA` fallback must match the mod folder as a path component,
+not as the literal `.\data_mods` prefix: absolute paths are the ones that overrun the buffer.
+
+## Gating death is not the same as preventing it — `GamePlayActor+0x2B7` is the matching-battle flag (2026-10-20)
+
+The training loop's "death bypass" set `GamePlayActor+0x2B7` mid-song: it does block both
+fail-out paths (`0x103C` → STEP_GAME_OVER and the DPS finish-poll), but it is really the
+**matching-battle** ctor flag. In stock play it is set at construction, where it is also passed
+into every GaugeActor as the gauge's own floor flag (`+0xD8`): the shared delta apply then clamps
+the value at 1 and sends `0x103B` instead of zeroing it and sending the `0x103A` death. Set only
+on the actor, the gauge still dies, `m_isDead` latches, and the run continues in a gate-up + dead
+combination stock never produces. The old loop revived on the same frame, so nobody saw it; once
+the revive was removed, holding that state for a few seconds (around the point stock would have
+failed the player on sustained misses) hard-crashed 20260915 with nothing in
+`ddr_hook_crash.log` or spice2x's dialog. The cause was never pinned down (the engine paths I
+read look benign), so the fix avoids the state entirely: `song_reset::hold_gauges` raises the
+gauge floor per frame (LifeGaugeActor has no floor, so its dead latch `+0xB0` is set at 1 life to
+hold the last life).
+
+Rules: (1) to make a run unfailable, keep the gauge out of the death state; never let `m_isDead`
+latch and keep playing. (2) When a fix removes a same-frame cleanup ("revive immediately"), the
+state it used to clear becomes long-lived and untested — check whether stock ever holds it.
+(3) A hard crash with no SEH log and no spice2x dialog is a fail-fast / process exit class —
+don't expect the crash log to explain it.
+
+## StepMania pack loader traps (2026-10-24)
+
+**An LZ77-compressed PNG arc member renders as a flat coloured square.** The first injected
+jacket (`data/jacket/<b>_jk.png` packed by `arc_tool.py pack`, which compresses by default)
+drew purple on the stage panel and red on results — no error, no crash, just
+`afp_mc_load_bitmap no <b>_jk`. All 266 sampled stock PNG jackets are stored raw; DDS
+thumbnail members may be compressed. `core/arc.rs` writes uncompressed, so the DLL path is
+safe; any offline packer must store PNG members raw.
+
+**The guideline (beat-line) drawer loops on `get_offset_y` until the offset passes 720 px.**
+It is the only `get_offset_y` caller bounded by distance rather than by note count. A
+display remap that returns 0 (StepMania `#SPEEDS` to 0) or a decreasing offset (negative
+`#SCROLLS`) hangs the whole game thread (cabinet run #9: dancers frozen, test menu dead,
+keepalive still logging). `scroll_remap` therefore routes that call site to the trampoline
+(stock math) and refuses to publish any table if the bypass did not land; the speed
+multiplier is floored at 1/64 as a second guard. Rule: before remapping a position function,
+find every caller that iterates "until position > bound" and keep it on stock values.
+
+**Warm boots trust cached artefacts AND cached rejections.** Changing a conversion parameter
+(duration cap, lead-in rule, title choice) silently does nothing for songs already indexed:
+"Cheper" stayed rejected after the 60-min cap landed. Bump
+`services/stepmania/model.rs::FORMAT_VERSION` with every change to conversion output or
+`index.bin`; the cost is one re-index (~25 ms/song).
+
+**The DLL never indexes StepMania packs; `ddr_world_hook_prep.exe` (`prep/`) does, before the
+game.** (2026-10-25, after a 14,000-song library stalled a tester's boot for 15 minutes with a
+clean log.) Cache ownership is the race-freedom argument and is strict: the tool writes
+`index.bin`, `ssq/`, `xsb/`, `tn/`, `sync.bin`; the DLL writes `xwb/`, `jacket/`, `lru.bin`,
+`thumbnail/`. Never add a DLL write to a tool-owned file (the old `mark_audio_failed` was the
+one such write — it is session-only now) and never add a tool write to a DLL-owned one. The
+DLL loads `index.bin` at step 0', validates records read-only on a thread (`validation.rs`;
+the `startup.arc` fingerprint waits ≤ 15 s) and drops anything whose artefacts or source
+stamps changed. There is no in-game timeout/partial-injection path any more; a boot without a
+tool-written `index.bin` injects nothing and WARNs once.
+
+**The tool must BE the DLL's pipeline, mounted — never a re-implementation.** The warm path
+trusts a record only when fingerprint + identity + artefacts match, so a tool that converted
+even slightly differently would produce a cache the game re-validates and the next tool run
+re-converts. `prep/` mounts `src/core/*` and `src/services/stepmania/{cache,ceiling,convert,
+identity,model,musicdb,records,sync_state}.rs` by `#[path]` with `log_*` macro shims at its
+crate root; the former `tools/sm_pack_check` (which had its own `convert_song`) is gone,
+folded in as `--dry-run`. Mounted files may import only `crate::core::*`, siblings via
+`super::`, and `crate::{log_info,log_warn,log_debug}`. One asterisk on "byte-for-byte": BC1
+thumbnails (`tn/*.dds`, texpresso) differ by one block endpoint ±1 LSB between an ARM host
+and the x86 DLL — float rounding, invisible, irrelevant to the warm path (fingerprints cover
+sources). On a Windows cabinet both sides are x86.
+
+**Injection has a ceiling (`ceiling.rs`), never a knob.** `MAX_INJECTED_SONGS` (30,000 —
+just under the gs texture table's hard 30,208; tested to 14,138 on 2026-10-26), first by
+`pack/folder` name, and NOTHING under a stock-sized XML arena. The arena is the AVS
+property-tree arena (`song_limit_expansion`, now 64 MiB, defined once in `ceiling.rs`), not a
+text buffer; the stock 716 KB document fits 1 MiB, so text ≤ arena × 2/3 is the budget the
+transform enforces as a last net. Raise the constant by testing, never per cabinet; the tool
+prints what the game will inject so the operator trims packs instead.
+
+**Injected songs are the LAST boot work items.** Their mcodes (9,000,000+) and their
+position in `musicdb.xml` (appended) put them at the end of `CheckStepDataActor`'s work list,
+so the fast-bootup invariant "the final item is always Stock" lands exactly on an injected
+song. Anything that wants to keep the game's own analysis away from an injected file must
+handle the final item specially (fast_bootup: entry vptr on a vtable copy whose `hasChart`
+answers "no"; record flipped so the bad file never loads). Also, the boot's groove-radar
+maxima are dead data on 20260721 (reset to constants at scene 7 and every new game), so
+"an extreme custom chart shrinks stock radars" does not happen there.
+
+**Early DLL log lines never reach spice2x's `log.txt`.** Anything logged before the
+debughook attaches (LayeredFS install, index spawn, a fast cabinet's `startup.arc`
+transform) is invisible on the cabinet; prove early-boot behaviour with a later summary line
+or a marker file, not with an early INFO.
+
+**Never hand the game's FileManager a load from the init thread.** `Application::onBoot`
+drains the step-data manager with a blocking loop (`FUN_1801fe040`) right after it registers
+`startup.arc`, and that loop pumps EVERY pending record until the queue is empty — including
+anything the DLL's init thread registers meanwhile. A `.png` goes to the PngFileCallback, which
+creates a D3D texture under the renderer's device mutex; before the device exists the mutex
+handle is NULL and `FUN_1802392e0` spins on `WaitForSingleObject(NULL, 10)` forever, on the game
+thread, with no window and no crash (deploy #7 of the prep-tool work, 2026-10-26: 236 % CPU,
+`note_types_mine00_{s,m,l}.png` at records 1–3). The DLL's own `startup.arc` work (a 4 s
+thumbnail-arc fallback build) is what widened the race so that `enable()` landed inside the
+drain. Rule: `FileManager::Load` (and anything else that needs the device) is issued from the
+frame pump (`widget_renderer::run_on_render_thread`) or a scene callback, never from
+`init`/`enable`; `asset_loader` and `scene3d::arc_set` already follow it, `note_types_expansion`
+now does too. Diagnosing a silent boot hang on the CrossOver install: don't kill it — `CX_BOTTLE=
+bemani .../CrossOver/bin/wine winedbg --command "bt all" <wine pid>` (`--command "info proc"`
+lists pids) gives every thread's stack as `module+offset`, and `--command "print /x *(unsigned
+long long*)<addr>"` reads memory (gamemdx base = any `gamemdx (+off)` frame address minus the
+offset; `DAT_1806f2f48` = the step-data manager, records at `mgr+8`, names at `mgr+0x28`).
+
+**Step-data record status 5 is "loaded, no file-type callback", not "failed".** Live read of
+onBoot's records (20260915): `.rlist`/`.csv`/`.xml`/`.db` files sit at status 5 with their
+buffer and `+0x1c` = byte count; records a callback consumed (`startup.arc` → Archive,
+`.png` → Png) are status 4. `docs/ultrafast_boot_research.md` §3.2 is corrected; SSQs (no
+callback accepts `.ssq`) are the status-5 case, which is why onUpdate's status gate admits 5.
+
+**A 14,000-song library hits SIX fixed limits, one per boot, and five of them are silent
+(2026-10-26, deploys #6–#8i).** In the order they bite: (1) AVS property node cap — a tree
+created without `PROPERTY_MODE_EXTEND` refuses the 65,536th node (`W:prop: read error by
+mem[…](80092143)`), `createList` gets NULL and the music DB is EMPTY; the stock document is
+~16,200 nodes and each injected entry 12, so it binds near 3,800 songs. (2) Step-data record
+pool, 4,096 records, no overflow guard. (3) Arc loader chunk — `ArchiveFileCallback` parses the
+cue + name tables out of the FIRST 512 KiB chunk with no bounds check; ~10,500 thumbnail members
+overflow it and the name copy at `gamemdx+0x343D` faults. (4) GS texture table — 4,096 slots
+(`Renderer::initGs` config `0x1000`, also the TextureData pool), one per resident wheel
+thumbnail; when full, texture creation returns handle 0 and `FUN_18022f220 → FUN_180237630(0)`
+faults on the I/O worker. The handle packs the slot in 15 bits, so 32,768 is the format's
+ceiling — the texture table is THE ceiling on injected songs (30,208 after a 2,560 reserve).
+(5) LayeredFS's own `_cache` index walk: 42k StepMania cache files made it lose the
+`startup.arc` race (`CACHE_INDEX_SKIP`). (6) The 1 MiB XML arena (known). All patched from
+`song_limit_expansion` (`ea3_boot` for anything `onBoot`/`initGs` constructs; the arena and
+property-mode at the `startup.arc` open / `early_apply`), and `ceiling.rs` models every one of
+them from the LIVE patch state so a late patch degrades to fewer songs, never a crash.
+`scripts/aob_check.py --build … --pattern …` is the quick uniqueness sweep for a new AOB.
+
+**fast-bootup's cache is only as fast as its verifier, and a stat per cached file does not
+scale (2026-10-26).** At 14k songs the identity sweep (two `std::fs::metadata` per file,
+single-threaded, ~3–10 ms each under Wine) published 100 s after the boot pass had begun, so a
+fully-captured cache replayed nothing and every boot was the 2.5-minute first boot. Injected
+StepMania SSQs are now identified by their index record's source fingerprint
+(`cache::Identity::Indexed`, no I/O — the prep tool is the sole writer and re-converts exactly
+when that fingerprint changes), the stock files are stat'd on 4 workers, and a verifier that
+still publishes mid-pass amends the plan for the files ahead of the cursor (`late_replan`).
+Result: `replay plan -- 78109/78110`, pass 134 ms, title at +24 s. Rule: anything that gates
+replay must be O(1) per injected song or come from data the tool already wrote; never a stat
+storm racing the game thread.
+
+**Diagnosing a boot crash on the CrossOver install.** spice2x's stackwalker only prints when no
+debugger is attached and only for the SECOND-chance fault; libavs's thread-task handler
+(`thread-task.c:48`) swallows a hardware fault in an AVS-thread task and re-raises it as a C++
+throw with no trace of the original site (the visible fault is then `kernelbase+0xD8B7`,
+`RaiseException`, with a bogus record). `crash_handler.rs` now installs a first-chance vectored
+handler that logs the first 8 interesting exceptions (C++ throws + hardware faults) with a
+`RtlCaptureStackBackTrace` as `module+offset`, and the top-level filter appends the same
+backtrace — read `ddr_hook_crash.log`, the first `first-chance ACCESS_VIOLATION … at
+gamemdx.dll+0x…` line is the real site; map `gamemdx+off` in Ghidra (20260915 base
+0x180000000). winedbg (`CX_BOTTLE=bemani …/bin/wine winedbg --command "bt all" <pid>`) is for
+hangs; its `break <symbol>` did not work against this process. `scripts/game_nav/launch.sh`
+must pass `-z`, not `-k`: with `-k` the DLL arrives moments before `ea3_boot` and LayeredFS
+misses `startup.arc` (stock DB + `FastBootup: … LayeredFS never saw the startup.arc open`).
+
+## A skinned normal carries the bone's scale — Big Head tripled the outline push on every head (2026-10-25)
+
+The DSU outline hull pushes each vertex along its SKINNED normal by a world-metre amount
+(`mdl_cel.hlsl::outline_out`). `skin_apply` multiplies the normal by the bone's 3×3, and Big Head
+scales `bones[Head]` by 3, so every Head-weighted vertex was pushed 3× further: 9–20 mm of ink on
+a 3× head, eye sockets filled black (the first dancers with eyeball geometry — the JoJo EoH port —
+showed "no irises" and "distorted faces" only under BIG HEAD). Stock dancers hid it because their
+eyes are painted on the face sheet. Fix: `normalize(ns)` before the push (DSU's own normals were
+unit on its unit-scale rigs, so this is faithful); the two `mdl_*_outline.vs` blobs were rebuilt.
+Rule: anything that converts a skinned normal into a world LENGTH must normalise it first — bone
+matrices are not pure rotations once Big Head (or any per-bone scale track) is in play.
+
+## A donor-rig dancer CAN carry extra bones: dynamic chains are appended after the 33 (2026-10-25)
+
+Stock clips address bones 0..32 by index and `evaluate_into` seeds every untracked bone at its
+rest local, so bones APPENDED after the 33 ride their parent at rest and the dynbones solver
+(`dynbones_logic.rs`, resolved by `.b2it` name, `parents[i] == parent`) drives them like the Winx
+hair. Requirements seen while adding Jotaro's chain / Dio's muffler: the game-space bind +x must
+run along the segment (`edit_bone.matrix` with X = direction; the add-on exports the bone frame
+as is), `ddr_bone_order` must list the new bones after the 33, the chain must be posed into its
+REST (hanging) shape before the bake since that pose is what the solver returns to, and
+`port_lib.export_and_check` now accepts ≥ 33 bones (palette ≤ 52, frame board 64 — a few chains
+fit). `exclude=` lists the colliders a bone IGNORES (the anchored root link sits inside the torso
+box). The dancer's whole-body clips still warn "33 bones, armature has 37" in Blender previews;
+that is expected.
+
+## A flat stage rig's `root` must be the GAME identity, not Blender's (2026-10-25)
+
+The ASBR stage port's first animated parts looked right in Blender and wrong on re-import: every
+mesh weighted to `root` (the whole static part) stood 90° on its side. The port had left the
+`root` edit bone at Blender's identity; the exporter converts bone frames Blender → game
+(`convert.rowmat_from_blender`), so that bind became a 90°-about-X frame, while the loop's root
+keys are the game identity — the evaluator re-posed the root by the difference. Build root as
+`eb.matrix = convert.rowmat_to_blender(identity)` (SuperNova's `build_part` does, via its game-col
+binds) and read the exported bind back (`port_stage_asbr.export_part` asserts it). Related, from
+the same port: a q48 (`0x1C`) identity decodes 2e-5 off, 1 cm at a 250 m cloud ring — key a
+static root with an exact kind-1 float quaternion; and a decimated rotation track must not span
+≥ ~140°: slerp takes the short way round, so a full-turn sky ring reduced to two keys spins back.
+
+## nuccChunkAnm addresses its targets through the chunk REFERENCE table (2026-10-25)
+
+Every other NUCC chunk stores page-relative chunk indices; an Anm's clump / bone / model indices
+are into the page's slice of the (name, chunk map) reference pairs the chunk table keeps between
+the maps and the index list (`nuccChunkPage.reference_size`). Read through the chunk indices they
+"resolve" to plausible but wrong chunks (Page / Anm chunks as bones). The reference NAME is the
+instance, the map the template, so one coord can be animated as many differently named
+instances. `xfbin_dump` exposes them as `Page.refs` / `ChunkRef`.
+
+## A camera set without `_non` shots films straight through every dance-clip switch (2026-10-26)
+
+The director (`schedule.rs`, A3's CameraActor rule) hides each dance cut with a camera cut: at
+the cut it switches to the next `_non` shot and holds it 1–2 s. With an empty `_non` list the
+main shot just keeps running, so the dancer visibly snaps between clips on camera. Griffin House's
+hand-authored set (`_st01..04` only) and the two ASBR stages borrowing it all did this. Any custom
+camera set needs `_non` cut-aways; `scripts/gen_cutaway_shots.py` derives safe ones from the main
+shots. (Rocky Mountain Village's black tree boxes from the same round were first blamed on the
+skinned shader; the real cause was the DXT1 mip encoder — see the next entry.)
+
+## A DXT1 re-encoder must keep the punch-through mode, or every mip of a cut-out turns black (2026-10-26)
+
+`xfbin_dump.dxt_halve` (the block-space downsampler that builds the missing mip chains of the
+ASBR sheets) always wrote DXT1 blocks with c0 > c1 — the opaque 4-colour mode — so the levels it
+generated had no transparent texels. Level 0 came straight from the source, so close-up previews
+were perfect; in-game the distant backdrop trees sample the small levels and drew as black boxes
+(and "fixing" the shader changed nothing). Rule: a DXT1 block with any transparent texel must be
+written c0 <= c1 with index 3 for those texels; and when cut-outs go black only at a distance,
+check the mip levels before the material.
+
+## Optional content packs: traps met while building them (2026-11-12)
+
+- **Info-ZIP stores `.arc` uncompressed below `-9`.** The suffix is on `zip`'s built-in
+  "already compressed" list (it means the 1980s ARC format), so `zip -r` wrote every
+  pre-packed model arc as `Stored`: the base release zip was 119 MB instead of 30 MB.
+  `-9` compresses regardless of suffix (`scripts/build_release_archive.sh`). Python's
+  `zipfile` has no such list (`scripts/build_packs.py`).
+- **A `match` on `mutex.lock().unwrap()…` holds the guard through every arm.** Locking the
+  same mutex again inside an arm deadlocks the thread. This hung the test HTTP server in
+  `updater/tests/packs_e2e.rs`; take the value in a `let` (or a block) first.
+- **A child's stdin pipe is not closed "when the arm ends".** In
+  `match x { A => { pipe.write_all(..); None } B => Some(pipe) }` the pipe is moved only in
+  arm B; in arm A it lives until the function returns, so the child never sees end of
+  input. `drop(pipe)` explicitly. `packs_e2e.rs` now also kills any updater run that
+  outlasts 60 s (`wait_bounded`), so a harness mistake fails instead of hanging the suite.
+- **serde deserializes a struct from a JSON ARRAY too** (fields in order). A file documented
+  as an object must be checked for `is_object()` first — `[1]` parsed as a valid pack
+  selection. `updater/src/packs/state.rs::from_object`, and the same check per pack entry
+  in `catalog.rs`.
+- **`git ls-files -s` blob ids make a lossless-move check cheap**: compare them with
+  `git hash-object --no-filters --stdin-paths` over the copy. Used to move 31 536 model
+  files to the assets repository.
+- **macOS and Windows file systems fold case**: a test that creates `Custom/` and `CUSTOM/`
+  as two folders gets one. Compare by slug instead of creating both.

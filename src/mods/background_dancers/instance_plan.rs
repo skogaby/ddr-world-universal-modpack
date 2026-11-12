@@ -4,7 +4,8 @@
 //! what order, with which pass mask, sort key and frame-board slot.
 //!
 //! Build order (design §4.3.5): stage parts, dancers, each dancer's parts,
-//! each dancer's shadow, then — when the outline plan is non-empty — one
+//! each dancer's shadow, each flying dancer's flight-effect pools (`Fx`,
+//! `flight_fx.rs`), then — when the outline plan is non-empty — one
 //! inverted-hull twin per restyle-eligible body PER LAYER, sharing the
 //! body's slot. Slots are `slot_base + owner_index` (design §5.3: gameplay
 //! 0, P1 previews 0, P2 previews 16); owners beyond the budget are skipped
@@ -16,6 +17,7 @@
 use std::time::Instant;
 
 use super::selection::SHADOW_MODEL;
+use super::style_rig::StyleRig;
 
 /// `SceneNode.instance` value meaning "no board slot" — pinned equal to
 /// `scene3d::frame_board::NO_SLOT` by a `const` assertion in `session.rs`.
@@ -37,10 +39,34 @@ pub enum InstanceKind {
     /// bit-31 program selector so the synthesized variant container's
     /// outline pair (program 0) draws it. Shares `of`'s frame-board slot —
     /// never published itself (RE §4.6). `layer` indexes the session's
-    /// `HullPlan`: INK has one layer; LAYERED stacks one hull per palette
-    /// colour, each a band wider (`outline.rs`).
+    /// `HullPlan` (DSU's ink: one black layer — `outline.rs`).
     Hull { of: usize, layer: usize },
+    /// A flight-effect pool model of dancer `dancer` (`pool` indexes its
+    /// `flight_fx::DancerFx::pools` / `frames`): sprites or ribbons placed
+    /// by bone matrices, coloured per draw record (`flight_fx.rs`).
+    Fx { dancer: usize, pool: usize },
+    /// A pool model of the flight intro's stage effect (the sky burst;
+    /// index into `flight_fx::StageFx::pools`).
+    StageFx(usize),
+    /// Winx Club: the ENCHANTIX twin body of dancer `n` (hidden until the
+    /// transformation; `ParsedDancer::twin`).
+    Twin(usize),
+    /// Winx Club: a pool model of a joint-bound effect (`chara_fx.rs`) of
+    /// dancer `dancer` — on its twin when `twin` — of bank `bank`
+    /// ([`CHARA_BANK_CHENGE`] / [`CHARA_BANK_WING`]), pool `pool` of that
+    /// bank's `JointFx::pools`.
+    CharaFx {
+        dancer: usize,
+        twin: bool,
+        bank: u8,
+        pool: usize,
+    },
 }
+
+/// `InstanceKind::CharaFx::bank`: the transformation effect.
+pub const CHARA_BANK_CHENGE: u8 = 0;
+/// `InstanceKind::CharaFx::bank`: the wing-tip sparkles.
+pub const CHARA_BANK_WING: u8 = 1;
 
 impl InstanceKind {
     /// Short tag for the built/skipped log lines.
@@ -51,6 +77,10 @@ impl InstanceKind {
             InstanceKind::Part { .. } => "part",
             InstanceKind::Shadow(_) => "shadow",
             InstanceKind::Hull { .. } => "hull",
+            InstanceKind::Fx { .. } => "fx",
+            InstanceKind::StageFx(_) => "stage fx",
+            InstanceKind::Twin(_) => "twin",
+            InstanceKind::CharaFx { .. } => "chara fx",
         }
     }
 
@@ -65,12 +95,17 @@ impl InstanceKind {
 /// and never a stage part whose model is the `_bg` skydome/backdrop (an
 /// inward-facing dome under a directional light gets a gradient across the
 /// sky). Hull twins inherit their body's verdict. Per-material blend-group
-/// exclusions are applied on top by `render_item::restyle_materials`.
+/// exclusions are applied on top by `render_item::restyle_candidates`.
 pub fn restyle_allowed(kind: &InstanceKind, model_name: &str) -> bool {
     match kind {
-        InstanceKind::Shadow(_) => false,
+        // The effect pools keep their unlit additive materials (no style,
+        // no outline).
+        InstanceKind::Shadow(_)
+        | InstanceKind::Fx { .. }
+        | InstanceKind::StageFx(_)
+        | InstanceKind::CharaFx { .. } => false,
         InstanceKind::StagePart(_) => !model_name.ends_with("_bg"),
-        InstanceKind::Dancer(_) | InstanceKind::Part { .. } => true,
+        InstanceKind::Dancer(_) | InstanceKind::Part { .. } | InstanceKind::Twin(_) => true,
         // The twin's model_name is the body's; a Hull of a Hull never exists.
         InstanceKind::Hull { .. } => !model_name.ends_with("_bg") && model_name != SHADOW_MODEL,
     }
@@ -105,6 +140,10 @@ pub struct Instance {
     pub material_count: usize,
     /// Texture-table entries still on the default texture (retry while > 0).
     pub textures_pending: usize,
+    /// The runtime look switch (`style_rig.rs`): captured at build for
+    /// every restyle-eligible instance, `None` otherwise (and for a Winx
+    /// body on the wipe containers).
+    pub style_rig: Option<StyleRig>,
     pub attached_at: Option<Instant>,
     /// The node-level "force hidden" it was attached with has been dropped
     /// (after the instance's first frame-board publish — the board's own
@@ -138,6 +177,7 @@ impl Instance {
             bone_count,
             material_count: 0,
             textures_pending: 0,
+            style_rig: None,
             attached_at: None,
             node_shown: false,
             queued: false,
@@ -157,12 +197,35 @@ pub struct PassMasks {
 }
 
 /// One parsed stage part (`gm_<stage>_<part>`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StagePartSpec {
     pub model_name: String,
     /// The `:N` low-priority rank (⇒ the lowprio pass, sort key = N).
     pub priority: Option<i32>,
     pub bone_count: usize,
+    /// The model's reach from its origin, metres (`ktmdl::bbox_extent`; 0 =
+    /// unknown). Gates the hull twin — see [`HULL_MAX_EXTENT_M`].
+    pub extent_m: f32,
+}
+
+/// No inverted-hull twin for a stage part reaching further than this from
+/// its origin (metres). Such a part is a skydome / backdrop the camera sits
+/// INSIDE or far away from, whatever its layer name: DSU's push is
+/// `0.00308 + 0.000375 · depth` m (`mdl_cel.hlsl`), while the 24-bit depth
+/// quantum at view depth `z` with the 0.1 m near plane is `z² / (0.1 · 2²⁴)`
+/// — the two cross near 630 m, so the black shell z-fights its own body and
+/// the sky dissolves into black hatched blocks (SuperNova stage020's `dec`
+/// sphere, radius 631: the push cleared only ~1 quantum). From ~200 m out the
+/// push is already under a pixel (a 1080p pixel spans ~0.12 m there), so the
+/// outline buys nothing past this line either way. The `_bg` name rule in
+/// [`restyle_allowed`] stays the one that also skips the LIGHTING restyle;
+/// this is the geometric safety net for the outline only.
+pub const HULL_MAX_EXTENT_M: f32 = 150.0;
+
+/// Whether a stage part may take an inverted-hull outline twin: restyle
+/// eligibility ([`restyle_allowed`]) plus the reach gate above.
+pub fn hull_allowed_for_stage_part(model_name: &str, extent_m: f32) -> bool {
+    restyle_allowed(&InstanceKind::StagePart(0), model_name) && extent_m < HULL_MAX_EXTENT_M
 }
 
 /// One parsed accessory part of a dancer (`pl_<key>_<part>`).
@@ -183,10 +246,32 @@ pub struct DancerSpec {
     /// Ground-contact bones resolved ⇒ a shadow quad is planned (when the
     /// shadow skeleton parsed).
     pub has_ground: bool,
+    /// Flight-effect pool models of this dancer (empty off a flight).
+    pub fx_pools: Vec<FxSpec>,
+    /// Winx Club: this body's own joint-bound effect pools `(bank, pool)`
+    /// (a standalone Fairy's wing sparkles).
+    pub chara_pools: Vec<(u8, FxSpec)>,
+    /// Winx Club: the Enchantix twin loaded beside it.
+    pub twin: Option<TwinSpec>,
+}
+
+/// The twin body + its effect pools `(bank, pool)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwinSpec {
+    pub model_name: String,
+    pub bone_count: usize,
+    pub chara_pools: Vec<(u8, FxSpec)>,
+}
+
+/// One flight-effect pool model (`fx_<stage>_<s|r><player><k>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FxSpec {
+    pub model_name: String,
+    pub bone_count: usize,
 }
 
 /// Everything `plan_instances` needs from a `Parsed` bundle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanInput {
     pub stage_parts: Vec<StagePartSpec>,
     pub dancers: Vec<DancerSpec>,
@@ -194,6 +279,8 @@ pub struct PlanInput {
     pub shadow_bone_count: Option<usize>,
     /// The shadow quad's model name (`pl_shadow00`).
     pub shadow_model: String,
+    /// The flight intro's stage-effect pools (empty elsewhere).
+    pub stage_fx: Vec<FxSpec>,
 }
 
 /// The planned table.
@@ -214,6 +301,9 @@ pub struct Plan {
 /// - `slot_budget`: how many owners may hold a slot; the tail is `Skipped`
 ///   with [`NO_SLOT`] (the caller logs the WARN from `Plan::truncated`).
 /// - `hull_layers`: outline layers per restyle-eligible body (0 = none).
+/// - `hull_stage` / `hull_dancers`: which bodies get hulls — stage props /
+///   dancer bodies, parts and twins (the session shows or hides each hull
+///   per look, `style_rig.rs`).
 /// - `item_pass_mask`: `Some(m)` stamps every instance with `m` (hull twins
 ///   included); `None` = the stock `masks`.
 pub fn plan_instances(
@@ -222,6 +312,8 @@ pub fn plan_instances(
     slot_base: u32,
     slot_budget: usize,
     hull_layers: usize,
+    hull_stage: bool,
+    hull_dancers: bool,
     item_pass_mask: Option<u32>,
 ) -> Plan {
     let mask_of = |stock: u32| item_pass_mask.unwrap_or(stock);
@@ -257,8 +349,25 @@ pub fn plan_instances(
             d.bone_count,
         ));
     }
-    // Build order (design §4.3.5): stage parts, dancers, parts, shadows.
+    // Build order (design §4.3.5): stage parts, dancers, (Winx twins),
+    // parts, shadows.
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); input.dancers.len()];
+    for (i, d) in input.dancers.iter().enumerate() {
+        let Some(t) = d.twin.as_ref() else {
+            continue;
+        };
+        max_bones = max_bones.max(t.bone_count);
+        children[i].push(instances.len());
+        instances.push(Instance::pending(
+            InstanceKind::Twin(i),
+            t.model_name.clone(),
+            mask_of(masks.dancer),
+            0,
+            slot_for(instances.len()),
+            false,
+            t.bone_count,
+        ));
+    }
     for (i, d) in input.dancers.iter().enumerate() {
         for (k, p) in d.parts.iter().enumerate() {
             children[i].push(instances.len());
@@ -290,6 +399,64 @@ pub fn plan_instances(
             ));
         }
     }
+    for (i, d) in input.dancers.iter().enumerate() {
+        for (k, f) in d.fx_pools.iter().enumerate() {
+            max_bones = max_bones.max(f.bone_count);
+            children[i].push(instances.len());
+            instances.push(Instance::pending(
+                InstanceKind::Fx { dancer: i, pool: k },
+                f.model_name.clone(),
+                mask_of(masks.dancer),
+                0,
+                slot_for(instances.len()),
+                false,
+                f.bone_count,
+            ));
+        }
+    }
+    // Winx Club joint-bound effect pools: the body's own, then its twin's.
+    for (i, d) in input.dancers.iter().enumerate() {
+        let own = d.chara_pools.iter().map(|p| (false, p));
+        let twin = d
+            .twin
+            .iter()
+            .flat_map(|t| t.chara_pools.iter())
+            .map(|p| (true, p));
+        let mut per_bank: [[usize; 2]; 2] = [[0; 2]; 2];
+        for (is_twin, (bank, f)) in own.chain(twin) {
+            let b = (*bank as usize).min(1);
+            let pool = per_bank[is_twin as usize][b];
+            per_bank[is_twin as usize][b] += 1;
+            max_bones = max_bones.max(f.bone_count);
+            children[i].push(instances.len());
+            instances.push(Instance::pending(
+                InstanceKind::CharaFx {
+                    dancer: i,
+                    twin: is_twin,
+                    bank: *bank,
+                    pool,
+                },
+                f.model_name.clone(),
+                mask_of(masks.dancer),
+                0,
+                slot_for(instances.len()),
+                false,
+                f.bone_count,
+            ));
+        }
+    }
+    for (k, f) in input.stage_fx.iter().enumerate() {
+        max_bones = max_bones.max(f.bone_count);
+        instances.push(Instance::pending(
+            InstanceKind::StageFx(k),
+            f.model_name.clone(),
+            mask_of(masks.stage),
+            0,
+            slot_for(instances.len()),
+            false,
+            f.bone_count,
+        ));
+    }
     // Slot budget: every instance so far OWNS a board slot.
     let slot_owners = instances.len();
     let truncated = slot_owners.saturating_sub(slot_budget);
@@ -304,7 +471,9 @@ pub fn plan_instances(
     // LAYER of the plan, each reading the body's slot. Never for the
     // shadow or the skydome part (their materials stay stock, so program
     // 0 of their container is the body again) — `restyle_allowed` is the
-    // same rule the restyle uses. Layer order within a body does not
+    // same rule the restyle uses — and never for a stage part reaching past
+    // `HULL_MAX_EXTENT_M` (a backdrop by geometry, whatever its name: the
+    // shell would z-fight its body). Layer order within a body does not
     // matter for the look (the z-test stacks them); layers are grouped
     // per body so the build/teardown log reads body-by-body.
     // (Deploy #4 shipped a Dancer|Part-only filter here — a `cargo fmt`
@@ -313,9 +482,20 @@ pub fn plan_instances(
         let n = instances.len();
         for of in 0..n {
             let body = &instances[of];
-            if !restyle_allowed(&body.kind, &body.model_name)
-                || body.status == InstanceStatus::Skipped
-            {
+            if body.status == InstanceStatus::Skipped {
+                continue;
+            }
+            let eligible = match body.kind {
+                InstanceKind::StagePart(i) => {
+                    hull_stage
+                        && hull_allowed_for_stage_part(
+                            &body.model_name,
+                            input.stage_parts.get(i).map_or(0.0, |p| p.extent_m),
+                        )
+                }
+                ref kind => hull_dancers && restyle_allowed(kind, &body.model_name),
+            };
+            if !eligible {
                 continue;
             }
             let (model_name, pass_mask, sort_key, slot, mirror, bone_count) = (
@@ -364,11 +544,13 @@ mod tests {
                     model_name: "gm_boom00_bg".into(),
                     priority: Some(-2),
                     bone_count: 3,
+                    extent_m: 420.0,
                 },
                 StagePartSpec {
                     model_name: "gm_boom00_stage".into(),
                     priority: None,
                     bone_count: 2,
+                    extent_m: 9.0,
                 },
             ],
             dancers: vec![
@@ -388,6 +570,9 @@ mod tests {
                         },
                     ],
                     has_ground: true,
+                    fx_pools: Vec::new(),
+                    chara_pools: Vec::new(),
+                    twin: None,
                 },
                 DancerSpec {
                     model_name: "pl_rage00".into(),
@@ -398,11 +583,56 @@ mod tests {
                         bone_count: 1,
                     }],
                     has_ground: true,
+                    fx_pools: Vec::new(),
+                    chara_pools: Vec::new(),
+                    twin: None,
                 },
             ],
             shadow_bone_count: Some(1),
             shadow_model: SHADOW_MODEL.to_string(),
+            stage_fx: Vec::new(),
         }
+    }
+
+    #[test]
+    fn flight_fx_pools_follow_the_shadows_and_take_no_hulls() {
+        let mut input = fixture();
+        input.dancers[1].fx_pools = vec![
+            FxSpec {
+                model_name: "fx_s_s1a".into(),
+                bone_count: 101,
+            },
+            FxSpec {
+                model_name: "fx_s_r1a".into(),
+                bone_count: 244,
+            },
+        ];
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, true, true, None);
+        let fx: Vec<usize> = (0..plan.instances.len())
+            .filter(|&k| matches!(plan.instances[k].kind, InstanceKind::Fx { .. }))
+            .collect();
+        assert_eq!(fx.len(), 2);
+        let last_shadow = (0..plan.instances.len())
+            .filter(|&k| matches!(plan.instances[k].kind, InstanceKind::Shadow(_)))
+            .max()
+            .unwrap();
+        assert!(fx.iter().all(|&k| k > last_shadow));
+        assert_eq!(
+            plan.instances[fx[1]].kind,
+            InstanceKind::Fx { dancer: 1, pool: 1 }
+        );
+        assert_eq!(plan.instances[fx[1]].bone_count, 244);
+        assert!(plan.children[1].ends_with(&fx));
+        assert_eq!(plan.max_bones, 244);
+        assert!(plan
+            .instances
+            .iter()
+            .all(|i| !matches!(i.kind, InstanceKind::Hull { of, .. } if fx.contains(&of))));
+        assert!(!restyle_allowed(
+            &InstanceKind::Fx { dancer: 0, pool: 0 },
+            "fx_s_s0a"
+        ));
+        assert_eq!(InstanceKind::Fx { dancer: 0, pool: 0 }.tag(), "fx");
     }
 
     fn kinds(plan: &Plan) -> Vec<InstanceKind> {
@@ -418,7 +648,7 @@ mod tests {
 
     #[test]
     fn gameplay_plan_order_and_slots() {
-        let plan = plan_instances(&fixture(), MASKS, 0, 32, 0, None);
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 0, true, true, None);
         use InstanceKind::*;
         assert_eq!(
             kinds(&plan),
@@ -458,7 +688,7 @@ mod tests {
 
     #[test]
     fn slot_base_shifts_owner_slots() {
-        let plan = plan_instances(&fixture(), MASKS, 16, 16, 1, None);
+        let plan = plan_instances(&fixture(), MASKS, 16, 16, 1, true, true, None);
         let slots: Vec<u32> = owners(&plan).iter().map(|i| i.slot).collect();
         assert_eq!(slots, (16..25).collect::<Vec<u32>>());
         for h in plan.instances.iter() {
@@ -475,8 +705,54 @@ mod tests {
     }
 
     #[test]
+    fn dancer_only_hulls_skip_the_stage() {
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 1, false, true, None);
+        let bodies: Vec<&Instance> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(&plan.instances[of]),
+                _ => None,
+            })
+            .collect();
+        // 2 dancers + 3 parts, no stage part.
+        assert_eq!(bodies.len(), 5);
+        assert!(bodies
+            .iter()
+            .all(|b| !matches!(b.kind, InstanceKind::StagePart(_))));
+        assert!(plan.instances.iter().all(|i| i.style_rig.is_none()));
+    }
+
+    #[test]
+    fn stage_only_hulls_skip_every_dancer_body() {
+        // The Universe styles without an outline: the `_stage` part keeps
+        // its hull, dancers / parts get none.
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 1, true, false, None);
+        let hull_bodies: Vec<&Instance> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(&plan.instances[of]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hull_bodies.len(), 1);
+        assert!(matches!(hull_bodies[0].kind, InstanceKind::StagePart(_)));
+        // Everything else is identical to the full plan.
+        let full = plan_instances(&fixture(), MASKS, 0, 32, 1, true, true, None);
+        let bodies = |p: &Plan| -> Vec<(String, u32)> {
+            p.instances
+                .iter()
+                .filter(|i| !matches!(i.kind, InstanceKind::Hull { .. }))
+                .map(|i| (i.model_name.clone(), i.slot))
+                .collect()
+        };
+        assert_eq!(bodies(&plan), bodies(&full));
+    }
+
+    #[test]
     fn mask_override_covers_every_instance() {
-        let plan = plan_instances(&fixture(), MASKS, 0, 32, 2, Some(0x20));
+        let plan = plan_instances(&fixture(), MASKS, 0, 32, 2, true, true, Some(0x20));
         assert!(plan.instances.iter().all(|i| i.pass_mask == 0x20));
         let hulls: Vec<&Instance> = plan
             .instances
@@ -524,7 +800,7 @@ mod tests {
 
     #[test]
     fn budget_truncates_the_tail() {
-        let plan = plan_instances(&fixture(), MASKS, 16, 4, 1, None);
+        let plan = plan_instances(&fixture(), MASKS, 16, 4, 1, true, true, None);
         let owners = owners(&plan);
         assert_eq!(owners.len(), 9);
         for (i, inst) in owners.iter().enumerate() {
@@ -550,6 +826,44 @@ mod tests {
         assert_eq!(hull_of, vec![1, 2, 3]);
     }
 
+    /// SuperNova stage020 ships its sky sphere as the `dec` layer (radius
+    /// 631 m): no `_bg` name to exempt it, so only the reach gate keeps the
+    /// black shell off it. The restyle (lighting) verdict is untouched.
+    #[test]
+    fn far_reaching_stage_part_takes_no_hull_whatever_its_name() {
+        let mut input = fixture();
+        input.stage_parts.push(StagePartSpec {
+            model_name: "gm_snstage020_dec".into(),
+            priority: None,
+            bone_count: 1,
+            extent_m: 631.567,
+        });
+        let plan = plan_instances(&input, MASKS, 0, 32, 1, true, true, None);
+        let hull_of: Vec<usize> = plan
+            .instances
+            .iter()
+            .filter_map(|i| match i.kind {
+                InstanceKind::Hull { of, .. } => Some(of),
+                _ => None,
+            })
+            .collect();
+        // Bodies: 0 `_bg` (name-exempt), 1 `_stage`, 2 the far `dec` (reach-
+        // exempt), then dancers 3, 4 and parts 5, 6, 7.
+        assert_eq!(hull_of, vec![1, 3, 4, 5, 6, 7]);
+        assert!(restyle_allowed(
+            &InstanceKind::StagePart(2),
+            "gm_snstage020_dec"
+        ));
+        assert!(!hull_allowed_for_stage_part("gm_snstage020_dec", 631.567));
+        assert!(!hull_allowed_for_stage_part(
+            "gm_snstage020_dec",
+            HULL_MAX_EXTENT_M
+        ));
+        assert!(hull_allowed_for_stage_part("gm_snstage020_glo", 9.0));
+        assert!(hull_allowed_for_stage_part("gm_snstage020_glo", 0.0));
+        assert!(!hull_allowed_for_stage_part("gm_snstage020_bg", 9.0));
+    }
+
     #[test]
     fn restyle_allowed_cases() {
         use InstanceKind::*;
@@ -572,7 +886,7 @@ mod tests {
     fn no_shadow_when_skeleton_missing() {
         let mut input = fixture();
         input.shadow_bone_count = None;
-        let plan = plan_instances(&input, MASKS, 0, 32, 0, None);
+        let plan = plan_instances(&input, MASKS, 0, 32, 0, true, true, None);
         assert!(!plan
             .instances
             .iter()
@@ -585,7 +899,7 @@ mod tests {
     fn stage_only_and_dancer_only_shapes() {
         let mut stage_only = fixture();
         stage_only.dancers.clear();
-        let plan = plan_instances(&stage_only, MASKS, 0, 16, 1, Some(0x08));
+        let plan = plan_instances(&stage_only, MASKS, 0, 16, 1, true, true, Some(0x08));
         assert_eq!(
             kinds(&plan),
             vec![
@@ -601,7 +915,7 @@ mod tests {
         dancer_only.stage_parts.clear();
         dancer_only.dancers.truncate(1);
         dancer_only.shadow_bone_count = None; // previews parse no shadow
-        let plan = plan_instances(&dancer_only, MASKS, 16, 16, 0, Some(0x20));
+        let plan = plan_instances(&dancer_only, MASKS, 16, 16, 0, true, true, Some(0x20));
         assert_eq!(
             kinds(&plan),
             vec![
@@ -616,5 +930,73 @@ mod tests {
         );
         assert!(plan.instances.iter().all(|i| i.pass_mask == 0x20));
         assert_eq!(plan.children, vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn winx_twin_and_chara_pools() {
+        let mut input = fixture();
+        let fx = |n: &str, b: usize| FxSpec {
+            model_name: n.into(),
+            bone_count: b,
+        };
+        input.dancers[0].twin = Some(TwinSpec {
+            model_name: "pl_winxbloom04".into(),
+            bone_count: 55,
+            chara_pools: vec![
+                (CHARA_BANK_CHENGE, fx("fx_c_caa", 124)),
+                (CHARA_BANK_CHENGE, fx("fx_c_car", 240)),
+                (CHARA_BANK_WING, fx("fx_c_waa", 70)),
+            ],
+        });
+        input.dancers[1].chara_pools = vec![(CHARA_BANK_WING, fx("fx_w_waa", 70))];
+        let plan = plan_instances(&input, MASKS, 0, 64, 1, true, true, None);
+        use InstanceKind::*;
+        let k = kinds(&plan);
+        let twin_at = k.iter().position(|x| *x == Twin(0)).unwrap();
+        assert_eq!(twin_at, 4, "right after the dancer bodies");
+        assert!(plan.children[0].contains(&twin_at));
+        let pools: Vec<InstanceKind> = k
+            .iter()
+            .copied()
+            .filter(|x| matches!(x, CharaFx { .. }))
+            .collect();
+        assert_eq!(
+            pools,
+            vec![
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_CHENGE,
+                    pool: 0
+                },
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_CHENGE,
+                    pool: 1
+                },
+                CharaFx {
+                    dancer: 0,
+                    twin: true,
+                    bank: CHARA_BANK_WING,
+                    pool: 0
+                },
+                CharaFx {
+                    dancer: 1,
+                    twin: false,
+                    bank: CHARA_BANK_WING,
+                    pool: 0
+                },
+            ]
+        );
+        assert_eq!(plan.max_bones, 240);
+        // the twin takes a hull (restyle-eligible), the pools never
+        assert!(k.contains(&Hull {
+            of: twin_at,
+            layer: 0
+        }));
+        assert!(!restyle_allowed(&pools[0], "fx_c_caa"));
+        assert!(restyle_allowed(&Twin(0), "pl_winxbloom04"));
+        assert_eq!(Twin(0).tag(), "twin");
     }
 }

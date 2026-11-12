@@ -85,6 +85,17 @@ static CACHE_INDEX: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashS
 /// init. Recurses one level per cached IFS subfolder (the cache layout is
 /// `_cache/<ifs_mod_path>/<file>`, with some nested arc/ifs subtrees), indexing
 /// every regular file by its full relative path.
+///
+/// `_cache/custom_models/` and `_cache/stepmania/` are skipped: the former
+/// holds the Background Dancers cache arcs (opened by the FileManager through
+/// the CRT, never through this texture path), the latter the StepMania pack
+/// cache (SSQ/XSB/XWB/thumbnails, served by the StepMania providers — ~3
+/// files per song, 42k at a 14k-song library). Both grow with the installed
+/// content; keeping them out keeps this race-critical walk — it runs before
+/// the AVS hooks install, and the game opens `startup.arc` ~3 s after the
+/// DLL loads — independent of how much content is installed (cabinet run
+/// 2026-10-26: a 1 s walk over the StepMania cache under Wine lost the
+/// `startup.arc` open, so nothing was injected).
 pub fn build_cache_index() {
     let mut index = CACHE_INDEX.lock().unwrap();
     index.clear();
@@ -97,15 +108,31 @@ pub fn build_cache_index() {
     );
 }
 
+/// `_cache` subfolders [`build_cache_index`] never descends into.
+const CACHE_INDEX_SKIP: &[&str] = &["custom_models", "stepmania"];
+
 fn index_dir_recursive(dir: &std::path::Path, index: &mut HashSet<String>, count: &mut usize) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return, // missing _cache dir (cold start) is fine — built lazily on write
     };
+    let at_root = dir == std::path::Path::new(CACHE_FOLDER);
     for entry in entries.flatten() {
         let path = entry.path();
         match entry.file_type() {
-            Ok(ft) if ft.is_dir() => index_dir_recursive(&path, index, count),
+            Ok(ft) if ft.is_dir() => {
+                if at_root {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if CACHE_INDEX_SKIP
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&name))
+                    {
+                        continue;
+                    }
+                }
+                index_dir_recursive(&path, index, count)
+            }
             Ok(ft) if ft.is_file() => {
                 if let Some(s) = normalize_cache_path(&path) {
                     index.insert(s);
@@ -393,6 +420,33 @@ pub fn handle_texture(norm_path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Pre-convert `png_path` into the per-image cache blob LayeredFS serves for
+/// texture `name` of a per-image IFS (`argb8888rev`, AVSLZ, `width`×`height`
+/// — the form a cloned-atlas `<image>` entry declares). For callers that
+/// declare net-new names through a merged texturelist but keep their source
+/// PNGs outside the IFS mod folder (so LayeredFS never auto-injects them).
+/// Uses the same encoder and freshness check as an on-demand conversion; the
+/// PNG must not be larger than `width`×`height` (smaller is padded top-left).
+/// Returns true when the blob is present and up to date.
+pub fn prebuild_texture(
+    ifs_mod_path: &str,
+    name: &str,
+    png_path: &str,
+    width: u32,
+    height: u32,
+) -> bool {
+    let info = ImageInfo {
+        name: name.to_string(),
+        name_md5: format!("{:x}", md5::compute(name.as_bytes())),
+        format: ImgFormat::Argb8888Rev,
+        compression: CompressType::Avslz,
+        ifs_mod_path: ifs_mod_path.to_string(),
+        width,
+        height,
+    };
+    cache_texture(png_path, &info)
 }
 
 /// Purge a STOCK-NAME texture replacement: delete the converted cache file

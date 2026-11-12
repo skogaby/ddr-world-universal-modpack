@@ -9,6 +9,15 @@
 //! immediately follows its header in the release. Headers themselves are
 //! inserted by the same rule. Existing user rows, their order and their flags
 //! are never touched; rows the release no longer ships are kept.
+//!
+//! One refinement for users who re-ordered (optional content packs design
+//! §4.13): a row that is NAMED AFTER the release sibling that follows it —
+//! it shares more leading `_`-separated words with that sibling than with
+//! the preceding one — is inserted directly before that sibling, wherever
+//! the user put it. `background_dancer_source` therefore lands above
+//! `background_dancer` even when the user moved that row, instead of
+//! following an unrelated predecessor. With the release's own order the two
+//! placements coincide, so nothing changes for a list nobody re-ordered.
 
 use std::ops::Range;
 
@@ -42,6 +51,14 @@ fn section(rows: &[Value], header_pos: usize) -> Range<usize> {
 /// Rows before the first header (the whole list when there is none).
 fn pre_header(rows: &[Value]) -> Range<usize> {
     0..rows.iter().position(is_header).unwrap_or(rows.len())
+}
+
+/// How many leading `_`-separated words two ids share.
+fn shared_words(a: &str, b: &str) -> usize {
+    a.split('_')
+        .zip(b.split('_'))
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 /// Merge `release` rows into `user`. Returns the merged list and the ids of
@@ -78,12 +95,32 @@ pub fn merge_option_menu_settings(user: &[Value], release: &[Value]) -> (Vec<Val
             pos(&out, &sid).filter(|p| region.contains(p))
         });
 
-        let insert_at = match (anchor, siblings.is_empty(), header_pos) {
+        let mut insert_at = match (anchor, siblings.is_empty(), header_pos) {
             (Some(p), _, _) => p + 1,
             (None, true, Some(hp)) => hp + 1,
             (None, true, None) => region.start,
             (None, false, _) => region.end,
         };
+
+        // Named after the sibling that follows it in the release? Then it
+        // belongs directly before that sibling, wherever the user keeps it.
+        if !is_header(r) {
+            let next = release[ri + 1..]
+                .iter()
+                .take_while(|s| !is_header(s))
+                .find_map(|s| {
+                    let sid = id(s)?;
+                    pos(&out, &sid).map(|p| (p, sid))
+                });
+            if let Some((next_pos, next_id)) = next {
+                let with_previous = anchor
+                    .and_then(|p| id(&out[p]))
+                    .map_or(0, |pid| shared_words(&rid, &pid));
+                if next_pos != insert_at && shared_words(&rid, &next_id) > with_previous {
+                    insert_at = next_pos;
+                }
+            }
+        }
         out.insert(insert_at, r.clone());
         inserted.push(rid);
     }
@@ -240,6 +277,222 @@ mod tests {
         let (out, inserted) = merge_option_menu_settings(&[], &release);
         assert_eq!(ids(&out), ["x", "hA", "a", "b", "hB", "c"]);
         assert_eq!(inserted.len(), 6);
+    }
+
+    #[test]
+    fn shared_words_counts_whole_leading_words() {
+        assert_eq!(
+            shared_words("background_dancer_source", "background_dancer"),
+            2
+        );
+        assert_eq!(
+            shared_words("background_dancer_source", "background_stage"),
+            1
+        );
+        assert_eq!(shared_words("assist_tick_volume", "assist_tick"), 2);
+        assert_eq!(
+            shared_words("step_data_export", "skip_results_fast_exit"),
+            0
+        );
+        assert_eq!(
+            shared_words("arrow_scale", "arrows"),
+            0,
+            "words, not letters"
+        );
+        assert_eq!(shared_words("a", "a"), 1);
+    }
+
+    #[test]
+    fn a_row_named_after_its_following_sibling_goes_directly_before_it() {
+        // Release: … x, a_source, a. The user moved `a` to the top.
+        check(
+            &["hA", "x", "a_source", "a", "y"],
+            &["hA", "a", "x", "y"],
+            &["hA", "a_source", "a", "x", "y"],
+        );
+        // …or into another section altogether.
+        check(
+            &["hA", "x", "a_source", "a", "hB", "c"],
+            &["hA", "x", "hB", "c", "a"],
+            &["hA", "x", "hB", "c", "a_source", "a"],
+        );
+        // First row of its section, named after the second, which moved down.
+        check(
+            &["hA", "a_source", "a", "x"],
+            &["hA", "x", "a"],
+            &["hA", "x", "a_source", "a"],
+        );
+    }
+
+    #[test]
+    fn a_row_named_after_its_predecessor_or_after_neither_still_follows_the_predecessor() {
+        // `a_volume` follows `a`; the unrelated `y` after it does not pull it.
+        check(
+            &["hA", "a", "a_volume", "y"],
+            &["hA", "y", "a"],
+            &["hA", "y", "a", "a_volume"],
+        );
+        // Equally related to both neighbours: the predecessor wins, as before.
+        check(
+            &["hA", "t_start", "t_end", "t_pos"],
+            &["hA", "t_pos", "t_start"],
+            &["hA", "t_pos", "t_start", "t_end"],
+        );
+        // Unrelated to both.
+        check(
+            &["hA", "p", "N", "q"],
+            &["hA", "q", "p"],
+            &["hA", "q", "p", "N"],
+        );
+        // A following sibling in the NEXT release section is not a sibling.
+        check(
+            &["hA", "x", "a_source", "hB", "a"],
+            &["hA", "x", "hB", "a"],
+            &["hA", "x", "a_source", "hB", "a"],
+        );
+    }
+
+    /// The ids of a released `mod-config.json`'s option rows.
+    fn released(file: &str) -> Vec<Value> {
+        let path = format!(
+            "{}/tests/fixtures/option_rows/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|id| json!({"id": id.trim()}))
+            .collect()
+    }
+
+    fn id_list(rows: &[Value]) -> Vec<String> {
+        rows.iter().filter_map(id).collect()
+    }
+
+    fn committed_ids() -> Vec<Value> {
+        committed_settings()
+            .iter()
+            .map(|r| json!({"id": r["id"]}))
+            .collect()
+    }
+
+    #[test]
+    fn released_default_lists_merge_to_exactly_the_committed_order() {
+        let canonical = committed_ids();
+        for file in ["v1.3.txt", "v1.4.txt"] {
+            let (out, inserted) = merge_option_menu_settings(&released(file), &canonical);
+            assert_eq!(id_list(&out), id_list(&canonical), "{file}");
+            assert!(
+                !inserted.is_empty(),
+                "{file} predates rows the repo has today"
+            );
+        }
+    }
+
+    fn move_to(rows: &mut Vec<Value>, what: &str, index_of: &str, offset: usize) {
+        let from = pos(rows, what).unwrap();
+        let row = rows.remove(from);
+        let to = pos(rows, index_of).unwrap() + offset;
+        rows.insert(to, row);
+    }
+
+    fn slice_between(ids: &[String], from: &str, to: &str) -> Vec<String> {
+        let a = ids.iter().position(|i| i == from).unwrap();
+        let b = ids.iter().position(|i| i == to).unwrap();
+        ids[a + 1..b].to_vec()
+    }
+
+    #[test]
+    fn v1_4_list_with_ddr_selection_moved_to_the_top_of_its_section() {
+        let mut user = released("v1.4.txt");
+        move_to(
+            &mut user,
+            "ddr_selection",
+            "header_playfield_styling_options",
+            1,
+        );
+        let (out, inserted) = merge_option_menu_settings(&user, &committed_ids());
+        assert_eq!(
+            inserted,
+            ["background_dancer_source", "background_stage_source"]
+        );
+        assert_eq!(
+            slice_between(
+                &id_list(&out),
+                "header_playfield_styling_options",
+                "header_training_options"
+            ),
+            [
+                "ddr_selection",
+                "perspective",
+                "center_arrows_1p",
+                "overlay_scale",
+                "overlay_opacity",
+                "arrow_scale",
+                "arrow_opacity",
+                "background_dancer_source",
+                "background_dancer",
+                "background_stage_source",
+                "background_stage",
+            ]
+        );
+    }
+
+    #[test]
+    fn v1_4_list_with_the_dancer_and_stage_rows_moved_under_another_header() {
+        let mut user = released("v1.4.txt");
+        move_to(
+            &mut user,
+            "background_stage",
+            "header_power_user_options",
+            1,
+        );
+        move_to(
+            &mut user,
+            "background_dancer",
+            "header_power_user_options",
+            1,
+        );
+        let (out, _) = merge_option_menu_settings(&user, &committed_ids());
+        let ids = id_list(&out);
+        assert_eq!(
+            ids[..6],
+            [
+                "header_power_user_options",
+                "background_dancer_source",
+                "background_dancer",
+                "background_stage_source",
+                "background_stage",
+                "premium_free",
+            ]
+        );
+        // The section they left keeps its rows, with nothing stranded in it.
+        assert_eq!(
+            slice_between(
+                &ids,
+                "header_playfield_styling_options",
+                "header_training_options"
+            )
+            .last(),
+            Some(&"ddr_selection".to_string())
+        );
+    }
+
+    #[test]
+    fn committed_list_with_any_two_rows_removed_is_reproduced_exactly() {
+        let list = committed_settings();
+        for i in 0..list.len() {
+            for j in i + 1..list.len() {
+                let user: Vec<Value> = list
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != i && *k != j)
+                    .map(|(_, r)| r.clone())
+                    .collect();
+                let (out, _) = merge_option_menu_settings(&user, &list);
+                assert_eq!(out, list, "removing rows {i} and {j} did not round-trip");
+            }
+        }
     }
 
     fn committed_settings() -> Vec<Value> {

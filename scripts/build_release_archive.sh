@@ -1,21 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Build a release of the modpack: the Windows 7 builds of the hook DLL and the
-# auto-updater exe, plus the runtime data files an operator needs.
+# Build a release of the modpack: the Windows 7 builds of the hook DLL, the
+# auto-updater exe and the StepMania prep tool, plus the runtime data files an
+# operator needs.
 #
 # Output (all in release/, gitignored):
 #   ddr-world-universal-modpack-YYYYMMDD.zip   the GitHub release asset (flat:
 #                                              zip root = game folder; carries
 #                                              the updater exe so installs
-#                                              self-update)
+#                                              self-update, and the prep tool)
 #   ddr_world_hook_updater.exe                 bare copy for testers who do not
 #                                              have the updater yet
+#   ddr_world_hook_prep.exe                    bare copy of the StepMania prep tool
 #   install-update-YYYYMMDD.bat                tester one-click installer: runs
 #                                              the updater with --from-zip on
 #                                              THIS zip (same date), so private
 #                                              builds get the same merges /
 #                                              backups / rollback as a public
 #                                              release. Send all three files.
+#
+# The zip is the BASE release: everything except the ported dancers and stages,
+# which are optional PACKS built from the assets repository and published
+# separately (scripts/publish_packs.sh). The base carries the pack catalog,
+# ddr_world_hook_packs.json, downloaded from the packs' release page; it pins
+# the exact pack revisions this release was built against, so publish new or
+# changed packs BEFORE building the release that should offer them.
+#
+# Environment:
+#   PACKS_CATALOG   a catalog file to embed instead of the published one (a
+#                   tester build against unpublished packs). Send testers the
+#                   pack zips too: the installer .bat takes them from a `packs`
+#                   folder beside it.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -25,10 +40,11 @@ cd "$REPO_ROOT"
 # causes the loader to reject the binary with "The procedure entry point
 # ProcessPrng could not be located". The x86_64-win7-windows-msvc target uses
 # RtlGenRandom instead. It's a tier 3 target, so std must be built from source
-# via -Z build-std. BOTH binaries below must use this recipe.
+# via -Z build-std. ALL THREE binaries below must use this recipe.
 WIN7_TARGET="x86_64-win7-windows-msvc"
 DLL="target/$WIN7_TARGET/release/ddr_world_hook.dll"
 UPDATER="updater/target/$WIN7_TARGET/release/ddr_world_hook_updater.exe"
+PREP="prep/target/$WIN7_TARGET/release/ddr_world_hook_prep.exe"
 
 RELEASE_DIR="release"
 STAMP="$(date +%Y%m%d)"
@@ -97,7 +113,10 @@ if not errorlevel 1 (
     echo The game is running. Close it, then run this .bat again.
     goto :end
 )
-"%~dp0ddr_world_hook_updater.exe" --from-zip "%~dp0$zip_name" --tag "$tag"
+rem Pack zips in a "packs" folder beside this .bat are used instead of downloads.
+set PACKS_ARG=
+if exist "%~dp0packs\" set PACKS_ARG=--packs-dir "%~dp0packs"
+"%~dp0ddr_world_hook_updater.exe" --from-zip "%~dp0$zip_name" --tag "$tag" %PACKS_ARG%
 set "RC=%errorlevel%"
 echo.
 if "%RC%"=="0" echo Done. Your settings and per-song offsets were kept; start the game normally.
@@ -105,6 +124,8 @@ if "%RC%"=="1" echo The update failed AND could not be fully rolled back. Check 
 echo.
 echo NOTE: if your gamestart.bat runs ddr_world_hook_updater.exe automatically, the next launch will
 echo replace this test build with the latest PUBLIC release. Remove that line while testing a private build.
+echo.
+echo Optional dancer and stage packs: run "ddr_world_hook_updater.exe --packs" to choose them.
 :end
 echo.
 pause
@@ -136,27 +157,58 @@ if [[ ! -f "$UPDATER" ]]; then
     exit 1
 fi
 
+echo "==> Building Windows 7 StepMania prep tool"
+(cd prep && cargo xwin build \
+    --release \
+    --target "$WIN7_TARGET" \
+    -Z build-std=std,panic_abort)
+
+if [[ ! -f "$PREP" ]]; then
+    echo "ERROR: expected build output not found: $PREP" >&2
+    exit 1
+fi
+
 echo "==> Verifying Windows 7 compatibility"
 assert_win7_safe "$DLL"
 assert_win7_safe "$UPDATER"
+assert_win7_safe "$PREP"
 
 echo "==> Staging release contents"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-cp "$DLL" "$UPDATER" "$STAGE/"
+cp "$DLL" "$UPDATER" "$PREP" "$STAGE/"
 cp mod-config.json judgement_offsets.csv README.md "$STAGE/"
 
 # data_mods/ as checked in, minus macOS metadata. Nothing else needs excluding:
 # runtime artifacts (_cache/, *.arc) never exist in a checkout (*.arc is
 # gitignored; _cache/ is created on cabinets), and the committed *_ifs/
 # directories (custom_options, custom_folders, custom_series,
-# music_wheel_song_length) are intended shipping content generated by
-# scripts/gen_option_labels.py and friends. The updater prunes files a later
+# music_wheel_song_length), custom_series/series_labels/ and
+# improved_song_title_sorting/title_labels/ are intended shipping content
+# generated by scripts/gen_option_labels.py, scripts/gen_series_labels.py,
+# scripts/gen_title_labels.py and friends. The updater prunes files a later
 # release drops, so what ships here is exactly what cabinets end up with.
 rsync -a \
     --exclude '.DS_Store' \
     data_mods "$STAGE/"
+
+# Background Dancers custom content ships PRE-PACKED: every model folder of the
+# staged copy becomes the ready arc the DLL would otherwise pack on each
+# cabinet's first boot (a second full copy under data_mods/_cache/), and each
+# model is one directory entry to scan and one file for the updater instead of
+# its whole folder tree. The checkout keeps the authoring folders.
+if [[ -d "$STAGE/data_mods/custom_models" ]]; then
+    echo "==> Pre-packing custom models"
+    python3 scripts/pack_custom_models.py --in-place --force "$STAGE/data_mods/custom_models"
+fi
+
+# Finish the base image: only the Custom sources stay under custom_models (the
+# ported ones are packs — a stray local copy must never leak into the base),
+# the published pack catalog is embedded and validated, and the image must
+# stay below the 2 GiB the updater already installed on cabinets accepts.
+echo "==> Embedding the pack catalog"
+python3 scripts/build_packs.py base-image "$STAGE"
 
 # DDR SELECTION's A3 importer (operators run it once against their own A3
 # install — the repo never ships A3 data). Lands in <game>/ddr_selection_import/
@@ -168,13 +220,24 @@ cp scripts/ddr_selection/import_a3_assets.sh scripts/ddr_selection/a3_assets.man
 sed 's/$/\r/' scripts/ddr_selection/import_a3_assets.bat \
     > "$STAGE/ddr_selection_import/import_a3_assets.bat"
 
+# StepMania packs: the empty songs root with the operator note the DLL would
+# otherwise write on first boot (same bytes — `include_str!` of this file —
+# so the updater never sees it as locally modified). Operator packs dropped
+# next to it, and the cache the prep tool builds under data_mods/_cache/, are
+# in neither the release nor a previous manifest, so the updater's plan never
+# touches them (updater/src/plan.rs).
+mkdir -p "$STAGE/stepmania/Songs"
+cp src/services/stepmania/songs_readme.txt "$STAGE/stepmania/Songs/README.txt"
+
 echo "==> Creating $ARCHIVE"
 mkdir -p "$RELEASE_DIR"
 rm -f "$ARCHIVE" "$INSTALL_BAT"
-(cd "$STAGE" && zip -r -q "$REPO_ROOT/$ARCHIVE" .)
+# -9: Info-ZIP stores .arc files uncompressed at any lower level (the suffix is
+# on its "already compressed" list), and the Custom models ship as .arc.
+(cd "$STAGE" && zip -r -q -9 "$REPO_ROOT/$ARCHIVE" .)
 
 echo "==> Writing tester files"
-cp "$UPDATER" "$RELEASE_DIR/"
+cp "$UPDATER" "$PREP" "$RELEASE_DIR/"
 write_install_bat "$INSTALL_BAT" "$ARCHIVE_NAME" "$BUILD_TAG"
 
 echo "Done: $RELEASE_DIR/"

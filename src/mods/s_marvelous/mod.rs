@@ -503,9 +503,10 @@ impl Mod for SMarvelousMod {
             // Best-effort — without it Marvelous never shows FAST/SLOW
             // (stock).
             self.fast_slow_installed = fast_slow::install(ctx.signatures);
-            // Song-select S-MFC lamp (server-upload Step 8): card-refresh
-            // detour. Best-effort — without it S-MFC charts keep the stock
-            // MFC lamp; the upload/echo-back data path is unaffected.
+            // Song-select S-MFC lamp (server-upload Step 8): card-bound
+            // subscriber (wheel_cards owns the detour) + panel detours.
+            // Best-effort — without it S-MFC charts keep the stock MFC lamp;
+            // the upload/echo-back data path is unaffected.
             self.lamp_badge_installed = lamp_badge::install(ctx.signatures);
             // Violet receptor burst (2026-09-12): the game's own
             // JudgeEffectRenderer pusher + the derived GamePlayActor

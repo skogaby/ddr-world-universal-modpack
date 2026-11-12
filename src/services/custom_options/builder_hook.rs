@@ -167,8 +167,15 @@ fn builder_detour_body(parent: *mut u8) {
         // the registry lock again per-row. Dropping the lock before the
         // game-allocator call keeps the ctor's potential re-entry into
         // custom_options state safe.
-        let handles: Vec<(OptionHandle, String, RowKindTag)> = {
+        // Each entry also carries the option's ShowWhen parent id so the
+        // ordering can keep families together (`ordering::parent_positions`).
+        let handles: Vec<(OptionHandle, String, RowKindTag, Option<String>)> = {
             let state = registry::STATE.lock().unwrap();
+            // One-shot operator feedback for `option_menu_settings` typos,
+            // checked against EVERY registered id (the filtered snapshot
+            // below omits overlay-only / unavailable rows that are still
+            // perfectly real).
+            state.warn_unknown_configured_ids_once();
             state
                 .options
                 .iter()
@@ -193,7 +200,8 @@ fn builder_detour_body(parent: *mut u8) {
                         UiKind::Scalar { .. } => RowKindTag::Scalar,
                         UiKind::Header => RowKindTag::Header,
                     };
-                    (OptionHandle(i as u32), opt.id.clone(), kind)
+                    let parent = opt.show_when_parent_id().map(str::to_string);
+                    (OptionHandle(i as u32), opt.id.clone(), kind, parent)
                 })
                 .collect()
         };
@@ -210,13 +218,23 @@ fn builder_detour_body(parent: *mut u8) {
         // unlisted headers from the returned order, so they simply never
         // reach the injection loop.
         let handles: Vec<(OptionHandle, String, RowKindTag)> = {
-            let ids: Vec<&str> = handles.iter().map(|(_, id, _)| id.as_str()).collect();
+            let ids: Vec<&str> = handles.iter().map(|(_, id, _, _)| id.as_str()).collect();
             let is_header: Vec<bool> = handles
                 .iter()
-                .map(|(_, _, kind)| *kind == RowKindTag::Header)
+                .map(|(_, _, kind, _)| *kind == RowKindTag::Header)
                 .collect();
-            let perm = super::ordering::display_order_for(&ids, &is_header);
-            perm.into_iter().map(|i| handles[i].clone()).collect()
+            let parent_ids: Vec<Option<&str>> = handles
+                .iter()
+                .map(|(_, _, _, parent)| parent.as_deref())
+                .collect();
+            let parent = super::ordering::parent_positions(&ids, &parent_ids);
+            let perm = super::ordering::display_order_for(&ids, &is_header, &parent);
+            perm.into_iter()
+                .map(|i| {
+                    let (h, id, kind, _) = handles[i].clone();
+                    (h, id, kind)
+                })
+                .collect()
         };
 
         if handles.is_empty() {

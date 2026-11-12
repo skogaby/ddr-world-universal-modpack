@@ -5,13 +5,28 @@
 //! ## Config
 //!
 //! `mod-config.json` `folder_expansion` (operator-edited; the DLL never writes
-//! it): `custom_folders: [{bit_index, key, voice_key}]` and
-//! `hide_difficulty_pane` (bool, default false). A song joins a folder when its
-//! musicdb `<property>` bitmask has bit `bit_index` set. `key` names the
-//! folder's assets, `voice_key` its select voice (may be empty). Validation at
-//! init: `key`/`voice_key` ≤ 15 bytes (they are written as SSO strings),
-//! `bit_index` ≤ 31 and unique. A missing section or a failed validation makes
-//! `init` return false, so the mod is not registered.
+//! it): `custom_folders: [{bit_index, key, voice_key, exclude_from_all_music}]`
+//! and `hide_difficulty_pane` (bool, default false). A song joins a folder when
+//! its musicdb `<property>` bitmask has bit `bit_index` set. `key` names the
+//! folder's assets, `voice_key` its select voice (may be empty).
+//! `exclude_from_all_music` (bool, default false) hides that folder's songs
+//! from the ALL MUSIC folder — they stay selectable in the custom folder (and
+//! in any other folder they belong to). Validation at init: `key`/`voice_key`
+//! ≤ 15 bytes (they are written as SSO strings), `bit_index` ≤ 31 and unique.
+//! A missing section or a failed validation makes `init` return false, so the
+//! mod is not registered.
+//!
+//! ## Runtime registration
+//!
+//! Code may add folders before `init` with [`register_runtime_folder`]
+//! (`lib.rs` step 0' — the StepMania loader registers its STEPMANIA folder at
+//! [`lowest_free_bit`]). `load_config` appends the runtime entries after the
+//! operator's, so configured type ids stay stable, and synthesises a config
+//! when the section is absent; the merged list is validated as one. Runtime
+//! folders' art is looked up like any folder's, first under
+//! `data_mods/custom_folders/`, then in any LayeredFS mod folder
+//! (`<ifs>_ifs/tex/<name>.png`) — the StepMania set ships in
+//! `data_mods/stepmania_packs/`.
 //!
 //! ## Hooks and patches (all owned here)
 //!
@@ -26,6 +41,29 @@
 //! - **`folder_has_songs`** detour (only with ≥1 custom folder) — forwards to
 //!   the original and forces `true` for native genre bits 0–9 and every
 //!   configured `bit_index`.
+//! - **`folder_apply_to_model`** + **`selectmusic_source_list`** detours (only
+//!   with ≥1 `exclude_from_all_music` folder) — ALL MUSIC exclusion. The game
+//!   filters a genre folder by copying the folder's per-chart filter function
+//!   (the `filter_functor_slot` `std::tr1::function<bool(shared_ptr
+//!   <ChartMetadata>)>`) into the song-select model's override filter when the
+//!   folder is applied; ALL MUSIC's slot is empty, so the player's Filter-menu
+//!   predicates run instead. Every list consumer (wheel rebuild, both
+//!   song-count paths) fetches its input through one getter,
+//!   `selectmusic_source_list(model, side, any_filter_active)`, which returns
+//!   the model's per-side base `vector<shared_ptr<ChartMetadata>>`. The
+//!   `folder_apply_to_model` detour records the applied folder's type id
+//!   (`FolderProperty+0`); while it is ALL MUSIC (7) the source-list detour
+//!   returns a shallow copy of the original vector minus every holder for
+//!   which one of the excluded folders' own `lambda20` filter functors
+//!   (built with `folder_filter_functor_ctor` and invoked through its
+//!   `_Do_call` slot) says "member". The copy is non-owning — the caller
+//!   copy-assigns it (taking its own references) on the same thread before
+//!   anything can mutate the base list — so no refcount is touched except the
+//!   +1 handed to `_Do_call`, which consumes its by-value `shared_ptr`
+//!   argument. Membership semantics are therefore identical to the folder's
+//!   (incl. the `property`/`property_old` fallback and the bit-8 quirk) with
+//!   no `music::Info` offset hardcoded. Side effect: ALL MUSIC's displayed
+//!   song count excludes the hidden songs too.
 //! - **Gameplay-object alloc size + ctor** (`gameplay_obj_alloc_size` /
 //!   `gameplay_obj_ctor`, only with ≥1 custom folder) — the gameplay sequence
 //!   object holds one shared_ptr slot per non-ALL-MUSIC folder. The
@@ -63,9 +101,15 @@
 //! It then builds cloned atlases (via `avs_layeredfs::atlas_cloner`, cache
 //! under `data_mods/_cache`) from art the operator supplies under
 //! `data_mods/custom_folders/{select_music_folder_v3_ifs,
-//! select_music_folder_lang_eng_v3_ifs}/tex/`, named like the `firststep`
-//! textures with `firststep` replaced by `key` (`mufo_folder_back_<key>_on.png`,
-//! …). The
+//! select_music_folder_lang_eng_v3_ifs, select_music_card_lang_eng_v3_ifs}/tex/`,
+//! named like the `firststep` textures with `firststep` replaced by `key`:
+//! `mufo_folder_back_<key>_{on,off}`, `mufo_txt_folder_title_<key>_{on,off}`
+//! (folder package), `mufo_txt_folder_subtitle_<key>_{on,off}`,
+//! `mufo_txt_folder_info_<key>` (folder lang package) and
+//! `muca_txt_folder_name_<key>` (220×60, header-card lang package — the strip
+//! beside "Change folder" on song select). The game formats every one of these
+//! names from the `FolderProperty` key itself, so nothing is hooked; the
+//! textures just have to exist by name in the package the game loads. The
 //! output lands in `data_mods/custom_folders/` and LayeredFS is rescanned.
 //! `.cache_meta.json` there (hash of the config + source ARC mtime) skips
 //! regeneration on a warm boot. This is the slow part of `enable()`, which is
@@ -90,7 +134,7 @@ use crate::core::{afp, arc, ifs};
 use crate::mods::mod_trait::{Mod, ModContext};
 use crate::services::afp_patcher;
 use crate::services::avs_layeredfs::mod_paths;
-use crate::{log_error, log_info, log_warn};
+use crate::{log_debug, log_error, log_info, log_warn};
 use retour::GenericDetour;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -191,6 +235,11 @@ const FOLDER_IFS_NAME: &str = "select_music_folder_v3.ifs";
 // ARC containing language-specific textures (info banner, subtitle strip)
 const LANG_ENG_ARC_PATH: &str = "data/arc/bm2d/select_music_folder_lang_eng_v3.arc";
 const LANG_ENG_IFS_NAME: &str = "select_music_folder_lang_eng_v3.ifs";
+// ARC containing the song-select header card's language-specific textures.
+// The folder-name strip next to "Change folder" (`muca_txt_folder_name_<key>`,
+// 220×60) lives here, not in the folder package.
+const CARD_LANG_ENG_ARC_PATH: &str = "data/arc/bm2d/select_music_card_lang_eng_v3.arc";
+const CARD_LANG_ENG_IFS_NAME: &str = "select_music_card_lang_eng_v3.ifs";
 // Source folder key to clone geo files from
 const SOURCE_KEY: &str = "firststep";
 // The 6 shape IDs containing folder-specific texture labels
@@ -202,6 +251,7 @@ const GEO_MOD_FOLDER: &str = "./data_mods/custom_folders";
 // IFS mod path (used for LayeredFS file lookup)
 const IFS_MOD_PATH: &str = "select_music_folder_v3_ifs";
 const LANG_ENG_IFS_MOD_PATH: &str = "select_music_folder_lang_eng_v3_ifs";
+const CARD_LANG_ENG_IFS_MOD_PATH: &str = "select_music_card_lang_eng_v3_ifs";
 
 // ── Config types ────────────────────────────────────────────────────
 
@@ -220,10 +270,151 @@ pub struct CustomFolderEntry {
     pub key: String,
     #[serde(default)]
     pub voice_key: String,
+    /// Hide this folder's songs from the ALL MUSIC folder (every chart whose
+    /// musicdb `<property>` has `bit_index` set). The songs stay selectable
+    /// in this folder and in any other folder they belong to.
+    #[serde(default)]
+    pub exclude_from_all_music: bool,
 }
 
 pub fn get_config() -> Option<&'static FolderConfig> {
     unsafe { (*std::ptr::addr_of!(FOLDER_CONFIG)).as_ref() }
+}
+
+// ── Runtime registration ────────────────────────────────────────────
+
+/// Lowest `bit_index` a runtime folder may take (bits 0–9 are the native
+/// genre folders).
+const FIRST_CUSTOM_BIT: u32 = 10;
+/// `<property>` is a u32 bitmask.
+const LAST_CUSTOM_BIT: u32 = 31;
+
+/// Folders registered by code before `init`, merged by `load_config`.
+static RUNTIME_FOLDERS: std::sync::Mutex<Vec<CustomFolderEntry>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn runtime_folders() -> Vec<CustomFolderEntry> {
+    RUNTIME_FOLDERS
+        .lock()
+        .map(|r| r.clone())
+        .unwrap_or_default()
+}
+
+/// `bit_index`es of the operator's `folder_expansion.custom_folders` (empty
+/// when the config store or the section is absent).
+fn configured_bits() -> Vec<u32> {
+    super::config::get()
+        .and_then(|cfg| cfg.folder_expansion.as_ref())
+        .map(|c| c.custom_folders.iter().map(|f| f.bit_index).collect())
+        .unwrap_or_default()
+}
+
+/// Register a custom folder from code. Call before the mod's `init` (the
+/// registry is read once, at `load_config`). Fails when the entry would not
+/// validate or its `bit_index` is already taken by the operator's config or
+/// an earlier registration.
+pub fn register_runtime_folder(entry: CustomFolderEntry) -> Result<(), String> {
+    validate_entry(&entry).map_err(|e| format!("runtime folder: {}", e))?;
+    if entry.key.is_empty() {
+        return Err("runtime folder: key is empty".to_string());
+    }
+    if entry.bit_index < FIRST_CUSTOM_BIT {
+        return Err(format!(
+            "runtime folder '{}': bit_index {} is a native genre bit",
+            entry.key, entry.bit_index
+        ));
+    }
+    let mut reg = RUNTIME_FOLDERS
+        .lock()
+        .map_err(|_| "runtime folder registry poisoned".to_string())?;
+    if configured_bits().contains(&entry.bit_index)
+        || reg.iter().any(|f| f.bit_index == entry.bit_index)
+    {
+        return Err(format!(
+            "runtime folder '{}': bit_index {} already in use",
+            entry.key, entry.bit_index
+        ));
+    }
+    if reg.iter().any(|f| f.key == entry.key) {
+        return Err(format!(
+            "runtime folder '{}': key already registered",
+            entry.key
+        ));
+    }
+    log_info!(
+        "FolderExpansion: runtime folder '{}' registered (bit_index={})",
+        entry.key,
+        entry.bit_index
+    );
+    reg.push(entry);
+    Ok(())
+}
+
+/// Lowest `bit_index` in 10..=31 used by neither the operator's config nor an
+/// already-registered runtime folder; `None` when all are taken.
+pub fn lowest_free_bit() -> Option<u32> {
+    let mut used = configured_bits();
+    used.extend(runtime_folders().iter().map(|f| f.bit_index));
+    lowest_free_bit_in(&used)
+}
+
+/// Pure core of [`lowest_free_bit`].
+fn lowest_free_bit_in(used: &[u32]) -> Option<u32> {
+    (FIRST_CUSTOM_BIT..=LAST_CUSTOM_BIT).find(|b| !used.contains(b))
+}
+
+/// The HIGHEST custom `<property>` bit (31 downwards to 10) used by neither
+/// the operator's config nor an already-registered runtime folder. Runtime
+/// features that must stay out of the way of operator-chosen folders (which
+/// conventionally start at bit 10) take their slot from this end.
+pub fn highest_free_bit() -> Option<u32> {
+    let mut used = configured_bits();
+    used.extend(runtime_folders().iter().map(|f| f.bit_index));
+    highest_free_bit_in(&used)
+}
+
+/// Pure core of [`highest_free_bit`].
+fn highest_free_bit_in(used: &[u32]) -> Option<u32> {
+    (FIRST_CUSTOM_BIT..=LAST_CUSTOM_BIT)
+        .rev()
+        .find(|b| !used.contains(b))
+}
+
+/// The config `init` works from: the operator's section with the runtime
+/// folders appended, or a section of just the runtime folders when the
+/// operator has none. `None` when there is nothing at all.
+fn merge_runtime_folders(
+    section: Option<FolderConfig>,
+    runtime: Vec<CustomFolderEntry>,
+) -> Option<FolderConfig> {
+    match section {
+        Some(mut config) => {
+            config.custom_folders.extend(runtime);
+            Some(config)
+        }
+        None if runtime.is_empty() => None,
+        None => Some(FolderConfig {
+            custom_folders: runtime,
+            hide_difficulty_pane: false,
+        }),
+    }
+}
+
+/// Per-entry validation shared by the config and runtime paths.
+fn validate_entry(entry: &CustomFolderEntry) -> Result<(), String> {
+    if entry.key.len() > SSO_MAX_LEN {
+        return Err(format!("key '{}' exceeds {} chars", entry.key, SSO_MAX_LEN));
+    }
+    if entry.voice_key.len() > SSO_MAX_LEN {
+        return Err(format!("voice_key exceeds {} chars", SSO_MAX_LEN));
+    }
+    if entry.bit_index > LAST_CUSTOM_BIT {
+        return Err(format!(
+            "bit_index {} > {}",
+            entry.bit_index, LAST_CUSTOM_BIT
+        ));
+    }
+    Ok(())
 }
 
 // ── Asset-generation cache ──────────────────────────────────────────
@@ -238,8 +429,12 @@ pub fn get_config() -> Option<&'static FolderConfig> {
 // `enable()`, we compute the current key, compare to the stored one, and
 // skip the generation step on a HIT. On any failure (missing file,
 // parse error, schema mismatch) we treat as a MISS and regenerate.
+//
+// Bump `CACHE_META_VERSION` whenever the set of generated outputs changes
+// (v2: added the `select_music_card_lang_eng_v3` folder-name strip) so
+// existing installs regenerate once instead of serving a stale set.
 
-const CACHE_META_VERSION: u32 = 1;
+const CACHE_META_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct CacheMeta {
@@ -508,6 +703,164 @@ unsafe extern "C" fn folder_has_songs_hook(functor: *const u8) -> bool {
     false
 }
 
+// ── ALL MUSIC exclusion ──────────────────────────────────────────────
+//
+// See the module doc ("folder_apply_to_model + selectmusic_source_list").
+
+/// `folder_apply_to_model`: __fastcall(RCX=ctx, RDX=folder_property)
+type FolderApplyFn = unsafe extern "C" fn(*mut u8, *mut u8);
+/// `selectmusic_source_list`: __fastcall(RCX=model, EDX=side, R8B=any_filter_active)
+/// → `vector<shared_ptr<ChartMetadata>>*` ({begin, end, cap} of 16-byte holders).
+type SourceListFn = unsafe extern "C" fn(*mut u8, i32, u8) -> *mut u8;
+/// `std::tr1::function` impl `_Do_call` slot (vtable[1]) of the game's folder
+/// filter functor: __fastcall(RCX=impl, RDX=&shared_ptr<ChartMetadata>) → bool.
+/// Consumes (releases) the by-value `shared_ptr` it is handed.
+type FilterDoCallFn = unsafe extern "C" fn(*mut u8, *mut u8) -> u8;
+
+static mut APPLY_FOLDER_HOOK: Option<GenericDetour<FolderApplyFn>> = None;
+static mut SOURCE_LIST_HOOK: Option<GenericDetour<SourceListFn>> = None;
+
+/// Type id (`FolderProperty+0`) of the folder most recently applied to the
+/// song-select model. 0 until the first `folder_apply_to_model` call.
+static CURRENT_FOLDER_TYPE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Game-built `lambda20` filter functors (one per `exclude_from_all_music`
+/// folder); each tests "chart's song has property bit `bit_index`".
+static mut EXCLUDE_FUNCTORS: Vec<*mut u8> = Vec::new();
+
+/// Our shallow copy of the model's base list: the `{begin, end, cap}` header
+/// the detour returns, and the backing storage it points into. Non-owning —
+/// see the module doc. Only ever touched on the game's select-music thread.
+static mut FILTERED_LIST_HEADER: [usize; 3] = [0; 3];
+static mut FILTERED_LIST_BUF: Vec<[usize; 2]> = Vec::new();
+
+/// One-shot log guard for the first successful exclusion pass.
+static EXCLUSION_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Size of one `shared_ptr<ChartMetadata>` holder `{obj, ctrl}`.
+const HOLDER_SIZE: usize = 16;
+/// `_Ref_count_base` strong-count offset inside the control block.
+const CTRL_USES_OFFSET: usize = 0x8;
+/// `_Do_call` slot index in a `std::tr1::function` impl vtable.
+const FUNC_IMPL_DO_CALL_SLOT: usize = 1;
+
+/// Hook callback for `folder_apply_to_model`: remember which folder type is
+/// now driving the song-select model, then run the original.
+unsafe extern "C" fn folder_apply_to_model_hook(ctx: *mut u8, folder_property: *mut u8) {
+    if memory::is_readable(folder_property, 4) {
+        let type_id = *(folder_property as *const u32);
+        let prev = CURRENT_FOLDER_TYPE.swap(type_id, std::sync::atomic::Ordering::AcqRel);
+        if prev != type_id {
+            log_debug!(
+                "FolderExpansion: folder applied to model: type_id={} (was {})",
+                type_id,
+                prev
+            );
+        }
+    }
+    if let Some(ref hook) = *std::ptr::addr_of!(APPLY_FOLDER_HOOK) {
+        hook.call(ctx, folder_property);
+    }
+}
+
+/// Ask one of the game's folder filter functors whether `holder`'s chart
+/// belongs to that folder. Hands `_Do_call` a +1'd copy of the holder because
+/// the callee releases its by-value `shared_ptr` argument.
+unsafe fn functor_matches(functor: *mut u8, holder: &[usize; 2]) -> bool {
+    let ctrl = holder[1] as *mut u8;
+    if holder[0] == 0 || ctrl.is_null() {
+        return false;
+    }
+    let vtable = memory::read_ptr(functor) as *const usize;
+    if vtable.is_null()
+        || !memory::is_readable(vtable as *const u8, 8 * (FUNC_IMPL_DO_CALL_SLOT + 1))
+    {
+        return false;
+    }
+    let do_call_addr = *vtable.add(FUNC_IMPL_DO_CALL_SLOT);
+    if do_call_addr == 0 {
+        return false;
+    }
+    let do_call: FilterDoCallFn = std::mem::transmute(do_call_addr);
+    let uses = ctrl.add(CTRL_USES_OFFSET) as *const std::sync::atomic::AtomicI32;
+    (*uses).fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let mut copy = *holder;
+    do_call(functor, copy.as_mut_ptr() as *mut u8) != 0
+}
+
+/// Build the ALL MUSIC view of `orig` (a `vector<shared_ptr<ChartMetadata>>`)
+/// into `FILTERED_LIST_*`. Returns the header pointer, or `None` when the
+/// input is not readable (caller falls back to `orig`).
+unsafe fn build_filtered_source_list(orig: *mut u8) -> Option<*mut u8> {
+    if !memory::is_readable(orig, 24) {
+        return None;
+    }
+    let begin = memory::read_ptr(orig) as usize;
+    let end = memory::read_ptr(orig.add(8)) as usize;
+    if begin == 0 || end < begin || (end - begin) % HOLDER_SIZE != 0 {
+        return None;
+    }
+    let count = (end - begin) / HOLDER_SIZE;
+    if count > 0 && !memory::is_readable(begin as *const u8, end - begin) {
+        return None;
+    }
+    let functors = &*std::ptr::addr_of!(EXCLUDE_FUNCTORS);
+    let buf = &mut *std::ptr::addr_of_mut!(FILTERED_LIST_BUF);
+    buf.clear();
+    buf.reserve(count);
+    let src = std::slice::from_raw_parts(begin as *const [usize; 2], count);
+    let mut excluded = 0usize;
+    for holder in src {
+        if functors.iter().any(|&f| functor_matches(f, holder)) {
+            excluded += 1;
+        } else {
+            buf.push(*holder);
+        }
+    }
+    if !EXCLUSION_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log_info!(
+            "FolderExpansion: ALL MUSIC exclusion active — hid {} of {} chart entries",
+            excluded,
+            count
+        );
+    }
+    let base = buf.as_ptr() as usize;
+    let header = &mut *std::ptr::addr_of_mut!(FILTERED_LIST_HEADER);
+    header[0] = base;
+    header[1] = base + buf.len() * HOLDER_SIZE;
+    header[2] = base + buf.capacity() * HOLDER_SIZE;
+    Some(header.as_mut_ptr() as *mut u8)
+}
+
+/// Hook callback for `selectmusic_source_list`. Pass-through unless the model
+/// is currently showing ALL MUSIC and at least one folder is excluded.
+unsafe extern "C" fn selectmusic_source_list_hook(
+    model: *mut u8,
+    side: i32,
+    any_filter_active: u8,
+) -> *mut u8 {
+    let orig = match *std::ptr::addr_of!(SOURCE_LIST_HOOK) {
+        Some(ref hook) => hook.call(model, side, any_filter_active),
+        None => return std::ptr::null_mut(),
+    };
+    if orig.is_null()
+        || CURRENT_FOLDER_TYPE.load(std::sync::atomic::Ordering::Acquire) != ALL_MUSIC_TYPE_ID
+        || (*std::ptr::addr_of!(EXCLUDE_FUNCTORS)).is_empty()
+    {
+        return orig;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_filtered_source_list(orig)
+    })) {
+        Ok(Some(filtered)) => filtered,
+        Ok(None) => orig,
+        Err(_) => {
+            log_error!("FolderExpansion: panic in ALL MUSIC exclusion — passing through");
+            orig
+        }
+    }
+}
+
 // ── Geo + AFP file generation ────────────────────────────────────────
 
 /// Generate patched geo and AFP files for all custom folders by extracting
@@ -659,6 +1012,15 @@ fn generate_custom_assets(config: &FolderConfig) {
     ) {
         generate_cloned_atlases(config, &xml, LANG_ENG_IFS_MOD_PATH);
     }
+
+    // Extract the header-card lang_eng IFS and clone the folder-name strip
+    // (`muca_txt_folder_name_<key>`) the game formats from the folder key.
+    if let Some(xml) = crate::services::avs_layeredfs::atlas_cloner::load_stock_texturelist(
+        CARD_LANG_ENG_ARC_PATH,
+        CARD_LANG_ENG_IFS_NAME,
+    ) {
+        generate_cloned_atlases(config, &xml, CARD_LANG_ENG_IFS_MOD_PATH);
+    }
 }
 
 /// Generate afplist.merged.xml that injects custom folder AFP entries into the
@@ -725,7 +1087,7 @@ fn generate_cloned_atlases(config: &FolderConfig, texlist_xml: &str, ifs_mod_pat
             .iter()
             .map(|donor| {
                 let new_name = donor.replace(SOURCE_KEY, &folder.key);
-                let png_path = format!("{}/{}.png", tex_dir, new_name);
+                let png_path = folder_art_path(&tex_dir, ifs_mod_path, &new_name);
                 (new_name, png_path)
             })
             .collect();
@@ -754,6 +1116,18 @@ fn generate_cloned_atlases(config: &FolderConfig, texlist_xml: &str, ifs_mod_pat
     if !combined_xml.is_empty() {
         write_merged_texturelist(ifs_mod_path, GEO_MOD_FOLDER, &combined_xml);
     }
+}
+
+/// Source PNG for folder texture `name`: the operator's
+/// `data_mods/custom_folders/<ifs>/tex/` copy when present, else the first
+/// LayeredFS mod folder shipping `<ifs>/tex/<name>.png` (runtime folders'
+/// art), else the `custom_folders` path (the cloner logs the miss).
+fn folder_art_path(tex_dir: &str, ifs_mod_path: &str, name: &str) -> String {
+    let local = format!("{}/{}.png", tex_dir, name);
+    if std::path::Path::new(&local).is_file() {
+        return local;
+    }
+    mod_paths::find_first_modfile(&format!("{}/tex/{}.png", ifs_mod_path, name)).unwrap_or(local)
 }
 
 /// Return every `<image name>` in `xml` whose name contains `substring`,
@@ -844,6 +1218,9 @@ pub struct FolderExpansionMod {
     register_fn: *const u8,
     has_songs_fn: *const u8,
     game_malloc: *const u8,
+    // ALL MUSIC exclusion hook targets (optional signatures; null = feature unavailable)
+    apply_folder_fn: *const u8,
+    source_list_fn: *const u8,
     // Gameplay object patch addresses (for expanding the fixed-size shared_ptr array)
     gameplay_obj_alloc_size: *const u8, // points to the imm32 in MOV ECX,<size>
     gameplay_obj_ctor: *const u8,       // constructor function address
@@ -863,32 +1240,38 @@ impl FolderExpansionMod {
             register_fn: std::ptr::null(),
             has_songs_fn: std::ptr::null(),
             game_malloc: std::ptr::null(),
+            apply_folder_fn: std::ptr::null(),
+            source_list_fn: std::ptr::null(),
             gameplay_obj_alloc_size: std::ptr::null(),
             gameplay_obj_ctor: std::ptr::null(),
         }
     }
 
     fn load_config() -> Option<FolderConfig> {
-        match super::config::get() {
-            Some(cfg) => match cfg.folder_expansion.clone() {
-                Some(config) => {
-                    if let Some(err) = Self::validate_config(&config) {
-                        log_warn!("FolderExpansion: config validation failed — {}", err);
-                        return None;
-                    }
-                    log_info!(
-                        "FolderExpansion: loaded {} custom folder(s)",
-                        config.custom_folders.len()
-                    );
-                    Some(config)
-                }
-                None => {
-                    log_warn!("FolderExpansion: no folder_expansion config — mod disabled");
-                    None
-                }
-            },
+        let section = match super::config::get() {
+            Some(cfg) => cfg.folder_expansion.clone(),
             None => {
                 log_warn!("FolderExpansion: config store not available — mod disabled");
+                return None;
+            }
+        };
+        let runtime = runtime_folders();
+        let n_runtime = runtime.len();
+        match merge_runtime_folders(section, runtime) {
+            Some(config) => {
+                if let Some(err) = Self::validate_config(&config) {
+                    log_warn!("FolderExpansion: config validation failed — {}", err);
+                    return None;
+                }
+                log_info!(
+                    "FolderExpansion: loaded {} custom folder(s) ({} runtime)",
+                    config.custom_folders.len(),
+                    n_runtime
+                );
+                Some(config)
+            }
+            None => {
+                log_warn!("FolderExpansion: no folder_expansion config — mod disabled");
                 None
             }
         }
@@ -896,20 +1279,8 @@ impl FolderExpansionMod {
 
     fn validate_config(config: &FolderConfig) -> Option<String> {
         for (i, entry) in config.custom_folders.iter().enumerate() {
-            if entry.key.len() > SSO_MAX_LEN {
-                return Some(format!(
-                    "entry[{}].key '{}' exceeds {} chars",
-                    i, entry.key, SSO_MAX_LEN
-                ));
-            }
-            if entry.voice_key.len() > SSO_MAX_LEN {
-                return Some(format!(
-                    "entry[{}].voice_key exceeds {} chars",
-                    i, SSO_MAX_LEN
-                ));
-            }
-            if entry.bit_index > 31 {
-                return Some(format!("entry[{}].bit_index {} > 31", i, entry.bit_index));
+            if let Err(e) = validate_entry(entry) {
+                return Some(format!("entry[{}].{}", i, e));
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -922,6 +1293,84 @@ impl FolderExpansionMod {
             }
         }
         None
+    }
+
+    /// Build one game `lambda20` filter functor per excluded folder and install
+    /// the `folder_apply_to_model` + `selectmusic_source_list` detours. Any
+    /// missing prerequisite logs a WARN and leaves ALL MUSIC untouched.
+    fn install_all_music_exclusion(&self, excluded: &[&CustomFolderEntry]) {
+        if self.apply_folder_fn.is_null() || self.source_list_fn.is_null() {
+            log_warn!("FolderExpansion: exclusion hook targets unresolved — ALL MUSIC unchanged");
+            return;
+        }
+        if self.filter_functor_ctor.is_null() {
+            log_warn!("FolderExpansion: folder_filter_functor_ctor missing — ALL MUSIC unchanged");
+            return;
+        }
+        unsafe {
+            let filter_functor_ctor: FolderFunctorCtorFn =
+                std::mem::transmute(self.filter_functor_ctor);
+            let functors = &mut *std::ptr::addr_of_mut!(EXCLUDE_FUNCTORS);
+            functors.clear();
+            for entry in excluded {
+                let buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
+                if buf.is_null() {
+                    log_warn!("FolderExpansion: functor alloc failed for '{}'", entry.key);
+                    continue;
+                }
+                let ret = filter_functor_ctor(buf, entry.bit_index);
+                if ret.is_null() || memory::read_ptr(ret).is_null() {
+                    log_warn!(
+                        "FolderExpansion: filter functor ctor returned no vtable for '{}'",
+                        entry.key
+                    );
+                    continue;
+                }
+                functors.push(ret);
+                log_info!(
+                    "FolderExpansion: '{}' (bit_index={}) excluded from ALL MUSIC",
+                    entry.key,
+                    entry.bit_index
+                );
+            }
+            if functors.is_empty() {
+                return;
+            }
+            CURRENT_FOLDER_TYPE.store(0, std::sync::atomic::Ordering::Release);
+            EXCLUSION_LOGGED.store(false, std::sync::atomic::Ordering::Release);
+
+            let apply_target: FolderApplyFn = std::mem::transmute(self.apply_folder_fn);
+            if let Err(e) = crate::core::hooks::install_enabled(
+                std::ptr::addr_of_mut!(APPLY_FOLDER_HOOK),
+                apply_target,
+                folder_apply_to_model_hook,
+            ) {
+                log_error!(
+                    "FolderExpansion: failed to hook folder_apply_to_model: {}",
+                    e
+                );
+                functors.clear();
+                return;
+            }
+            let list_target: SourceListFn = std::mem::transmute(self.source_list_fn);
+            if let Err(e) = crate::core::hooks::install_enabled(
+                std::ptr::addr_of_mut!(SOURCE_LIST_HOOK),
+                list_target,
+                selectmusic_source_list_hook,
+            ) {
+                log_error!(
+                    "FolderExpansion: failed to hook selectmusic_source_list: {}",
+                    e
+                );
+                APPLY_FOLDER_HOOK = None;
+                functors.clear();
+                return;
+            }
+            log_info!(
+                "FolderExpansion: ALL MUSIC exclusion hooks installed ({} folder(s))",
+                functors.len()
+            );
+        }
     }
 
     /// Detect difficulty-related field offsets from the constructor.
@@ -1374,6 +1823,26 @@ impl Mod for FolderExpansionMod {
             log_warn!("FolderExpansion: game_malloc not found — custom folders disabled");
         }
 
+        // Optional: ALL MUSIC exclusion hook targets
+        self.apply_folder_fn = ctx
+            .signatures
+            .get_address("folder_apply_to_model")
+            .unwrap_or(std::ptr::null());
+        self.source_list_fn = ctx
+            .signatures
+            .get_address("selectmusic_source_list")
+            .unwrap_or(std::ptr::null());
+        if config
+            .custom_folders
+            .iter()
+            .any(|f| f.exclude_from_all_music)
+            && (self.apply_folder_fn.is_null() || self.source_list_fn.is_null())
+        {
+            log_warn!(
+                "FolderExpansion: folder_apply_to_model / selectmusic_source_list unresolved — exclude_from_all_music unavailable"
+            );
+        }
+
         // Estimate folder_init size for scanning
         self.folder_init_size = estimate_function_size(self.folder_init_addr, 0x3000);
         log_info!(
@@ -1474,6 +1943,16 @@ impl Mod for FolderExpansionMod {
             }
         }
 
+        // Install ALL MUSIC exclusion hooks
+        let excluded: Vec<&CustomFolderEntry> = config
+            .custom_folders
+            .iter()
+            .filter(|f| f.exclude_from_all_music)
+            .collect();
+        if !excluded.is_empty() {
+            self.install_all_music_exclusion(&excluded);
+        }
+
         // Generate custom geo + AFP files for LayeredFS serving
         if !config.custom_folders.is_empty() {
             // Patch gameplay sequence object to accommodate extra folders.
@@ -1563,7 +2042,13 @@ impl Mod for FolderExpansionMod {
         unsafe {
             REGISTER_HOOK = None;
             HAS_SONGS_HOOK = None;
+            APPLY_FOLDER_HOOK = None;
+            SOURCE_LIST_HOOK = None;
             CUSTOM_FOLDERS_CREATED = false;
+            CURRENT_FOLDER_TYPE.store(0, std::sync::atomic::Ordering::Release);
+            // The functor buffers are intentionally leaked (alloc_zeroed, never
+            // handed to the game) — a re-enable builds fresh ones.
+            (*std::ptr::addr_of_mut!(EXCLUDE_FUNCTORS)).clear();
             FN_PROPERTY_CTOR = None;
             FN_FUNCTOR_CTOR = None;
             FN_FILTER_FUNCTOR_CTOR = None;
@@ -1586,4 +2071,86 @@ fn estimate_function_size(addr: *const u8, max_search: usize) -> usize {
         }
     }
     max_search
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(bit_index: u32, key: &str) -> CustomFolderEntry {
+        CustomFolderEntry {
+            bit_index,
+            key: key.to_string(),
+            voice_key: String::new(),
+            exclude_from_all_music: false,
+        }
+    }
+
+    #[test]
+    fn lowest_free_bit_skips_used_bits() {
+        assert_eq!(lowest_free_bit_in(&[]), Some(10));
+        assert_eq!(lowest_free_bit_in(&[11]), Some(10));
+        assert_eq!(lowest_free_bit_in(&[10, 11, 13]), Some(12));
+        assert_eq!(lowest_free_bit_in(&[3, 10]), Some(11));
+        let all: Vec<u32> = (10..=31).collect();
+        assert_eq!(lowest_free_bit_in(&all), None);
+        assert_eq!(lowest_free_bit_in(&all[..all.len() - 1]), Some(31));
+    }
+
+    #[test]
+    fn highest_free_bit_skips_used_bits() {
+        assert_eq!(highest_free_bit_in(&[]), Some(31));
+        assert_eq!(highest_free_bit_in(&[31]), Some(30));
+        assert_eq!(highest_free_bit_in(&[11, 30, 31]), Some(29));
+        let all: Vec<u32> = (10..=31).collect();
+        assert_eq!(highest_free_bit_in(&all), None);
+        assert_eq!(highest_free_bit_in(&all[1..]), Some(10));
+    }
+
+    #[test]
+    fn merge_appends_runtime_entries_after_configured_ones() {
+        let section = FolderConfig {
+            custom_folders: vec![entry(11, "dogs")],
+            hide_difficulty_pane: true,
+        };
+        let merged = merge_runtime_folders(Some(section), vec![entry(10, "stepmania")]).unwrap();
+        let keys: Vec<&str> = merged
+            .custom_folders
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+        assert_eq!(keys, ["dogs", "stepmania"]);
+        assert!(merged.hide_difficulty_pane);
+        assert!(FolderExpansionMod::validate_config(&merged).is_none());
+    }
+
+    #[test]
+    fn merge_synthesises_a_section_for_runtime_only() {
+        let merged = merge_runtime_folders(None, vec![entry(12, "stepmania")]).unwrap();
+        assert_eq!(merged.custom_folders.len(), 1);
+        assert_eq!(merged.custom_folders[0].bit_index, 12);
+        assert!(!merged.hide_difficulty_pane);
+        assert!(merge_runtime_folders(None, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn merged_duplicates_still_fail_validation() {
+        let section = FolderConfig {
+            custom_folders: vec![entry(12, "dogs")],
+            hide_difficulty_pane: false,
+        };
+        let merged = merge_runtime_folders(Some(section), vec![entry(12, "stepmania")]).unwrap();
+        let err = FolderExpansionMod::validate_config(&merged).expect("duplicate bit");
+        assert!(err.contains("duplicate bit_index 12"), "{err}");
+    }
+
+    #[test]
+    fn entry_validation_matches_the_config_rules() {
+        assert!(validate_entry(&entry(31, "fifteen_chars__")).is_ok());
+        assert!(validate_entry(&entry(32, "x")).is_err());
+        assert!(validate_entry(&entry(10, "sixteen_chars___")).is_err());
+        let mut voiced = entry(10, "x");
+        voiced.voice_key = "sixteen_chars___".to_string();
+        assert!(validate_entry(&voiced).is_err());
+    }
 }

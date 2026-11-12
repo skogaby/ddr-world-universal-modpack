@@ -213,6 +213,10 @@ struct BgState {
     /// Prefetch-window half-width N (`custom_options.preview_window`, clamped
     /// 0..=10 at init). Resident packages per side ≤ 2N+1.
     window_n: i32,
+    /// Per-alias loadability, probed once per session on first request (see
+    /// [`alias_loadable`]): `true` = the arc LayeredFS serves for the game
+    /// path opens through AVS and carries `<alias>.ifs` inside.
+    alias_probe: HashMap<String, bool>,
 }
 
 // NOTE: no `unsafe impl Send` — every field is already Send (handles wrap a
@@ -228,6 +232,7 @@ impl BgState {
             pump_running: false,
             animate: true,
             window_n: 3,
+            alias_probe: HashMap::new(),
         }
     }
 }
@@ -594,6 +599,9 @@ fn sync_window(state: &mut BgState, side: usize) -> bool {
         let Some((dir, name, asset_id)) = load_params(state, key.0, key.1) else {
             continue;
         };
+        if !alias_loadable(state, side, &dir, &name, asset_id) {
+            continue;
+        }
         match bm2d_package::request_load(&dir, &name) {
             Some(ticket) => {
                 state.sides[side].resident.insert(
@@ -660,6 +668,86 @@ fn load_params(state: &BgState, ci: usize, idx: usize) -> Option<(String, String
     let manager_dir = scan_dir.strip_prefix("data/arc/").unwrap_or(scan_dir);
     let name = format!("{}{}{:04}", ALIAS_PREFIX, file_prefix, asset_id);
     Some((manager_dir.to_string(), name, asset_id))
+}
+
+/// Largest header slice read by [`probe_alias`]: ARC header (16) + cue table
+/// (16/entry) + path strings. A background alias holds one IFS; 16 KiB covers
+/// any plausible member count without reading the payload.
+const ALIAS_PROBE_BYTES: usize = 16 * 1024;
+
+/// Is `<dir>/<name>` safe to hand to the BM2D data manager? Cached per alias
+/// for the session; the first request probes (file IO on the render thread,
+/// a few hundred µs, once per alias). A refused alias is logged once per asset
+/// id per side and stays chrome-only — `Manager::Update` has no failure path:
+/// an arc whose load fails, or whose inner IFS isn't `<name>.ifs`, makes it
+/// write through a NULL object (`gamemdx` 20260915 `FUN_1801ac310`+0x142,
+/// `docs/bm2d_background_preview_research.md`; 2026-10 field crash).
+fn alias_loadable(state: &mut BgState, side: usize, dir: &str, name: &str, asset_id: u32) -> bool {
+    if let Some(&ok) = state.alias_probe.get(name) {
+        return ok;
+    }
+    let verdict = probe_alias(dir, name);
+    let ok = verdict.is_ok();
+    state.alias_probe.insert(name.to_string(), ok);
+    if let Err(why) = verdict {
+        if state.sides[side].warned.insert(asset_id) {
+            log_warn!(
+                "bg_preview_overlay: alias '{}' is NOT loadable the way the game would load it — {}; \
+                 that background stays chrome-only (requesting it would crash bm2d::data::Manager::Update)",
+                name,
+                why
+            );
+        }
+    }
+    ok
+}
+
+/// Prove the alias arc through the game's own path: the game `lstat`s and
+/// opens `data/arc/<dir>/<name>.arc` via AVS (LayeredFS redirects both), then
+/// looks the inner IFS up by the FNV hash of `<name>.ifs`. We perform the
+/// same redirected AVS open, read the header, and require an entry whose
+/// basename is exactly `<name>.ifs`. Any other outcome is a reason string.
+fn probe_alias(dir: &str, name: &str) -> Result<(), String> {
+    use crate::services::avs_layeredfs::{read_mod_file_as_game, GameReadError};
+
+    let game_path = format!("data/arc/{}/{}.arc", dir, name);
+    let (mod_path, bytes) = match read_mod_file_as_game(&game_path, ALIAS_PROBE_BYTES) {
+        Ok(v) => v,
+        Err(GameReadError::NotServed) => {
+            return Err(format!(
+                "LayeredFS has no file to serve for {} (alias cache missing or mod folder excluded)",
+                game_path
+            ))
+        }
+        Err(GameReadError::OpenFailed { mod_path, rc }) => {
+            return Err(format!(
+                "AVS refused to open the served file {} (rc {:#x}, {} chars) — install path too long or mis-cased?",
+                mod_path,
+                rc as u32,
+                mod_path.len()
+            ))
+        }
+        Err(GameReadError::Empty { mod_path }) => {
+            return Err(format!("served file {} is empty", mod_path))
+        }
+    };
+    let Some(entries) = crate::core::arc::parse(&bytes) else {
+        return Err(format!("served file {} is not a parseable ARC", mod_path));
+    };
+    let want = format!("{}.ifs", name);
+    let has_ifs = entries.iter().any(|e| {
+        let base = e.path.rsplit(['/', '\\']).next().unwrap_or(e.path.as_str());
+        base == want
+    });
+    if has_ifs {
+        Ok(())
+    } else {
+        let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        Err(format!(
+            "served file {} has no inner '{}' (members: {:?}) — stale alias copy; delete data_mods/bg_preview and data_mods/_cache/bg_preview to regenerate",
+            mod_path, want, names
+        ))
+    }
 }
 
 /// Probe whether LayeredFS's mod-file lookup resolves the first discovered

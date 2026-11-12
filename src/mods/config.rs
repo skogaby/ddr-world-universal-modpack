@@ -110,6 +110,11 @@ pub struct DiagnosticsConfig {
     /// Boot-only, bounded audio/game-clock observation. Does not change timing.
     #[serde(default)]
     pub audio_sync: bool,
+    /// Developer aid: path (relative to the game dir) of an XML fragment of
+    /// `<music>` elements appended to `musicdb.xml` inside the `startup.arc`
+    /// repack through the LayeredFS member-transform API. Empty/absent = off.
+    #[serde(default)]
+    pub musicdb_fragment: String,
 }
 
 /// Global timing-offset values for the `timing-offsets` mod. These are
@@ -154,7 +159,10 @@ fn default_render_offset() -> i32 {
 /// Config for the `fps-unlock` mod. `presets` are the selectable FPS values
 /// shown in the overlay enum row (operator-editable — add oddball refresh rates
 /// here); `selected` is the active value, stored as a raw FPS number (not an
-/// index). Both have sensible defaults so an absent/partial section still works.
+/// index). Values above 60 are fullscreen refresh requests; values below 60
+/// (floor 10) are frame-limiter caps at the stock refresh
+/// (`mods::fps_unlock::pacing::mode_for`). Both have sensible defaults so an
+/// absent/partial section still works.
 /// Normalization (dedupe / sort / range-clamp / auto-add `selected`) is applied
 /// in-memory by the mod, NOT written back — only `selected` is persisted on
 /// change (via `save_json_key`), preserving the operator's `presets` array.
@@ -458,41 +466,32 @@ pub struct BackgroundDancersConfig {
     pub stop_slow: bool,
     /// SCENE STYLE — how the whole 3D scene (stage props AND dancers) is
     /// shaded: `"stock"` (the game's unlit shaders), `"lit"` (a fixed key
-    /// light, smooth) or `"cel"` (the SAME key light, banded per pixel + rim
-    /// ink). Applied per SONG by re-pointing the render items' material
+    /// light, smooth) or `"cel"` (Dancing Stage Unleashed's toon shading —
+    /// its two-band ramp on per-vertex N·L under its default light, since
+    /// 2026-09-28). Applied per SONG by re-pointing the render items' material
     /// copies at the synthesized variant containers; additive glows,
     /// translucents, the skydome part and the floor shadow always stay stock.
     /// Absent ⇒ the legacy `shader_fixes.dancer_lighting` / `lit_models`,
     /// else `lit`. Mod menu (GLOBAL SETTINGS, Background Dancers), next song.
     #[serde(default)]
     pub style: Option<String>,
-    /// SCENE OUTLINES — inverted-hull ink outline around every restyled mesh
-    /// (needs a non-stock style). Absent ⇒ the legacy
-    /// `shader_fixes.dancer_outlines`, else `true`. Next song.
+    /// SCENE OUTLINES — Dancing Stage Unleashed's black inverted-hull ink
+    /// around every restyled mesh (needs a non-stock style). Absent ⇒ the
+    /// legacy `shader_fixes.dancer_outlines`, else `true`. Next song.
     #[serde(default)]
     pub outlines: Option<bool>,
-    /// Outline rim width in 720p pixels for the dancers (bodies + parts),
-    /// default 2.0 (clamped 0.5..=6). Constant on screen up to 25 m of camera
-    /// distance. Operator knob, next song.
+    /// RETIRED 2026-09-28 (the outline width is DSU's own depth-scaled push):
+    /// read only to log that it is ignored; the next row edit's whole-section
+    /// write drops it.
     #[serde(default)]
     pub outline_px: Option<f32>,
-    /// Outline rim width for the stage props, default 1.5 (large flat props
-    /// read heavier than a figure at the same width). Same clamp.
+    /// RETIRED 2026-09-28 — see `outline_px`.
     #[serde(default)]
     pub outline_px_stage: Option<f32>,
-    /// OUTLINE STYLE (experimental, 2026-09-21): `"ink"` (default — one
-    /// black stroke) or `"layered"` — the DDR World UI text look: several
-    /// strokes stacked, narrowest on top (black, then red, then blue by
-    /// default), each a separate hull as wide again as the kind's outline
-    /// width (2/4/6 px on dancers, 1.5/3/4.5 on props). Absent/unknown ⇒
-    /// ink. Next song.
+    /// RETIRED 2026-09-28 (the INK / LAYERED outline styles) — see `outline_px`.
     #[serde(default)]
     pub outline_style: Option<String>,
-    /// LAYERED only: operator palette override, innermost first, `[r, g, b]`
-    /// in 0..=1, 1..=4 entries (each entry = one extra draw of every
-    /// outlined mesh). Absent ⇒ black / red / blue
-    /// (`background_dancers::outline::DEFAULT_LAYERED_RGB`). Re-emitted
-    /// verbatim by the row edits' whole-section write; not row-editable.
+    /// RETIRED 2026-09-28 (the LAYERED palette) — see `outline_px`.
     #[serde(default)]
     pub outline_layer_colors: Option<Vec<[f32; 3]>>,
     /// CUSTOM DANCERS & STAGES (2026-09-22): also discover community dancers
@@ -520,15 +519,14 @@ pub struct BackgroundDancersConfig {
     /// song.
     #[serde(default)]
     pub movie_mode: Option<String>,
-}
-
-/// Clamp an outline width to the range the hull VS was tuned for.
-pub fn clamp_outline_px(px: f32) -> f32 {
-    if px.is_finite() {
-        px.clamp(0.5, 6.0)
-    } else {
-        2.0
-    }
+    /// BIG HEAD (2026-09-27): every dancer's head (the `Head` bone's subtree —
+    /// the skinned head and hair, the `head00` / `face01` parts, their
+    /// outlines) drawn at 3× about the Head joint, in gameplay and in the
+    /// song-select previews. Purely cosmetic. Default `false`. Mod menu
+    /// (GLOBAL SETTINGS, Background Dancers — the last row), LIVE: applies on
+    /// the next frame. `docs/big_head_mode_feasibility.md`.
+    #[serde(default)]
+    pub big_head: bool,
 }
 
 impl Default for BackgroundDancersConfig {
@@ -544,6 +542,7 @@ impl Default for BackgroundDancersConfig {
             outline_layer_colors: None,
             custom_content: true,
             movie_mode: None,
+            big_head: false,
         }
     }
 }
@@ -859,6 +858,58 @@ fn default_audio_clock_window() -> u32 {
     10
 }
 
+/// `stepmania_packs` — the StepMania pack loader (`services::stepmania`).
+/// Operator-only: read once at `stepmania::early_init`, never written. An
+/// absent section means every default below.
+#[derive(Deserialize, Clone, Debug)]
+pub struct StepmaniaPacksConfig {
+    /// Hide injected songs from ALL MUSIC (they stay in the STEPMANIA folder).
+    /// Default true: the folder is the only entry point; the VERSION filter
+    /// (ALL MUSIC only) then has nothing of ours to show.
+    #[serde(default = "default_true")]
+    pub exclude_from_all_music: bool,
+    /// Byte budget (MiB) of the on-demand bank + jacket cache under
+    /// `data_mods/_cache/stepmania/`.
+    #[serde(default = "default_stepmania_audio_cache_mb")]
+    pub audio_cache_mb: u32,
+    /// Auto-sync: the prep tool measures each injected song against its
+    /// audio once per source fingerprint (`sync.bin`) and
+    /// `services::stepmania::sync_apply` applies the correction at play time
+    /// through the game's JUDGEMENT OFFSET (never by changing a file). When
+    /// false the tool measures nothing and nothing is applied. (The retired
+    /// `index_timeout_s` key is parsed and ignored.)
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
+    /// `hide_chart` (the only policy today): charts with warps / negative
+    /// BPMs / negative stops are not declared.
+    #[serde(default = "default_stepmania_gimmick_policy")]
+    pub gimmick_policy: String,
+    /// Reproduce `#SPEEDS` / `#SCROLLS` display gimmicks for injected songs
+    /// (`services::scroll_remap`). Display-only; judgement is untouched
+    /// either way. When false the tables are never published.
+    #[serde(default = "default_true")]
+    pub scroll_gimmicks: bool,
+}
+
+impl Default for StepmaniaPacksConfig {
+    fn default() -> Self {
+        Self {
+            exclude_from_all_music: true,
+            audio_cache_mb: default_stepmania_audio_cache_mb(),
+            auto_sync: true,
+            gimmick_policy: default_stepmania_gimmick_policy(),
+            scroll_gimmicks: true,
+        }
+    }
+}
+
+fn default_stepmania_audio_cache_mb() -> u32 {
+    1024
+}
+fn default_stepmania_gimmick_policy() -> String {
+    "hide_chart".to_string()
+}
+
 static CONFIG: OnceCell<ConfigFile> = OnceCell::new();
 
 #[derive(Deserialize)]
@@ -913,6 +964,8 @@ pub struct ConfigFile {
     pub background_dancers: Option<BackgroundDancersConfig>,
     #[serde(default)]
     pub ddr_selection: Option<DdrSelectionConfig>,
+    #[serde(default)]
+    pub stepmania_packs: Option<StepmaniaPacksConfig>,
 }
 
 /// Initialize the config store. Call once, early in init sequence.
@@ -955,6 +1008,7 @@ pub fn init() {
                     gameplay_timing_fixes: None,
                     background_dancers: None,
                     ddr_selection: None,
+                    stepmania_packs: None,
                 }
             }
         },
@@ -986,6 +1040,7 @@ pub fn init() {
                 gameplay_timing_fixes: None,
                 background_dancers: None,
                 ddr_selection: None,
+                stepmania_packs: None,
             }
         }
     };

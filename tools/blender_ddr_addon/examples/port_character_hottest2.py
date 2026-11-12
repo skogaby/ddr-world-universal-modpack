@@ -1,0 +1,1126 @@
+"""EXAMPLE / PORT: the HOTTEST PARTY polygon dancers of DanceDanceRevolution MUSIC FIT (Wii, JP 2009
+= HOTTEST PARTY 3) -- which re-ships the whole FuruFuru Party (Wii, JP 2008 = HOTTEST PARTY 2) cast
+and remakes HOTTEST PARTY 1's leads and back-ups in their HP1 outfits on the new rig -- WITH THEIR
+OWN RIG AND THEIR OWN CHOREOGRAPHY, as ONE de-duplicated Background Dancers source folder
+`HOTTSTPARTY 1-3` (the Omnimix path of port_character_hottest.py), fed by the zan decoder in
+scripts/zan_dump.py (formats, the HP2-is-a-subset-of-HP3 analysis and the naming evidence:
+docs/wii_ddr_hottest_party_2_3_research.md).
+
+Both games run on Konami's own `zan` Wii library. Every dancer is a costume file
+sound/stream/character/CHR<nn>0.bin = {body ZMB, head ZMB} plus one texture file per colour
+variant, CHR<nn><k>.bin = {body TPL, head TPL}. All of them share ONE 37-bone Maya rig (Hips ..
+Head, the hands with two finger joints each) plus the Acc* / mii_head attach joints, and ONE kind
+of choreography: each song's motion/MOT010_SSQ<nnn>.bin is its dance as a run of one-bar ZAB clips.
+Per dancer:
+  1. rebuild the rig from the rest worlds in World game space (the file frame is World's: Y up,
+     facing +Z, left at +X), one uniform scale (zan_dump.GAME_SCALE: the Hips at 0.97 m);
+  2. build ONE skinned mesh: the body's skinned submeshes (joint weights by name), its rigid ones
+     (on their nearest joint), and the head (rigid on `mii_head` -- the game swaps it for a Mii
+     head); the file's normals via `ddr_normal`; winding made consistent with the normals; the
+     vertex colours as COLOR0; one material slot per (texture, two-sided, blended). The body's
+     SKIN material (colour group 2) carries a neutral pale texture that the game tints per
+     costume / colour variant from a main.dol table (zan_dump.skin_tone_table): the tone is
+     multiplied into that material's vertex colours (the head's skin is baked into its texture).
+     The eyes /
+     mouth are overlay passes through UV set 1 (the game animates their frames): their first frame
+     is baked over the face texture into one picture in UV-1 space (zan_dump.bake_overlay); the
+     costume's accessories (accessory/<Joint>_<code>*.bin: rings, jun's fan) ride their joint;
+  3. add the World ROLE-BONE ALIAS `Spine2` -> `Spine1` to the body `.b2it`;
+  4. the choreography library: every song's MOT file of MUSIC FIT plus the FuruFuru Party songs'
+     pieces MUSIC FIT does not carry, chained into continuous takes (zan_dump.chain_motions), each
+     piece's bars from the song's SSQ tempo (zan_dump.clip_bars), cut into ~8-bar clips (World cuts
+     every clip 1.5 s before its end; stock clips are ~10 bars), duplicates dropped, then DEALT over
+     the cast in a seeded rotation (zan_dump.deal_rotating, PER_DANCER clips each; together they
+     dance all of it). A clip is retimed so one bar = 120 frames (World's dance clock runs at chart
+     BPM / 120 under `bpm_sync`), keyed every 2nd frame, the Hips' x/z path re-centred on the mark
+     (ROOT_MODE), and checked against the zan pose (< 1 mm per joint);
+     FLIGHT: the flight songs (zan_dump.piece_class; research 2/3 §7.5) stay out of that library.
+     Their take-off piece becomes motion/flight/takeoff.anm (1:1, 10 s of dance time, its run and
+     leap where authored) and their flight pieces ~8-bar motion/flight/fly_*.anm clips, the Hips
+     lifted from the origin to the standing hip height, FLIGHT_PER_DANCER per dancer dealt in a
+     rotation -- what Background Dancers plays on a flight stage (`mapset_<key>/flight.txt`);
+  5. the `chara_resources.rlist.txt` sidecar (sex from the cast table, shadow 0.75 F / 0.8 M).
+
+GAME=hp4 / hp5 port DanceDanceRevolution HOTTEST PARTY 4 / 5 (Wii, EU 2010 / 2011; the same zan
+engine, rig and formats -- docs/wii_ddr_hottest_party_4_5_research.md) into their own sources
+`HOTTSTPARTY 4` / `HOTTSTPARTY 5` (neither cast contains the other's, nor is HOTTEST PARTY 1-3's a
+part of them). Their costume files are CHR<id><variant:02>.bin, ids 61..75 + 101 (HP4) and
+201..209 (HP5); names from each disc's select-screen plates / portraits and the costume texture
+codes (HP4A_01 = Rena as in MUSIC FIT's HP3A_01, ...). HP4's CHR72 / 73 are MUSIC FIT's CHR49 / 50
+(Pia / Forte, variants 1-2) byte for byte -- shipped already, not re-ported. HP4 / HP5 bodies have
+no colour-group-2 skin material (the skin is in the texture): no tone. The library is that disc's
+own dance/DANCE_*_MOT_010.bin (HP4: 77 song choreographies, the `NNNL` ones alternate dances of
+song NNN; HP5: 200 choreographies of HP2..HP5 songs, nearly all pieces HP2 / HP3 / HP4 ones
+again), tempo from ssq/ss4 where the file maps to a song (HP4), else the pieces' own length.
+
+GAME=winx ports DanceDanceRevolution Winx Club (Wii, EU 2009, `RW6PA4`; the same zan engine and
+37-bone rig in HP2 / HP3's file layout -- docs/wii_ddr_winx_club_research.md) into `WINX CLUB`:
+the six fairies in their three outfits (character/CHR1n / 2n / 3n: `Bloom`, `Bloom Dance`,
+`Bloom Denim`) and their ENCHANTIX form (CHR0n + accessory/AccSpine1_wing0n: `Bloom Fairy`,
+drawn ENCHANTIX_LIFT higher, as the game does). Heads and wings are skinned to dynamic-bone
+chains the game simulates (kept in the rig; see below); the DBBOX_* collision boxes are not drawn.
+The library is motion/MOT010_SSQ*.bin
+(tempo ssq/MU_WIN_<nnn>.ss9 where it exists). Every dancer also gets the girl's transformation
+(transform_clips: motion/transform/transform.anm + pose.anm, 1:1), and an outfit names its
+Enchantix twin by the member pl_<key>/transform/<twin key>.txt (+ the event camera
+camera/transform.camanm, GAME_DEF_CAM /#3/#0) -- what Background Dancers plays when the player's
+side still holds a full combo at 80 % of the song (main.dol FUN_800a6d3c; the Wii: a full Dance
+Gauge). The head's / wings' /
+ribbons' DYNAMIC BONES stay in the rig, skinned (winx_extras), with their solver configs + the
+DBBOX colliders in pl_<key>/dynbones.txt; the additive `kira` sparkle overlays are kept (blended
+material, mesh flags 0x06C1) with their UV scroll in the body's material loop
+pl_<key>/pl_<key>_play_loop.sanm. Then run port_winx_fx.py (the Fairy dancers' effect banks).
+
+Inputs (environment):
+  GAME        hp3 (default: the HOTTSTPARTY 1-3 port) | hp4 | hp5 | winx
+  HP3_GAME / HP2_GAME / HP4_GAME / HP5_GAME / WINX_GAME  the dumped disc trees
+              (scripts/extract_wii_ddr_data.py disc ...), default ~/Desktop/DDR Wii ISOs/<title>
+              (Winx Club: ~/Desktop/ddr_wii/Winx Club (Europe)); HP2 only feeds the hp3 library
+  DANCERS     comma list of keys (hprena01 .., hp4rena01 .., winxbloom01 ..) or person stems (rena,
+              pia, bloom, ...: every costume), default the first dancer, or 'all'
+  OUT_BASE    default <assets checkout>/dancers/HOTTSTPARTY 1-3 | 4 | 5 | WINX CLUB
+  PER_DANCER  clips per dancer (default 12)
+  ROOT_MODE   recentre (default) | travel
+  PREVIEW     1 = also render Workbench previews of the RE-IMPORTED export into PREVIEW_DIR
+              (default the system temp dir -- never into the repo)
+Run: DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+       --python tools/blender_ddr_addon/examples/port_character_hottest2.py
+"""
+import hashlib
+import os
+import re
+import sys
+import tempfile
+
+import bpy
+import numpy as np
+from mathutils import Vector
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.normpath(os.path.join(HERE, '..', '..', '..'))
+sys.path.insert(0, HERE)
+from assets_path import assets_root  # noqa: E402
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
+import port_lib as P  # noqa: E402  (registers the add-on)
+import zan_dump as Z  # noqa: E402
+import hsf_dump as H  # noqa: E402  (worlds_to_anm_spec, consistent_winding)
+import extract_wii_ddr_data as W  # noqa: E402
+from blender_ddr_addon import convert, export_character, import_anm, import_character  # noqa: E402
+from blender_ddr_addon.codec import anm as A  # noqa: E402
+from blender_ddr_addon.codec import ktmdl as K  # noqa: E402
+
+GAME = os.environ.get('GAME', 'hp3').lower()
+assert GAME in ('hp3', 'hp4', 'hp5', 'winx'), GAME
+DISCS = {'hp2': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Furu Furu Party (Japan)', 'hp3': '~/Desktop/DDR Wii ISOs/Dance Dance Revolution - Music Fit (Japan)',
+         'hp4': '~/Desktop/DDR Wii ISOs/Hottest Party 4 (Europe)', 'hp5': '~/Desktop/DDR Wii ISOs/Hottest Party 5 (Europe)',
+         'winx': '~/Desktop/ddr_wii/Winx Club (Europe)'}
+DISC = os.path.expanduser(os.environ.get('%s_GAME' % GAME.upper(), DISCS[GAME]))
+HP2_DISC = os.path.expanduser(os.environ.get('HP2_GAME', DISCS['hp2']))
+SOURCE = {'hp3': 'HOTTSTPARTY 1-3', 'hp4': 'HOTTSTPARTY 4', 'hp5': 'HOTTSTPARTY 5', 'winx': 'WINX CLUB'}[GAME]
+TITLE = {'hp3': 'DanceDanceRevolution MUSIC FIT (Wii, JP) = HOTTEST PARTY 3',
+         'hp4': 'DanceDanceRevolution HOTTEST PARTY 4 (Wii, EU)',
+         'hp5': 'DanceDanceRevolution HOTTEST PARTY 5 (Wii, EU)',
+         'winx': 'DanceDanceRevolution Winx Club (Wii, EU)'}[GAME]
+KEY_PREFIX = {'hp3': 'hp', 'hp4': 'hp4', 'hp5': 'hp5', 'winx': 'winx'}[GAME]
+# clip-name tag of a song file's game ('h3s001_000', 'wxs001_000')
+CLIP_TAG = {'hp2': 'h2', 'hp3': 'h3', 'hp4': 'h4', 'hp5': 'h5', 'winx': 'wx'}
+OUT_BASE = os.path.expanduser(os.environ.get('OUT_BASE', os.path.join(assets_root(), 'dancers', SOURCE)))
+PER_DANCER = int(os.environ.get('PER_DANCER', '12'))
+# FLIGHT stages (Background Dancers: `mapset_<key>/flight.txt`): motion/flight/takeoff.anm + these
+# many flight clips per dancer (motion/flight/fly_*.anm; the DLL's normal playlist reads only the
+# direct children of motion/, so they never play on a normal stage or in the preview)
+FLIGHT_PER_DANCER = int(os.environ.get('FLIGHT_PER_DANCER', '4'))
+FLIGHT_DIR = 'flight'
+TAKEOFF_CLIP = 'takeoff'
+FLIGHT_LIFT = Z.HIPS_UNITS * Z.GAME_SCALE   # flight pieces fly the Hips at the origin: lift to 0.97 m
+ROOT_MODE = os.environ.get('ROOT_MODE', 'recentre')
+PREVIEW = os.environ.get('PREVIEW', '0') == '1'
+PREVIEW_DIR = os.environ.get('PREVIEW_DIR') or os.path.join(tempfile.gettempdir(), 'hottest_party_previews')
+CHR_DIR = os.path.join(DISC, 'character') if GAME == 'winx' else os.path.join(DISC, 'sound', 'stream', 'character')
+
+SHADER = 'mdl_ch_constant_vc'
+SHADOW = {'F': 0.75, 'M': 0.8}
+ROLE_ALIASES = Z.ROLE_ALIASES
+SEED = 3
+
+# ---------------------------------------------------------------------------------------------
+# the cast: MUSIC FIT's costume files, a person -> [(costume file number nn, its colour variants)]
+# in chronological outfit order -- the HOTTEST PARTY 1 outfit (CHR2x/3x), the FuruFuru Party one
+# (CHR0x/1x), MUSIC FIT's own (CHR4x/5x); the person's variants are numbered on across them
+# (`Rena 1..4` = the HP1 outfit in its four colours, `Rena 5..6` the HP2 one, `Rena 7..8` HP3's).
+# Names = MUSIC FIT's select-screen name plates (select_bin_us.bin), matched to the costumes through
+# the portraits in plate order. A back-up costume file holds TWO people: variants 1/2 are one
+# person in the black / white outfit, 3/4 another (Pia / Gliss, Forte / Sharp, Bossa / Nova,
+# Hip / Hop -- the select portraits, the fan wiki's gallery and the head textures agree). The Mii
+# bodies (CHR81..88) have no head and are not ported. FuruFuru Party's cast is a subset of this one
+# (its CHR01..30 are CHR01..30 here, its CHR41..43 = CHR11..13; re-exports, a few triangles apart).
+# stem -> (label, sex, [(nn, (variant, ...))])
+# ---------------------------------------------------------------------------------------------
+V2, V4, V12, V34 = (1, 2), (1, 2, 3, 4), (1, 2), (3, 4)
+CAST_HP3 = {
+    'rena': ('Rena', 'F', [(21, V4), (1, V2), (41, V2)]),
+    'domi': ('Domi', 'F', [(22, V4), (2, V2)]),
+    'ug': ('U.G.', 'M', [(23, V4), (3, V2), (43, V2)]),
+    'root': ('Root', 'M', [(24, V4), (4, V2), (44, V2)]),
+    'chordia': ('Chordia', 'F', [(25, V4), (5, V2), (45, V2)]),
+    'harmony': ('Harmony', 'F', [(26, V4), (6, V2), (46, V2)]),
+    'gaku': ('Gaku', 'M', [(27, V4), (7, V2)]),
+    'danca': ('Danca', 'M', [(28, V4), (8, V2)]),
+    'naoki': ('NAOKI', 'M', [(11, V4), (51, V2)]),
+    'u1': ('U1', 'M', [(12, V4), (52, V2)]),
+    'jun': ('jun', 'F', [(13, V4), (53, (1, 2, 3))]),
+    'dyna': ('Dyna', 'F', [(42, V4)]),
+    'bridget': ('Bridget', 'F', [(47, V4)]),
+    'ceja': ('Ceja', 'F', [(48, V4)]),
+    'pia': ('Pia', 'F', [(29, V12), (9, V12), (49, V12)]),
+    'gliss': ('Gliss', 'F', [(29, V34), (9, V34), (49, V34)]),
+    'forte': ('Forte', 'M', [(30, V12), (10, V12), (50, V12)]),
+    'sharp': ('Sharp', 'M', [(30, V34), (10, V34), (50, V34)]),
+    'bossa': ('Bossa', 'F', [(31, V12), (14, V12), (54, V12)]),
+    'nova': ('Nova', 'F', [(31, V34), (14, V34), (54, V34)]),
+    'hip': ('Hip', 'M', [(32, V12), (15, V12), (55, V12)]),
+    'hop': ('Hop', 'M', [(32, V34), (15, V34), (55, V34)]),
+}
+
+
+# HOTTEST PARTY 4 (EU): CHR<id><variant:02>. The leads wear one new outfit each in two colours;
+# the texture codes keep MUSIC FIT's per-person numbering (HP4A_01 Rena, _03 U.G., _04 Root, _05
+# Chordia, _06 Harmony, _09 Dyna, _10 Bridget, _11 Ceja; HP4C_01 NAOKI, _02 U1, _03 jun; HP4B_03
+# Bossa / Nova, _04 Hip / Hop) and the select screen's plates and portraits agree (Rena's teal hat,
+# U.G.'s visor, Harmony / U.G. the dark-skinned ones). CHR101 is U1's outfit with other legs
+# (HP4C_04_leg). CHR72 / 73 (HP3B_01 / 02 = Pia / Forte in their MUSIC FIT outfit) are MUSIC FIT's
+# CHR49 / 50 byte for byte: shipped in HOTTSTPARTY 1-3, skipped here. CHR81..90 are Mii bodies.
+CAST_HP4 = {
+    'rena': ('Rena', 'F', [(61, V2)]),
+    'dyna': ('Dyna', 'F', [(62, V2)]),
+    'bridget': ('Bridget', 'F', [(63, V2)]),
+    'ug': ('U.G.', 'M', [(64, V2)]),
+    'root': ('Root', 'M', [(65, V2)]),
+    'chordia': ('Chordia', 'F', [(66, V2)]),
+    'harmony': ('Harmony', 'F', [(67, V2)]),
+    'ceja': ('Ceja', 'F', [(68, V2)]),
+    'naoki': ('NAOKI', 'M', [(69, V2)]),
+    'u1': ('U1', 'M', [(70, V2), (101, V2)]),
+    'jun': ('jun', 'F', [(71, V2)]),
+    'bossa': ('Bossa', 'F', [(74, V12)]),
+    'nova': ('Nova', 'F', [(74, V34)]),
+    'hip': ('Hip', 'M', [(75, V12)]),
+    'hop': ('Hop', 'M', [(75, V34)]),
+}
+# HOTTEST PARTY 5 (EU): five new characters (plates DISCO, EMI, RUBY, RAGE, YUNI) and a new Rena,
+# matched through the portraits (afro DISCO = CHR202, blue-haired EMI = 201, tanned RUBY = 203 --
+# its texture is `HP5_03_ruby_*` --, pink-haired YUNI = 204, capped RAGE = 205, teal-haired Rena =
+# 206), plus HP4's NAOKI / jun / U1 outfits re-exported with retouched heads (HP5C_01 / 03 / 02 =
+# CHR207 / 208 / 209; bodies identical to HP4's CHR69 / 71 / 70). Root, Harmony and the back-ups
+# have portraits but no costume file on the disc. CHR81..90 are Mii bodies.
+CAST_HP5 = {
+    'disco': ('DISCO', 'M', [(202, V2)]),
+    'emi': ('EMI', 'F', [(201, V2)]),
+    'ruby': ('RUBY', 'F', [(203, V2)]),
+    'rage': ('RAGE', 'M', [(205, V2)]),
+    'yuni': ('YUNI', 'F', [(204, V2)]),
+    'rena': ('Rena', 'F', [(206, V2)]),
+    'naoki': ('NAOKI', 'M', [(207, V2)]),
+    'jun': ('jun', 'F', [(208, V2)]),
+    'u1': ('U1', 'M', [(209, V2)]),
+}
+# DanceDanceRevolution Winx Club (EU, RW6PA4): the six fairies, SYS_TEXT.bin's name order (Bloom,
+# Stella, Musa, Flora, Tecna, Layla = person 1..6; the head textures' hair colours and
+# `wd_02_stella_body` agree). main.dol FUN_8001d760 groups the character ids: CHR1n the default
+# outfit (`wa_0n`), CHR2n "Denim" (`wc_`: the denim set on all six), CHR3n "Dance" (`wd_`), CHR0n
+# the ENCHANTIX fairy form
+# (`wb_`, its own head, wings accessory/AccSpine1_wing0n) every outfit transforms into in game
+# (never picked directly there); one colour variant each. CHR51..54 are Mii bodies. Entries are
+# (nn, variants, label suffix): labels `Bloom` / `Bloom Denim` / `Bloom Dance` / `Bloom Fairy`.
+WINX_OUTFITS = [(10, ''), (20, ' Denim'), (30, ' Dance'), (0, ' Fairy')]
+WINX_PEOPLE = [('bloom', 'Bloom'), ('stella', 'Stella'), ('musa', 'Musa'), ('flora', 'Flora'),
+               ('tecna', 'Tecna'), ('layla', 'Layla')]
+CAST_WINX = {stem: (label, 'F', [(base + n, (1,), suffix) for base, suffix in WINX_OUTFITS])
+             for n, (stem, label) in enumerate(WINX_PEOPLE, 1)}
+ENCHANTIX_LIFT = 0.8 * Z.GAME_SCALE   # main.dol FUN_8003149c: ids 0..5 are drawn 0.8 units up (they float)
+CAST = {'hp3': CAST_HP3, 'hp4': CAST_HP4, 'hp5': CAST_HP5, 'winx': CAST_WINX}[GAME]
+
+
+def dancers():
+    """{key: dict(label, sex, nn, variant, stem, index)} in cast order. A costume entry
+    (nn, variants) numbers its labels (`Rena 1` ..); (nn, variants, suffix) names them
+    (`Bloom Dance`)."""
+    out = {}
+    for stem, (label, sex, costumes) in CAST.items():
+        n = 0
+        for costume in costumes:
+            nn, variants = costume[:2]
+            for v in variants:
+                n += 1
+                name = label + costume[2] if len(costume) > 2 else '%s %d' % (label, n)
+                out['%s%s%02d' % (KEY_PREFIX, stem, n)] = dict(
+                    label=name, sex=sex, nn=nn, variant=v, stem=stem, index=len(out))
+    return out
+
+
+DANCERS_TABLE = dancers()
+
+
+def is_enchantix(entry):
+    return GAME == 'winx' and entry['nn'] < 10
+
+
+def enchantix_key(entry):
+    """Winx Club: the key of the Enchantix form an outfit transforms into (None for the
+    Enchantix entry itself and outside Winx Club)."""
+    if GAME != 'winx' or is_enchantix(entry):
+        return None
+    person = entry['nn'] % 10
+    return next(k for k, e in DANCERS_TABLE.items() if e['nn'] == person)
+
+
+def bone_name(n):
+    return n.replace('*', '_')
+
+
+def chr_path(nn, k):
+    """FuruFuru Party / MUSIC FIT / Winx Club: CHR<nn:02><k>; HOTTEST PARTY 4 / 5: CHR<id><k:02>."""
+    return os.path.join(CHR_DIR, ('CHR%02d%d.bin' if GAME in ('hp3', 'winx') else 'CHR%d%02d.bin') % (nn, k))
+
+
+# ---------------------------------------------------------------------------------------------
+# the choreography library
+# ---------------------------------------------------------------------------------------------
+HP5_DANCE = re.compile(r'^DANCE_HP(\d)([A-Z])_(\d+)(L?)_([A-Z])(\d+)_MOT_010\.bin$', re.I)
+HP4_DANCE = re.compile(r'^DANCE_(\d{3})(L?)_MOT_010\.bin$', re.I)
+
+
+def song_files():
+    """[(game, song tag, MOT path, SSQ path)] of the songs' choreographies (no lesson files):
+    MUSIC FIT's, then FuruFuru Party's (whose pieces MUSIC FIT also carries are dropped later).
+    HOTTEST PARTY 4: dance/DANCE_<song>[L]_MOT_010.bin (`L` = the song's alternate dance, its own
+    pieces), tempo from ssq/ss4/MU_DDR_<song>.ss4. HOTTEST PARTY 5: dance/DANCE_HP<n><U|J>_<song>
+    _<E|L|S><nn>_MOT_010.bin (HP<n> = the song's origin game, its numbering, not HP5's ss4 one):
+    no SSQ, so library() takes the tempo from the pieces (one bar each)."""
+    out = []
+    if GAME == 'winx':
+        # Winx Club: motion/MOT010_SSQ<nnn>.bin, tempo ssq/MU_WIN_<nnn>.ss9 (001..033 only; the
+        # rest -- HOTTEST PARTY choreographies the game re-uses -- take the pieces' own length)
+        mdir = os.path.join(DISC, 'motion')
+        for f in sorted(os.listdir(mdir)):
+            if f.startswith('MOT010_SSQ') and f.endswith('.bin'):
+                tag = f[len('MOT010_SSQ'):-4]
+                out.append((GAME, tag, os.path.join(mdir, f), os.path.join(DISC, 'ssq', 'MU_WIN_%s.ss9' % tag)))
+        return out
+    if GAME in ('hp4', 'hp5'):
+        ddir = os.path.join(DISC, 'dance')
+        for f in sorted(os.listdir(ddir)):
+            if GAME == 'hp4':
+                m = HP4_DANCE.match(f)
+                if m:
+                    out.append((GAME, m.group(1) + m.group(2).lower(), os.path.join(ddir, f),
+                                os.path.join(DISC, 'ssq', 'ss4', 'MU_DDR_%s.ss4' % m.group(1))))
+            else:
+                m = HP5_DANCE.match(f)
+                if m:
+                    tag = '%s%s%s%s%s%s' % tuple(x.lower() for x in m.groups())     # 2u008l01
+                    out.append((GAME, tag, os.path.join(ddir, f), ''))
+        return out
+    for game, disc in (('hp3', DISC), ('hp2', HP2_DISC)):
+        mdir = os.path.join(disc, 'motion')
+        if not os.path.isdir(mdir):
+            print('LIBRARY no %s motion dir %s' % (game, Z._tilde(mdir)))
+            continue
+        for f in sorted(os.listdir(mdir)):
+            if not (f.startswith('MOT010_SSQ') and f.endswith('.bin')):
+                continue
+            tag = f[len('MOT010_SSQ'):-4]           # '001' / '001J'
+            if game == 'hp2':
+                ssq = os.path.join(disc, 'ssq', 'MU_DDR_%s.ss9' % tag)
+            else:
+                ssq = os.path.join(disc, 'ssq', 'Jss9' if tag.endswith('J') else 'ss9', 'MU_DDR_%s.ss9' % tag)
+            out.append((game, tag, os.path.join(mdir, f), ssq))
+    return out
+
+
+_LIBRARY = None
+_FLIGHT = None
+
+
+def library(body, joints):
+    """[clip dict(name, pieces [(motion, frames, bars)], bars)]: every song's choreography
+    chained into takes, cut into ~8-bar clips, duplicates (same piece bytes) dropped; a FuruFuru
+    Party clip is kept only when it holds a piece MUSIC FIT does not (its own songs / takes).
+    The FLIGHT songs (any piece zan_dump.piece_class calls 'flight') are not dance: they go to
+    flight_library() instead (until 2026-10-05 they were dealt here, and a level body half in the
+    floor showed on every stage and in the options-menu preview)."""
+    global _LIBRARY, _FLIGHT
+    if _LIBRARY is not None:
+        return _LIBRARY
+    seen, clips = set(), []
+    hp3_pieces = set()
+    total_bars = 0.0
+    songs = song_files()
+    flight = dict(takeoff=None, clips=[], songs=[])
+    flight_seen = set()
+    for game, tag, mot, ssq in songs:
+        blobs = [z for _p, _n, z in Z.members(open(mot, 'rb').read(), 'zab')]
+        motions = [Z.parse_zab(z) for z in blobs]
+        lengths = [m['length'] for m in motions]
+        if not motions:
+            continue
+        bpm = Z.dominant_bpm(Z.ssq_tempo(open(ssq, 'rb').read())) if ssq and os.path.exists(ssq) else 14400.0 / float(np.median(lengths))
+        hashes = [hashlib.md5(z).hexdigest() for z in blobs]
+        classes = [Z.piece_class(body, m) for m in motions]
+        if 'flight' in classes:
+            flight['songs'].append('%s %s' % (game, tag))
+            for i, c in enumerate(classes):
+                if c == 'takeoff' and flight['takeoff'] is None:
+                    flight['takeoff'] = dict(name=TAKEOFF_CLIP, pieces=[(motions[i], lengths[i], lengths[i] / 120.0)],
+                                             bars=lengths[i] / 120.0, bpm=120.0, flight=True, lift=False)
+            fl = [i for i, c in enumerate(classes) if c == 'flight']
+            for chain in Z.chain_motions(body, [(i, motions[i]) for i in fl], joints):
+                # a flight piece keeps about its authored speed (whole 120-frame bars): no beat to
+                # hit, and some flight songs' SSQ tempo reads doubled (MUSIC FIT 051: 440 BPM)
+                pieces = [(motions[i], lengths[i], max(1.0, float(round(lengths[i] / 120.0))), hashes[i]) for i in chain]
+                for run in Z.chunk_take([(p[3], p[2]) for p in pieces]):
+                    ps = [pieces[k] for k in run]
+                    key = tuple(p[3] for p in ps)
+                    bars = sum(p[2] for p in ps)
+                    if bars < 3 or key in flight_seen:
+                        continue
+                    flight_seen.add(key)
+                    flight['clips'].append(dict(name='fly_%ss%s_%03d' % (CLIP_TAG[game], tag.lower(), chain[run[0]]),
+                                                pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm,
+                                                flight=True, lift=True))
+            continue
+        if min(lengths) > 250:       # the 3-clip demo / showcase files
+            print('LIBRARY skip %s %s (%d clips of %s frames)' % (game, tag, len(lengths), sorted(set(lengths))))
+            continue
+        if game == 'hp3':
+            hp3_pieces.update(hashes)
+        for chain in Z.chain_motions(body, list(enumerate(motions)), joints):
+            pieces = [(motions[i], lengths[i], Z.clip_bars(lengths[i], bpm), hashes[i]) for i in chain]
+            for ci, run in enumerate(Z.chunk_take([(p[3], p[2]) for p in pieces])):
+                ps = [pieces[k] for k in run]
+                bars = sum(p[2] for p in ps)
+                key = tuple(p[3] for p in ps)
+                if bars < 3 or key in seen:
+                    continue
+                if game == 'hp2' and all(h in hp3_pieces for h in key):
+                    continue                    # MUSIC FIT dances it already
+                seen.add(key)
+                # a clip that never moves (a hold pose) is no dance
+                w0 = Z.pose_positions(body, ps[0][0], joints, 0.0)
+                moving = any(np.abs(Z.pose_positions(body, p[0], joints, p[1] * 0.5) - w0).max() > 0.3 for p in ps)
+                if not moving:
+                    continue
+                clips.append(dict(name='%ss%s_%03d' % (CLIP_TAG[game], tag.lower(), chain[0] + run[0]),
+                                  pieces=[(p[0], p[1], p[2]) for p in ps], bars=bars, bpm=bpm))
+                total_bars += bars
+    print('LIBRARY %s: %d clips (%d FuruFuru Party), %.0f bars from %d song files' % (
+        GAME, len(clips), sum(1 for c in clips if c['name'].startswith('h2')), total_bars, len(songs)))
+    print('FLIGHT %s: take-off %s, %d flight clips (%.0f bars) from %d flight song(s): %s' % (
+        GAME, '%d frames' % flight['takeoff']['pieces'][0][1] if flight['takeoff'] else 'NONE', len(flight['clips']),
+        sum(c['bars'] for c in flight['clips']), len(flight['songs']), ', '.join(flight['songs'])))
+    _LIBRARY, _FLIGHT = clips, flight
+    return clips
+
+
+def flight_library(body, joints):
+    """dict(takeoff clip or None, clips [flight clips], songs): the flight songs' pieces
+    (research 2/3 §7.5) -- the one take-off piece (MUSIC FIT / HP4: 600 frames, exported 1:1 =
+    10 s of dance time, its run and leap kept where they were authored) and the flight pieces
+    chained into ~8-bar clips like the dance library, lifted so the Hips fly at the standing hip
+    height (FLIGHT_LIFT; the zan pieces put them at the model origin)."""
+    library(body, joints)
+    return _FLIGHT
+
+
+_HANDS = None
+_FLIGHT_HANDS = None
+
+
+def hand_of(index, body, joints):
+    global _HANDS
+    if _HANDS is None:
+        lib = library(body, joints)
+        _HANDS = Z.deal_rotating(range(len(lib)), len(DANCERS_TABLE), PER_DANCER, seed=SEED)
+    lib = library(body, joints)
+    return [lib[i] for i in sorted(_HANDS[index])]
+
+
+def flight_hand_of(index, body, joints):
+    """The take-off + FLIGHT_PER_DANCER flight clips of dancer `index` (dealt in a rotation like
+    the dance clips, so the cast together flies all of them), or [] without a take-off."""
+    global _FLIGHT_HANDS
+    fl = flight_library(body, joints)
+    if not fl['takeoff'] or not fl['clips']:
+        return []
+    if _FLIGHT_HANDS is None:
+        _FLIGHT_HANDS = Z.deal_rotating(range(len(fl['clips'])), len(DANCERS_TABLE), FLIGHT_PER_DANCER, seed=SEED + 1)
+    return [fl['takeoff']] + [fl['clips'][i] for i in sorted(_FLIGHT_HANDS[index])]
+
+
+# Winx Club's ENCHANTIX TRANSFORMATION (main.dol FUN_800a6d3c; research notes in
+# docs/wii_ddr_winx_club_research.md): both the outfit and its Enchantix twin play the girl's
+# game/APLMOT/APL_CHARA0<n>.bin /#0/#0 (120 frames: the transformation) then /#0/#1 (40 frames,
+# held until the next choreography piece), at their authored 60 Hz -- written 1:1 as
+# motion/transform/transform.anm + pose.anm. An outfit's body folder also carries the marker
+# `transform/<Enchantix key>.txt` (the key in the member NAME -- the DLL's content planner sees member
+# names only; the text repeats it and adds the twin's `lift`) and the event camera
+# `camera/transform.camanm`.
+TRANSFORM_DIR = 'transform'
+TRANSFORM_MARKER_DIR = 'transform'
+TRANSFORM_CLIPS = ('transform', 'pose')
+
+
+def transform_clips(entry):
+    """[clip dict] of the transformation (Winx Club only, else [])."""
+    if GAME != 'winx':
+        return []
+    blob = open(os.path.join(DISC, 'game', 'APLMOT', 'APL_CHARA%02d.bin' % (entry['nn'] % 10)), 'rb').read()
+    body = [Z.parse_zab(z) for p, _n, z in Z.members(blob, 'zab') if p.startswith('/#0/')]
+    out = []
+    for name, mo in zip(TRANSFORM_CLIPS, body):
+        L = mo['length']
+        out.append(dict(name=name, pieces=[(mo, L, L / 120.0)], bars=L / 120.0, bpm=120.0, transform=True))
+    return out
+
+
+def clip_worlds(body, clip, joints, frames, extras=None):
+    """(frames x joints x 4 x 4) ROW-vector game worlds of one clip, retimed so a bar lasts 120
+    output frames (each piece stretched onto its own bars). `extras` {joint: (rest world in its
+    own model, frame joint)} are joints of another model (Winx Club's head / wing skeletons): they
+    ride their frame joint at rest."""
+    extras = extras or {}
+    own = [n for n in joints if n not in extras]
+    frame_joints = sorted({fr for _w, fr in extras.values() if fr not in own})
+    body_joints = own + frame_joints
+    out = np.empty((len(frames), len(body_joints), 4, 4))
+    f = np.asarray(frames, dtype=np.float64)
+    starts = np.cumsum([0.0] + [120.0 * p[2] for p in clip['pieces']])
+    piece = np.clip(np.searchsorted(starts, f, side='right') - 1, 0, len(clip['pieces']) - 1)
+    for k, (mo, L, bars) in enumerate(clip['pieces']):
+        sel = np.nonzero(piece == k)[0]
+        if not len(sel):
+            continue
+        src = np.minimum((f[sel] - starts[k]) * L / (120.0 * bars), float(L))
+        out[sel] = Z.joint_worlds(body, mo, body_joints, src)
+    if not extras:
+        return Z.game_row(out)
+    col = {n: i for i, n in enumerate(body_joints)}
+    full = np.empty((len(frames), len(joints), 4, 4))
+    for i, n in enumerate(joints):
+        if n in extras:
+            rest, fr = extras[n]
+            full[:, i] = np.einsum('ij,fjk->fik', rest, out[:, col[fr]])
+        else:
+            full[:, i] = out[:, col[n]]
+    return Z.game_row(full)
+
+
+# ---------------------------------------------------------------------------------------------
+# Winx Club: the dynamic-bone skeletons (research §7.1) -- the head's `bone_head` / `rot_DB*` /
+# `DB_*` (under mii_head), the wings' `wing_root` / `DB_*wing*` (under AccSpine1) and the body's
+# own `DB_*` (Layla Denim's `DB_himo*`) stay in the rig, skinned, and `pl_<key>/dynbones.txt`
+# carries every DB_ node's config + the body's DBBOX colliders for the DLL's solver
+# (`background_dancers/dynbones_logic.rs`).
+# ---------------------------------------------------------------------------------------------
+DYNBONES_FILE = 'dynbones.txt'
+
+
+def winx_extras(head, acc):
+    """[(joint, parent joint, model, frame joint)] of the head's and the wings' own skeletons,
+    parents first (mesh holders, ZDRAW_ / DBBOX_ / FX_ nodes are no joints)."""
+    if GAME != 'winx':
+        return []
+    out = []
+    srcs = ([(head, Z.ATTACH_NODE)] if head is not None else []) + [(m, j) for j, m, _t, _f in acc]
+    for model, frame in srcs:
+        for nd in model['nodes']:
+            # (FX_wing: the wings' effect markers at each DB_*wing_02 origin -- duplicate names, no
+            # weights; the DLL attaches the wing sparkles at those joints themselves)
+            if nd['parent'] < 0 or nd['submeshes'] or nd['name'].upper().startswith(('ZDRAW', 'DBBOX', 'FX_')):
+                continue
+            par = model['nodes'][nd['parent']]
+            out.append((nd['name'], frame if par['parent'] < 0 else par['name'], model, frame))
+    return out
+
+
+def dynbones_sidecar(entry, body, extras, jnames, binds):
+    """The dynbones.txt text (None without a dynamic bone): every DB_ node of the body / head /
+    wings in the rig, the body's DBBOX boxes as joint-local metres."""
+    models = [(body, None)] + [(m, fr) for _n, _p, m, fr in extras]
+    seen, bones = set(), []
+    for model, _frame in models:
+        if id(model) in seen:
+            continue
+        seen.add(id(model))
+        for nd in model['nodes']:
+            if not Z.is_dynamic_bone(nd) or nd['name'] not in jnames:
+                continue
+            par = model['nodes'][nd['parent']]
+            parent = par['name'] if par['name'] in jnames else None
+            if parent is None:
+                parent = next(p for n, p, _m, _f in extras if n == nd['name'])
+            rest = np.asarray(binds[nd['name']]) @ np.linalg.inv(np.asarray(binds[parent]))
+            bones.append(dict(name=nd['name'], parent=parent, length=nd['length'] * Z.GAME_SCALE,
+                              cfg=Z.dynbone_config(model['_blob'], nd), rest=rest))
+    if not bones:
+        return None
+    rest = Z.rest_worlds(body)
+    boxes = []
+    for nd in body['nodes']:
+        bid = Z.dbbox_id(nd['name'])
+        if bid is None or not nd['submeshes']:
+            continue
+        joint = Z._nearest_joint(body, nd['parent'], set(jnames))
+        pts = np.concatenate([sm['pos'] for sm in nd['submeshes']]) @ rest[nd['index']][:3, :3] + rest[nd['index']][3, :3]
+        J = np.asarray(binds[joint])
+        loc = (pts * Z.GAME_SCALE - J[3, :3]) @ np.linalg.inv(J[:3, :3])
+        boxes.append((bid, joint, loc.min(0).tolist(), loc.max(0).tolist()))
+    hdr = ['%s "%s": dynamic bones (main.dol FUN_8010d430 configs) + DBBOX colliders' % (TITLE, entry['label']),
+           'generated by tools/blender_ddr_addon/examples/port_character_hottest2.py -- do not edit']
+    print('  DYNBONES %d bones (%s), %d colliders' % (len(bones), ' '.join(b['name'] for b in bones), len(boxes)))
+    return Z.format_dynbones(bones, boxes, header=hdr)
+
+
+# The body's material loop (Winx Club: the kira overlays' UV scroll): one .sanm beside the model,
+# member `data/chara/pl_<key>/pl_<key>_play_loop.sanm` (Background Dancers samples it into the
+# body's material copies on the real clock).
+KIRA_SCROLLS = {}
+SANM_SUFFIX = '_play_loop.sanm'
+
+
+def body_sanm(key, model_path):
+    """(bytes, summary) of the body's material loop over KIRA_SCROLLS, or None."""
+    if not KIRA_SCROLLS:
+        return None
+    m = K.parse_model(open(model_path, 'rb').read())
+    idents = {mt['identity'] for mt in m['materials']}
+    period = 0.0
+    for sc in KIRA_SCROLLS.values():
+        if sc is not None and len(sc[0]) > 1:
+            period = max(period, float(sc[0][-1, 0] - sc[0][0, 0]))
+    L = max(1, int(round((period or 1.0) * 60.0)))
+    targets, tracks = [], []
+    for name, sc in sorted(KIRA_SCROLLS.items()):
+        if sc is None:
+            continue
+        ident = K.pack_identity(name)
+        assert ident in idents, '%s: material %s not in the model' % (key, name)
+        f = np.arange(L + 1, dtype=np.float64)
+        off = Z.texmtx_offset(sc[0], sc[1], f / 60.0)
+        # at f = L the clock has wrapped to key 0 again: continue the slope into the loop point
+        if L >= 2:
+            off[L] = off[L - 1] + (off[L - 1] - off[L - 2])
+        slot = len(targets)
+        targets.append(dict(identity=ident, identity2=0, hash=K.fnv1(SHADER), flags=0x2000))
+        for ax in (0, 1):
+            v = off[:, ax]
+            if np.abs(v - v[0]).max() < 1e-7:
+                continue
+            times, vals = [0], [float(v[0])]
+            for i in range(1, L + 1):
+                if i == L or abs((v[i + 1] - v[i]) - (v[i] - v[i - 1])) > 1e-6:
+                    times.append(i)
+                    vals.append(float(v[i]))
+            tracks.append(dict(kind=8, target=slot, sub=2 + ax, times=times, keys=[(x,) for x in vals]))
+    if not tracks:
+        return None
+    spec = dict(frame_count=L, flag=1, fps=60, material_tracks=tracks, material_targets=targets)
+    data = A.write_anm(spec)
+    parsed = A.parse_anm(data)
+    for t in tracks:
+        got = A.evaluate_materials(parsed, float(L // 2))[t['target']][t['sub']]
+        want = t['keys'][0][0] + (t['keys'][-1][0] - t['keys'][0][0]) * (L // 2) / float(t['times'][-1])
+        assert abs(got - want) < 1e-4, (key, got, want)
+    return data, '%d frames, %d materials, %d tracks' % (L, len(targets), len(tracks))
+
+
+# The transformation's event camera: GAME_DEF_CAM `/#3/#0` (main.dol FUN_8003aedc member 3, the
+# 92-frame shot FUN_8003d1d8 cuts to), shipped with every transforming outfit as
+# `pl_<key>/camera/transform.camanm` (the stage ports' camera math, port_stage_hottest2).
+TRANSFORM_CAMERA = 'transform'
+
+
+def transform_camera(body_dir):
+    import port_stage_hottest2 as SP
+    blob = open(os.path.join(DISC, 'game', 'GAME_DEF_CAM.bin'), 'rb').read()
+    cams = [(p, Z.parse_cam(b)) for p, _n, b in Z.members(blob, 'cam') if p.startswith('/#3/#0')]
+    assert cams, 'GAME_DEF_CAM.bin has no /#3/#0'
+    spec, times, (pos_m, aim_m) = SP.camera_spec(cams[0][1])
+    data = A.write_anm(spec)
+    ep, ed = SP.check_camera(data, times, pos_m, aim_m)
+    assert ep < 1e-3 and ed < 1e-3, 'transform camera error pos %.4f dir %.4f' % (ep, ed)
+    cdir = os.path.join(body_dir, 'camera')
+    os.makedirs(cdir, exist_ok=True)
+    open(os.path.join(cdir, TRANSFORM_CAMERA + '.camanm'), 'wb').write(data)
+    return '%s %d frames' % (cams[0][0], times[-1])
+
+
+# ---------------------------------------------------------------------------------------------
+# model
+# ---------------------------------------------------------------------------------------------
+_TONES = None
+
+
+def skin_tone(entry, body=None):
+    """The (r, g, b) skin tone the game gives this costume / colour variant: MUSIC FIT's
+    main.dol table (zan_dump.skin_tone_table, slot = variant - 1). None for a body without a
+    skin material (colour group 2): HOTTEST PARTY 4 / 5 bake the skin into the texture."""
+    global _TONES
+    if body is not None and Z.skin_material(body) is None:
+        assert GAME != 'hp3', 'CHR%02d has no skin material' % entry['nn']
+        return None
+    if _TONES is None:
+        dol = W.main_dol(DISC)
+        assert dol, 'no main.dol under %s/sys: the skin tones come from it' % Z._tilde(DISC)
+        _TONES = Z.skin_tone_table(open(dol, 'rb').read())
+    tones = _TONES.get(entry['nn'])
+    assert tones, 'CHR%02d has no skin tone in main.dol' % entry['nn']
+    return tones[min(entry['variant'], len(tones)) - 1]
+
+
+def load_costume(entry):
+    zm = Z.members(open(chr_path(entry['nn'], 0), 'rb').read(), 'zmb')
+    body = Z.parse_zmb(zm[0][2])
+    body['_blob'] = zm[0][2]
+    head = Z.parse_zmb(zm[1][2]) if len(zm) > 1 else None
+    if head is not None:
+        head['_blob'] = zm[1][2]
+    tp = Z.members(open(chr_path(entry['nn'], entry['variant']), 'rb').read(), 'tpl')
+    body_tex = Z.tpl_images(tp[0][2])
+    head_tex = Z.tpl_images(tp[1][2]) if len(tp) > 1 else []
+    return body, head, body_tex, head_tex
+
+
+def accessories(body, head, variant):
+    """[(attach joint, ZMB model, TPL images)] of a costume: accessory/<Joint>_<costume code>[_*].bin
+    (the code is the body's texture prefix: `n_05` / `c_03` / `s_03` in FuruFuru Party, `HP2A_05`
+    in MUSIC FIT) -- rings, fans, a headlamp, rigid on the joint; colour variant k uses the k-th TPL
+    (the last when there are fewer). The Wii-Remote props (`*_wii_con`) are left out."""
+    import re
+    if GAME == 'winx':
+        # Winx Club: the Enchantix bodies (wb_0n) wear accessory/AccSpine1_wing0n (main.dol's
+        # accessory table: wing01..06; the outfits wear nothing)
+        m = re.search(r'\bwb_0(\d)_body', ' '.join(body['textures']))   # CHR36's Denim body reuses wb_06_ref03
+        if not m:
+            return []
+        f = 'AccSpine1_wing0%s.bin' % m.group(1)
+        blob = open(os.path.join(DISC, 'accessory', f), 'rb').read()
+        zm, tps = Z.members(blob, 'zmb'), Z.members(blob, 'tpl')
+        wings = Z.parse_zmb(zm[0][2])
+        wings['_blob'] = zm[0][2]
+        return [('AccSpine1', wings, Z.tpl_images(tps[min(variant, len(tps)) - 1][2]), f)]
+    names = ' '.join(body['textures'] + (head['textures'] if head else []))
+    m = re.search(r'(HP\d[A-Z]_\d\d)', names, re.I) or re.search(r'(?:tex_)?([ncsm]_\d\d)', names)
+    if not m:
+        return []
+    code = m.group(1).lower()
+    # HOTTEST PARTY 5 ships HP4's accessory files only: its re-exported HP5C_<nn> outfits (NAOKI /
+    # jun / U1 = HP4C_<nn>) wear HP4C_<nn>'s (jun's fan, AccRHand_HP4C_03)
+    codes = [code] + (['hp4c_' + code[5:]] if GAME == 'hp5' and code.startswith('hp5c_') else [])
+    adir = os.path.join(DISC, 'accessory')
+    out = []
+    for f in sorted(os.listdir(adir)) if os.path.isdir(adir) else []:
+        stem = f[:-4].lower() if f.lower().endswith('.bin') else None
+        if not stem or 'wii_con' in stem:
+            continue
+        for joint, code in [(n['name'], c) for c in codes for n in body['nodes']]:
+            if stem.startswith(joint.lower() + '_' + code) and (len(stem) == len(joint) + 1 + len(code) or
+                                                              stem[len(joint) + 1 + len(code)] == '_'):
+                blob = open(os.path.join(adir, f), 'rb').read()
+                zm = Z.members(blob, 'zmb')
+                tps = Z.members(blob, 'tpl')
+                if zm and tps:
+                    out.append((joint, Z.parse_zmb(zm[0][2]), Z.tpl_images(tps[min(variant, len(tps)) - 1][2]), f))
+                break
+    return out
+
+
+def build_armature(key, joints, binds):
+    arm_data = bpy.data.armatures.new(key + '_rig')
+    arm = bpy.data.objects.new(key + '_Armature', arm_data)
+    bpy.context.scene.collection.objects.link(arm)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode='EDIT')
+    ebs = {}
+    for n, _p in joints:
+        eb = arm_data.edit_bones.new(bone_name(n))
+        eb.head = (0.0, 0.0, 0.0)
+        eb.tail = (0.0, 0.04, 0.0)
+        eb.matrix = convert.rowmat_to_blender([float(x) for x in np.asarray(binds[n]).reshape(16)])
+        ebs[n] = eb
+    for n, p in joints:
+        if p is not None:
+            ebs[n].parent = ebs[p]
+    bpy.ops.object.mode_set(mode='OBJECT')
+    arm['ddr_bone_order'] = [bone_name(n) for n, _ in joints]
+    arm['ddr_chara_key'] = key
+    return arm
+
+
+def pow2_rgba(rgba):
+    h, w = rgba.shape[:2]
+    nh, nw = 1 << max(0, int(round(np.log2(h)))), 1 << max(0, int(round(np.log2(w))))
+    if (nh, nw) == (h, w):
+        return rgba
+    ys = (np.arange(nh) * h // nh).clip(0, h - 1)
+    xs = (np.arange(nw) * w // nw).clip(0, w - 1)
+    return rgba[ys][:, xs]
+
+
+def texture_png(stem, rgba):
+    out = os.path.join(tempfile.gettempdir(), 'hottest_party_dancer_textures', stem + '.png')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    rgba = np.ascontiguousarray(pow2_rgba(rgba))
+    W.write_png(out, rgba.shape[1], rgba.shape[0], rgba.tobytes())
+    return out
+
+
+def costume_pieces(body, head, body_tex, head_tex, names, acc=(), tone=None):
+    """[(piece, picture RGBA, uv set, two_sided, blended, tag, tint)] of a costume: every submesh
+    with a texture; an overlay pass (eyes / mouth) gets its baked UV-1 picture; accessories ride
+    their joint. Additive passes (an accessory headlamp's glow) are left out -- except Winx Club's
+    `kira` overlays, kept as additive slots (`blended` = dict(add, scroll: the UV keys)). `tint` is the skin tone (RGB 0..1) on the body's skin
+    material (zan_dump.skin_material), else None: the game multiplies it into that material's
+    colour register, the port into the vertex colours."""
+    rest = Z.rest_worlds(body)
+    mii = rest[body['by_name'][Z.ATTACH_NODE]]
+    out = []
+    skin = Z.skin_material(body) if tone is not None else None
+    sources = [(body, body_tex, Z.model_pieces(body, names), 'b')]
+    if head is not None:
+        sources.append((head, head_tex, Z.model_pieces(head, names, frame=mii, default_joint=Z.ATTACH_NODE), 'h'))
+    for k, (joint, model, tex, _f) in enumerate(acc):
+        sources.append((model, tex, Z.model_pieces(model, names, frame=rest[body['by_name'][joint]],
+                                                   default_joint=joint), 'a%d' % k))
+    for model, tex, pieces, prefix in sources:
+        for pc in pieces:
+            if pc['node'].upper().startswith('DBBOX_'):
+                continue                     # Winx Club: a dynamic-bone collision box (dummy.tga), not drawn
+            mt = model['materials'][pc['material']]
+            if mt['flags'][3] != 0:          # an effect pass (environment map): not drawn as a mesh
+                continue
+            if Z.material_mode(mt)[0] == Z.BLEND_ADD:
+                if GAME != 'winx':
+                    print('  SKIP additive %s sub %d (material %d)' % (pc['node'], pc['sub'], pc['material']))
+                    continue
+            if not mt['textures'] or mt['textures'][0] >= len(tex):
+                print('  WARN %s sub %d: material %d has no texture in the TPL (%s / %d)' % (
+                    pc['node'], pc['sub'], pc['material'], mt['textures'], len(tex)))
+                continue
+            blend, soft, two, _lit = Z.material_mode(mt)
+            tint = tuple(c / 255.0 for c in tone) if model is body and pc['material'] == skin else None
+            base = tex[mt['textures'][0]]
+            if blend == Z.BLEND_ADD:
+                # Winx Club's `kira` sparkle overlays (ZDRAW_kira_*, *_kirakira, the wings' third
+                # submesh; research §7.2): additive, kept in the body with their UV scroll keys
+                # (the body's material loop, `pl_<key>_play_loop.sanm`)
+                k = Z.material_uv_keys(model, mt)
+                scroll = Z.uv_keys(model['_blob'], *k) if k and '_blob' in model else None
+                print('  KIRA additive %s sub %d (material %d), uv keys %s' % (
+                    pc['node'], pc['sub'], pc['material'], None if scroll is None else scroll[0].tolist()))
+                out.append((pc, base, 0, True, dict(add=True, scroll=scroll), '%sk%d' % (prefix, mt['textures'][0]),
+                            None))
+                continue
+            lay = Z.material_layer(model, pc['material'])
+            if lay is not None and pc['flags'] & 0x10000 and lay['textures'][0] < len(tex):
+                pic = Z.bake_overlay(base, tex[lay['textures'][0]], pc)
+                out.append((pc, pic, 1, two, False, '%sov%d' % (prefix, lay['textures'][0]), tint))
+            else:
+                out.append((pc, base, 0, two, blend == Z.BLEND_ALPHA and soft, '%s%d' % (prefix, mt['textures'][0]),
+                            tint))
+    return out
+
+
+def build_mesh(key, pieces, arm):
+    """ONE skinned mesh; one material slot per distinct (picture, two-sided, blended)."""
+    KIRA_SCROLLS.clear()
+    P_, N_, UV_, C_, W_, T_, M_ = [], [], [], [], [], [], []
+    slot_key, slots = {}, []
+    for pc, pic, uv_set, two, blended, tag, tint in pieces:
+        pos, nrm, uv, col, wts, tris = Z.weld(pc, uv_set)
+        if not len(tris):
+            continue
+        if tint is not None:
+            col = col.copy()
+            col[:, :3] *= np.asarray(tint)
+        tris, _f = H.consistent_winding(pos, nrm, tris)
+        digest = hashlib.md5(np.ascontiguousarray(pic).tobytes()).hexdigest()[:8]
+        sk = (digest, two, 'add' if isinstance(blended, dict) else blended)
+        if sk not in slot_key:
+            slot_key[sk] = len(slots)
+            slots.append((pic, two, blended, tag))
+        base = len(P_)
+        P_.extend(pos)
+        N_.extend(nrm)
+        UV_.extend(uv)
+        C_.extend(col)
+        W_.extend(wts)
+        T_.extend((tris + base).tolist())
+        M_.extend([slot_key[sk]] * len(tris))
+    me = bpy.data.meshes.new(key + '_body')
+    me.from_pydata([tuple(convert.vec_to_blender(p)) for p in P_], [], T_)
+    me.update()
+    lay = me.uv_layers.new(name='UVMap')
+    loops_v = np.zeros(len(me.loops), dtype=np.int64)
+    me.loops.foreach_get('vertex_index', loops_v)
+    luv = np.array(UV_)[loops_v].copy()
+    luv[:, 1] = 1.0 - luv[:, 1]
+    lay.data.foreach_set('uv', luv.astype(np.float32).ravel())
+    exact = me.attributes.new('ddr_normal', 'FLOAT_VECTOR', 'POINT')
+    exact.data.foreach_set('vector', np.array([tuple(convert.vec_to_blender(n)) for n in N_]).ravel())
+    ob = bpy.data.objects.new(key + '_body', me)
+    bpy.context.scene.collection.objects.link(ob)
+    ob.parent = arm
+    groups = {n: ob.vertex_groups.new(name=n) for n in arm['ddr_bone_order']}
+    for vi, ws in enumerate(W_):
+        acc = {}
+        for joint, w in ws:
+            acc[bone_name(joint)] = acc.get(bone_name(joint), 0.0) + w
+        for j, w in acc.items():
+            groups[j].add([vi], w, 'ADD')
+    mod = ob.modifiers.new('Armature', 'ARMATURE')
+    mod.object = arm
+    c_attr = P.white_color_attribute(ob)
+    # color_srgb = the raw bytes the exporter writes (the linear `color` accessor would re-encode
+    # them: a file 0.5 would ship as 0.74)
+    c_attr.data.foreach_set('color_srgb', np.array(C_, dtype=np.float32)[loops_v].ravel())
+    for i, (pic, two, blended, tag) in enumerate(slots):
+        stem = '%s_%s' % (key, tag)
+        image = P.load_texture(stem, texture_png(stem, pic))
+        mat = P.make_material(stem, image, two_sided=two, shader=SHADER)
+        if blended:
+            mat.surface_render_method = 'BLENDED'
+        if isinstance(blended, dict):
+            # additive, two-sided, no z-write (export_model._mesh_flags honours the material's own
+            # flags; the flight-effect pools' FLAGS_ADD)
+            mat['ddr_flags'], mat['ddr_flags2'] = 0x06C1, 4
+            KIRA_SCROLLS[mat.name] = blended.get('scroll')
+        me.materials.append(mat)
+    if len(me.materials) > 1:
+        me.polygons.foreach_set('material_index', np.array(M_, dtype=np.int32))
+        me.update()
+    return ob, len(slots)
+
+
+def add_role_aliases(b2it_path, names):
+    entries = K.parse_b2it(open(b2it_path, 'rb').read())
+    have = {n for n, _ in entries}
+    for role, joint in ROLE_ALIASES.items():
+        if role not in have and joint in names:
+            entries.append((role, names.index(joint)))
+    open(b2it_path, 'wb').write(K.write_b2it(entries))
+    return sorted(n for n, _ in entries if n in ROLE_ALIASES)
+
+
+def exported_rig(body_dir, body):
+    m = K.parse_model(open(os.path.join(body_dir, body + '.model'), 'rb').read())
+    table = K.parse_b2it(open(os.path.join(body_dir, body + '.b2it'), 'rb').read())
+    by_index = {i: n for n, i in table if n not in ROLE_ALIASES}
+    names = [by_index[i] for i in range(len(m['bones']))]
+    parents = [b['parent'] for b in m['bones']]
+    binds = [np.array(b['bind'], dtype=float).reshape(4, 4) for b in m['bones']]
+    return m, names, parents, binds
+
+
+def check_clip(anm_bytes, worlds, parents, times):
+    parsed = A.parse_anm(anm_bytes)
+    n = worlds.shape[0]
+    worst = 0.0
+    for k in sorted({0, 1, n // 3, n // 2, n - 2, n - 1}):
+        pose = A.evaluate_pose(parsed, times[k], parents)
+        for i in range(worlds.shape[1]):
+            w = np.array(pose[i]['world'], dtype=float).reshape(4, 4)
+            worst = max(worst, float(np.abs(w[3, :3] - worlds[k][i][3, :3]).max()))
+    return worst
+
+
+def port(key):
+    entry = DANCERS_TABLE[key]
+    label, sex = entry['label'], entry['sex']
+    assert len(label.encode()) <= 15, label  # the options row's SSO budget (catalog::MAX_LABEL_BYTES)
+    P.fresh_scene()
+    body, head, body_tex, head_tex = load_costume(entry)
+    motion_bones = Z.parse_zab(Z.members(open(song_files()[0][2], 'rb').read(), 'zab')[0][2])['order']
+    joints = Z.rig_joints(body, keep=motion_bones)
+    binds = Z.game_bind_matrices(body, joints)
+    acc = accessories(body, head, entry['variant'])
+    # Winx Club: the head's / wings' dynamic-bone skeletons join the rig (they are simulated by
+    # the DLL instead of being folded rigid onto mii_head / AccSpine1)
+    extras = winx_extras(head, acc)
+    body_rest = Z.rest_worlds(body) if extras else None
+    extra_rest = {}
+    for n, p, model, frame in extras:
+        r = Z.rest_worlds(model)[model['by_name'][n]]
+        extra_rest[n] = (r, frame)
+        binds[n] = Z.game_row(r @ body_rest[body['by_name'][frame]])
+        joints.append((n, p))
+    jnames = [n for n, _p in joints]
+    arm = build_armature(key, joints, binds)
+    tone = skin_tone(entry, body)
+    pieces = costume_pieces(body, head, body_tex, head_tex, set(jnames), acc, tone)
+    _ob, nslots = build_mesh(key, pieces, arm)
+    bpy.context.view_layer.update()
+    print('MODEL %s (%s): %d joints, %d pieces, %d material slots, skin %s, accessories %s' % (
+        key, os.path.basename(chr_path(entry['nn'], entry['variant'])), len(joints), len(pieces), nslots,
+        '#%02x%02x%02x' % tone if tone else 'in texture', [a[3] for a in acc]))
+
+    out_dir = os.path.join(OUT_BASE, label)
+    bname = 'pl_' + key
+    body_dir = os.path.join(out_dir, bname)
+    motion_dir = os.path.join(body_dir, 'motion')
+    flight_dir = os.path.join(motion_dir, FLIGHT_DIR)
+    os.makedirs(flight_dir, exist_ok=True)
+    for d, ext in ((body_dir, '.dds'), (motion_dir, '.anm'), (flight_dir, '.anm')):
+        for stale in os.listdir(d):
+            if stale.endswith(ext):
+                os.remove(os.path.join(d, stale))
+    rep = export_character.export_character(out_dir, arm, key=key, write_textures=True, write_rlist=False)
+    print('EXPORT', key, rep['body_spec'], [os.path.relpath(w, out_dir) for w in rep['written']])
+
+    m, file_names, parents, file_binds = exported_rig(body_dir, bname)
+    zan_of = {bone_name(n): n for n in jnames}
+    assert sorted(file_names) == sorted(zan_of), (file_names, jnames)
+    idents = [b['identity'] for b in m['bones']]
+    assert len(set(idents)) == len(idents), 'bone identity collision'
+    assert all(len(me['palette']) <= 52 for me in m['meshes'])
+    assert len(file_names) <= 64, 'more posed bones than the frame board holds'
+    assert K.write_model(K.model_to_spec(m)) == open(os.path.join(body_dir, bname + '.model'), 'rb').read()
+    aliases = add_role_aliases(os.path.join(body_dir, bname + '.b2it'), file_names)
+    assert set(aliases) == set(ROLE_ALIASES), aliases
+
+    names = [zan_of[n] for n in file_names]
+    game_binds = {n: binds[n] for n in names}
+    # the choreography library reads the body's own joints (the head / wing skeletons ride at rest)
+    body_names = [n for n in names if n not in extra_rest]
+    hand = hand_of(entry['index'], body, body_names)
+    flight = flight_hand_of(entry['index'], body, body_names)
+    if not flight:
+        os.rmdir(flight_dir)
+    transform = transform_clips(entry)
+    transform_dir = os.path.join(motion_dir, TRANSFORM_DIR)
+    if os.path.isdir(transform_dir):
+        for stale in os.listdir(transform_dir):
+            os.remove(os.path.join(transform_dir, stale))
+        os.rmdir(transform_dir)
+    if transform:
+        os.makedirs(transform_dir)
+    lift = ENCHANTIX_LIFT if is_enchantix(entry) else 0.0
+    total = 0
+    for clip in hand + flight + transform:
+        n_out = int(round(clip['bars'] * 120))
+        frames = list(range(0, n_out + 1, 2))
+        worlds = clip_worlds(body, clip, names, frames, extra_rest)
+        if clip.get('lift'):
+            worlds[:, :, 3, 1] += FLIGHT_LIFT
+        worlds[:, :, 3, 1] += lift
+        shift = None
+        if ROOT_MODE == 'recentre' and clip['name'] != TAKEOFF_CLIP and not clip.get('transform'):
+            hips = worlds[:, names.index('Hips'), 3]
+            shift = ((hips[:, 0].min() + hips[:, 0].max()) / 2, (hips[:, 2].min() + hips[:, 2].max()) / 2)
+        spec, wq = H.worlds_to_anm_spec(worlds, names, parents, file_binds, game_binds, frames, frames[-1], shift)
+        data = A.write_anm(spec)
+        err = check_clip(data, wq, parents, frames)
+        assert err < 1e-3, '%s: joint error %.5f m' % (clip['name'], err)
+        out_clip = transform_dir if clip.get('transform') else flight_dir if clip.get('flight') else motion_dir
+        open(os.path.join(out_clip, clip['name'] + '.anm'), 'wb').write(data)
+        total += len(data)
+        print('CLIP %s %2d piece(s) %5.1f bars (song %3.0f BPM) -> %5d frames @60, %7d bytes, max joint err %.2e m' % (
+            clip['name'], len(clip['pieces']), clip['bars'], clip['bpm'], frames[-1], len(data), err))
+    print('CLIPS %s: %d clips, %.1f bars + flight %s + transform %s, %.2f MB' % (
+        key, len(hand), sum(c['bars'] for c in hand), [c['name'] for c in flight] or 'none',
+        [c['name'] for c in transform] or 'none', total / 1e6))
+    twin = enchantix_key(entry)
+    old_marker = os.path.join(body_dir, 'transform.txt')       # the 2026-10-20 checkpoint's name
+    if os.path.exists(old_marker):
+        os.remove(old_marker)
+    marker_dir = os.path.join(body_dir, TRANSFORM_MARKER_DIR)
+    cam_dir = os.path.join(body_dir, 'camera')
+    for d in (marker_dir, cam_dir):
+        if os.path.isdir(d):
+            for stale in os.listdir(d):
+                os.remove(os.path.join(d, stale))
+            os.rmdir(d)
+    if twin:
+        os.makedirs(marker_dir)
+        with open(os.path.join(marker_dir, twin + '.txt'), 'w') as f:
+            f.write('# Winx Club: this outfit transforms into %s (%s) -- main.dol FUN_800a6d3c\n' % (
+                twin, DANCERS_TABLE[twin]['label']))
+            f.write('%s\n' % twin)
+            # the twin's own clips fly ENCHANTIX_LIFT higher; the outfit's choreography it takes
+            # over after the switch is lifted by the DLL
+            f.write('lift %.6f\n' % ENCHANTIX_LIFT)
+        print('  TRANSFORM camera %s' % transform_camera(body_dir))
+    # Winx Club: the dynamic bones' sidecar and the body's material loop (kira UV scroll)
+    dyn_path = os.path.join(body_dir, DYNBONES_FILE)
+    dyn = dynbones_sidecar(entry, body, extras, set(names), binds) if GAME == 'winx' else None
+    if dyn:
+        open(dyn_path, 'w').write(dyn)
+    elif os.path.exists(dyn_path):
+        os.remove(dyn_path)
+    sanm_path = os.path.join(body_dir, bname + SANM_SUFFIX)
+    sanm = body_sanm(key, os.path.join(body_dir, bname + '.model')) if GAME == 'winx' else None
+    if sanm:
+        open(sanm_path, 'wb').write(sanm[0])
+        print('  SANM %s: %s' % (os.path.basename(sanm_path), sanm[1]))
+    elif os.path.exists(sanm_path):
+        os.remove(sanm_path)
+
+    sidecar = os.path.join(out_dir, 'chara_resources.rlist.txt')
+    with open(sidecar, 'w') as f:
+        f.write('# %s "%s" (%s + %s), ported with its own rig and choreography\n' % (
+            TITLE, label, os.path.basename(chr_path(entry['nn'], 0))[:-4],
+            os.path.basename(chr_path(entry['nn'], entry['variant']))[:-4]))
+        f.write('# (tools/blender_ddr_addon/examples/port_character_hottest2.py; clips %s)\n' % (
+            ' '.join(c['name'] for c in hand)))
+        if flight:
+            f.write('# flight stages: motion/%s/ %s\n' % (FLIGHT_DIR, ' '.join(c['name'] for c in flight)))
+        if transform:
+            f.write('# Enchantix transformation: motion/%s/ %s%s\n' % (
+                TRANSFORM_DIR, ' '.join(c['name'] for c in transform), ' -> %s' % twin if twin else ''))
+        f.write('%s, pl, %s, A, 1.0, %s, 0.0\n' % (key, sex, export_character.fmt_num(SHADOW[sex])))
+    if PREVIEW:
+        preview(out_dir, key, max(hand, key=lambda c: c['bars'])['name'] if hand else None)
+    return out_dir
+
+
+def preview(out_dir, key, clip):
+    """Round trip through the game formats: re-import the export + one exported clip, render."""
+    P.fresh_scene()
+    bname = 'pl_' + key
+    arm, _meshes, _parts, _info = import_character.load_character(
+        os.path.join(out_dir, bname, bname + '.model'), import_textures=True)
+    P.studio()
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    P.render_camera(os.path.join(PREVIEW_DIR, '%s_rest.png' % key), Vector((0.0, -4.5, 0.95)),
+                    Vector((0.0, 0.0, 0.95)), scale=2.3, res=(600, 800))
+    P.render_camera(os.path.join(PREVIEW_DIR, '%s_face.png' % key), Vector((0.0, -4.5, 1.55)),
+                    Vector((0.0, 0.0, 1.55)), scale=0.5, res=(500, 500))
+    if clip:
+        import_anm.load_anm(os.path.join(out_dir, bname, 'motion', clip + '.anm'), arm)
+        for f in (0, 240, 480, 720):
+            bpy.context.scene.frame_set(f)
+            P.render_camera(os.path.join(PREVIEW_DIR, '%s_%s_f%04d.png' % (key, clip, f)),
+                            Vector((0.0, -6.0, 1.0)), Vector((0.0, 0.0, 1.0)), scale=4.0, res=(600, 600))
+    transform = os.path.join(out_dir, bname, 'motion', TRANSFORM_DIR, TRANSFORM_CLIPS[0] + '.anm')
+    if os.path.exists(transform):
+        import_anm.load_anm(transform, arm)
+        for f in (0, 40, 80, 120):
+            bpy.context.scene.frame_set(f)
+            P.render_camera(os.path.join(PREVIEW_DIR, '%s_transform_f%04d.png' % (key, f)),
+                            Vector((0.0, -6.0, 1.0)), Vector((0.0, 0.0, 1.0)), scale=4.0, res=(600, 600))
+
+
+if __name__ == '__main__':
+    want = os.environ.get('DANCERS', next(iter(DANCERS_TABLE)))
+    if want == 'all':
+        todo = list(DANCERS_TABLE)
+    else:
+        todo = []
+        for w in (s.strip().lower() for s in want.split(',') if s.strip()):
+            todo += [k for k, e in DANCERS_TABLE.items() if e['stem'] == w] if w in CAST else [w]
+    unknown = [k for k in todo if k not in DANCERS_TABLE]
+    if unknown:
+        sys.exit('unknown DANCERS %s (have %s)' % (unknown, ' '.join(DANCERS_TABLE)))
+    for k in todo:
+        port(k)
+    print('DONE')

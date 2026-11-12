@@ -1,13 +1,21 @@
-//! Transactional apply (design §6): execute a [`Plan`] against the game folder
-//! with a backup of every file it replaces or removes, roll everything back on
-//! the first error, and write the manifest last.
+//! Transactional apply (design §6; optional content packs design §4.9):
+//! execute a list of actions against the game folder with a backup of every
+//! file it replaces or removes, and roll everything back on the first error.
 //!
 //! Every mutation is a same-volume `rename` (stage and backup live inside the
 //! game folder's work directory), so each step is atomic on its own and the
 //! set of steps performed so far is exactly what a rollback has to undo. The
 //! journal names the planned actions before the first mutation; deleting it
-//! after the manifest write marks the run complete (crash recovery reads it).
+//! after the last one marks the transaction complete (crash recovery reads
+//! it).
+//!
+//! One run may hold several transactions — the base release, then one per
+//! pack. Each backs up into its own subfolder of `backup/`, and the folder as
+//! a whole is emptied only by the first transaction of a run ([`Session`]),
+//! so "backup holds the last update" stays true for the run as a unit.
 
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -23,16 +31,55 @@ use crate::plan::{Action, MergedFiles, Plan};
 use crate::relpath::RelPath;
 use crate::selfupdate::{self, SwapReceipt};
 
+/// The backup subfolder of the base release's transaction.
+pub const BASE_BACKUP: &str = "base";
+
+/// One updater run. Carries what must happen once per run rather than once
+/// per transaction.
+#[derive(Debug, Default)]
+pub struct Session {
+    backups_reset: Cell<bool>,
+}
+
+impl Session {
+    pub fn new() -> Self {
+        Session::default()
+    }
+}
+
+/// Everything [`execute`] needs for one transaction.
+pub struct Transaction<'a> {
+    /// What the journal calls it (a release tag, a pack id).
+    pub label: &'a str,
+    /// Subfolder of `backup/` this transaction backs up into.
+    pub backup_subdir: &'a str,
+    pub actions: &'a [Action],
+    /// Where `Write` actions take their files from.
+    pub stage_root: &'a Path,
+    /// Bytes for `WriteMerged` actions.
+    pub merged: &'a MergedFiles,
+    /// Written by `WriteManifest`; a transaction without one must not plan
+    /// that action.
+    pub manifest: Option<&'a Manifest>,
+    /// When set, a successful transaction keeps only these paths in its
+    /// backup and deletes the rest (see the module docs of `packs::plan`).
+    pub keep_backup: Option<&'a BTreeSet<RelPath>>,
+}
+
 /// Written before the first mutation, deleted after the last.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Journal {
     pub tag: String,
     pub started_unix: u64,
     pub actions: Vec<Action>,
+    /// Subfolder of `backup/` holding this transaction's originals. Empty in
+    /// a journal written by an updater that predates packs: `backup/` itself.
+    #[serde(default)]
+    pub backup_subdir: String,
 }
 
 impl Journal {
-    pub fn new(tag: &str, actions: &[Action]) -> Self {
+    pub fn new(tag: &str, backup_subdir: &str, actions: &[Action]) -> Self {
         Journal {
             tag: tag.to_string(),
             started_unix: SystemTime::now()
@@ -40,6 +87,16 @@ impl Journal {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             actions: actions.to_vec(),
+            backup_subdir: backup_subdir.to_string(),
+        }
+    }
+
+    /// Where this journal's originals are.
+    fn backup_root(&self, game: &GameDir) -> PathBuf {
+        if self.backup_subdir.is_empty() {
+            game.backup_dir()
+        } else {
+            game.backup_dir().join(&self.backup_subdir)
         }
     }
 
@@ -138,24 +195,56 @@ enum Done {
     SelfSwapped(SwapReceipt),
 }
 
-/// Execute `plan`. The staged release lives at `stage_root`; `merged` carries
-/// the bytes for any `WriteMerged` actions; `manifest` is written last.
-pub fn execute(
+/// Execute the base release's `plan`: the staged release lives at
+/// `stage_root`, `merged` carries the bytes for any `WriteMerged` actions,
+/// and `manifest` is written last.
+pub fn execute_release(
     game: &GameDir,
+    session: &Session,
     plan: &Plan,
     stage_root: &Path,
     merged: &MergedFiles,
     manifest: &Manifest,
     fault: Fault,
 ) -> Result<Summary, ApplyError> {
-    let backup_root = game.backup_dir();
+    execute(
+        game,
+        session,
+        &Transaction {
+            label: &manifest.tag,
+            backup_subdir: BASE_BACKUP,
+            actions: &plan.actions,
+            stage_root,
+            merged,
+            manifest: Some(manifest),
+            keep_backup: None,
+        },
+        fault,
+    )
+}
+
+/// Execute one transaction.
+pub fn execute(
+    game: &GameDir,
+    session: &Session,
+    tx: &Transaction<'_>,
+    fault: Fault,
+) -> Result<Summary, ApplyError> {
+    let backup_root = game.backup_dir().join(tx.backup_subdir);
+    let (stage_root, merged) = (tx.stage_root, tx.merged);
     let prepare = || -> io::Result<()> {
         fs::create_dir_all(&game.work)?;
+        // The first transaction of a run starts the backup folder afresh;
+        // later ones only claim their own subfolder.
+        if !session.backups_reset.get() && game.backup_dir().exists() {
+            fs::remove_dir_all(game.backup_dir())?;
+        }
+        session.backups_reset.set(true);
         if backup_root.exists() {
             fs::remove_dir_all(&backup_root)?;
         }
         fs::create_dir_all(&backup_root)?;
-        Journal::new(&manifest.tag, &plan.actions).write(&game.journal_path())
+        Journal::new(tx.label, tx.backup_subdir, tx.actions).write(&game.journal_path())
     };
     if let Err(e) = prepare() {
         // Nothing has been touched yet.
@@ -172,7 +261,7 @@ pub fn execute(
     let mut failure: Option<String> = None;
     let mut pruned_rels: Vec<RelPath> = Vec::new();
 
-    for action in &plan.actions {
+    for action in tx.actions {
         let result = match action {
             Action::Write { rel, existed } => {
                 let target = rel.to_path(&game.root);
@@ -245,17 +334,20 @@ pub fn execute(
                 }
                 Ok(())
             }
-            Action::WriteManifest => {
-                if let Err(e) = manifest::write(&game.manifest_path(), manifest) {
-                    // Non-fatal by design (§7): the next run re-installs.
-                    crate::log_warn!(
-                        "could not write {}: {e}; the next run will repeat this update",
-                        game.manifest_path().display()
-                    );
-                    summary.manifest_written = false;
+            Action::WriteManifest => match tx.manifest {
+                Some(manifest) => {
+                    if let Err(e) = manifest::write(&game.manifest_path(), manifest) {
+                        // Non-fatal by design (§7): the next run re-installs.
+                        crate::log_warn!(
+                            "could not write {}: {e}; the next run will repeat this update",
+                            game.manifest_path().display()
+                        );
+                        summary.manifest_written = false;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
+                None => Err("this transaction has no manifest to write".to_string()),
+            },
         };
 
         if let Err(msg) = result {
@@ -291,6 +383,9 @@ pub fn execute(
             let _ = fs::remove_dir_all(game.download_dir());
             let _ = fs::remove_dir_all(game.stage_dir());
             summary.dirs_removed = remove_emptied_dirs(&game.root, &pruned_rels);
+            if let Some(keep) = tx.keep_backup {
+                trim_backup(&backup_root, &done, keep);
+            }
             Ok(summary)
         }
         Some(cause) => {
@@ -392,6 +487,48 @@ fn has_backup(d: &Done) -> bool {
     matches!(d, Done::Replaced { .. } | Done::Pruned { .. })
 }
 
+/// After a committed transaction: delete every backed-up original whose path
+/// is not in `keep`, then the directories that emptied. Best-effort — a
+/// leftover backup file is harmless.
+fn trim_backup(backup_root: &Path, done: &[Done], keep: &BTreeSet<RelPath>) {
+    for d in done {
+        let (Done::Replaced { backup, .. } | Done::Pruned { backup, .. }) = d else {
+            continue;
+        };
+        let kept = backup
+            .strip_prefix(backup_root)
+            .ok()
+            .map(|rel| {
+                rel.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .and_then(|rel| RelPath::new(&rel))
+            .is_some_and(|rel| keep.contains(&rel));
+        if !kept {
+            let _ = fs::remove_file(backup);
+        }
+    }
+    remove_empty_tree(backup_root);
+}
+
+/// Remove `dir` and its subdirectories wherever they hold no files.
+/// Returns true when `dir` itself was removed.
+fn remove_empty_tree(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let mut empty = true;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !(path.is_dir() && remove_empty_tree(&path)) {
+            empty = false;
+        }
+    }
+    empty && fs::remove_dir(dir).is_ok()
+}
+
 /// After prunes: remove directories under `data_mods/` that are now empty,
 /// walking up each pruned path's parents and stopping at the first non-empty
 /// ancestor. `data_mods/` itself is never removed. Best-effort.
@@ -454,7 +591,7 @@ pub fn recover_if_interrupted(game: &GameDir) -> Recovery {
             };
         }
     };
-    let backup_root = game.backup_dir();
+    let backup_root = journal.backup_root(game);
     let mut restored = 0;
     let mut removed = 0;
     let mut errors = Vec::new();
@@ -540,11 +677,145 @@ mod tests {
             },
             Action::WriteManifest,
         ];
-        let j = Journal::new("v1", &actions);
+        let j = Journal::new("v1", BASE_BACKUP, &actions);
         let path = dir.join("journal.json");
         j.write(&path).unwrap();
         let back = Journal::read(&path).unwrap();
         assert_eq!(back, j);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_journal_from_before_packs_reads_with_an_empty_backup_subdir() {
+        let old = r#"{"tag": "v1.4", "started_unix": 1, "actions": ["WriteManifest"]}"#;
+        let j: Journal = serde_json::from_str(old).unwrap();
+        assert_eq!(j.backup_subdir, "");
+        let game = GameDir::for_test(Path::new("game"));
+        assert_eq!(j.backup_root(&game), game.backup_dir());
+        let new = Journal::new("dancers-mix", "dancers-mix", &[]);
+        assert_eq!(
+            new.backup_root(&game),
+            game.backup_dir().join("dancers-mix")
+        );
+    }
+
+    #[test]
+    fn recovery_restores_from_the_journals_backup_subfolder() {
+        let dir =
+            std::env::temp_dir().join(format!("ddr_updater_recovery_sub_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let game = GameDir::for_test(&dir);
+        let rel = RelPath::new("data_mods/custom_models/dancers/Mix/a.arc").unwrap();
+        let backup = rel.to_path(&game.backup_dir().join("dancers-mix"));
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, b"ORIGINAL").unwrap();
+        // The base transaction's backup of the same run must not be touched.
+        fs::create_dir_all(game.backup_dir().join(BASE_BACKUP)).unwrap();
+        fs::write(
+            game.backup_dir()
+                .join(BASE_BACKUP)
+                .join("ddr_world_hook.dll"),
+            b"OLD DLL",
+        )
+        .unwrap();
+        let target = rel.to_path(&game.root);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"PARTIAL").unwrap();
+        let actions = vec![Action::Write {
+            rel: rel.clone(),
+            existed: true,
+        }];
+        Journal::new("dancers-mix", "dancers-mix", &actions)
+            .write(&game.journal_path())
+            .unwrap();
+        assert_eq!(
+            recover_if_interrupted(&game),
+            Recovery::Recovered {
+                restored: 1,
+                removed: 0,
+                errors: vec![]
+            }
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"ORIGINAL");
+        assert!(game
+            .backup_dir()
+            .join(BASE_BACKUP)
+            .join("ddr_world_hook.dll")
+            .exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_first_transaction_of_a_session_empties_the_backup_folder() {
+        let dir = std::env::temp_dir().join(format!("ddr_updater_session_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let game = GameDir::for_test(&dir);
+        fs::create_dir_all(game.backup_dir().join("left-by-an-earlier-run")).unwrap();
+        fs::create_dir_all(&game.root).unwrap();
+        let merged = MergedFiles::default();
+        let tx = |subdir: &'static str| Transaction {
+            label: subdir,
+            backup_subdir: subdir,
+            actions: &[],
+            stage_root: Path::new("unused"),
+            merged: &merged,
+            manifest: None,
+            keep_backup: None,
+        };
+        let session = Session::new();
+        execute(&game, &session, &tx("first"), Fault::None).unwrap();
+        assert!(!game.backup_dir().join("left-by-an-earlier-run").exists());
+        assert!(game.backup_dir().join("first").is_dir());
+        fs::write(game.backup_dir().join("first/kept.bin"), b"x").unwrap();
+        execute(&game, &session, &tx("second"), Fault::None).unwrap();
+        assert!(game.backup_dir().join("first/kept.bin").exists());
+        assert!(game.backup_dir().join("second").is_dir());
+        // A new run starts over.
+        execute(&game, &Session::new(), &tx("third"), Fault::None).unwrap();
+        assert!(!game.backup_dir().join("first").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_transaction_without_a_manifest_cannot_write_one() {
+        let dir =
+            std::env::temp_dir().join(format!("ddr_updater_nomanifest_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let game = GameDir::for_test(&dir);
+        fs::create_dir_all(&game.root).unwrap();
+        let merged = MergedFiles::default();
+        let result = execute(
+            &game,
+            &Session::new(),
+            &Transaction {
+                label: "pack",
+                backup_subdir: "pack",
+                actions: &[Action::WriteManifest],
+                stage_root: Path::new("unused"),
+                merged: &merged,
+                manifest: None,
+                keep_backup: None,
+            },
+            Fault::None,
+        );
+        assert!(matches!(result, Err(ApplyError::RolledBack(_))));
+        assert!(!game.manifest_path().exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_backup_trees_are_removed_and_trees_with_files_stay() {
+        let dir =
+            std::env::temp_dir().join(format!("ddr_updater_emptytree_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("gone/a/b")).unwrap();
+        fs::create_dir_all(dir.join("stays/a/b")).unwrap();
+        fs::create_dir_all(dir.join("stays/empty")).unwrap();
+        fs::write(dir.join("stays/a/b/file"), b"x").unwrap();
+        assert!(remove_empty_tree(&dir.join("gone")));
+        assert!(!remove_empty_tree(&dir.join("stays")));
+        assert!(!dir.join("gone").exists());
+        assert!(dir.join("stays/a/b/file").exists() && !dir.join("stays/empty").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -582,7 +853,7 @@ mod tests {
             },
             Action::WriteManifest,
         ];
-        Journal::new("v9", &actions)
+        Journal::new("v9", "", &actions)
             .write(&game.journal_path())
             .unwrap();
 

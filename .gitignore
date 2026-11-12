@@ -14,6 +14,13 @@ log.txt
 # The one place arcs ARE repo content: the Background Dancers custom
 # dancer/stage packs (add-on-authored models, never Konami data).
 !/data_mods/custom_models/**/*.arc
+# Ported dancers and stages live in the assets repository
+# (skogaby/ddr-world-universal-modpack-assets); only the Custom sources are
+# repo content here. A local copy or symlink of a ported source stays ignored.
+/data_mods/custom_models/dancers/*
+!/data_mods/custom_models/dancers/Custom/
+/data_mods/custom_models/stages/*
+!/data_mods/custom_models/stages/Custom/
 /tests/
 
 # Claude Code

@@ -233,9 +233,11 @@ fn on_preview_request(side: u8, option_id: &str) {
     if !ENABLED.load(Ordering::Acquire) || side > 1 {
         return;
     }
+    // Any of our rows (source rows included): a model row previews its own
+    // value, a source row the side's effective pick (design 2026-09-30 R21).
     let kind = options::kind_for_option(option_id);
     let wanted: Option<Identity> =
-        kind.and_then(|k| options::choice_key(k, side).map(|key| (k, key)));
+        kind.and_then(|k| options::row_choice_key(option_id, side).map(|key| (k, key)));
     let now = now_ms();
     if let Ok(mut slots) = SLOTS.lock() {
         let s = &mut slots[side as usize];
@@ -362,7 +364,11 @@ fn drive_live_window(slot: &mut PreviewSlot, menu_open: bool) {
         }
         w.scene.park_engine_destroyed();
         let t = w.t();
-        w.scene.publish(t, true, SceneMask::ALL);
+        // RANDOM / STENCIL bars: 2 s (a 120-BPM bar of the preview's clock).
+        if let Some(sess) = w.scene.session_mut() {
+            sess.style_bar = super::universe_logic::bar_at_seconds(t as f64);
+        }
+        w.scene.publish(t, t, true, SceneMask::ALL);
         if let Some(passes) = slot.passes.as_mut() {
             let f = camera::frustum_for(w, t, slot.aspect);
             camera::apply(&f, passes);

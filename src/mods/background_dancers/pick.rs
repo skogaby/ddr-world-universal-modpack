@@ -11,8 +11,8 @@
 //! carries the one parse-time switch the previews need (no floor shadow).
 
 use super::selection::{
-    camera_lists, dancer_x, pick_dancers, pick_stage, playlist, DancerCandidate, PickSource, Rng,
-    Sex, StageCandidate, SHADOW_ARC,
+    camera_lists, dancer_x, flight_playlist_for, intro_cameras, pick_dancers, pick_stage,
+    playlist_for, DancerCandidate, PickSource, Rng, Sex, StageCandidate, SHADOW_ARC,
 };
 
 /// Parse-time switches for a pick (design §4.8): gameplay parses the
@@ -40,6 +40,9 @@ pub struct Pick {
     /// cycle and the `_non` cut-aways.
     pub camera_main: Vec<String>,
     pub camera_non: Vec<String>,
+    /// A FLIGHT stage's take-off shots, in order (`selection::intro_cameras`;
+    /// empty elsewhere).
+    pub camera_intro: Vec<String>,
     /// The MOVIE camera set (`movie_camera.rs`) split + shuffled like the
     /// stage's: used instead of the stage cameras while Background Movies =
     /// FULLSCREEN has a movie as the backdrop. Empty unless the song window
@@ -48,15 +51,28 @@ pub struct Pick {
     pub movie_camera_non: Vec<String>,
     /// Side order: index 0 = the left dancer. May be empty (stage-only).
     pub dancers: Vec<DancerCandidate>,
-    /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`).
+    /// Per dancer: shuffled clip names (`mc_<sex>_<name>_exec`, or the
+    /// dancer's own clip stems — `DancerCandidate::clip_member` maps either).
     pub playlists: Vec<Vec<String>>,
     /// Per dancer: the accessory parts whose arc exists (`head00`, …).
     pub parts: Vec<Vec<String>>,
     /// Selection came from `DDR_DANCERS_PIN`.
     pub pinned: bool,
+    /// FLIGHT mode ([`fly_pick`]): a flight stage whose dancers all fly —
+    /// every playlist is take-off + flight loops, and the stage's `pre_` /
+    /// `fly_` parts switch at the end of the take-off. `false` on a flight
+    /// stage nobody can fly (the platform stays, the dancers dance on it).
+    pub flight: bool,
     /// Provenance of the stage / of each dancer (summary INFO only).
     pub source_stage: PickSource,
     pub source_dancers: Vec<PickSource>,
+    /// Winx Club ([`transform_pick`]): per dancer, the ENCHANTIX twin
+    /// loaded beside it (gameplay, human sides, transform-capable outfits
+    /// only; empty / `None` elsewhere).
+    pub twins: Vec<Option<DancerCandidate>>,
+    /// Per dancer: the player side it stands for (gameplay; empty in the
+    /// previews) — the transformation's combo trigger reads that side.
+    pub sides: Vec<u8>,
 }
 
 impl Pick {
@@ -96,8 +112,17 @@ impl Pick {
                 out.push(a);
             }
         }
+        // Winx Club: the Enchantix twins' body arcs (loaded beside their
+        // outfits; their own clips live inside).
+        for d in self.twins.iter().flatten() {
+            let a = format!("data/arc/{}", d.body_arc_name());
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
         for d in &self.dancers {
-            let a = format!("data/arc/{}.arc", d.sex.arc_stem());
+            // `mc_<sex>.arc`, or the body arc again for own motion (dedup).
+            let a = format!("data/arc/{}", d.motion_arc_name());
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -120,7 +145,7 @@ impl Pick {
     }
 
     /// The one-line per-song INFO. Every element carries its provenance
-    /// (`{random}` / `{option}` / `{pin}`) so a field log shows whether the
+    /// (`{random}` / `{source}` / `{option}` / `{pin}`) so a field log shows whether the
     /// option rows were honoured. A dancer-only pick reads `stage=none{…}`.
     pub fn summary(&self) -> String {
         let n = self.dancers.len();
@@ -151,10 +176,19 @@ impl Pick {
         let clips: Vec<String> = self
             .playlists
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
+                let own = self.dancers.get(i).is_some_and(|d| d.has_own_motion());
                 p.iter()
                     .take(3)
-                    .map(|c| c.rsplit('_').nth(1).unwrap_or(c).to_string())
+                    .map(|c| {
+                        if own {
+                            // Own clips keep their authored stem.
+                            c.clone()
+                        } else {
+                            c.rsplit('_').nth(1).unwrap_or(c).to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(">")
             })
@@ -200,7 +234,20 @@ impl Pick {
             self.arcs().len(),
             self.seed,
             if self.pinned { " (PINNED)" } else { "" }
-        )
+        ) + if self.flight { " FLIGHT" } else { "" }
+            + &{
+                let t: Vec<String> = self
+                    .twins
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, t)| t.as_ref().map(|t| format!("{}->{}", i + 1, t.key)))
+                    .collect();
+                if t.is_empty() {
+                    String::new()
+                } else {
+                    format!(" TRANSFORM[{}]", t.join(" "))
+                }
+            }
     }
 }
 
@@ -263,12 +310,13 @@ pub fn assemble_pick_opt(
         .and_then(|s| camera_rows.get(s.row))
         .map(|(_, f)| f.clone())
         .unwrap_or_default();
-    let playlists = dancers.iter().map(|d| playlist(rng, d.sex)).collect();
+    let playlists = dancers.iter().map(|d| playlist_for(rng, d)).collect();
     let parts = dancers
         .iter()
         .map(|d| d.parts_present(&arc_exists))
         .collect();
     let (camera_main, camera_non) = camera_lists(rng, &camera_row);
+    let camera_intro = intro_cameras(&camera_row);
     let n = dancers.len();
     Pick {
         seed: 0,
@@ -276,15 +324,120 @@ pub fn assemble_pick_opt(
         camera_row,
         camera_main,
         camera_non,
+        camera_intro,
         movie_camera_main: Vec::new(),
         movie_camera_non: Vec::new(),
         dancers,
         playlists,
         parts,
         pinned,
+        flight: false,
         source_stage: PickSource::Random,
         source_dancers: vec![PickSource::Random; n],
+        twins: Vec::new(),
+        sides: Vec::new(),
     }
+}
+
+/// Winx Club (maintainer 2026-10-20): give every dancer of a GAMEPLAY pick
+/// that can transform ([`DancerCandidate::twin`]) and stands for a HUMAN
+/// side (`human(side)`: entered and not the Multiplayer Bot's phantom side)
+/// its Enchantix twin from `all`, loaded beside it. `sides[i]` = dancer
+/// `i`'s player side. Flight picks never transform. Returns the pick and
+/// the `(dancer index, twin key)` of every twin key the tables lack (one
+/// WARN each at the caller). Pure; draws nothing from any rng.
+pub fn transform_pick(
+    mut pick: Pick,
+    all: &[DancerCandidate],
+    sides: &[u8],
+    human: impl Fn(u8) -> bool,
+) -> (Pick, Vec<(usize, String)>) {
+    pick.sides = sides.iter().copied().take(pick.dancers.len()).collect();
+    pick.twins = vec![None; pick.dancers.len()];
+    let mut missing = Vec::new();
+    if pick.flight {
+        return (pick, missing);
+    }
+    for (i, d) in pick.dancers.iter().enumerate() {
+        let Some(key) = d.twin.as_ref() else {
+            continue;
+        };
+        if !sides.get(i).is_some_and(|&s| human(s)) {
+            continue;
+        }
+        match all.iter().find(|c| c.key == *key && c.key != d.key) {
+            Some(t) => pick.twins[i] = Some(t.clone()),
+            None => missing.push((i, key.clone())),
+        }
+    }
+    (pick, missing)
+}
+
+/// What [`fly_pick`] did to a pick.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlightOutcome {
+    /// Not a flight stage (or no stage): the pick is unchanged.
+    NotFlight,
+    /// Flight mode: `(dancer index, replaced key, new key)` for every
+    /// dancer that could not fly.
+    Flight {
+        replaced: Vec<(usize, String, String)>,
+    },
+    /// A flight stage, but no dancer of `all` can fly: the pick is unchanged
+    /// (no flight — the platform stays).
+    NoCapableDancer,
+}
+
+/// Turn a finished pick on a FLIGHT stage into a flight pick (maintainer
+/// 2026-10-05): every dancer that cannot fly ([`DancerCandidate::can_fly`])
+/// is replaced by a random flight-capable one of `all` (another key than
+/// the pick's other dancers while any is left), a capable one is KEPT, and
+/// every dancer's playlist becomes [`flight_playlist_for`] (take-off first).
+/// A stage-only pick (the stage preview) simply turns flight mode on. Pure;
+/// draws from `rng` only on a flight stage, so every other pick is
+/// unchanged.
+pub fn fly_pick(
+    rng: &mut Rng,
+    mut pick: Pick,
+    all: &[DancerCandidate],
+    arc_exists: impl Fn(&str) -> bool,
+) -> (Pick, FlightOutcome) {
+    if !pick.stage.as_ref().is_some_and(|s| s.flight) {
+        return (pick, FlightOutcome::NotFlight);
+    }
+    let capable: Vec<&DancerCandidate> = all.iter().filter(|d| d.can_fly()).collect();
+    if !pick.dancers.is_empty() && capable.is_empty() {
+        return (pick, FlightOutcome::NoCapableDancer);
+    }
+    let mut replaced = Vec::new();
+    for i in 0..pick.dancers.len() {
+        if pick.dancers[i].can_fly() {
+            continue;
+        }
+        let taken: Vec<String> = pick.dancers.iter().map(|d| d.key.clone()).collect();
+        let fresh: Vec<&&DancerCandidate> =
+            capable.iter().filter(|d| !taken.contains(&d.key)).collect();
+        let new = if fresh.is_empty() {
+            capable[rng.below(capable.len() as u32) as usize]
+        } else {
+            *fresh[rng.below(fresh.len() as u32) as usize]
+        };
+        replaced.push((i, pick.dancers[i].key.clone(), new.key.clone()));
+        pick.dancers[i] = new.clone();
+        if let Some(parts) = pick.parts.get_mut(i) {
+            *parts = new.parts_present(&arc_exists);
+        }
+        if let Some(src) = pick.source_dancers.get_mut(i) {
+            *src = PickSource::Flight;
+        }
+    }
+    pick.playlists = pick
+        .dancers
+        .iter()
+        .map(|d| flight_playlist_for(rng, d))
+        .collect();
+    pick.flight = true;
+    (pick, FlightOutcome::Flight { replaced })
 }
 
 /// The BACKGROUND STAGE preview's pick (design §4.6): a uniform row of
@@ -328,6 +481,85 @@ mod tests {
     use super::super::selection::fixtures::{real_chara_rows, real_map_rows, rows};
     use super::super::selection::{dancer_candidates, stage_candidates, Rng};
     use super::*;
+
+    #[test]
+    fn fly_pick_replaces_dancers_that_cannot_fly_and_keeps_those_that_can() {
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let flyer = |key: &str| DancerCandidate {
+            key: key.into(),
+            motion: vec!["h3s020_040".into()],
+            flight: vec![
+                "flight/fly_a".into(),
+                "flight/fly_b".into(),
+                "flight/takeoff".into(),
+            ],
+            ..dancers[0].clone()
+        };
+        let mut all = dancers.clone();
+        all.push(flyer("hprena05"));
+        all.push(flyer("hpemi01"));
+        let tunnel = StageCandidate {
+            flight: true,
+            ..stages[0].clone()
+        };
+        let picked = vec![dancers[0].clone(), flyer("hpemi01"), dancers[1].clone()];
+        let pick = assemble_pick(&mut Rng::new(5), tunnel.clone(), &[], picked, false, |_| {
+            false
+        });
+        let (p, out) = fly_pick(&mut Rng::new(9), pick, &all, |_| false);
+        assert!(p.flight);
+        // the capable one stays, the others become capable ones (no duplicate while any is free)
+        assert_eq!(p.dancers[1].key, "hpemi01");
+        assert_eq!(p.dancers[0].key, "hprena05");
+        assert!(p.dancers.iter().all(|d| d.can_fly()));
+        match out {
+            FlightOutcome::Flight { replaced } => {
+                assert_eq!(replaced.len(), 2);
+                assert_eq!(replaced[0].0, 0);
+                assert_eq!(replaced[0].2, "hprena05");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(p.source_dancers[0], PickSource::Flight);
+        assert!(p
+            .playlists
+            .iter()
+            .all(|pl| pl[0] == "flight/takeoff" && pl.len() == 3));
+        assert!(p.summary().ends_with(" FLIGHT"), "{}", p.summary());
+        // a normal stage is untouched (and draws nothing)
+        let plain = assemble_pick(
+            &mut Rng::new(5),
+            stages[0].clone(),
+            &[],
+            vec![dancers[0].clone()],
+            false,
+            |_| false,
+        );
+        let before = plain.playlists.clone();
+        let (q, out) = fly_pick(&mut Rng::new(9), plain, &all, |_| false);
+        assert_eq!(out, FlightOutcome::NotFlight);
+        assert!(!q.flight);
+        assert_eq!(q.playlists, before);
+        // nobody can fly: unchanged, no flight
+        let lone = assemble_pick(
+            &mut Rng::new(5),
+            tunnel.clone(),
+            &[],
+            vec![dancers[0].clone()],
+            false,
+            |_| false,
+        );
+        let (r, out) = fly_pick(&mut Rng::new(9), lone, &dancers, |_| false);
+        assert_eq!(out, FlightOutcome::NoCapableDancer);
+        assert!(!r.flight && r.dancers[0].key == dancers[0].key);
+        // the stage preview (no dancers) just turns flight mode on
+        let only = assemble_pick_opt(&mut Rng::new(5), Some(tunnel), &[], vec![], false, |_| {
+            false
+        });
+        let (s, out) = fly_pick(&mut Rng::new(9), only, &dancers, |_| false);
+        assert!(s.flight && out == FlightOutcome::Flight { replaced: vec![] });
+    }
 
     const SEED: u64 = 0x5EED_CAFE;
 
@@ -479,6 +711,20 @@ mod tests {
         let summary = pick.summary();
         assert!(summary.starts_with("stage=boom00[0]{option}"), "{summary}");
         assert!(summary.ends_with(" (PINNED)"), "{summary}");
+
+        // A within-source draw (2026-09-30) renders `{source}` per element.
+        let pick = assemble_pick(
+            &mut rng,
+            stage(&stages, "boom00"),
+            &camera_rows,
+            vec![dancer(&dancers, "emi01")],
+            false,
+            |_| true,
+        )
+        .with_sources(PickSource::Source, vec![PickSource::Source]);
+        let summary = pick.summary();
+        assert!(summary.starts_with("stage=boom00[0]{source}"), "{summary}");
+        assert!(summary.contains("emi01(F) x=+0.0{source}"), "{summary}");
     }
 
     #[test]
@@ -547,5 +793,124 @@ mod tests {
         assert_eq!(arcs[0], "data/arc/pl_emi01.arc");
         assert!(pick.summary().contains("dancers=[emi01(F) x=+0.0{option}]"));
         assert!(dancer_only(&mut rng, &dancers, "nobody00", |_| true).is_none());
+    }
+
+    #[test]
+    fn own_motion_dancer_plays_its_own_pool_from_its_body_arc() {
+        let (stages, camera_rows, dancers) = tables();
+        let boom = stage(&stages, "boom00");
+        let umx = DancerCandidate {
+            key: "umxafro00".into(),
+            row: 40,
+            sex: Sex::Male,
+            class: "A".into(),
+            model_scale: 1.0,
+            shadow_scale: 0.8,
+            motion: vec!["hh01_m".into(), "ht01_m".into(), "sfd01_m".into()],
+            flight: Vec::new(),
+            twin: None,
+        };
+        let picked = vec![umx.clone(), dancer(&dancers, "rage00")];
+        let pick = assemble_pick(
+            &mut Rng::new(SEED),
+            boom,
+            &camera_rows,
+            picked,
+            false,
+            |a| !a.starts_with("pl_umxafro00_"),
+        );
+        let mut own = pick.playlists[0].clone();
+        own.sort();
+        assert_eq!(own, umx.motion);
+        assert!(pick.playlists[1].iter().all(|c| c.starts_with("mc_male_")));
+        assert!(pick.parts[0].is_empty());
+        let arcs = pick.arcs();
+        // The own pool rides in the body arc (listed once); rage00 still
+        // needs the male motion arc.
+        assert_eq!(
+            arcs.iter()
+                .filter(|a| *a == "data/arc/pl_umxafro00.arc")
+                .count(),
+            1
+        );
+        assert!(arcs.contains(&"data/arc/mc_male.arc".to_string()));
+        let summary = pick.summary();
+        assert!(
+            summary.contains(&pick.playlists[0][0]),
+            "own stems shown whole: {summary}"
+        );
+        // A pool of only own-motion dancers never loads a sex arc.
+        let solo = dancer_only(&mut Rng::new(SEED), &[umx], "umxafro00", |_| false).unwrap();
+        assert_eq!(
+            solo.arcs_for(&ParseOptions::PREVIEW),
+            vec!["data/arc/pl_umxafro00.arc".to_string()]
+        );
+    }
+
+    #[test]
+    fn transform_pick_twins_human_outfits_only() {
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let outfit = DancerCandidate {
+            key: "winxbloom01".into(),
+            twin: Some("winxbloom04".into()),
+            ..dancers[0].clone()
+        };
+        let fairy = DancerCandidate {
+            key: "winxbloom04".into(),
+            ..dancers[0].clone()
+        };
+        let mut all = dancers.clone();
+        all.push(outfit.clone());
+        all.push(fairy.clone());
+        let picked = vec![outfit.clone(), outfit.clone()];
+        let pick = assemble_pick(
+            &mut Rng::new(5),
+            stages[0].clone(),
+            &[],
+            picked,
+            false,
+            |_| false,
+        );
+        // side 1 is the bot's phantom side: only side 0 transforms
+        let (p, missing) = transform_pick(pick.clone(), &all, &[0, 1], |s| s == 0);
+        assert!(missing.is_empty());
+        assert_eq!(
+            p.twins[0].as_ref().map(|t| t.key.as_str()),
+            Some("winxbloom04")
+        );
+        assert!(p.twins[1].is_none());
+        assert_eq!(p.sides, vec![0, 1]);
+        assert!(p
+            .arcs()
+            .contains(&"data/arc/pl_winxbloom04.arc".to_string()));
+        assert!(p.summary().contains("TRANSFORM[1->winxbloom04]"));
+        // a twin the tables lack is reported, never invented
+        let (p2, missing) = transform_pick(pick.clone(), &dancers, &[0, 1], |_| true);
+        assert!(p2.twins.iter().all(Option::is_none));
+        assert_eq!(
+            missing,
+            vec![
+                (0, "winxbloom04".to_string()),
+                (1, "winxbloom04".to_string())
+            ]
+        );
+        // a standalone Fairy (no twin key) and flight picks never transform
+        let solo = assemble_pick(
+            &mut Rng::new(5),
+            stages[0].clone(),
+            &[],
+            vec![fairy],
+            false,
+            |_| false,
+        );
+        assert!(transform_pick(solo, &all, &[0], |_| true).0.twins[0].is_none());
+        let mut fl = pick;
+        fl.flight = true;
+        assert!(transform_pick(fl, &all, &[0, 1], |_| true)
+            .0
+            .twins
+            .iter()
+            .all(Option::is_none));
     }
 }

@@ -7,12 +7,20 @@
 //! Also hooks `kernel32!GetLongPathNameA` to work around a hard-coded 128‑byte
 //! buffer AVS uses internally; long ifs‑in‑arc cache paths can blow past it
 //! and AVS doesn't fall through to `CreateFileA`. See `hook_get_long_path_name_a`.
+//!
+//! The open/read pair also carries the StepMania progressive-bank reads
+//! (fd → watermark handle; see "In-flight (progressive) reads" below).
 
 use retour::GenericDetour;
 use std::ffi::{CStr, CString};
 use std::panic::AssertUnwindSafe;
 use std::ptr::addr_of;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use crate::services::stepmania::progressive::{self as sm_progressive, ProgressiveFile};
+use crate::services::stepmania::progressive_logic::{self, FdCursor, Poll};
 use crate::{log_info, log_warn};
 
 use super::arc_handler;
@@ -22,6 +30,294 @@ use super::mod_paths;
 use super::ramfs_demangler;
 use super::xml_merger;
 use super::{avs_version, config};
+
+// ── Open/read thread diagnostics (`layeredfs.verbose` only) ──────────
+//
+// Which thread the FileManager uses to open and read per-song assets decides
+// whether a provider may ever block inside the open hook (StepMania packs
+// E2). Latched from the config at hook install so the read hot path pays one
+// atomic load when the diagnostics are off.
+static DIAG_THREADS: AtomicBool = AtomicBool::new(false);
+/// fds whose first read is still awaited → asset family label.
+static DIAG_PENDING_READS: Mutex<Vec<(AvsFile, &'static str)>> = Mutex::new(Vec::new());
+
+/// Asset families whose open/read threads are of interest.
+fn diag_family(norm: &str) -> Option<&'static str> {
+    let lower = norm.to_ascii_lowercase();
+    if lower.starts_with("mdb_apx/ssq/") {
+        Some("ssq")
+    } else if lower.starts_with("sound/win/dance/") {
+        Some("dance-bank")
+    } else if lower.starts_with("arc/jacket/") {
+        Some("jacket")
+    } else if lower.starts_with("arc/thumbnail/") {
+        Some("thumbnail")
+    } else {
+        None
+    }
+}
+
+fn diag_thread_tag() -> String {
+    let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let render = crate::services::widget_renderer::render_thread_id();
+    format!(
+        "tid={} render={}",
+        tid,
+        match render {
+            Some(r) if r == tid => "yes",
+            Some(_) => "no",
+            None => "unknown",
+        }
+    )
+}
+
+fn diag_note_open(norm: &str, fd: AvsFile) {
+    if !DIAG_THREADS.load(Ordering::Relaxed) || fd < 0 {
+        return;
+    }
+    let Some(family) = diag_family(norm) else {
+        return;
+    };
+    log_info!(
+        "LayeredFS[diag]: open {} family={} fd={} {}",
+        norm,
+        family,
+        fd,
+        diag_thread_tag()
+    );
+    if let Ok(mut pending) = DIAG_PENDING_READS.lock() {
+        pending.retain(|(f, _)| *f != fd);
+        if pending.len() < 64 {
+            pending.push((fd, family));
+        }
+    }
+}
+
+fn diag_note_first_read(fd: AvsFile, nbytes: usize) {
+    if !DIAG_THREADS.load(Ordering::Relaxed) {
+        return;
+    }
+    let family = match DIAG_PENDING_READS.lock() {
+        Ok(mut pending) => match pending.iter().position(|(f, _)| *f == fd) {
+            Some(i) => pending.swap_remove(i).1,
+            None => return,
+        },
+        Err(_) => return,
+    };
+    log_info!(
+        "LayeredFS[diag]: first read family={} fd={} nbytes={} {}",
+        family,
+        fd,
+        nbytes,
+        diag_thread_tag()
+    );
+}
+
+// ── In-flight (progressive) reads ────────────────────────────────────
+//
+// StepMania's gameplay bank is served while it is still being written
+// (`stepmania::progressive`, design §4.8 item 3): the open hook records
+// `fd → handle` when the redirected path is a registered progressive file,
+// and the read hook holds a read of `[cursor, cursor + n)` until the
+// writer's watermark covers it (or the writer is done), bounded at 5 s —
+// then the read passes through (zeros from the pre-sized file = brief
+// silence, never a hang). No new detours: open and read are already hooked;
+// lseek / close / fstat stay unhooked — the per-fd cursor is advanced by what
+// each read returned, which matches the one reader this exists for (the
+// FileManager's single I/O worker streams the XWB sequentially in 1 MiB
+// chunks, cabinet fact E2), and an entry is dropped when the file is done
+// and fully read, or when the same fd value is opened again (closed and
+// reused). The quiet path costs one relaxed atomic load per read.
+
+struct ProgressiveFd {
+    file: Arc<ProgressiveFile>,
+    cursor: FdCursor,
+    warned: bool,
+}
+
+static PROGRESSIVE_FDS: Mutex<Vec<(AvsFile, ProgressiveFd)>> = Mutex::new(Vec::new());
+/// `PROGRESSIVE_FDS.len()` mirror — the read hook's fast path.
+static PROGRESSIVE_LIVE: AtomicUsize = AtomicUsize::new(0);
+static PROGRESSIVE_OPEN_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+/// Longest a single read waits for the writer.
+const PROGRESSIVE_READ_BOUND_MS: u64 = 5_000;
+const PROGRESSIVE_POLL: Duration = Duration::from_millis(2);
+/// Longest the open-failure fallback waits for the writer to finish.
+const PROGRESSIVE_OPEN_FALLBACK: Duration = Duration::from_secs(10);
+
+fn progressive_summary(fd: AvsFile, e: &ProgressiveFd, why: &str) {
+    log_info!(
+        "LayeredFS[progressive]: '{}' fd {} {} -- {} wait(s), {} ms total, {} KiB read{}",
+        e.file.basename,
+        fd,
+        why,
+        e.cursor.waits,
+        e.cursor.waited_ms,
+        e.cursor.pos / 1024,
+        if e.cursor.timed_out {
+            ", PASSED THROUGH at least once"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Open hook: record the fd when `mod_path` is a registered progressive
+/// file; drop a stale entry when its fd value is reused.
+fn progressive_note_open(mod_path: Option<&str>, fd: AvsFile) {
+    if fd < 0 {
+        return;
+    }
+    let registered = mod_path.and_then(sm_progressive::lookup_path);
+    if registered.is_none() && PROGRESSIVE_LIVE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    if let Some(i) = table.iter().position(|(f, _)| *f == fd) {
+        let (_, old) = table.swap_remove(i);
+        progressive_summary(fd, &old, "fd reused");
+    }
+    if let Some(file) = registered {
+        // Done files are inert for waits; the game streams one bank at a
+        // time, so an older done entry is a closed fd we never saw close.
+        let mut i = 0;
+        while i < table.len() {
+            if table[i].1.file.is_done() {
+                let (f, old) = table.swap_remove(i);
+                progressive_summary(f, &old, "superseded");
+            } else {
+                i += 1;
+            }
+        }
+        let p = file.progress();
+        log_info!(
+            "LayeredFS[progressive]: fd {} -> '{}' {} (watermark {} KiB of {} KiB, tail {}) {}",
+            fd,
+            file.basename,
+            if p.done { "complete" } else { "in progress" },
+            p.watermark / 1024,
+            p.planned_len / 1024,
+            if p.tail_ready { "ready" } else { "pending" },
+            diag_thread_tag()
+        );
+        table.push((
+            fd,
+            ProgressiveFd {
+                file,
+                cursor: FdCursor::new(),
+                warned: false,
+            },
+        ));
+    }
+    PROGRESSIVE_LIVE.store(table.len(), Ordering::Release);
+}
+
+/// Read hook, before the original: hold the read until the writer covers
+/// it. Never holds the table lock while sleeping.
+fn progressive_before_read(fd: AvsFile, nbytes: usize) {
+    let (file, cursor) = {
+        let Ok(table) = PROGRESSIVE_FDS.lock() else {
+            return;
+        };
+        match table.iter().find(|(f, _)| *f == fd) {
+            Some((_, e)) => (e.file.clone(), e.cursor.pos),
+            None => return,
+        }
+    };
+    let started = Instant::now();
+    let mut waited = false;
+    let timed_out = loop {
+        let progress = file.progress();
+        match progressive_logic::poll(
+            cursor,
+            nbytes,
+            &progress,
+            started.elapsed().as_millis() as u64,
+            PROGRESSIVE_READ_BOUND_MS,
+        ) {
+            Poll::Ready => break false,
+            Poll::TimedOut => break true,
+            Poll::Wait => {
+                waited = true;
+                std::thread::sleep(PROGRESSIVE_POLL);
+            }
+        }
+    };
+    if !waited {
+        return;
+    }
+    let ms = started.elapsed().as_millis() as u64;
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    if let Some((_, e)) = table.iter_mut().find(|(f, _)| *f == fd) {
+        e.cursor.note_wait(ms, timed_out);
+        if timed_out && !e.warned {
+            e.warned = true;
+            log_warn!(
+                "LayeredFS[progressive]: '{}' fd {} read of {} KiB at {} KiB waited {} ms for the writer (watermark {} KiB) -- passing through; expect brief silence (further timeouts on this fd silent)",
+                e.file.basename,
+                fd,
+                nbytes / 1024,
+                cursor / 1024,
+                ms,
+                file.watermark.load(Ordering::Acquire) / 1024
+            );
+        }
+    }
+}
+
+/// Read hook, after the original: advance the cursor; drop the entry once
+/// the file is done and fully read.
+fn progressive_after_read(fd: AvsFile, returned: usize, requested: usize) {
+    let Ok(mut table) = PROGRESSIVE_FDS.lock() else {
+        return;
+    };
+    let Some(i) = table.iter().position(|(f, _)| *f == fd) else {
+        return;
+    };
+    let e = &mut table[i].1;
+    e.cursor.advance(returned, requested);
+    if progressive_logic::entry_finished(&e.cursor, &e.file.progress()) {
+        let (f, old) = table.swap_remove(i);
+        progressive_summary(f, &old, "finished");
+        PROGRESSIVE_LIVE.store(table.len(), Ordering::Release);
+    }
+}
+
+/// AVS refused to open a progressive `.part` (most plausibly a share-mode
+/// conflict with our writer's handle). Fall back to Step 6's behaviour:
+/// wait for the writer to finish (bounded; never on the render thread),
+/// move the file into place and open that.
+unsafe fn progressive_open_fallback(
+    original: &GenericDetour<FnAvsFsOpen>,
+    file: &ProgressiveFile,
+    mode: u16,
+    flags: i32,
+) -> AvsFile {
+    if !PROGRESSIVE_OPEN_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+        log_warn!(
+            "LayeredFS[progressive]: open of '{}' in progress was refused -- waiting for the encode to finish instead (stage-load stall; report this)",
+            file.basename
+        );
+    }
+    if !crate::services::widget_renderer::is_render_thread() {
+        let deadline = Instant::now() + PROGRESSIVE_OPEN_FALLBACK;
+        while !file.is_done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if !file.is_done() {
+        return -1;
+    }
+    let _ = sm_progressive::try_rename(file);
+    match CString::new(file.serve_path()) {
+        Ok(cpath) => original.call(cpath.as_ptr(), mode, flags),
+        Err(_) => -1,
+    }
+}
 
 // ── Static detours ───────────────────────────────────────────────────
 
@@ -74,6 +370,26 @@ pub unsafe fn orig_fs_close(handle: AvsFile) {
 pub unsafe fn orig_fs_fstat(handle: AvsFile, st: *mut AvsStat) -> i32 {
     let avs = super::get_avs_fns();
     (avs.avs_fs_fstat)(handle, st)
+}
+pub unsafe fn orig_fs_lstat(name: *const i8, st: *mut AvsStat) -> i32 {
+    match get_hook!(HOOK_FS_LSTAT) {
+        Some(hook) => hook.call(name, st),
+        None => (super::get_avs_fns().avs_fs_lstat)(name, st),
+    }
+}
+
+/// Size + mtime of an AVS path (no read), for cache fingerprints of game
+/// files that host `std::fs::metadata` cannot see. `None` if AVS has no such
+/// file.
+pub fn avs_stat(path: &str) -> Option<(u64, i64)> {
+    let cpath = CString::new(path).ok()?;
+    let mut st = AvsStat::default();
+    let rc = unsafe { orig_fs_lstat(cpath.as_ptr(), &mut st) };
+    if rc < 0 {
+        return None;
+    }
+    let size = (u64::from(st.hi_filesize) << 32) | u64::from(st.filesize);
+    Some((size, st.st_mtime))
 }
 
 // ── Hook callback implementations ───────────────────────────────────
@@ -138,7 +454,16 @@ unsafe fn fs_open_body(
             log_info!("LayeredFS: using {}", mod_path);
         }
         match CString::new(mod_path.as_str()) {
-            Ok(cpath) => original.call(cpath.as_ptr(), mode, flags),
+            Ok(cpath) => {
+                let mut r = original.call(cpath.as_ptr(), mode, flags);
+                if r < 0 {
+                    warn_redirected_open_failed(&path, mod_path, r);
+                    if let Some(pf) = sm_progressive::lookup_path(mod_path) {
+                        r = progressive_open_fallback(original, &pf, mode, flags);
+                    }
+                }
+                r
+            }
             Err(_) => original.call(name, mode, flags),
         }
     } else {
@@ -147,6 +472,8 @@ unsafe fn fs_open_body(
 
     // Feed demangler for .ifs files
     ramfs_demangler::on_fs_open(&path, result);
+    diag_note_open(&norm, result);
+    progressive_note_open(replacement.as_deref(), result);
 
     // Per-song SSQ-open observer (Per-Song Judgement Offsets, D21): every
     // stage load — normal, course/dan, training — opens the song's chart as
@@ -265,9 +592,19 @@ unsafe extern "C" fn hook_avs_fs_read(context: AvsFile, bytes: *mut u8, nbytes: 
         return 0;
     };
     std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Progressive-bank fds first: one relaxed load when none is open.
+        let progressive = PROGRESSIVE_LIVE.load(Ordering::Relaxed) != 0;
+        if progressive {
+            progressive_before_read(context, nbytes);
+        }
         // Feed demangler with buffer address
         ramfs_demangler::on_fs_read(context, bytes as usize);
-        original.call(context, bytes, nbytes)
+        diag_note_first_read(context, nbytes);
+        let got = original.call(context, bytes, nbytes);
+        if progressive {
+            progressive_after_read(context, got, nbytes);
+        }
+        got
     }))
     .unwrap_or_else(|_| {
         log_warn!("LayeredFS: panic in avs_fs_read hook — serving original read");
@@ -425,15 +762,134 @@ fn find_mod_replacement(norm_path: &str, original_path: &str) -> Option<String> 
     None
 }
 
+// ── Serving diagnostics & probes ─────────────────────────────────────
+
+/// Bounded WARN for a redirected `avs_fs_open` that AVS then refused. Our
+/// lookup said "serve this mod file" and the native open of it failed — the
+/// game sees "file missing" with nothing in the log saying why, and some
+/// callers (the BM2D data manager, `docs/bm2d_background_preview_research.md`)
+/// have no survivable failure path at all. Field reports (2026-10, a Windows
+/// install under a 55-char root) showed EVERY generated asset silently
+/// unserved; this line names the first few so the pattern is visible.
+static REDIRECTED_OPEN_FAILURES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+const REDIRECTED_OPEN_FAILURES_LOGGED: u32 = 8;
+
+fn warn_redirected_open_failed(game_path: &str, mod_path: &str, rc: AvsFile) {
+    use std::sync::atomic::Ordering;
+    let n = REDIRECTED_OPEN_FAILURES.fetch_add(1, Ordering::AcqRel);
+    if n < REDIRECTED_OPEN_FAILURES_LOGGED {
+        log_warn!(
+            "LayeredFS: redirected open FAILED: {} -> {} (avs rc {:#x}; {} chars) — the game sees the file as missing. \
+             Check the install path length/casing (AVS normalises native paths through a 128-byte buffer and a case-sensitive compare)",
+            game_path,
+            mod_path,
+            rc as u32,
+            mod_path.len()
+        );
+    } else if n == REDIRECTED_OPEN_FAILURES_LOGGED {
+        log_warn!("LayeredFS: redirected open FAILED again (further failures not logged)");
+    }
+}
+
+/// How many redirected opens AVS has refused this session (for status lines).
+pub fn redirected_open_failures() -> u32 {
+    REDIRECTED_OPEN_FAILURES.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The mod file the `avs_fs_open` detour would hand AVS for `game_path`
+/// (e.g. `data/arc/custom/background/foo.arc`), or None when the game would
+/// get the stock file. Same normalisation + lookup as the hooks.
+pub fn mod_replacement_for(game_path: &str) -> Option<String> {
+    let norm = mod_paths::normalise_path(game_path)?;
+    find_mod_replacement(&norm, game_path)
+}
+
+/// Why [`read_mod_file_as_game`] could not produce bytes.
+#[derive(Debug)]
+pub enum GameReadError {
+    /// LayeredFS has nothing to serve for this game path.
+    NotServed,
+    /// AVS refused the native open of the mod file (return code attached).
+    OpenFailed { mod_path: String, rc: AvsFile },
+    /// Open succeeded but the file is empty.
+    Empty { mod_path: String },
+}
+
+/// Read up to `max_bytes` of the mod file LayeredFS serves for `game_path`,
+/// through the SAME AVS open the game will perform (redirected path, read
+/// mode, original AVS function). Lets a caller prove a generated asset is
+/// actually loadable before handing its name to a game loader that cannot
+/// survive a failed load. Blocking file IO — not for per-frame paths.
+pub fn read_mod_file_as_game(
+    game_path: &str,
+    max_bytes: usize,
+) -> Result<(String, Vec<u8>), GameReadError> {
+    let mod_path = mod_replacement_for(game_path).ok_or(GameReadError::NotServed)?;
+    let cpath = CString::new(mod_path.as_str()).map_err(|_| GameReadError::NotServed)?;
+    let mode = avs_open_mode_read(avs_version());
+    let handle = unsafe { orig_fs_open(cpath.as_ptr(), mode, 420) };
+    if handle < 0 {
+        return Err(GameReadError::OpenFailed {
+            mod_path,
+            rc: handle,
+        });
+    }
+    let mut stat = AvsStat::default();
+    unsafe { orig_fs_fstat(handle, &mut stat) };
+    let size = (stat.filesize as usize).min(max_bytes);
+    if size == 0 {
+        unsafe { orig_fs_close(handle) };
+        return Err(GameReadError::Empty { mod_path });
+    }
+    let mut buf = vec![0u8; size];
+    let got = unsafe { orig_fs_read(handle, buf.as_mut_ptr(), size) };
+    unsafe { orig_fs_close(handle) };
+    buf.truncate(got.min(size));
+    if buf.is_empty() {
+        return Err(GameReadError::Empty { mod_path });
+    }
+    Ok((mod_path, buf))
+}
+
+/// Does `path` (as Win32 sees it — any separator, any case, relative or
+/// absolute) lie under the mod folder? `mod_folder_native` is the configured
+/// folder in backslash form (`.\data_mods`); we match on its leaf name as a
+/// path component, so `C:\Games\…\contents\data_mods\x`, `.\data_mods\x`,
+/// `data_mods/x` and `DATA_MODS\x` all count. Absolute forms are the ones
+/// most likely to overrun AVS's 128-byte path buffer, so a prefix-literal
+/// match would miss exactly the cases the workaround exists for.
+fn is_under_mod_folder(path: &str, mod_folder_native: &str) -> bool {
+    let leaf = mod_folder_native
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if leaf.is_empty() {
+        return false;
+    }
+    let p = path.replace('/', "\\").to_ascii_lowercase();
+    p.split('\\').any(|component| component == leaf)
+}
+
+static LONG_PATH_FALLBACK_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // ── GetLongPathNameA hook ────────────────────────────────────────────
 
 /// Detour for `kernel32!GetLongPathNameA`. AVS calls this with a fixed 128‑byte
-/// buffer when normalizing paths internally; ifs‑in‑arc cache paths (e.g.
-/// `./data_mods/_cache/arc/.../inner_ifs/<md5>`) routinely exceed that. When
-/// the real Win32 call returns "buffer too small" (`ret > cchBuffer`) for one
-/// of *our* mod-cache paths, we lie and return `ERROR_FILE_NOT_FOUND` so AVS
-/// falls through to `CreateFileA` with the original (still valid) path
-/// instead of strcmp-failing and bailing out.
+/// buffer when normalizing paths internally (libavs `FUN_1800082c0`, the native
+/// open: `GetLongPathNameA(path, buf, 0x80)` then a case-sensitive `strcmp`
+/// against the input); ifs‑in‑arc cache paths (e.g.
+/// `./data_mods/_cache/arc/.../inner_ifs/<md5>`) routinely exceed that, and
+/// under a long install root (`C:\Games\<long name>\contents`, 55 chars in a
+/// 2026-10 field report) even plain alias arcs and texturelists do. When the
+/// real Win32 call returns "buffer too small" (`ret > cchBuffer`) for a path
+/// under *our* mod folder — matched as a path component, so absolute, `.\`
+/// and mixed-case forms all count — we lie and return `ERROR_FILE_NOT_FOUND`
+/// so AVS falls through to `CreateFileA` with the original (still valid) path
+/// instead of strcmp-failing and bailing out. Logged once per session.
 unsafe extern "system" fn hook_get_long_path_name_a(
     short_path: *const i8,
     long_path: *mut i8,
@@ -463,8 +919,16 @@ unsafe extern "system" fn hook_get_long_path_name_a(
                 Err(_) => return ret,
             };
             let mod_folder_native = super::mod_folder_native();
-            if !mod_folder_native.is_empty() && path.contains(&mod_folder_native) {
+            if is_under_mod_folder(path, &mod_folder_native) {
+                use std::sync::atomic::Ordering;
                 use windows::Win32::Foundation::{SetLastError, ERROR_FILE_NOT_FOUND};
+                if !LONG_PATH_FALLBACK_LOGGED.swap(true, Ordering::AcqRel) {
+                    log_info!(
+                        "LayeredFS: GetLongPathNameA long-path fallback engaged ({} chars > 128-byte AVS buffer): {}",
+                        ret.saturating_sub(1),
+                        path
+                    );
+                }
                 SetLastError(ERROR_FILE_NOT_FOUND);
                 return 0;
             }
@@ -531,6 +995,7 @@ fn install_get_long_path_name_a() -> bool {
 /// Install all AVS filesystem hooks plus the GetLongPathNameA workaround.
 /// Call after AVS resolution and mod path scanning.
 pub fn install_hooks() -> bool {
+    DIAG_THREADS.store(config().verbose, Ordering::Relaxed);
     let avs = super::get_avs_fns();
     let success = crate::core::hook_transaction::install_all_or_rollback(
         5,
@@ -633,5 +1098,32 @@ unsafe fn install_one<F: retour::Function>(
             log_warn!("LayeredFS: failed to create {} hook: {}", name, e);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_under_mod_folder;
+
+    #[test]
+    fn mod_folder_match_is_component_based_and_case_insensitive() {
+        let mf = ".\\data_mods";
+        assert!(is_under_mod_folder(".\\data_mods\\_cache\\x", mf));
+        assert!(is_under_mod_folder("./data_mods/_cache/x", mf));
+        assert!(is_under_mod_folder("data_mods\\bg_preview\\a.arc", mf));
+        assert!(is_under_mod_folder(
+            "C:\\Games\\Dance Dance Revolution World Skogaby\\contents\\data_mods\\bg_preview\\a.arc",
+            mf
+        ));
+        assert!(is_under_mod_folder("C:\\DDR\\contents\\DATA_MODS\\x", mf));
+        assert!(!is_under_mod_folder(
+            "C:\\DDR\\contents\\data\\arc\\shader.arc",
+            mf
+        ));
+        assert!(!is_under_mod_folder(
+            "C:\\DDR\\contents\\data_mods_old\\x",
+            mf
+        ));
+        assert!(!is_under_mod_folder("C:\\DDR\\contents\\data_mods", ""));
     }
 }

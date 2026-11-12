@@ -48,6 +48,12 @@ impl GameDir {
         self.work.join("download")
     }
 
+    /// Pack zips and their partial downloads; kept across runs so an
+    /// interrupted download resumes.
+    pub fn packs_dir(&self) -> PathBuf {
+        self.work.join("packs")
+    }
+
     /// Where the release zip is extracted before being applied.
     pub fn stage_dir(&self) -> PathBuf {
         self.work.join("stage")
@@ -71,6 +77,16 @@ impl GameDir {
     /// The per-run log.
     pub fn log_path(&self) -> PathBuf {
         self.root.join(LOG_NAME)
+    }
+
+    /// The pack catalog shipped by the installed base release.
+    pub fn catalog_path(&self) -> PathBuf {
+        self.root.join(crate::packs::catalog::CATALOG_NAME)
+    }
+
+    /// The user's pack selection.
+    pub fn selection_path(&self) -> PathBuf {
+        self.root.join(crate::packs::state::SELECTION_NAME)
     }
 }
 

@@ -20,8 +20,10 @@
 //!   created already shifted and the driver aligns the clock on the first anchored frame,
 //!   behind the `TRAINING_LEAD_MS` silent approach.
 //! - **Looping** — with the loop latched, the end cascade is parked and the driver resets to
-//!   the section start each time the live count reaches the end bound; a gauge death is
-//!   revived the same way. Quick fail / quick restart are the exits.
+//!   the section start each time the live count reaches the end bound. Failure is disabled:
+//!   the gauges are held out of the death state (floored at ≥ 1 / last life held), so the
+//!   run never ends or resets on an empty gauge; the next pass or scrub restores the gauge.
+//!   Quick fail / quick restart are the exits.
 //! - **Gestures** (gameplay only, after `song_reset::run_in_song`): pinpad 4 sets A, 6 sets
 //!   B, 5 restores the row-derived bounds (markers need a latched loop; one hint toast per
 //!   song otherwise); 7 / 9 rewind / fast-forward by `rw_increment_ms` / `ff_increment_ms`
@@ -39,7 +41,9 @@
 //!   every completed `song_reset` landing at t > 0 or during a session-active song — calls
 //!   `taint_entered_sides` (`score_guard::set_training_taint`; both sides when the entered
 //!   state is unreadable). Restart-from-A resets the taint at its trigger, so the reset
-//!   subscriber is the re-taint that keeps it fail-closed.
+//!   subscriber is the re-taint that keeps it fail-closed. Scrubs taint without latching
+//!   the session, so a quick restart to 0 after scrubs alone clears the taint and the full
+//!   run submits; a latched loop, bounds or markers keep the song tainted across restarts.
 //! - **Versus.** P1 governs (the classifier's policy) and `versus_mirror` mirrors every
 //!   row in `MIRRORED_OPTIONS` — `training_start_time`, `training_end_time`,
 //!   `training_loop_song` and `training_progress_pos` — so both players share one timeline
@@ -116,9 +120,11 @@ const OPT_END_TIME: &str = "training_end_time";
 /// song switches within a session and takes no part in the highlight
 /// seeder or the digest stamp; card-in resets it to OFF.
 const OPT_LOOP_SONG: &str = "training_loop_song";
-/// Bound-row range/stepping (design §4.1 as amended): 0–200 s absolute
-/// timestamps, fine 5, coarse 30. START defaults 0 (natural start); END
-/// defaults to the cap (= natural end for every real chart).
+/// Bound-row range/stepping (design §4.1 as amended): 0 s up to the
+/// abstract [`section_math::BOUND_ROW_MAX_S`] cap (re-bounded per song to
+/// its own length by [`seed_rows_for_highlight`]), absolute timestamps,
+/// fine 5, coarse 30. START defaults 0 (natural start); END defaults to
+/// the cap (= natural end for every real chart).
 const BOUND_ROW_MIN_S: i32 = 0;
 const BOUND_ROW_MAX_S: i32 = section_math::BOUND_ROW_MAX_S;
 /// The stepper's nudge distance only — the highlight seeder's END seed
@@ -604,7 +610,10 @@ impl Mod for TrainingModeMod {
         //
         // A t = 0 reset re-taints only while the per-song session-active
         // latch is set (design §4.1's predicate, latched per song): a plain
-        // press-1 replay of an UNTOUCHED song stays clean and submits —
+        // press-1 replay of an UNTOUCHED song stays clean and submits, and
+        // so does a press-1 after FF/RW scrubs alone (scrubs taint without
+        // latching the session: the in-place reset rebuilds everything a
+        // seek touched, so the full run that follows is honest) —
         // but a press-1 during a session-altered song (a B-only early end
         // whose truncated thresholds persist across the in-place reset, or
         // a whole-song grind) must not launder the taint the trigger's

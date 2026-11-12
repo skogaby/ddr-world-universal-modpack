@@ -252,10 +252,11 @@ impl Mod for NoteTypesExpansionMod {
             return;
         }
 
-        // Load mine textures via the engine's file pipeline. The PNGs are
-        // registered asynchronously; the render pass checks availability
-        // per-frame via the texture data lookup and gracefully skips if
-        // not ready.
+        // Load mine textures via the engine's file pipeline. The Load calls
+        // are queued to the first frame dispatch (never issued from this
+        // thread -- see texture_loader.rs), the PNGs are registered
+        // asynchronously, and the render pass checks availability per-frame
+        // via the texture data lookup and gracefully skips if not ready.
         if self.texture_loader.is_none() {
             let loader = unsafe {
                 MineTextureLoader::new(

@@ -13,6 +13,32 @@ use crate::log_warn;
 
 use super::config;
 
+// ── Private folders ──────────────────────────────────────────────────
+
+/// Folders directly under the mod root that are NOT LayeredFS overlays and are
+/// never indexed or matched against game paths:
+///
+/// - `_cache` — LayeredFS's own build output (indexed separately, for textures
+///   only, by `ifs_textures::build_cache_index`).
+/// - `custom_models` — the Background Dancers custom-content base
+///   (`dancers/` + `stages/`). Its owner walks it with `std::fs` and hands
+///   the engine filesystem paths (`scene3d::arc_set` mounts, opened by the
+///   FileManager through the CRT), so no game path can ever resolve into it.
+///
+/// Why it matters: `init_mod_paths` runs at `lib.rs` step 0b, on the boot
+/// path that races `Application::onBoot` (shader.arc, the Custom Resolution
+/// display-init check). Under CrossOver a directory enumeration costs
+/// ~0.4 ms, and the custom-models tree is thousands of directories (2,217
+/// dirs / 20k files measured 2026-10-04 = ~1 s) — indexing it pushed
+/// `early_apply` past the game's display init. The content base must be free
+/// to grow without moving any boot race.
+pub const PRIVATE_FOLDERS: &[&str] = &["_cache", "custom_models"];
+
+/// Whether a top-level mod-root folder name is one of [`PRIVATE_FOLDERS`].
+pub fn is_private_folder(name: &str) -> bool {
+    PRIVATE_FOLDERS.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 struct ModContents {
@@ -34,6 +60,30 @@ static STATE: Lazy<Mutex<ModPathState>> = Lazy::new(|| {
         initialized: false,
     })
 });
+
+/// A virtual-asset resolver: normalised game path → host path of the bytes
+/// to serve, or `None` when the resolver has nothing for that path. Consulted
+/// by [`find_first_modfile`] AFTER the mod folders (an operator's mod file
+/// always wins), in registration order. Must be cheap for non-matching paths
+/// (a prefix test) — it runs on every intercepted open.
+pub type Resolver = fn(&str) -> Option<String>;
+
+static RESOLVERS: Mutex<Vec<Resolver>> = Mutex::new(Vec::new());
+
+/// Register a virtual-asset resolver. Safe to call before `init_mod_paths`.
+pub fn register_resolver(resolver: Resolver) {
+    if let Ok(mut r) = RESOLVERS.lock() {
+        r.push(resolver);
+    }
+}
+
+fn resolve_virtual(norm_path: &str) -> Option<String> {
+    let resolvers = RESOLVERS.lock().ok()?;
+    if resolvers.is_empty() {
+        return None;
+    }
+    resolvers.iter().find_map(|r| r(norm_path))
+}
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -108,6 +158,7 @@ pub fn normalise_path(path: &str) -> Option<String> {
 }
 
 /// Find the first mod file matching the normalized path. Returns the full filesystem path.
+/// Falls through to the registered virtual-asset resolvers when no mod folder has it.
 pub fn find_first_modfile(norm_path: &str) -> Option<String> {
     let cfg = config();
     let lower = norm_path.to_lowercase();
@@ -127,7 +178,7 @@ pub fn find_first_modfile(norm_path: &str) -> Option<String> {
             }
         }
     }
-    None
+    resolve_virtual(norm_path)
 }
 
 /// Find the first mod folder matching the normalized path. Returns the full filesystem path.
@@ -218,8 +269,8 @@ fn scan_mod_folders(mod_folder: &str, allowlist: &[String], blocklist: &[String]
 
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip cache directory
-        if name.eq_ignore_ascii_case("_cache") {
+        // Skip the cache and the service-owned content bases (never overlays).
+        if is_private_folder(&name) {
             continue;
         }
 

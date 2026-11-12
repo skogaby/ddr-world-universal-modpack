@@ -15,6 +15,10 @@
 //!   the segment index), then resumes with the NEXT main clip. No beat gate
 //!   (v1 deviation, design §9).
 //!
+//! - FLIGHT stages ([`DanceSchedule::with_intro`]): segment 0 is every
+//!   dancer's take-off (playlist element 0), whole — no `CUT_LEAD`, its end
+//!   is the leap and the stage's switch time — then the flight loops cycle.
+//!
 //! Purity: `advance(advance(s, a, b), b, c) == advance(s, a, c)` and
 //! `at(t) == advance(initial, 0, t)`, so a rewind or scrub re-simulates from
 //! 0 and lands exactly where forward stepping would have.
@@ -70,6 +74,10 @@ pub struct DanceSchedule {
     /// mode: one beat of dance time, so every cut lands on a beat); `None`
     /// = unsnapped (A3).
     quantum: Option<f32>,
+    /// FLIGHT ([`with_intro`](Self::with_intro)): element 0 of every
+    /// playlist is a take-off played once, whole, as segment 0; the later
+    /// segments cycle elements `1..`.
+    intro: bool,
 }
 
 impl DanceSchedule {
@@ -81,7 +89,24 @@ impl DanceSchedule {
         Some(DanceSchedule {
             per_dancer,
             quantum: None,
+            intro: false,
         })
+    }
+
+    /// FLIGHT stages: segment 0 plays element 0 of every playlist (the
+    /// take-off) to the end of the SHORTEST one — uncut (no `CUT_LEAD`: its
+    /// last second is the leap) and unsnapped — then segment `k ≥ 1` plays
+    /// element `1 + (k − 1) mod (n − 1)`. Unchanged (no intro) when a
+    /// playlist has fewer than two clips.
+    pub fn with_intro(mut self) -> DanceSchedule {
+        self.intro = self.per_dancer.iter().all(|p| p.len() >= 2);
+        self
+    }
+
+    /// The end of the take-off segment (the flight stage's switch time), or
+    /// `None` without an intro.
+    pub fn intro_end(&self) -> Option<f32> {
+        self.intro.then(|| self.segment_len(0))
     }
 
     /// Snap every segment length down to whole multiples of `q` (≥ `q`).
@@ -112,7 +137,15 @@ impl DanceSchedule {
     /// The clip dancer `i` plays in segment `k`.
     pub fn clip_index(&self, dancer: usize, k: usize) -> usize {
         let n = self.per_dancer[dancer].len();
-        k % n
+        if self.intro && n >= 2 {
+            if k == 0 {
+                0
+            } else {
+                1 + (k - 1) % (n - 1)
+            }
+        } else {
+            k % n
+        }
     }
 
     /// `max(MIN_SEGMENT, min_i dur_i(k) − CUT_LEAD)`, snapped down to the
@@ -124,6 +157,13 @@ impl DanceSchedule {
             if d < shortest {
                 shortest = d;
             }
+        }
+        if self.intro && k == 0 {
+            return if shortest > MIN_SEGMENT && shortest.is_finite() {
+                shortest
+            } else {
+                MIN_SEGMENT
+            };
         }
         let len = shortest - CUT_LEAD;
         let len = if !(len > MIN_SEGMENT) {
@@ -470,6 +510,42 @@ mod tests {
         let plain = DanceSchedule::new(vec![vec![ClipRef::new("a", 21.167, false)]]).unwrap();
         assert!((plain.segment_len(0) - 19.667).abs() < 1e-5);
         assert_eq!(plain.quantum(), None);
+    }
+
+    #[test]
+    fn intro_plays_the_takeoff_once_whole_then_cycles_the_rest() {
+        let d = DanceSchedule::new(vec![
+            clips(&[10.0, 8.0, 6.0]),
+            clips(&[12.0, 9.0, 7.0, 5.0]),
+        ])
+        .unwrap()
+        .with_quantum(0.5)
+        .with_intro();
+        // segment 0: the shortest take-off, uncut and unsnapped
+        assert_eq!(d.intro_end(), Some(10.0));
+        assert!((d.segment_len(0) - 10.0).abs() < 1e-6);
+        assert_eq!(d.clip_index(0, 0), 0);
+        assert_eq!(d.clip_index(1, 0), 0);
+        // then 1.. cycle, never the take-off again
+        assert_eq!(
+            (1..7).map(|k| d.clip_index(0, k)).collect::<Vec<_>>(),
+            vec![1, 2, 1, 2, 1, 2]
+        );
+        assert_eq!(
+            (1..7).map(|k| d.clip_index(1, k)).collect::<Vec<_>>(),
+            vec![1, 2, 3, 1, 2, 3]
+        );
+        // segment 1 = min(8, 9) - CUT_LEAD, snapped
+        assert!((d.segment_len(1) - 6.5).abs() < 1e-6);
+        let p = d.at(0, 10.0);
+        assert_eq!((p.segment, p.clip), (1, 1));
+        assert!(d.at(1, 9.99).clip == 0 && d.at(1, -1.0).clip == 0);
+        // a playlist without a flight loop: no intro, the plain cycle
+        let plain = DanceSchedule::new(vec![clips(&[10.0])])
+            .unwrap()
+            .with_intro();
+        assert_eq!(plain.intro_end(), None);
+        assert!((plain.segment_len(0) - 8.5).abs() < 1e-6);
     }
 
     fn clips(durs: &[f32]) -> Vec<ClipRef> {

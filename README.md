@@ -23,9 +23,11 @@ This modpack is also **datecode-agnostic**! Through memory scanning and pattern 
 2. Copy these into your game folder (the folder containing `spice64.exe`):
    - `ddr_world_hook.dll`
    - the `data_mods/` folder (textures and assets many mods need)
+   - `ddr_world_hook_packs.json` (the list of [optional dancer and stage packs](#optional-dancer-and-stage-packs) this release offers; only the updater reads it)
    - `mod-config.json` (a ready-to-go default configuration)
    - `judgement_offsets.csv` (optional but recommended — a community-sourced sync list for ~1,440 songs)
    - `ddr_world_hook_updater.exe` (optional — keeps all of the above current automatically; see [Automatic updates](#automatic-updates))
+   - `ddr_world_hook_prep.exe` (only if you use StepMania packs — indexes them before the game starts; see [StepMania Packs](#stepmania-packs))
 3. Add the hook to your spice2x launch options: `-z ddr_world_hook.dll` (in `gamestart.bat` as a new parameter to `spice2x.exe`).
 4. Launch the game. You'll see a splash message in the top-left confirming the modpack loaded.
 5. **First boot only:** if a red warning appears telling you to reboot, restart the game once — the modpack builds its menu textures on first launch.
@@ -40,18 +42,29 @@ The release zip ships a small updater, `ddr_world_hook_updater.exe`. Run it from
 @echo off
 cd /d %~dp0
 ddr_world_hook_updater.exe
+ddr_world_hook_prep.exe
 start spice64.exe -ddr -modules modules -z ddr_world_hook.dll
 ```
 
-Just the bare exe name — a plain `.exe` call blocks the batch file until the updater has finished, so the game never starts mid-update. What it does:
+Just the bare exe names — a plain `.exe` call blocks the batch file until the program has finished, so the game never starts mid-update or mid-index. (The `ddr_world_hook_prep.exe` line is only needed if you use [StepMania Packs](#stepmania-packs); it takes about a second when nothing changed.) What the updater does:
 
-- **Checks** the latest release on GitHub. Offline, rate-limited, or any other failure ⇒ game starts with what you have.
-- **Installs** the new `ddr_world_hook.dll`, `data_mods/`, `README.md` and the updater itself. Files a newer release stopped shipping are removed **only if you never modified them**; anything you added yourself under `data_mods/` (custom song packs, texture packs) and the modpack's own caches are never touched.
+- **Checks** the latest release on GitHub. Offline, or any other failure ⇒ game starts with what you have.
+- **Installs** the new `ddr_world_hook.dll`, `data_mods/`, `README.md` and the updater itself.
 - **Merges** your `mod-config.json`: every value you have set stays exactly as it is.
 - **Merges** your `judgement_offsets.csv`: every offset you set is kept; blank cells are filled from the community list and songs you don't have yet are appended.
 - **Backs up** everything it replaces or removes in `.ddr_world_hook_updater/backup/` (last update only) and writes `ddr_world_hook_updater.log` in the game folder. If an update fails half-way (even a power cut), the next run restores the previous state first and then tries again.
+- **Offers the optional dancer and stage packs** — see [Optional dancer and stage packs](#optional-dancer-and-stage-packs) below.
 
-Options: `--check` reports whether an update is available without changing anything (exit code 3 when one is); `--force` reinstalls the current release; `--include-prerelease` also considers pre-releases builds, if available; `--from-zip <file>` installs a local release zip instead of downloading (`--tag <name>` labels it). Remove the line from `gamestart.bat` to stop updating. The installed release is recorded in `ddr_world_hook_updater.manifest.json` — delete it to force a reinstall on the next run.
+#### Optional dancer and stage packs
+
+The Background Dancers mod can use dancers and stages ported from other DDR releases — 3rdMIX through X2, the Ultramix / Universe / Hottest Party console games, and more. They are about 1 GB to download and 3.4 GB on disk in total, so they are **not** part of the release zip. Each source is a separate **pack**, and you choose which ones you want:
+
+- **Every time the updater runs** it prints how many packs you have and waits 5 seconds: `Press Enter to choose packs ... starting the game in 5 seconds`. Do nothing and the game starts. Press Enter and a checklist opens: type the numbers of the packs you want (`1 2 3`, `16-20`, `d` for all dancers, `s` for all stages, `a` for everything, `n` for nothing), press Enter to apply, and the updater downloads them. Tick `f` to also get packs that later releases add.
+- **No keyboard on the cabinet?** `ddr_world_hook_updater.exe --packs-install all` (or `none`, or a comma-separated list of ids from `--packs-list`) sets the choice without the checklist; or choose once on another machine and copy `ddr_world_hook_updater.packs.json` over — it is a small, hand-editable file in the game folder.
+- **After that the updater keeps your packs current.** When a release changes a pack you selected, it downloads the new revision; if files of a selected pack go missing or change size, it downloads the pack again.
+- **Deselecting a pack** removes the files it installed.
+- **Installing by hand:** every pack is a zip on the [packs page](https://github.com/skogaby/ddr-world-universal-modpack-assets/releases/tag/packs); unzip the ones you want into the game folder. The updater recognises them afterwards.
+
 
 ### The Mod Menu
 
@@ -61,9 +74,12 @@ Press **0 three times** on either pinpad to open the in-game mod menu. Navigate 
 - **GLOBAL SETTINGS** — Cabinet-wide settings that affect all players on the machine (timing offsets, FPS target, restart delay, things like that)
 - **PLAYER SETTINGS** — Per-player settings that can be configured on each cabinet side individually. **This is a mirror of the injected in-game custom options, though this can be configured in `mod-config.json`**.
 - **APPEARANCE** — 12 menu themes with animated backgrounds
+
 ![Menu Image 1](screenshots/menu_1.png)
 ![Menu Image 2](screenshots/menu_2.png)
+
 Per-player options (autoplay, the versus bot, assist tick, song speed, styling, cosmetics, etc.) also live in the game's **own options menu** on a new **MODPACK** tab, right alongside the stock options — and they follow your player profile.
+
 ![Menu Image 3](screenshots/menu_3.png)
 
 ### Pinpad Hotkeys
@@ -82,22 +98,22 @@ One step past `Level 10` is **TARGET SCORE**: the bot replays whatever your pace
 ![Versus Bot](screenshots/versus_bot.png)
 
 ### Background Dancer Revival
-DDR World removed the 3D dancers and stages every earlier DDR showed behind the arrows — this mod puts them back. On every song a random stage and random dancer(s) perform the DDR A3 choreography, filmed by the stage's own camera cuts, just as A3 sequenced them. **LIGHTING STYLE** (mod menu, `GLOBAL SETTINGS` → `BACKGROUND DANCERS`) keeps the flat stock look or adds **SMOOTH SHADING** or toon-style **CEL SHADING**, and **SCENE OUTLINES** draws an ink outline around every dancer and prop.
+DDR World removed the 3D dancers and stages every earlier DDR showed behind the arrows — this mod puts them back. On every song a random stage and random dancer(s) perform the DDR A3 choreography, filmed by the stage's own camera cuts, just as A3 sequenced them. **LIGHTING STYLE** (mod menu, `GLOBAL SETTINGS` → `BACKGROUND DANCERS`) keeps the flat stock look or adds **SMOOTH SHADING** or **CEL SHADING** — the two-band toon shading of *Dancing Stage Unleashed* / DDR ULTRAMIX (Xbox), reproduced from that game's own shaders — and **SCENE OUTLINES** draws that game's black ink outline around every dancer and prop. The rest of the Lighting Style options are various character shaders ported from the DDR Universe series.
 
 Songs with a background movie get a **BACKGROUND MOVIES** choice in the same section: **STAGE SCREENS** (the default, DDR A3's look — the movie plays on the stage's own video screens; stages without screens show it as a thumbnail), **THUMBNAIL** (the movie in its small window over the stage), **FULLSCREEN (NO STAGE)** (DDR 5th Mix style — the movie fills the screen behind the dancers), **MOVIE ONLY (NO DANCERS)** (the stock World look while a movie plays) or **OFF** (no movie; the stage plays as on any other song). Your VIDEO SIZE setting still decides whether movies play at all, and is never changed.
 
 ![Background Dancers, cel shading with outlines](screenshots/background_dancers.png)
 
 ### Custom Background Dancers and Stages
-The cast is not limited to Konami's. Any character or stage built with the repo's Blender add-on (`tools/blender_ddr_addon/`) — or ripped from another game and ported with its playbook — can join the rotation: drop the add-on's exported folder into `data_mods/custom_models/`, inside a folder named after the character or stage, and it is treated exactly like the stock content — random picks, its own entry in the BACKGROUND DANCER / BACKGROUND STAGE rows, and a live 3D preview.
+The cast is not limited to Konami's. Any character or stage built with the repo's Blender add-on (`tools/blender_ddr_addon/`) — or ripped from another game and ported with its playbook — can join the rotation: drop the add-on's exported folder into `data_mods/custom_models/`, inside a folder named after the character or stage, and it is treated exactly like the stock content — random picks, its own entry in the BACKGROUND DANCER / BACKGROUND STAGE rows, and a live 3D preview. The dancers and stages ported from other DDR releases are installed the same way, by the updater: see [Optional dancer and stage packs](#optional-dancer-and-stage-packs).
+
+With dozens of custom models one list gets long, so the folders can be grouped one level up into **sources**: `data_mods/custom_models/dancers/DDR STRIKE/Akira1/pl_…/` makes `DDR STRIKE` a **DANCER SOURCE** (likewise `stages/<Source>/<Stage>/mapset_…/` a **STAGE SOURCE**). Whenever at least one source exists the options menu shows a DANCER SOURCE / STAGE SOURCE row — `RANDOM`, `STOCK` (Konami's own), then every source — directly above the BACKGROUND DANCER / BACKGROUND STAGE row, which then lists only that source's models and remembers your last pick per source. Source `RANDOM` hides the model row and draws from everything, as before; a specific source with the model on `RANDOM` draws within that source (still honouring the video-screen rule for movie songs where the source allows it).
 
 ![Custom Dancer Selection](screenshots/custom_dancer_selection.png)
 ![Custom Dancers and Stages](screenshots/custom_dancers.png)
 
 ### DDR SELECTION
 DDR A3's DDR SELECTION is back, and extended. Set **DDR SELECTION** in the options menu (or the mod menu's `PLAYER SETTINGS`) and every song plays with the gameplay screen of an earlier DDR — judgement words, combo, life gauge, score, READY!, the stage panel, the CLEARED / FAILED banner, even the announcer — all from files your World install already has. Choose one of A3's five eras (**1stMIX-5thMIX**, **MAX-EXTREME**, **SuperNOVA 1-2**, **X-X3 vs 2ndMIX**, **2013-2014**), **DDR A**, or DDR A3's own **DDR A3 (White)** / **DDR A3 (Gold)** — or **AUTO**, which gives each song the look of the version it first appeared in (A20 to A3 songs get DDR A3, Gold on a gold cabinet; World songs stay stock). P1's pick applies to the whole cabinet, and courses stay stock.
-
-The DDR A and A3 screens show your dancer name during the song and your best score and target on the stage panel. On **1stMIX-5thMIX**, as in A3, everyone plays with the classic options (×1.00, no BOOST, …) and gets their own back after the song; songs that had a DDR SELECTION movie in A3 play it again; and S-Marvelous Judgement dresses every skin in its own style. Skip the era cut-in with START, or turn it off under `GLOBAL SETTINGS` → **DDR SELECTION** → **Era Cut-In**. One file the 2013-2014 combo needs is blank in World's data: if you have a DDR A3 install, run `ddr_selection_import\import_a3_assets.bat "<A3 contents folder>"` once from the game folder (`import_a3_assets.sh` on macOS/Linux) — it never touches World's own files.
 
 ![DDR Selection 1](screenshots/ddr_selection_1.png)
 ![DDR Selection 2](screenshots/ddr_selection_2.png)
@@ -106,7 +122,7 @@ The DDR A and A3 screens show your dancer name during the song and your best sco
 Play any song at **25%–175%** speed, with everything in sync — audio (pitch-preserved, or classic vinyl-style if you prefer), arrows, judging, even the background video if you opt in. Song-select previews follow your speed setting too, so you can dial it in by ear. Practice hard charts slow; push past 100% for a challenge. Scores at non-100% speeds are never submitted, so your records stay honest.
 
 ### Training Mode
-Now you can grind and practice songs on a real cabinet, without resorting to StepMania conversions! Turn on **LOOP SONG**, set a start and end point (the SONG START/END TIME rows appear under it, or press **4**/**6** mid-song), and grind the section; scrub backward/forward any time with **7**/**9** — with a chart timeline HUD showing exactly where you are. Sections only exist as loops: with LOOP SONG off, the 4/5/6 marker keys are inert and the timeline shows just your position. All training hotkeys wait for the READY banner to clear.
+Now you can grind and practice songs on a real cabinet, without resorting to StepMania conversions! Turn on **LOOP SONG**, set a start and end point (the SONG START/END TIME rows appear under it, or press **4**/**6** mid-song), and grind the section; scrub backward/forward any time with **7**/**9** — with a chart timeline HUD showing exactly where you are. You can't fail out while LOOP SONG is on: the life gauge bottoms out just above empty and keeps refilling as you play (LIFE4/RISKY holds your last life), and it resets at the next pass or scrub. Sections only exist as loops: with LOOP SONG off, the 4/5/6 marker keys are inert and the timeline shows just your position. Scrubbing keeps that run's score from being submitted; with LOOP SONG off, a quick restart (**1**) clears that, so a full run from the top counts again. All training hotkeys wait for the READY banner to clear.
 
 ### Gameplay Timing Fixes
 Ever felt the same song judge a few milliseconds early one credit and late the next, so no offset setting ever quite sticks? That is the stock game, not you: its music clock starts at a slightly random point on every play, anywhere in a window of about 10 ms.
@@ -121,9 +137,11 @@ Not every song is synced the same. This mod gives every song its own judgement o
 
 ### S-Marvelous Judgement
 A brand-new judgement tier above Marvelous: steps landed within **±12 ms** earn a violet **S-Marvelous**, with the full native treatment — its own judgement flash, combo colors, full-combo splash, a dedicated row on the results screen, its own series on the play graph, and S-MFC emblems for an all-S-Marvelous full combo (on every DDR SELECTION skin too, in its own style). It's pure presentation: to the game (and the network) an S-Marvelous is still a Marvelous, so your scores and records are completely untouched.
+
 ![S-Marvelous Gameplay](screenshots/smarv_gameplay.png)
 ![S-Marvelous Results 1](screenshots/smarv_results_1.png)
 ![S-Marvelous Results 2](screenshots/smarv_results_2.png)
+
 ### Quick Restart, Quick Fail, Quick Logout
 Press **1** mid-song to instantly restart it (optionally with a countdown), **3** to bail out to song select, and triple-press **9** at song select to end your session on the spot. Combined with **Premium Free** (unlimited stages per credit), your cabinet becomes a practice machine.
 
@@ -131,9 +149,12 @@ Press **1** mid-song to instantly restart it (optionally with a countdown), **3*
 Playing head-to-head with a friend — or against the [Versus Bot](#versus-bot--play-2-player-against-a-cpu-or-your-target-score)? Turn on **2-Player BPL Mode** and every local 2-player versus song gets the in-shop battle HUD that's normally locked behind two LAN-linked cabinets and a matching session: a score board per player, side-by-side score-ratio gauges, live **1st / 2nd** rank badges that swap the moment the lead changes, and the running point margin between you. Spectators can read who's winning at a glance without squinting at two separate scores. It's the game's own battle UI — same art, same animations — running on ordinary versus play, so it shows whichever score type your cabinet uses (money or EX) and never touches scoring or saves. Solo, doubles and course play are unaffected.
 
 ![Single Cabinet BPL](screenshots/single_cabinet_bpl.png)
+
 ### Player Perspective + Playfield Styling
 Per-player lane views: stock **OVERHEAD**, StepMania-style **HALLWAY** (true 3D perspective), or **DISTANT**. Independently scale and fade the arrows, receptors, lane dressing, combo/judgement text, and pacemaker — per player, persisted to your profile.
+
 ![Perspective](screenshots/perspective.png)
+
 ### Assist Tick
 A clap sound at every arrow's exact judgement moment, mixed sample-perfectly through the game's own audio engine — the classic StepMania assist tick, with a volume control. Great for learning rhythms (scores are withheld while it's on, like autoplay). Pair it with Gameplay Timing Fixes for ticks locked to the music at sample precision.
 
@@ -148,6 +169,11 @@ All the cosmetic customizations normally locked behind Konami's web portal — a
 
 ### Fast Bootup
 **DDR A3-style instant bootup mod for DDR World**. This is accomplished by caching all of the data that DDR World normally analyzes from all charts during every bootup cycle. If a chart changes, the cache is updated, so the chart metadata never goes stale from an update.
+
+### StepMania Packs
+Drop StepMania packs into `stepmania/Songs/<Pack>/<Song>/`, run **`ddr_world_hook_prep.exe`** (or let `gamestart.bat` run it before every launch — see [Automatic updates](#automatic-updates) for the snippet), and play them on the cabinet — no repacking. The prep tool converts every `.sm`/`.ssc` chart to the game's own chart format, the OGG/MP3/WAV audio to the game's streaming bank format and the jacket/banner/background art to wheel thumbnails and jackets, all into a cache the game reads like stock content. 
+
+The songs appear in a **STEPMANIA** folder in-game, with proper jackets, previews, difficulty panels, BPM readouts and native titles where the game's fonts can draw them. Mines and ITG-style `#SPEEDS`/`#SCROLLS` gimmicks are reproduced; charts with warps or negative BPMs are left out rather than mis-played. The prep tool also automatically syncs the timing for any StepMania songs you import. Scores for these songs are **never submitted** to a server.
 
 ### StepManiaX Cabinet Support
 Native support for running on StepManiaX cabinets, with no configuration needed. Stage inputs and lights, as well as emulation of DDR Gold cabinet lights, are fully supported. There's even a touchscreen overlay to give you access to menu buttons, pinpads, and a card-in button.
@@ -182,11 +208,11 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **Playfield Styling** | Arrow/receptor/lane scale and opacity, per player. |
 | **Overlay Element Styling** | Combo/judgement/pacemaker scale and opacity, per player. |
 | **Center Arrows (1P)** | Centers the playfield during solo play. |
-| **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses), plus the lit / cel-shaded / outline shader variants Background Dancers' LIGHTING STYLE picks from. |
-| **FPS Unlock** | Raise the display target from 60 up to 360 FPS (next-launch). |
+| **Shader Fixes** | Anti-aliased arrow rendering (and the shader programs Player Perspective uses), plus the lit / cel-shaded / DDR Universe / outline shader variants Background Dancers' LIGHTING STYLE picks from. |
+| **FPS Unlock** | Raise the display target from 60 up to 360 FPS, or cap the frame rate below 60 (e.g. 20/30) with a frame limiter (next-launch). |
 | **Fast Bootup** | Dramatically faster boots via a chart-analysis cache. |
 | **Custom Resolution** | Native 1080p/1440p/4K rendering and 4:3 SD-cabinet output (640×480). Off by default; applies at the next launch. |
-| **Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the files World still ships but never opens — with optional smooth or cel-shaded lighting and ink outlines over the whole scene, a BACKGROUND MOVIES choice for movie songs (off / thumbnail / on the stage's video screens — the default / DDR 5th Mix-style fullscreen movie behind the dancers / movie only, no 3D), and BACKGROUND DANCER / BACKGROUND STAGE rows in the options menu with live 3D previews. Off by default; see above. |
+| **Background Dancers** | Brings back the pre-World 3D background: a random DDR A3 stage with random A3 dancer(s) dancing behind the lane on every song, rendered by the game's own 3D engine from the files World still ships but never opens — with optional smooth or cel-shaded lighting and ink outlines over the whole scene, a BACKGROUND MOVIES choice for movie songs (off / thumbnail / on the stage's video screens — the default / DDR 5th Mix-style fullscreen movie behind the dancers / movie only, no 3D), a BIG HEAD toggle (every dancer's head at 3×), and BACKGROUND DANCER / BACKGROUND STAGE rows in the options menu with live 3D previews (plus DANCER SOURCE / STAGE SOURCE rows once custom models are grouped into source folders — see above). Off by default; see above. |
 | **Gameplay Timing Fixes** | Deterministic, sound-card-locked music clock: no play-to-play onset jitter, no in-song drift, survives quick restarts and scrubs; assist tick re-laid to the sample its voice really started on. No score or judgement-window changes. On by default; applies at the next launch. |
 | **Skip Intros** | Jump straight to the title screen at boot, skipping the various license splashes. |
 | **Timer Freeze** | Freezes and hides all selection countdown timers. |
@@ -200,16 +226,18 @@ In fullscreen the size must be one your display supports (otherwise the game sta
 | **WebUI Options** | Web-portal cosmetics in-game with live previews, plus weight/calorie profile settings. |
 | **Split SSQ Auto-Discovery** | Finds split chart files (`<song>_N.ssq`) on disk instead of trusting the game's hardcoded per-version list — newer chart data loads correctly on older game builds. |
 | **Note Types Expansion** | New note types for custom charts — ITG-style **mines** are fully supported. |
+| **StepMania Packs** | Plays StepMania packs from `stepmania/Songs/` as native songs once `ddr_world_hook_prep.exe` has indexed them: a STEPMANIA folder/series, mines and scroll gimmicks, auto-sync through the per-song judgement offset, score submission always suppressed. See above. |
 | **Series Expansion** | Custom VERSION filter categories for custom song packs (config-driven). |
-| **Folder Expansion** | Custom genre folders in the song wheel (config-driven). |
-| **Song Limit Expansion** | Raises the loadable song cap by ~8× for large custom libraries. |
+| **Improved Song Title Sorting** | The song-select FILTER menu's MUSIC TITLE list gets one entry per letter — A to Z five per row, then OTHER — instead of three-letter groups, ahead of the unchanged kana lines. Pick one letter to see only the songs that start with it. On by default. |
+| **Folder Expansion** | Custom genre folders in the song wheel (config-driven). A folder can be marked `exclude_from_all_music` so its songs (e.g. long versions) stay out of ALL MUSIC and only appear in their own folder. |
+| **Song Limit Expansion** | Lifts the game's fixed-size song limits for large custom libraries: the XML arena (1→64 MiB), the 65,535-node property cap, the chart-record pool (4,096→131,072), the arc loader's chunk (512 KiB→4 MiB) and the texture table (4,096→32,768). Required by StepMania Packs. |
 | **Background Movie Sync** | Keeps music videos in sync across restarts, scrubs, and loops (always on; can only improve on stock). |
 | **Non-Native OS Support** | Keeps the game stable under CrossOver/Wine (background-movie handling). |
 | **SMX Hardware and Touchscreen Overlay** | Native StepManiaX Dedicated Cabinet support: pads as input, DDR lights on the pads and cabinet, and a touchscreen overlay (menu buttons, pinpad, card-in). See below. |
 
 ## Your Scores Are Safe
 
-The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. In a Versus Bot session the bot's side carries the same mark (it never reaches the server) while your own side is saved exactly as in any stock play. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
+The modpack takes score integrity seriously. Anything that would make a score dishonest — Autoplay, Assist Tick, a quick-fail, an altered Training Mode run, a non-100% song speed — marks that song, and marked scores are **never submitted to the server**. Your profile, settings, and cosmetics still save normally. Autoplay additionally renders a visible watermark so videos of autoplayed runs are identifiable. In a Versus Bot session the bot's side carries the same mark (it never reaches the server) while your own side is saved exactly as in any stock play. StepMania-pack songs are always marked: the server never learns they exist. If the safety machinery ever can't initialize, the modpack errs on the side of submitting nothing.
 
 ## The Game Identifies Itself as a Modded Build
 
@@ -231,15 +259,16 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 | `series_expansion` / `folder_expansion` | Custom series/folder definitions for custom song packs |
 | `custom_options` | Option persistence gates, preview tuning, menu ordering/placement |
 | `timing_offsets` | The four cabinet timing offsets (also editable in the mod menu) |
-| `fps_unlock` | FPS preset list + selection (also editable in the mod menu) |
+| `fps_unlock` | FPS preset list + selection (also editable in the mod menu). Values above 60 request that fullscreen refresh rate (the monitor must offer it; ignored in windowed mode); values below 60 (10–59, e.g. `20`, `30`) keep the stock 60 Hz and cap the frame rate instead |
 | `gameplay_timing_fixes` | Gameplay Timing Fixes: `audio_clock.mode` (`fit` default — averages the coarse DirectSound cursor and lets it drive the in-song clock; `anchor` — reads the cursor once per song to fix the 0–10 ms startup error, then runs the song on the game's own clock (the conservative choice if you'd rather not have the sound card's reported position steer the clock mid-song); `raw` for platforms whose cursor is already smooth), `audio_clock.window_seconds` (2–60, default 10), `audio_clock.latency_bias_ms` (added to the mean-preserving latency constant; normally 0 — auto-calibration absorbs any residual), `assist_tick_alignment` (default `true`) — all boot-only (next launch) |
 | `resolution` | Custom Resolution: `output` (`WxH`; 16:9 = native render at that size, 4:3 sizes = SD-cabinet mode at the stock 1280×720 render), `presets` (RESOLUTION row choices), `sd_present` (`crop` / `letterbox`, 4:3 only) — editable in the mod menu (RESOLUTION / SD PRESENT MODE); `test_menu_scale` (operator-only multiplier on TEST-menu text size); all apply at the next launch |
 | `quick_restart` | Restart countdown (also editable in the mod menu) |
 | `training_mode` | Scrub step sizes |
 | `music_wheel_song_length` | Position/size of the length readout |
 | `per_song_judgement_offsets` | `mirror_players` — sync both players' offsets (solo home setups) |
+| `stepmania_packs` | StepMania Packs: `exclude_from_all_music` (default `true` — songs only in the STEPMANIA folder), `audio_cache_mb` (converted-bank cache budget, default 1024), `auto_sync` (default `true`), `gimmick_policy` (`hide_chart`), `scroll_gimmicks` (default `true`). The mod toggle applies at the next launch |
 | `non_native_os_support` | Background-movie mode under Wine (`suppress` / `fallback`) |
-| `background_dancers` | Background Dancers: `style` (`stock` / `lit` / `cel` — LIGHTING STYLE), `outlines` (SCENE OUTLINES), `outline_px` / `outline_px_stage` (line thickness in 720p px, 0.5–6, defaults 2 / 1.5), `bpm_sync` (default `true` — dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats), `stop_slow` (default `true` — 1/12 speed through a chart STOP, as in DDR A3), `movie_mode` (`off` / `thumbnail` / `stage_screens` / `fullscreen` / `movie_only` — BACKGROUND MOVIES, default `stage_screens`, see above) and `custom_content` (default `true` — also load the dancers/stages under `data_mods/custom_models/`, see above). All eight are also rows under BACKGROUND DANCERS in the mod menu; the first seven apply from the next song, `custom_content` at the next launch |
+| `background_dancers` | Background Dancers: `style` (`random` / `stock` / `lit` / `cel`, or a DDR Universe style: `contrast` / `highlight` / `shadow` / `negative` / `mono` / `sepia` / `outline` / `stencil` / `stencil_rainbow` / `thermo` / `mercury` / `candy` / `bubble` / `crystal` / `xray` — LIGHTING STYLE), `outlines` (SCENE OUTLINES), `bpm_sync` (default `true` — dancers, stage props and camera run at the song's tempo, half a second of choreography per beat, in phase with the chart's beats), `stop_slow` (default `true` — 1/12 speed through a chart STOP, as in DDR A3), `movie_mode` (`off` / `thumbnail` / `stage_screens` / `fullscreen` / `movie_only` — BACKGROUND MOVIES, default `stage_screens`, see above), `custom_content` (default `true` — also load the dancers/stages under `data_mods/custom_models/`, see above) and `big_head` (default `false` — BIG HEAD, every dancer's head at 3×). All seven are also rows under BACKGROUND DANCERS in the mod menu; `style` and `big_head` apply immediately, `outlines` shows or hides the outlines immediately where they were built (and builds them from the next song), `bpm_sync` / `stop_slow` / `movie_mode` apply from the next song, `custom_content` at the next launch. The former `outline_px` / `outline_px_stage` / `outline_style` / `outline_layer_colors` keys are ignored (the outline is Dancing Stage Unleashed's own) |
 | `player_perspective` | HALLWAY/DISTANT geometry tuning |
 | `s_marvelous` | S-Marvelous window in ms (`window_ms`, 1–16, default 12), judgement word art, and the S-Marvelous combo on DDR SELECTION skins with per-grade combo colours (`judgement_color`: `purple_shadow` / `all_purple`), receptor flash on an S-Marvelous hit (`receptor_flash`: `purple` = violet burst, default / `white` = identical to Marvelous) — all also editable in the mod menu. The stock Marvelous word's shimmer is always muted (the old `marvelous_shimmer` key is ignored) |
 | `shader_fixes` | Arrow anti-aliasing toggle (`anti_aliasing`, also editable in the mod menu, next launch). The scene-shader variants Background Dancers uses are synthesized whenever both mods are on; the lighting knobs live under `background_dancers` |
@@ -249,8 +278,6 @@ Everything else lives in the single `mod-config.json` in the game folder (includ
 All keys are optional; missing keys use sensible defaults.
 
 </details>
-
-Custom songs, textures, and assets are served from the `data_mods/` folder — drop-in PNGs are converted automatically, no repacking tools needed.
 
 ## StepManiaX Cabinet and Touchscreen Support
 
@@ -306,13 +333,16 @@ The modpack is a Rust hook DLL (`cdylib`) injected into the live game process. T
 ```bash
 cargo check --target x86_64-pc-windows-msvc   # fast type check
 cargo test                                     # host tests (pure layers)
-./build.sh                                     # release build via cargo-xwin (macOS/Linux)
-./build_win7.sh                                # Windows 7-compatible build
+./build.sh                                     # release builds via cargo-xwin: DLL, updater and prep tool (ONLY=dll|updater|prep for one)
+./build_win7.sh                                # Windows 7-compatible builds: DLL, updater and prep tool (ONLY=dll|updater|prep for one)
 cargo test --manifest-path updater/Cargo.toml  # the auto-updater's host tests
-./scripts/build_release_archive.sh             # release/: zip (Win7 DLL + updater + data), bare updater exe, tester install .bat
+./scripts/validate_prep.sh                     # the StepMania prep tool's tests (incl. the DLL's mounted suites) + a smoke dry-run
+./scripts/publish_packs.sh                     # build the optional dancer/stage packs from the assets checkout, upload the changed ones
+./scripts/build_release_archive.sh             # release/: base zip (Win7 DLL + updater + prep tool + data + pack catalog), bare exes, tester install .bat
+scripts\build_release_distribution.bat         # Windows: release\ = unzipped game-folder image (base + every pack when the assets checkout is present)
 ```
 
-Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too. The auto-updater is a separate crate in `updater/` (plain Rust, no game dependencies); the release script builds it with the same Windows 7 recipe and refuses to package any binary that would not load on Windows 7.
+Output: `target/x86_64-pc-windows-msvc/release/ddr_world_hook.dll`. On Windows, a plain `cargo build --release --target x86_64-pc-windows-msvc` works too. The auto-updater (`updater/`) and the StepMania prep tool (`prep/`, which mounts the DLL's own conversion code by `#[path]` so the cache it writes is exactly what the game validates) are separate crates; the release scripts build both with the same Windows 7 recipe and refuse to package any binary that would not load on Windows 7. Both release scripts ship the Background Dancers custom models pre-packed as `.arc` files (`scripts/pack_custom_models.py`); the checkout keeps them as loose folders.
 
 **Where to start reading:**
 

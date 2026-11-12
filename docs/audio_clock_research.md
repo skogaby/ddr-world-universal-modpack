@@ -296,7 +296,10 @@ slope the v2 capture measured. **The calibration is re-run every boot and its
 error is not repeatable:** a 2026-09-13 boot on the same machine read
 `freq=999928836/s` (+71.2 ppm), confirmed by that session's +70.6 ppm
 game-vs-QPC fit (§7.3). On native hardware the 500 ms QPC-referenced
-calibration should be good to a few ppm, and a CPU without an invariant TSC
+calibration tracks QPC to a few ppm — but QPC itself inherits Windows' own
+boot-time TSC calibration, which on the official Win7 cabinet moved by
+~780 ppm between two boots (§7.4), so the native tick-vs-DAC error is NOT
+reliably small. A CPU without an invariant TSC
 falls back to `timeGetTime()` (whose rate is the system-timer crystal). **The
 tester's `log.txt` `time:` lines identify which source their cabinet uses.**
 
@@ -471,7 +474,7 @@ cursor line at the arm frame give this play's stock onset error
 
 | Mode | In-song count | Cursor exposure after the arm | Line loss mid-song |
 |---|---|---|---|
-| `fit` (default) | `E(t_frame)` from the 10 s LSQ line — the DAC rate | slow cursor wander (period ≳ window) passes 1:1 into the game clock | passthrough to stock for ~2.5 s (`ready` needs 256 passes), then back — a STEP of size Δ |
+| `fit` (default) | `E(t_frame)` from the 10 s LSQ line — the DAC rate | slow cursor wander (period ≳ window) passes 1:1 into the game clock | holds `T − A + Δ + last drift residual` until the line returns (since 2026-10-04; was a passthrough to stock — a STEP of the whole correction) |
 | `anchor` | stock `T − A + Δ` | none — the cursor is read once per voice | none (Δ needs no line); passthrough only if the origin ALSO changed and no line can re-latch |
 | `raw` | newest cursor read + nominal-rate extrapolation | the full staircase (±5 ms per read) | as `fit` |
 
@@ -526,19 +529,76 @@ seek is excluded; lineless anchor-mode frames carry no measurement). Negative
 = the game tick ran fast vs the DAC (the CrossOver RDTSC case). So a Win7
 tester's bare `log.txt` in EITHER mode answers the question; no CSV needed.
 
+### 7.4 First native Win7 capture (official cabinet, 2026-10-03) and the drift-aware gate
+
+Hardware: AMD Embedded RX-421BD, Win7 build 7601, RDTSC tick path (invariant
+TSC). Two boots on the same cabinet: boot A in `anchor` (`log.txt` +
+CSV, QPC 2046962 Hz) and boot B in `fit` (CSV only, QPC 2048554 Hz). Mostly
+training-mode loops; two full ~76 s songs in boot B.
+
+**The stock tick vs the audio is a per-boot constant that can be large.**
+Fitting the stock `frame_tick` and the long-run accumulated play position
+against QPC over the whole session:
+
+| | Boot A | Boot B |
+|---|---|---|
+| stock tick vs QPC | −3.4 ppm | +2.6 ppm |
+| DAC (long-run) vs QPC | +10.5 ppm | +788 ppm |
+| **stock tick vs DAC** | **−14 ppm** (1.7 ms / 2 min) | **−785 ppm** (≈ 94 ms / 2 min) |
+
+Boot B's vsync measured 59.902 Hz vs boot A's 59.855 Hz (+785 ppm) and the
+two QPC frequencies differ by 778 ppm: Windows' boot-time TSC calibration
+moved by ~0.08 % and libavs (§4, calibrated against QPC) inherits it. The
+stock game on a boot like B drifts ~0.8 ms per second against its own music.
+Only an in-song rate correction (`fit`) addresses that; `anchor` = stock there.
+
+**The Win7 DS cursor:** 441-frame (10 ms) steps, reads phase-locked so the
+line residual is ~0.02 ms (`fit sd=0.018…0.04 ms`). But the LOCAL slope is
+~57 ppm off the long-run rate in both boots (boot A −46.2 vs +10.5 ppm), with
+a +10 ms catch-up every ~176 s (≈ 2 s of ±10 ms toggling at the boundary).
+Interpretation (not proven): the once-per-pass read cadence beats against the
+device period, so between slips the readings track the reader's cadence, not
+the DAC. Consequences: `fit` follows a ~57 ppm-biased slope plus a smoothed
++10 ms step every ~3 min; the disarm `in-song drift` INFO (median −39 ppm in
+boot A) measures stock vs that LOCAL line, so it overstates the true drift on
+this platform; and the arm's Δ (both modes) carries the slowly wandering
+0–10 ms reader phase. A long-run (minutes, slip-spanning) rate estimate is the
+accurate one — not implemented (maintainer: fix the gate first).
+
+**The 50 ms gate bug (fixed 2026-10-04).** The ACTIVE gate used the arm's
+absolute `|E − (T − A)| ≤ 50 ms`, which capped the in-song correction at
+50 ms. In boot B `fit` corrected linearly (+0.73 ms/s, 301/301 Marvelous, mean
+≈ +1 ms) until ~68–71 s, then flapped Diverged / re-arm (Δ ≈ +49.8) ~15 times
+in ~1 s — the playhead jumping 50 ms back and forth, which the tester saw as
+stutter "twice" — and fell back to stock for the rest of the song (judgement
+median −41 ms). `GatePolicy::stays_active` now gates the ACTIVE drift residual
+`(E − (T − A)) − Δ` instead: a per-frame step ≤ `sanity_ms` (a re-anchor is a
+discontinuity; the detector keeps its 50 ms sensitivity all song, and now also
+catches a sub-50 ms-absolute re-anchor late in a drifted song) AND
+`|residual| ≤ sanity_ms + max_drift_ppm (2000) × span`. The arm and the
+origin-republication re-latch keep the absolute 50 ms gate. Host tests: a
+785 ppm song stays ACTIVE for 150 s in both modes; a 5000 ppm runaway diverges
+at ~16.7 s; an 80 ms stock jump at 100 s into a 785 ppm song diverges.
+Line loss while ACTIVE (same day): with corrections no longer capped, a `fit`
+passthrough on a lost line (fit reset / render stall / no `C`) would step the
+playhead back by the whole accumulated drift (up to ~100 ms on a boot-B
+cabinet; not observed in this capture). Both modes now HOLD instead: `fit`
+returns `T − A + Δ + last drift residual` (frozen; ≤ 785 ppm × the gap of
+error, ~2 ms over a 2.5 s fit reset) and rejoins the line through the step
+gate. Only an origin change with no line to re-latch still passes through.
+
 ---
 
 ## 8. Open / unmeasured
 
-- Win7 DS cursor granularity, its slow-wander behaviour (the §7.3 question), and
-  the stock onset distribution on the tester's cabinet (the first tester run
-  with `diagnostics.audio_sync` ON answers all three via the `armed … fit(sd=…)`
-  lines / `onset` CSV rows / `output_cursor_segments`' `cursor_rate_error_ppm`
-  + `fit_residual_ms`). As of 2026-09-13 several Win7 cabinets have played the
-  shipped `fit` build and reported sync "significantly better" — anecdotal,
-  no capture returned.
+- Win7 DS cursor: MEASURED 2026-10-03 (§7.4) — 10 ms steps, ~0.02 ms read
+  jitter, a ~57 ppm local-vs-long-run slope bias with a +10 ms slip every
+  ~176 s. Still open: whether the slip mechanism is the read cadence beating
+  against the device period, and how common large per-boot calibration errors
+  (boot B: −785 ppm) are across cabinets — more `log.txt`s with the stock-tick
+  vs long-run DAC rate would tell.
 - Whether the tester's CPU takes the RDTSC or the `timeGetTime()` tick path
-  (their `log.txt`).
+  (their `log.txt`): RDTSC on the RX-421BD cabinet (§7.4).
 - Whether the mean stock onset phase is 5 ms (the model) or a few ms later
   (the CrossOver mean `delta_vs_stock` ≈ −2.7 ms hints so, n ≈ 19).
 - Whether anything other than the master pass calls `0x435A50` (the two

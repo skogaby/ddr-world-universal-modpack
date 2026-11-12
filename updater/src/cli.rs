@@ -28,6 +28,14 @@ pub struct Cli {
     pub tag: Option<String>,
     /// `--repo <OWNER/NAME>`: GitHub repository override.
     pub repo: String,
+    /// `--packs`: open the pack chooser after the update steps, no countdown.
+    pub packs: bool,
+    /// `--packs-list`: print the optional packs and their state; change nothing.
+    pub packs_list: bool,
+    /// `--packs-install <all|none|id,id,…>`: set the pack selection and apply it.
+    pub packs_install: Option<String>,
+    /// `--packs-dir <DIR>`: take pack zips from this folder before downloading.
+    pub packs_dir: Option<PathBuf>,
 }
 
 impl Default for Cli {
@@ -40,6 +48,10 @@ impl Default for Cli {
             from_zip: None,
             tag: None,
             repo: REPO_DEFAULT.to_string(),
+            packs: false,
+            packs_list: false,
+            packs_install: None,
+            packs_dir: None,
         }
     }
 }
@@ -75,6 +87,13 @@ pub fn usage() -> String {
          \x20 --from-zip <PATH>       Install this local archive instead of downloading\n\
          \x20 --tag <NAME>            Tag to record with --from-zip (default: local:<sha256 prefix>)\n\
          \x20 --repo <OWNER/NAME>     Override the GitHub repository (default: {REPO_DEFAULT})\n\
+         \x20 --packs                 Choose optional dancer and stage packs now (the checklist\n\
+         \x20                         every run offers for a few seconds)\n\
+         \x20 --packs-list            List the optional dancer and stage packs and their state;\n\
+         \x20                         no network access, nothing changed\n\
+         \x20 --packs-install <SPEC>  Choose the optional packs without the prompt: all, none,\n\
+         \x20                         or pack ids separated by commas (see --packs-list)\n\
+         \x20 --packs-dir <DIR>       Take pack zips from this folder instead of downloading them\n\
          \x20 --help                  Show this text\n\
          \x20 --version               Show the updater version\n"
     )
@@ -108,6 +127,8 @@ where
             "--check" => cli.check = true,
             "--force" => cli.force = true,
             "--include-prerelease" => cli.include_prerelease = true,
+            "--packs" => cli.packs = true,
+            "--packs-list" => cli.packs_list = true,
             "--game-dir" => match take_value(&flag, inline, &mut iter) {
                 Ok(v) => cli.game_dir = Some(PathBuf::from(v)),
                 Err(msg) => return Parsed::Usage(msg),
@@ -118,6 +139,14 @@ where
             },
             "--tag" => match take_value(&flag, inline, &mut iter) {
                 Ok(v) => cli.tag = Some(v),
+                Err(msg) => return Parsed::Usage(msg),
+            },
+            "--packs-install" => match take_value(&flag, inline, &mut iter) {
+                Ok(v) => cli.packs_install = Some(v),
+                Err(msg) => return Parsed::Usage(msg),
+            },
+            "--packs-dir" => match take_value(&flag, inline, &mut iter) {
+                Ok(v) => cli.packs_dir = Some(PathBuf::from(v)),
                 Err(msg) => return Parsed::Usage(msg),
             },
             "--repo" => match take_value(&flag, inline, &mut iter) {
@@ -198,6 +227,30 @@ mod tests {
     }
 
     #[test]
+    fn packs_list_flag() {
+        assert!(run(&["--packs-list"]).packs_list);
+        assert!(!run(&[]).packs_list);
+        assert!(usage().contains("--packs-list"));
+    }
+
+    #[test]
+    fn packs_install_and_dir_flags() {
+        let c = run(&["--packs-install", "all", "--packs-dir=some/folder"]);
+        assert_eq!(c.packs_install.as_deref(), Some("all"));
+        assert_eq!(c.packs_dir, Some(PathBuf::from("some/folder")));
+        assert_eq!(
+            run(&["--packs-install=a,b"]).packs_install.as_deref(),
+            Some("a,b")
+        );
+        assert!(usage_msg(&["--packs-install"]).contains("requires a value"));
+        assert!(usage_msg(&["--packs-dir="]).contains("non-empty"));
+        assert_eq!(run(&[]).packs_install, None);
+        assert!(run(&["--packs"]).packs && !run(&["--packs-list"]).packs);
+        assert!(!run(&[]).packs);
+        assert!(usage().contains("--packs-install") && usage().contains("--packs-dir"));
+    }
+
+    #[test]
     fn t1_no_args_is_default_run() {
         assert_eq!(p(&[]), Parsed::Run(Cli::default()));
         assert_eq!(Cli::default().repo, REPO_DEFAULT);
@@ -265,6 +318,10 @@ mod tests {
                 from_zip: Some(PathBuf::from("r.zip")),
                 tag: Some("v1".to_string()),
                 repo: "o/n".to_string(),
+                packs: false,
+                packs_list: false,
+                packs_install: None,
+                packs_dir: None,
             }
         );
     }

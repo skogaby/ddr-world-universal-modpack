@@ -58,6 +58,39 @@ payload). The afpu package id used for layer creation lives at pkg+0x314 (u32).
 
 ### Deferred destroy — the crash class
 
+**Field crash, 2026-10 (`gamemdx` 20260915, Windows tester; not reproducible
+on the maintainer's CrossOver install).** `EXCEPTION_ACCESS_VIOLATION` at
+`gamemdx+0x1ac452`, null write at `0x308` — that is `Manager::Update`
+(`FUN_1801ac310` on 20260915) at the `*(obj+0x308) = 1` store above, with
+`obj = FUN_180202bd0(entry->ifs_hash)` returning NULL for the first of the
+seven `bgprev_background_*` entries the overlay had just requested (`rsi` =
+entry+0x2c, `(rbx - entry) / 0x40 == 7` in both dumps). Chain on 20260915,
+file-relative:
+
+| Step | Function | Note |
+|---|---|---|
+| request_load | `FUN_1801ac5b0` (`+0x1AC5B0`) | tries `<name>_lang_<xx>` then `<name>`; each hit pushes one 0x40 registry entry |
+| arc resolve + FNV | `FUN_1801abde0` | variants `%s_v3`, `%s_v0`, `%s_lite` (skipped when machine type ∈ {2,3}), `%s`; hash = FNV-1a(`<resolved>.ifs`) |
+| arc register | `FUN_1801abce0` | `avs_fs_lstat("data/arc/%s/%s.arc")` → `FileManager::Load` (`FUN_1801febf0`, dedupes by FNV of the basename), tags the record type `"bm2d"` |
+| arc expansion | `FUN_180207610` | per inner member: child `FileManager::Load("<scheme>:<inner path>")` |
+| inner-IFS registration | `FUN_180208290` → `AsyncRegisterJob::run` `FUN_180208170` → `FUN_180203630` | name = basename of the member path; inserts into the hash→object map at `DAT_1806f2f60+0xf8` (dedupes by hash: a second registration only addrefs) |
+| Update gate | `FUN_1801ac310` first loop | FileManager states `{0,5,6,8}` count as *finished* — a FAILED load is finished too, and the create pass then dereferences the missing object |
+
+So the game crashes for ANY alias whose load fails (open refused, truncated,
+not an ARC) or whose inner IFS is not literally `<alias>.ifs`. The tester's
+logs showed every runtime-generated LayeredFS asset unserved (all injected
+option labels, the Mods tab title, preview images, S-Marvelous/song-length
+textures missing) while `avs_fs_lstat` of the aliases succeeded — i.e. the
+redirected `avs_fs_open` of the mod file was refused by AVS. libavs's native
+open (`FUN_1800082c0`, 20260324) runs `GetLongPathNameA(path, buf, 0x80)` and a
+case-sensitive `strcmp` against the input when the device's `posix` flag is
+set; the install root was 55 chars (`C:\Games\<long name>\contents`), putting
+the served paths at 127–140 chars. Mitigations shipped: `bg_preview_overlay`
+probes each alias through the same redirected AVS open + header parse before
+`request_load` (chrome-only + one WARN instead of a crash); LayeredFS WARNs
+the first redirected opens AVS refuses and matches the `GetLongPathNameA`
+fallback on the `data_mods` path component (absolute/`.\`/mixed-case forms).
+
 `release(name)` erases the registry entry synchronously (`is_ready` → false
 immediately) but the actual `afpu_destroy_package_data` runs LATER, from the
 engine's update in `gameMain`. Consequences (all cabinet-observed as crashes,

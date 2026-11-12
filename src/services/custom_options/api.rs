@@ -241,7 +241,7 @@ pub enum ScalarFormat {
 /// | Mode       | network save | network load | JSON cache (write + prime) | card-in reset |
 /// |------------|:------------:|:------------:|:--------------------------:|:-------------:|
 /// | `Full`     | yes          | yes          | yes                        | no            |
-/// | `SaveOnly` | yes          | no           | no                         | no            |
+/// | `SaveOnly` | yes          | no           | fallback only (see below)  | no            |
 /// | `Local`    | no           | no           | yes                        | no            |
 /// | `None`     | no           | no           | no                         | no            |
 /// | `Session`  | no           | no           | no                         | **yes**       |
@@ -250,7 +250,16 @@ pub enum ScalarFormat {
 /// channel the game itself owns (e.g. the WebUI customize values, applied by
 /// the game's native `<customize>` profile load): the DLL still *sends* the
 /// value on save — the direction the game lacks — but never reads it back,
-/// so the game's own load path stays the single source of truth.
+/// so the game's own load path stays the single source of truth. That only
+/// holds while the network round-trip exists: when the operator turns
+/// `persist_network` OFF (a server that doesn't honour the injected
+/// `mod_*` fields), nothing would ever persist a `SaveOnly` row — so with
+/// `persist_network=false` + `persist_json=true` the row **falls back to
+/// the JSON cache** (write + prime), exactly like `Local`. The fallback is a
+/// single process-wide flag the persistence service sets from the config
+/// gates ([`json_cached_when`](Self::json_cached_when)); a row's owner
+/// consults `custom_options::save_only_json_fallback()` to decide whether
+/// to drive game memory from the cache or mirror game memory into the menu.
 ///
 /// `Local` exists for options the backend will never store (the Multiplayer
 /// Bot rows): the cabinet remembers them per side in `mod-config.json` like a
@@ -269,8 +278,10 @@ pub enum PersistMode {
     /// Network save + network load + JSON cache. The default; equivalent to
     /// the historical `persist: true`.
     Full,
-    /// Emitted on network save only; skipped by the network load and by the
-    /// JSON cache write + prime.
+    /// Emitted on network save only; skipped by the network load. Skipped by
+    /// the JSON cache write + prime too — UNLESS the persistence service has
+    /// raised the `SaveOnly` JSON fallback (`persist_network=false`, see the
+    /// type docs), in which case the row is JSON-cached like `Local`.
     SaveOnly,
     /// JSON cache write + prime only; never on the wire in either direction.
     Local,
@@ -322,11 +333,24 @@ impl PersistMode {
 
     /// Whether the option participates in the offline JSON cache — both the
     /// write (`snapshot_for_json_cache`) and the boot-time prime
-    /// (`resolve_from_load` with [`LoadSource::JsonPrime`]).
+    /// (`resolve_from_load` with [`LoadSource::JsonPrime`]) — with the
+    /// `SaveOnly` JSON fallback OFF. The pure matrix column; the persistence
+    /// choke points use [`json_cached_when`](Self::json_cached_when) with the
+    /// live fallback flag.
     pub fn json_cached(self) -> bool {
+        self.json_cached_when(false)
+    }
+
+    /// [`json_cached`](Self::json_cached) with the `SaveOnly` JSON fallback
+    /// state applied: when `save_only_fallback` is true (the persistence
+    /// service runs with `persist_network=false` + `persist_json=true`),
+    /// `SaveOnly` rows join the JSON cache in both directions — the only way
+    /// they can persist at all without the network round-trip.
+    pub fn json_cached_when(self, save_only_fallback: bool) -> bool {
         match self {
             PersistMode::Full | PersistMode::Local => true,
-            PersistMode::SaveOnly | PersistMode::None | PersistMode::Session => false,
+            PersistMode::SaveOnly => save_only_fallback,
+            PersistMode::None | PersistMode::Session => false,
         }
     }
 
@@ -343,12 +367,20 @@ impl PersistMode {
     }
 
     /// Whether a value arriving from `source` may be applied to the cache —
-    /// the single load-side gate `resolve_from_load` consults.
-    pub fn accepts_load(self, source: LoadSource) -> bool {
+    /// the single load-side gate `resolve_from_load` consults (with the live
+    /// `SaveOnly` JSON fallback flag; see
+    /// [`json_cached_when`](Self::json_cached_when)).
+    pub fn accepts_load_when(self, source: LoadSource, save_only_fallback: bool) -> bool {
         match source {
             LoadSource::Network => self.loaded_from_network(),
-            LoadSource::JsonPrime => self.json_cached(),
+            LoadSource::JsonPrime => self.json_cached_when(save_only_fallback),
         }
+    }
+
+    /// [`accepts_load_when`](Self::accepts_load_when) with the fallback OFF —
+    /// the pure matrix.
+    pub fn accepts_load(self, source: LoadSource) -> bool {
+        self.accepts_load_when(source, false)
     }
 }
 
@@ -412,7 +444,11 @@ pub type OnChangeFn = fn(player_side: u8, new_value: i32);
 /// `seop_item_<id>`; mods ship the matching PNG at
 /// `data_mods/custom_options/select_music_option_lang_eng_v3_ifs/tex/seop_item_<id>.png`
 /// and the framework automatically clones the stock option-row atlas to
-/// include the new texture.
+/// include the new texture. A row may instead BORROW another row's textures
+/// through [`label_texture_like`](Self::label_texture_like) /
+/// [`preview_texture_like`](Self::preview_texture_like) — runtime-named
+/// sibling rows (one per discovered content source) then share one shipped
+/// label PNG and one preview chrome.
 #[derive(Debug, Clone)]
 pub struct RegisterSpec {
     /// Stable identifier for this option. Used as the kbin element-name
@@ -466,6 +502,16 @@ pub struct RegisterSpec {
     /// One-line description shown in the overlay's footer while the row is
     /// selected. `None` falls back to empty.
     pub description: Option<&'static str>,
+
+    /// Render the row label from ANOTHER option's texture (`seop_item_<alias>`)
+    /// instead of `seop_item_<id>`. `None` = this row's own. The alias is an
+    /// option id (or any stem a shipped `seop_item_*.png` exists for).
+    pub label_texture_like: Option<&'static str>,
+
+    /// Draw the preview-box chrome from ANOTHER option's textures
+    /// (`seop_image_<alias>` and, for enum values with a preview key,
+    /// `seop_image_<alias>_<key>`) instead of this id's. `None` = own.
+    pub preview_texture_like: Option<&'static str>,
 }
 
 impl RegisterSpec {
@@ -504,6 +550,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -531,6 +579,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -565,6 +615,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -592,6 +644,8 @@ impl RegisterSpec {
             menus: MenuPlacement::default(),
             display_name: None,
             description: None,
+            label_texture_like: None,
+            preview_texture_like: None,
         }
     }
 
@@ -663,9 +717,12 @@ impl RegisterSpec {
     }
 
     /// Install only the save-side transform (in-memory value → wire value).
-    /// For [`PersistMode::SaveOnly`] options no load path consults a
-    /// `load_transform`, so registering one would be dead code — this setter
-    /// leaves `load_transform` as `None`.
+    /// For a [`PersistMode::SaveOnly`] option whose wire value IS its
+    /// in-memory value no load path needs an inverse. A `SaveOnly` row with a
+    /// non-identity wire mapping must use [`persist_transform`](Self::persist_transform)
+    /// instead: the `SaveOnly` JSON fallback (`persist_network=false`) primes
+    /// it from the cache through `load_transform`, and with none registered
+    /// the wire value would land in the registry untransformed.
     pub fn save_transform(mut self, save: fn(id: &str, value: i32) -> i32) -> Self {
         self.save_transform = Some(save);
         self
@@ -708,6 +765,21 @@ impl RegisterSpec {
     /// Set the one-line footer description for the overlay menu.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = Some(description);
+        self
+    }
+
+    /// Render this row's label from `seop_item_<alias>` instead of its own
+    /// id-derived texture (see [`RegisterSpec::label_texture_like`]).
+    pub fn label_texture_like(mut self, alias: &'static str) -> Self {
+        self.label_texture_like = Some(alias);
+        self
+    }
+
+    /// Draw this row's preview chrome from `seop_image_<alias>` (and
+    /// `seop_image_<alias>_<key>` for keyed enum values) instead of its own
+    /// (see [`RegisterSpec::preview_texture_like`]).
+    pub fn preview_texture_like(mut self, alias: &'static str) -> Self {
+        self.preview_texture_like = Some(alias);
         self
     }
 }

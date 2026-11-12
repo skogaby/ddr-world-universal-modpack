@@ -157,58 +157,7 @@ impl ArcArchive {
     /// Serialize to bytes. Writes uncompressed (compression=0), with the
     /// game-required 64-byte alignment between sections and entries.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let file_count = self.files.len() as u32;
-        let cue_start = 16u32;
-        let str_table_offset = cue_start + file_count * 16;
-
-        let mut str_offsets: Vec<u32> = Vec::with_capacity(self.files.len());
-        let mut str_cursor = str_table_offset;
-        for name in self.files.keys() {
-            str_offsets.push(str_cursor);
-            str_cursor += name.len() as u32 + 1;
-        }
-
-        let data_start = align_up(str_cursor, ARC_ALIGN);
-        let mut file_offsets: Vec<u32> = Vec::with_capacity(self.files.len());
-        let mut data_cursor = data_start;
-        for data in self.files.values() {
-            file_offsets.push(data_cursor);
-            data_cursor = align_up(data_cursor + data.len() as u32, ARC_ALIGN);
-        }
-
-        let mut out = Vec::with_capacity(data_cursor as usize);
-        out.extend_from_slice(&ARC_MAGIC.to_le_bytes());
-        out.extend_from_slice(&ARC_VERSION.to_le_bytes());
-        out.extend_from_slice(&file_count.to_le_bytes());
-        out.extend_from_slice(&ARC_COMPRESSION_NONE.to_le_bytes());
-
-        for (i, data) in self.files.values().enumerate() {
-            let size = data.len() as u32;
-            out.extend_from_slice(&str_offsets[i].to_le_bytes());
-            out.extend_from_slice(&file_offsets[i].to_le_bytes());
-            out.extend_from_slice(&size.to_le_bytes()); // unpacked
-            out.extend_from_slice(&size.to_le_bytes()); // packed (== unpacked since uncompressed)
-        }
-
-        for name in self.files.keys() {
-            out.extend_from_slice(name.as_bytes());
-            out.push(0);
-        }
-
-        // Pad to data_start
-        while out.len() < data_start as usize {
-            out.push(0);
-        }
-
-        for data in self.files.values() {
-            out.extend_from_slice(data);
-            let pad = align_up(data.len() as u32, ARC_ALIGN) as usize - data.len();
-            for _ in 0..pad {
-                out.push(0);
-            }
-        }
-
-        out
+        crate::core::art::arcpack::write_uncompressed(&self.files)
     }
 
     /// Save to disk.

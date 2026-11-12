@@ -1,8 +1,8 @@
 //! `core/anm` — the PURE format layer for the DDR 3D animation/model data
 //! the Background Dancers feature reads straight from the stock `.arc`
 //! members: the ANM family container (`.anm` skeletal clips, `.camanm`
-//! cameras), the KTMDL bone table, `.b2it` bone-name tables and `MRL0`
-//! resource lists.
+//! cameras, `.sanm` material-parameter clips), the KTMDL bone / material
+//! tables, `.b2it` bone-name tables and `MRL0` resource lists.
 //!
 //! It is a byte-for-byte port of the verified Python reference codecs
 //! (`scripts/anm_dump.py`, `scripts/ktmdl_dump.py`; format record in
@@ -31,6 +31,7 @@ pub mod ktmdl;
 pub mod pose;
 pub mod rlist;
 pub mod sample;
+pub mod sanm;
 
 #[cfg(test)]
 mod tests;

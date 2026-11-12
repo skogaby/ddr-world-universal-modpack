@@ -18,15 +18,18 @@
 //! - **Apply:** a user edit (`on_change`) writes `index + 1` to
 //!   `Customize + 0x30` for that side. This is the row's only writer of
 //!   game memory.
-//! - **Seed:** on every SONG_SELECT (scene 25) entry the menu registry is
+//! - **Sync:** on every SONG_SELECT (scene 25) entry the menu registry is
 //!   re-seeded by READING `Customize + 0x30` (populated by the game's own
 //!   native `<customize>` load) via `set_value_silent` — never fires
-//!   `on_change`, so an unknown stored value can't clobber game state.
-//! - **Persistence:** `PersistMode::SaveOnly` with a `+1` save transform —
-//!   the DLL emits `mod_customize_movie_size` (1/2/3) on the network save;
-//!   the backend stores its native `cust_movie_size` column and the value
-//!   returns through the game's own `<customize>` load block. No network
-//!   load, no JSON cache.
+//!   `on_change`, so an unknown stored value can't clobber game state. Under
+//!   the `SaveOnly` JSON fallback (below) the direction flips for a cached /
+//!   player-chosen value, which is written into `Customize + 0x30` instead.
+//! - **Persistence:** `PersistMode::SaveOnly` with a `±1` persist transform
+//!   pair — the DLL emits `mod_customize_movie_size` (1/2/3) on the network
+//!   save; the backend stores its native `cust_movie_size` column and the
+//!   value returns through the game's own `<customize>` load block. No
+//!   network load. With `persist_network=false` the row rides the
+//!   `mod-config.json` cache instead (`custom_options::save_only_json_fallback`).
 //!
 //! ## Textures
 //!
@@ -83,6 +86,18 @@ fn persist_save_transform(_id: &str, value: i32) -> i32 {
     }
 }
 
+/// Inverse of [`persist_save_transform`]: game/wire value (1..=3) → menu index
+/// (0..=2); anything else → index 0 (the same mapping the game→menu mirror
+/// applies). Consulted only by the JSON prime under the `SaveOnly` JSON
+/// fallback (`persist_network=false`).
+fn persist_load_transform(_id: &str, wire: i32) -> i32 {
+    if (1..=VALUE_KEYS.len() as i32).contains(&wire) {
+        wire - 1
+    } else {
+        0
+    }
+}
+
 /// Resolve one side's `Customize` base. Null-guards every hop; `None` when
 /// the signatures didn't stash or the side isn't carded in.
 fn customize_base(player_side: u8) -> Option<*mut u8> {
@@ -105,7 +120,8 @@ fn customize_base(player_side: u8) -> Option<*mut u8> {
     }
 }
 
-/// User edit in the options menu — the ONLY writer of the game field.
+/// User edit in the options menu (or a persistence load landing) — the writer
+/// of the game field, also reused by [`sync_with_game`]'s JSON-fallback leg.
 fn on_value_changed(player_side: u8, new_value: i32) {
     let Some(base) = customize_base(player_side) else {
         return;
@@ -116,20 +132,31 @@ fn on_value_changed(player_side: u8, new_value: i32) {
     }
 }
 
-/// Read-only seed of the menu registry from the game's `Customize` object
-/// for one side, on SONG_SELECT entry. Unknown stored values map to index 0
-/// and — via the silent setter — can never write back into game memory.
-fn seed_from_game(player_side: u8) {
+/// Reconcile the menu registry with the game's `Customize` object for one
+/// side, on SONG_SELECT entry. Default direction: a read-only seed — unknown
+/// stored values map to index 0 and, via the silent setter, can never write
+/// back into game memory. Under the `SaveOnly` JSON fallback
+/// (`persist_network=false`) a value the cache primed or the player chose
+/// ([`custom_options::value_is_authoritative`]) is written INTO the game
+/// instead, since the game's own load can't bring it back.
+fn sync_with_game(player_side: u8) {
     let Some(base) = customize_base(player_side) else {
         return;
     };
+    if custom_options::save_only_json_fallback()
+        && custom_options::value_is_authoritative(OPTION_ID, player_side)
+    {
+        if let Some(v) = custom_options::get_value(player_side, OPTION_ID) {
+            on_value_changed(player_side, v);
+        }
+        return;
+    }
     let game_value = unsafe { (base.add(CUSTOMIZE_FIELD_OFFSET) as *const u32).read() };
-    let index = if (1..=VALUE_KEYS.len() as u32).contains(&game_value) {
-        (game_value - 1) as i32
-    } else {
-        0
-    };
-    custom_options::set_value_silent(OPTION_ID, player_side, index);
+    custom_options::set_value_silent(
+        OPTION_ID,
+        player_side,
+        persist_load_transform(OPTION_ID, game_value as i32),
+    );
 }
 
 pub struct MovieSizeCustomizationMod {
@@ -209,7 +236,7 @@ impl Mod for MovieSizeCustomizationMod {
             .default_value(0)
             .on_change(on_value_changed)
             .persist_mode(PersistMode::SaveOnly)
-            .save_transform(persist_save_transform);
+            .persist_transform(persist_save_transform, persist_load_transform);
 
         match custom_options::register_option(spec) {
             Ok(_handle) => {
@@ -225,16 +252,18 @@ impl Mod for MovieSizeCustomizationMod {
             }
         }
 
-        // Seed the menu registry from the game's own Customize object on
+        // Sync the menu registry with the game's own Customize object on
         // EVERY SONG_SELECT (scene 25) entry — the earliest point the options
         // modal can open, and the point at which PlayerWork/Customize are
-        // fully populated from the server's <customize> load block. The seed
-        // is read-only and idempotent (a user edit writes Customize
-        // on-change, so re-seeding reads back the same value).
+        // fully populated from the server's <customize> load block. With
+        // network persistence on the sync is a read-only, idempotent seed (a
+        // user edit writes Customize on-change, so re-seeding reads back the
+        // same value); under the SaveOnly JSON fallback it drives the cached
+        // / player-chosen value into Customize instead.
         self.scene_cb_id = Some(scene_manager::on_scene_change(Box::new(|_old, new| {
             if new == scene::SONG_SELECT {
-                seed_from_game(0);
-                seed_from_game(1);
+                sync_with_game(0);
+                sync_with_game(1);
             }
         })));
 

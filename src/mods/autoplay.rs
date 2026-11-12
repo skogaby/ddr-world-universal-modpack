@@ -169,6 +169,10 @@ fn watermark_tick(st: &Arc<Mutex<WatermarkState>>) {
     }
 }
 
+fn watermark_suppressed_by_env() -> bool {
+    std::env::var("DDR_DISABLE_AUTOPLAY_MARK").map_or(false, |v| v.trim() == "1")
+}
+
 /// Spawn the watermark tick thread. Creates the text widget lazily (on the
 /// render thread) once the widget renderer is up, then evaluates
 /// arm/visibility state and advances the bounce animation every tick.
@@ -291,7 +295,9 @@ impl Mod for AutoplayMod {
 
         // Start the "Autoplay Enabled" watermark. Only reached when the swap
         // service is up (init gate), i.e. autoplay can actually engage.
-        spawn_watermark_thread(self.watermark.clone());
+        if !watermark_suppressed_by_env() {
+            spawn_watermark_thread(self.watermark.clone());
+        }
 
         log_info!("Autoplay: enabled (per-player, toggled via options menu)");
     }

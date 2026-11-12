@@ -23,6 +23,20 @@ pub struct CustomResolutionAnchors {
     pub screen_h_global: Option<*const u8>,
 }
 
+/// Addresses FPS Unlock's sub-60 frame limiter needs — see
+/// [`SignatureStore::frame_limiter_anchors`]. Like
+/// [`CustomResolutionAnchors`] these come from linear hits only, so the mod
+/// can resolve them inside `early_apply`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameLimiterAnchors {
+    /// The per-frame "submit last frame + reset" function the app tick calls
+    /// first (the limiter's detour target).
+    pub frame_begin: Option<*const u8>,
+    /// The f32 per-frame delta-time clamp global (`2.0 / 59.94` s, set in
+    /// onBoot, read by the dt function every frame).
+    pub frame_dt_clamp: Option<*const u8>,
+}
+
 pub struct SignatureDefinition {
     pub name: &'static str,
     pub pattern: &'static str,
@@ -424,6 +438,75 @@ pub struct DdrSelSongInfoPanelSites {
     /// The helper's `SUB r32,r32` (2 bytes — World moves the text box one
     /// placeholder width left; A3 centres it on the placeholder).
     pub x_offset_sub: *const u8,
+}
+
+/// series_expansion's enhanced VERSION layout (`derive_series_enhanced`).
+/// All-or-nothing: either every site resolved and passed its shape checks,
+/// or none is published.
+#[derive(Clone, Copy, Debug)]
+pub struct SeriesEnhancedSites {
+    /// `void builder(u8* capture, std::function<FilterButton*(int)>* factory)`.
+    pub builder: *const u8,
+    /// `FilterButton* tab_factory(u8* capture, i32 g)` (g: 0 CLASSIC, 1 WHITE, 2 GOLD).
+    pub tab_factory: *const u8,
+    /// `void FilterButton::SetTemplate(FilterButton*, i32 template)`.
+    pub set_template: *const u8,
+    /// `std::string* std::string::assign(std::string*, const char*, usize)`.
+    pub string_assign: *const u8,
+    /// `void group_press(u8* captures, bool on)`.
+    pub group_press: *const u8,
+    /// `void clear_category(u8* state, i32 cat)`.
+    pub clear_category: *const u8,
+    /// `void set_one(u8* state, i32 cat, i32 idx, bool on)`.
+    pub set_one: *const u8,
+    /// `void notify(u8* filter_panel)`.
+    pub notify: *const u8,
+    /// The VERSION predicate loop head (`version_predicate_range` match):
+    /// table LEA at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34.
+    pub predicate_range: *const u8,
+    /// `void* operator new(usize)` (the game CRT's; grid children are freed
+    /// through their deleting destructor → the CRT `free`).
+    pub operator_new: *const u8,
+    /// `sequence::Component* Component::Component(Component*)` — installs
+    /// the base vtables; a bare Component is the row-break spacer.
+    pub component_ctor: *const u8,
+    /// `void vector<Component*>::grow_by_one(vector*)` (the push_back
+    /// reallocation path).
+    pub vector_grow: *const u8,
+}
+
+/// improved_song_title_sorting's MUSIC TITLE menu (`derive_title_filter`).
+/// All-or-nothing: either every site resolved and passed its shape checks,
+/// or none is published.
+#[derive(Clone, Copy, Debug)]
+pub struct TitleFilterSites {
+    /// `void builder(u8* capture, std::function<FilterButton*(int)>* factory)`
+    /// — the same by-value factory contract as the VERSION builder.
+    pub builder: *const u8,
+    /// `void FilterButton::SetTemplate(FilterButton*, i32 template)`.
+    pub set_template: *const u8,
+    /// `std::string* std::string::assign(std::string*, const char*, usize)`.
+    pub string_assign: *const u8,
+    /// The stock 0x88-stride title table (20 rows + sentinel; range start
+    /// at +0x30, summary labels at +0x38 / +0x60).
+    pub table: *const u8,
+    /// The predicate's `LEA R8,[table]` instruction (disp32 at +3).
+    pub predicate_lea: *const u8,
+    /// The chip summary's `LEA RCX,[table]` instruction (disp32 at +3).
+    pub summary_table_lea: *const u8,
+    /// The chip summary's run-builder count (imm32 of `MOV EDX,20`).
+    pub summary_count: *const u8,
+    /// `void* operator new(usize)` (the game CRT's; frees via the object's
+    /// deleting destructor).
+    pub operator_new: *const u8,
+    /// `sequence::Component* Component::Component(Component*)`.
+    pub component_ctor: *const u8,
+    /// `FilterHeader` primary / secondary (`+0x28`) vtables.
+    pub header_vtable: *const u8,
+    pub header_vtable2: *const u8,
+    /// `void vector<Component*>::grow_by_one(vector*)` (the push_back
+    /// reallocation path).
+    pub vector_grow: *const u8,
 }
 
 /// ddr_selection's theme stage-panel score sets (`derive_ddr_sel_score_set`):
@@ -1217,10 +1300,37 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "41 81 78 08 10 27 00 00 0F 8C",
         description: "ControlSpeedActor msg-0x1045 self-destruct gate — CMP [R8+8],10000ms; JL. Anytime-speedmod patches the imm32 at +4.",
     },
+    // Application::onBoot builds the texture.db lookup object: `MOV dword
+    // [RSP+d],1 (load the db); MOV dword [RSP+d],0x55 (the DEFAULT attr for a
+    // texture whose key is not in data/data/texture.db); XOR R8D,R8D; LEA
+    // EDX,[R8+0x18]; MOV RCX,[rip+heap]; CALL alloc`. attr bits 7:6 = 01 make
+    // the default CLAMP; Background Dancers' `texture_wrap` rewrites the imm
+    // to 0x15 (WRAP) so mod-shipped DDS textures — never listed in the db —
+    // repeat like the stock ones. RE: docs/3d_model_format_research.md §3.8.
+    SignatureDefinition {
+        name: "texture_db_default_attr_imm32",
+        pattern: "C7 44 24 ?? 01 00 00 00 C7 44 24 ?? 55 00 00 00 45 33 C0 41 8D 50 18 48 8B 0D ?? ?? ?? ?? E8",
+        description: "Application::onBoot's texture.db default sampler attr — MOV dword [RSP+d],1; MOV dword [RSP+d],0x55; XOR R8D,R8D; LEA EDX,[R8+0x18]; MOV RCX,[rip+heap]; CALL alloc (FUN_1800020d0+0x3bf on 20260915, right before FUN_180205a00 loads data/data/texture.db). The imm32 at match+12 (0x55 = CLAMP / LINEAR / mip LINEAR / aniso 1) is the usage source for every DDS whose registry key is absent from the db — i.e. every mod-shipped texture; stock ones are listed as 0x315 (WRAP). background_dancers::texture_wrap rewrites it to 0x15 (WRAP) in early_apply. Unique single match, byte-identical on 20250805/20260224/20260721/20260825/20260915.",
+    },
     SignatureDefinition {
         name: "fps_target_imm32",
         pattern: "C7 44 24 ?? 3C 00 00 00 75 08 C7 44 24 ?? 4B 00 00 00",
-        description: "Fullscreen display-refresh ('FPS') target in Application::onBoot — MOV dword [RSP+d],0x3C (default 60); JNZ +8; MOV dword [RSP+d],0x4B (75 if MachineType==1). The patchable imm32 is at match+4 (the 0x3C). FPS-unlock mod overwrites it (u32) before onBoot consumes it. Value is latched into the D3D device once at boot (never re-read). Unique single match, byte-identical on builds 20250805/20260324/20260526.",
+        description: "Fullscreen display-refresh ('FPS') target in Application::onBoot — MOV dword [RSP+d],0x3C (default 60); JNZ +8; MOV dword [RSP+d],0x4B (75 if MachineType==1). The patchable imm32 is at match+4 (the 0x3C). FPS-unlock mod overwrites it (u32) before onBoot consumes it — for targets ABOVE 60 only (sub-60 targets use the frame limiter, see app_tick_frame_begin_site). Value is latched into the D3D device once at boot (never re-read); it becomes D3DPRESENT_PARAMETERS.FullScreen_RefreshRateInHz, which is forced to 0 in windowed mode. Unique single match, byte-identical on builds 20250805/20260324/20260526.",
+    },
+    // The top of the per-frame application tick (FUN_180003070 on 20260915):
+    // `CMP byte [first_frame_done],0; JZ +6; CALL frame_begin; NOP; CALL
+    // frame_dt; NOP; INC dword [frame_counter]; MOV RCX,[rip+d]; CALL`.
+    // frame_begin (FUN_1801f2a80 on 20260915 = the "submit+reset" of
+    // overlay_draw_research.md) drains the GPU executor and submits the
+    // previous frame's command stream; frame_dt (FUN_180210b80) measures the
+    // frame's delta-time and clamps it to a boot-computed global. Consumed
+    // ONLY by FPS Unlock's sub-60 frame limiter via
+    // `SignatureStore::frame_limiter_anchors` (shape-gated). RE:
+    // docs/fps_frame_limiter.md.
+    SignatureDefinition {
+        name: "app_tick_frame_begin_site",
+        pattern: "80 3D ?? ?? ?? ?? 00 74 06 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 90 FF 05 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? E8",
+        description: "Per-frame application tick head: `CMP byte [rip+d],0; JZ +6; CALL frame_begin (match+9); NOP; CALL frame_dt (match+15); NOP; INC dword [rip+d]; MOV RCX,[rip+d]; CALL`. frame_begin = the once-per-frame GPU-drain + previous-stream submit (single caller: this tick; a second, first-frame-only call site later in the same tick); frame_dt = the delta-time measure + clamp whose `MOVSS XMM1,[rip+clamp]` disp32 sits at frame_dt+0x44. FPS Unlock's sub-60 frame limiter detours frame_begin (post-original wait) and raises the clamp. Unique on 20250805/20260721/20260825/20260915.",
     },
     // Landmark in the timing-init publisher: the four consecutive
     // `MOV EDX,[RBP+d]; LEA RCX,[rip+key]; CALL set_int` pairs that publish
@@ -1487,6 +1597,88 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "FF 92 ?? 00 00 00 44 0F B6 C0 33 C9 0F 1F 40 00 42 8B 94 29 ?? ?? ?? ?? 46 39 84 29 ?? ?? ?? ?? 7E 0C 48 83 E9 04 48 83 F9 F8 7D E4 33 D2",
         description: "CalcFlareSkill series->category walk. Cat-table disp32 at +20, threshold-table disp32 at +28, loop-bound imm8 at +41. series_expansion redirects both disp32s at a 4-entry extended table (adds 'series >= 22 -> category 0') and widens the bound -8 -> -12.",
     },
+    // ── series_expansion enhanced layout (config-defined VERSION menu) ──
+    // All four verified unique on 20250805 / 20260224 / 20260721 / 20260825
+    // / 20260915, with identical instruction layouts after the match; the
+    // offsets consumed are checked in `derive_series_enhanced`.
+    //
+    // VERSION filter builder (lambda body `builder(capture, factory)`),
+    // matched at its entry: prologue, `R14 = factory`, `R15 = capture`,
+    // `MOV ESI,2` (tab loop), `LEA RBX,[group table]`.
+    SignatureDefinition {
+        name: "version_filter_builder",
+        pattern: "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC C0 00 00 00 48 C7 45 97 FE FF FF FF 48 89 9C 24 10 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 4C 8B F2 4C 8B F9 48 89 55 8F BE 02 00 00 00 48 8D 1D",
+        description: "VERSION filter builder fn(capture, factory) at entry. +0x55 CALL tab factory, +0x65/+0x27F CALL SetTemplate, +0x8B CALL std::string::assign(const char*, n). series_expansion enhanced mode detours it.",
+    },
+    // GROUP-tab press body (lambda60 body, reached by `ADD RCX,8; JMP`),
+    // matched at entry: `MOV EDX,[RCX+8]; MOV RBX,RCX; MOV RCX,[RCX];
+    // CALL clear_category`, then the group-table walk.
+    SignatureDefinition {
+        name: "version_group_press",
+        pattern: "48 89 5C 24 18 55 56 57 41 54 41 55 48 83 EC 30 8B 51 08 48 8B D9 48 8B 09 E8 ?? ?? ?? ?? 4C 63 5B 18 48 8B 53 10",
+        description: "VERSION GROUP-tab press body fn(captures{state,cat,group_table,g,panel}, on). +0x19 CALL clear-category, +0xD9 JMP notify. series_expansion enhanced mode detours it.",
+    },
+    // FilterButton toggle lambda (lambda93) body: `set_one(state, cat, idx,
+    // on)` then tail `JMP notify(panel)`.
+    SignatureDefinition {
+        name: "filter_toggle_one_body",
+        pattern: "40 53 48 83 EC 20 44 8B 41 14 44 0F B6 CA 8B 51 10 48 8B D9 48 8B 49 08 E8 ?? ?? ?? ?? 48 8B 4B 18 48 83 C4 20 5B E9",
+        description: "FilterButton toggle (lambda93) body. +0x18 CALL selection set-one(state, cat, idx, on), +0x26 JMP notify(panel).",
+    },
+    // VERSION predicate range loop (58 bytes, LEA disp32 wildcarded): the
+    // unique form of `version_predicate_lea`'s first match. The second
+    // compare's disp32 (`CMP EDI,[RAX+R8+0xB8]`, the next entry's start)
+    // sits at +0x34.
+    SignatureDefinition {
+        name: "version_predicate_range",
+        pattern: "48 8B 50 08 48 8B 0A 48 3B CA 74 36 4C 8D 05 ?? ?? ?? ?? 66 66 66 0F 1F 84 00 00 00 00 00 48 63 41 10 48 69 C0 88 00 00 00 42 39 7C 00 30 7F 0A 42 3B BC 00 B8 00 00 00 7C 15",
+        description: "VERSION predicate selection loop. LEA R8 table at +0x0C (disp32 +0x0F), end-compare disp32 at +0x34 (0xB8). series_expansion enhanced mode repoints +0x34 to 0x34 (per-row end).",
+    },
+    // ── improved_song_title_sorting (per-letter MUSIC TITLE menu) ───────
+    // All four verified unique on 20250805 / 20260224 / 20260721 / 20260825
+    // / 20260915 with instruction-identical bodies (only rel32/disp32 and the
+    // FilterManager selection offset differ); every offset consumed is
+    // checked in `derive_title_filter`.
+    //
+    // MUSIC TITLE builder (lambda body `builder(capture, factory)`), matched
+    // at its loop tail: `INC R12; ADD RSI,0x88; ADD RBX,0x88; CMP
+    // RSI,0xAA0; JB` — 0xAA0 = 20 stock rows × 0x88 is what tells it apart
+    // from the five sibling builders sharing its prologue. Entry = match −
+    // 0x168.
+    SignatureDefinition {
+        name: "title_builder_loop",
+        pattern: "49 FF C4 48 81 C6 88 00 00 00 48 81 C3 88 00 00 00 48 81 FE A0 0A 00 00 0F 82",
+        description: "MUSIC TITLE filter builder loop tail (20 rows x 0x88). Entry = match - 0x168; +0x6F CALL SetTemplate, +0x95 CALL string assign, +0x45 LEA RBX,[table+8]. improved_song_title_sorting detours the entry.",
+    },
+    // MUSIC TITLE predicate (lambda body) at entry: reads the title class
+    // `ChartMetadata+0x88`, looks the category's selection set up
+    // (`ADD RCX,<FilterManager+0x378>` — 0x358 on 20250805/20260224,
+    // wildcarded), then `LEA R8,[title table]` at +0x3A (disp32 +0x3D).
+    SignatureDefinition {
+        name: "title_predicate",
+        pattern: "40 53 48 83 EC 20 48 8B 02 4C 8B C1 48 8B 09 8B 98 88 00 00 00 41 8B 40 08 48 8D 54 24 30 48 81 C1 ?? ?? 00 00 89 44 24 30 E8 ?? ?? ?? ?? 48 8B 50 08 48 8B 02 48 3B C2 74 ?? 4C 8D 05",
+        description: "MUSIC TITLE filter predicate at entry. LEA R8 title table at +0x3A (disp32 +0x3D); range loop `start(+0x30) <= class < next start(+0xB8)` at +0x50.",
+    },
+    // MUSIC TITLE chip summary (`"TITLE "` + selected runs): the
+    // `filter_label_builder_count` shape with the TITLE count (20). Count
+    // imm32 at +14, `LEA RCX,[title table]` at −0x57, `LEA RDX,["TITLE "]`
+    // at −0x78.
+    SignatureDefinition {
+        name: "title_label_builder_count",
+        pattern: "48 89 44 24 20 4C 8D 4D AF 4C 8D 45 8F BA 14 00 00 00 48 8D 4D",
+        description: "MUSIC TITLE filter chip summary: MOV EDX,20 (imm32 at +14) into the run builder; table LEA RCX at -0x57, seed LEA RDX \"TITLE \" at -0x78.",
+    },
+    // The VERSION builder's invisible full-width row break
+    // (`FilterHeader`, 0xF8 bytes): `MOV ECX,0xF8; CALL operator new`,
+    // `CALL Component ctor`, both vtable stores, the field inits, then an
+    // inlined `children.push_back` (CALL vector grow at +0x9D / +0xC2) and
+    // `MOV [RBX+0x60],R13` (parent) at +0xD8. The only FilterHeader
+    // construction in the module.
+    SignatureDefinition {
+        name: "filter_header_alloc",
+        pattern: "B9 F8 00 00 00 E8 ?? ?? ?? ?? 48 8B D8 48 89 45 87 48 85 C0 74 46 48 8B C8 E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 89 13 48 8D 05 ?? ?? ?? ?? 48 89 43 28 48 C7 83 D8 00 00 00 0F 00 00 00 48 89 BB D0 00 00 00 C6 83 C0 00 00 00 00 48 89 BB E8 00 00 00 48 89 BB F0 00 00 00",
+        description: "FilterHeader (filter-grid row break) construction inside the VERSION builder. +0x05 CALL operator new, +0x19 CALL Component ctor, vtable LEAs at +0x1E / +0x28, +0x9D CALL vector<Component*> grow.",
+    },
     // ── Folder Expansion signatures ─────────────────────────────────
     // Only folder_register and folder_has_songs are AOB-scanned.
     // All other folder functions are derived from folder_register xrefs
@@ -1512,6 +1704,32 @@ const SIGNATURES: &[SignatureDefinition] = &[
         name: "folder_has_songs",
         pattern: "48 8B 05 ? ? ? ? 48 63 51 08 48 8B 08 48 8B 05 ? ? ? ? 44 8B 41 04 41 83 F8 01",
         description: "Has-songs predicate — reads bit_index from functor+0x8, checks count array. Hook target.",
+    },
+    // "Apply folder to song-select model" — `FUN_1801445e0(ctx, FolderProperty*)`
+    // on 20260721. Runs when the player enters a folder: copies the folder's
+    // per-chart filter function (FolderProperty filter_functor_slot) into the
+    // SelectMusicModel override filter, re-derives the UI mode, and stores the
+    // folder's mode flag. RDX = FolderProperty (type id at +0). Prologue-anchored;
+    // the two wildcarded disp32/disp16 are the security-cookie RIP and the
+    // build-dependent `max_difficulty` offset (0xc0 / 0x100). Hook target
+    // (folder-expansion: tracks the current folder type for ALL MUSIC exclusion).
+    SignatureDefinition {
+        name: "folder_apply_to_model",
+        pattern: "48 8B C4 55 57 41 54 48 8D A8 B8 FE FF FF 48 81 EC 30 02 00 00 48 C7 44 24 50 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 20 01 00 00 48 8B FA 48 8B F1 45 33 E4 44 89 64 24 20 8B 9A ? ? 00 00 48 8D 55 A0 48 8B CF E8",
+        description: "SelectMusicModel 'apply folder' — RDX = FolderProperty; copies its filter function into the model override filter and re-derives the UI mode. Hook target (current-folder tracking).",
+    },
+    // `FUN_180100770(model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*`
+    // — the single source-list getter every song-select list consumer calls
+    // (wheel rebuild, both song-count paths). Lazily builds the base lists via
+    // the hard rebuild when the `+0x1c0` 'built' byte is clear, then returns
+    // the per-side song-level list (`+0x208`) or chart-level list (`+0x248`).
+    // The three model offsets shift by 0x20 on older builds (0x1a0/0x1e8/0x228
+    // on 20250805) and are wildcarded. Hook target (folder-expansion: ALL MUSIC
+    // exclusion returns a filtered shallow copy).
+    SignatureDefinition {
+        name: "selectmusic_source_list",
+        pattern: "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 80 B9 ? ? 00 00 00 41 0F B6 F0 48 63 FA 48 8B D9 75 ? 8B D7 C6 81 ? ? 00 00 01 E8",
+        description: "SelectMusicModel source-list getter (model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*. Hook target (ALL MUSIC exclusion).",
     },
     // ── Gameplay object allocation ───────────────────────────────────
     // The gameplay sequence object has a fixed-size shared_ptr array (one slot per
@@ -2906,7 +3124,7 @@ const SIGNATURES: &[SignatureDefinition] = &[
     SignatureDefinition {
         name: "build_ssq_path",
         pattern: "48 89 74 24 08 57 48 83 EC 30 4C 8B D1 48 8D 3D ?? ?? ?? ?? 48 8B F2 B9 05 00 00 00 F3 A6 0F 84",
-        description: "SSQ path builder entry (basename + difficulty → data/mdb_apx/ssq/<basename>[_N].ssq via a hardcoded split-song table). Detoured by split-ssq-auto-discovery (full replacement).",
+        description: "SSQ path builder entry (basename + difficulty → data/mdb_apx/ssq/<basename>[_N].ssq via a hardcoded split-song table). Detoured by services::ssq_path (resolver chain: StepMania provider, split-ssq-auto-discovery, stock) (full replacement).",
     },
     // ── Song playback speed: identity-only runtime transaction ────────
     // Byte-level evidence and per-build addresses live in
@@ -3565,6 +3783,7 @@ impl SignatureStore {
         self.derive_frame_tick_global();
         self.derive_input_tick_function();
         self.derive_custom_resolution();
+        self.derive_frame_limiter();
         self.find_gauge_vtables();
         self.derive_judge_rebuild_trio();
         self.derive_song_rate_runtime_sites();
@@ -3616,6 +3835,59 @@ impl SignatureStore {
         // Consumes `cmovieclip_create` (identity gate of the bg_root site) —
         // must stay after derive_cmovieclip_create.
         self.derive_scene3d();
+        // Cross-checks against `filter_button_panel_config`, `string_assign`,
+        // `ui_entry_loop`, `version_predicate_lea` and `series_mapper_bounds`
+        // (plain AOBs / derive_string_assign_via_pair, above).
+        self.derive_series_enhanced();
+        // Same cross-checks (`filter_button_panel_config`, `string_assign`);
+        // independent of the enhanced VERSION sites.
+        self.derive_title_filter();
+        // Sweep coverage for the song-limit byte patches (the mod scans the
+        // same specs itself, earlier than this store exists).
+        self.derive_song_limit_sites();
+    }
+
+    /// Publish every `core::song_limit_sites` family as resolved addresses
+    /// (`song_limit_<family>` for one-hit families, `_<i>` for the three
+    /// parser sites, plus `song_limit_property_mode_<i>` derived from each
+    /// READ hit). `mods::song_limit_expansion` does NOT read these — it
+    /// scans the specs itself at `ea3_boot` / the `startup.arc` open,
+    /// before this store exists — they are here so the offline sweep
+    /// (`scripts/validate_signatures.sh`) proves every patch site, with its
+    /// stock immediate, on every supported build.
+    fn derive_song_limit_sites(&mut self) {
+        use crate::core::song_limit_sites as sites;
+        for spec in sites::ALL {
+            let hits = match sites::find(self.base, self.size, spec) {
+                Ok(h) => h,
+                Err(reason) => {
+                    log_warn!("  [-] {} -- {}", spec.name, reason);
+                    continue;
+                }
+            };
+            let several = hits.len() > 1;
+            for (i, hit) in hits.iter().enumerate() {
+                let name = if several {
+                    format!("{}_{}", spec.name, i)
+                } else {
+                    spec.name.to_string()
+                };
+                self.publish_value(&name, hit.offset);
+                if spec.name == sites::ARENA_READ.name {
+                    match sites::find_mode_site(self.base, hit) {
+                        Some(addr) => {
+                            let off = addr as usize - self.base as usize;
+                            self.publish_value(&format!("song_limit_property_mode_{}", i), off);
+                        }
+                        None => log_warn!(
+                            "  [-] song_limit_property_mode_{} -- no `MOV R8D, 0x11` within {} bytes before the read site",
+                            i,
+                            sites::MODE_SCAN_BACK
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     /// Derive the bottom-text service's two data addresses from the
@@ -8889,6 +9161,468 @@ impl SignatureStore {
     /// `+0x201`, identical on 20250805 / 20260825). Publishes
     /// `ddr_sel_best_record` + `ddr_sel_pw_score_db_off`; a miss ⇒ the theme
     /// panel's record fields stay hidden (one WARN).
+    /// series_expansion enhanced layout: verify the four enhanced AOBs and
+    /// derive the functions they call (design: the VERSION builder, the
+    /// GROUP-tab press and the selection primitives).
+    ///
+    /// * builder (`version_filter_builder`): opcode + shape checks at +0x55
+    ///   (CALL tab factory), +0x65 / +0x27F (CALL SetTemplate — both equal,
+    ///   and equal to `filter_button_panel_config` when resolved), +0x8B
+    ///   (CALL string assign — equal to `string_assign` when resolved),
+    ///   +0x1D0 `MOV RAX,[R15+0x40]; MOV R13,[RAX+0x228]` (capture → item
+    ///   grid), +0x260 `MOV RCX,[R14+0x18]`, +0x278 `MOV EDX,[R15+0x48]`;
+    ///   `ui_entry_loop` (when resolved) sits at +0x249.
+    /// * row break (the stock FilterHeader block, builder +0x16D — equal to
+    ///   `filter_header_alloc` when resolved): `MOV ECX,0xF8` then +0x05 CALL
+    ///   operator new, +0x19 CALL Component ctor, +0x45 the first derived
+    ///   field store at `+0xC0` (sizeof Component), both vector grow CALLs
+    ///   (+0x9D, +0xC2) agree, +0xD8 `MOV [RBX+0x60],R13` (parent = grid).
+    /// * tab factory: entry prologue; +0x9F `LEA R13,[group table]`, +0xAD
+    ///   `MOV ECX,0x30`, +0xC3 `LEA RAX,[lambda60 vtable]` whose slot 1 is
+    ///   `ADD RCX,8; JMP` to the `version_group_press` match.
+    /// * press body: +0x19 CALL clear-category, +0xD9 JMP notify.
+    /// * toggle body (`filter_toggle_one_body`): +0x18 CALL set-one, +0x26
+    ///   JMP equal to the press body's notify.
+    /// * predicate (`version_predicate_range`): equals the first
+    ///   `version_predicate_lea` match; its mapper CALL at −0x22 lands on
+    ///   `series_mapper_bounds − 0x5D`.
+    ///
+    /// Any failure un-resolves all four AOBs so no consumer can install half
+    /// of the enhanced mode.
+    fn derive_series_enhanced(&mut self) {
+        const TAG: &str = "series_enhanced";
+        const NAMES: [&str; 4] = [
+            "version_filter_builder",
+            "version_group_press",
+            "filter_toggle_one_body",
+            "version_predicate_range",
+        ];
+        const BUILDER_LEN: usize = 0x3D2;
+        const TAB_FACTORY_PROLOGUE: [u8; 15] = [
+            0x48, 0x8B, 0xC4, 0x55, 0x41, 0x54, 0x41, 0x55, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC,
+            0x70,
+        ];
+        let (Some(builder), Some(press), Some(toggle), Some(pred)) = (
+            self.get_address(NAMES[0]),
+            self.get_address(NAMES[1]),
+            self.get_address(NAMES[2]),
+            self.get_address(NAMES[3]),
+        ) else {
+            if NAMES.iter().any(|n| self.get_address(n).is_some()) {
+                for n in NAMES {
+                    self.resolved.remove(n);
+                }
+                log_warn!(
+                    "  [-] {} -- not every enhanced AOB resolved; un-resolved all",
+                    TAG
+                );
+            }
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8, len: usize| {
+            let off = (p as usize).wrapping_sub(base);
+            off < size && off.saturating_add(len) <= size
+        };
+        let fail = |this: &mut Self, why: &str| {
+            for n in NAMES {
+                this.resolved.remove(n);
+            }
+            log_warn!("  [-] {} -- {}; enhanced sites un-resolved", TAG, why);
+        };
+        if !inside(builder, BUILDER_LEN) || !inside(press, 0xDE) || !inside(toggle, 0x2B) {
+            return fail(self, "an enhanced function lies outside the module");
+        }
+        unsafe {
+            let at = |p: *const u8, off: usize, want: &[u8]| {
+                std::slice::from_raw_parts(p.add(off), want.len()) == want
+            };
+            // Decode a CALL (E8) / JMP (E9) rel32 at p+off after checking the opcode.
+            let branch = |p: *const u8, off: usize, op: u8| -> Option<*const u8> {
+                if *p.add(off) != op {
+                    return None;
+                }
+                let target = decode_call_rel32(p.add(off));
+                inside(target, 1).then_some(target)
+            };
+
+            // ── builder ──
+            if !at(
+                builder,
+                0x1D0,
+                &[
+                    0x49, 0x8B, 0x47, 0x40, 0x4C, 0x8B, 0xA8, 0x28, 0x02, 0x00, 0x00,
+                ],
+            ) || !at(builder, 0x260, &[0x49, 0x8B, 0x4E, 0x18])
+                || !at(builder, 0x278, &[0x41, 0x8B, 0x57, 0x48])
+            {
+                return fail(self, "builder capture/factory loads differ");
+            }
+            let (Some(tab_factory), Some(set_template), Some(set_template_b), Some(assign)) = (
+                branch(builder, 0x55, 0xE8),
+                branch(builder, 0x65, 0xE8),
+                branch(builder, 0x27F, 0xE8),
+                branch(builder, 0x8B, 0xE8),
+            ) else {
+                return fail(self, "builder call sites differ");
+            };
+            if set_template != set_template_b {
+                return fail(self, "builder SetTemplate calls disagree");
+            }
+            if let Some(known) = self.get_address("filter_button_panel_config") {
+                if known != set_template {
+                    return fail(self, "SetTemplate is not filter_button_panel_config");
+                }
+            }
+            if let Some(known) = self.get_address("string_assign") {
+                if known != assign {
+                    return fail(self, "builder string assign is not string_assign");
+                }
+            }
+            if let Some(loop_site) = self.get_address("ui_entry_loop") {
+                if loop_site != builder.add(0x249) {
+                    return fail(self, "ui_entry_loop is not builder+0x249");
+                }
+            }
+
+            // ── row break (stock FilterHeader construction) ──
+            const HEADER: usize = 0x16D;
+            if !at(builder, HEADER, &[0xB9, 0xF8, 0x00, 0x00, 0x00])
+                || !at(
+                    builder,
+                    HEADER + 0x45,
+                    &[0xC6, 0x83, 0xC0, 0x00, 0x00, 0x00, 0x00],
+                )
+                || !at(builder, HEADER + 0xD8, &[0x4C, 0x89, 0x6B, 0x60])
+            {
+                return fail(self, "builder row-break block differs");
+            }
+            let (Some(op_new), Some(component_ctor), Some(grow), Some(grow_b)) = (
+                branch(builder, HEADER + 0x05, 0xE8),
+                branch(builder, HEADER + 0x19, 0xE8),
+                branch(builder, HEADER + 0x9D, 0xE8),
+                branch(builder, HEADER + 0xC2, 0xE8),
+            ) else {
+                return fail(self, "builder row-break call sites differ");
+            };
+            if grow != grow_b {
+                return fail(self, "builder row-break vector grow calls disagree");
+            }
+            if let Some(known) = self.get_address("filter_header_alloc") {
+                if known != builder.add(HEADER) {
+                    return fail(self, "filter_header_alloc is not builder+0x16D");
+                }
+            }
+
+            // ── tab factory → lambda60 → press body ──
+            if !inside(tab_factory, 0xCA)
+                || !at(tab_factory, 0, &TAB_FACTORY_PROLOGUE)
+                || !at(tab_factory, 0x9F, &[0x4C, 0x8D, 0x2D])
+                || !at(tab_factory, 0xAD, &[0xB9, 0x30, 0x00, 0x00, 0x00])
+                || !at(tab_factory, 0xC3, &[0x48, 0x8D, 0x05])
+            {
+                return fail(self, "tab factory shape differs");
+            }
+            let vt = decode_rip_relative(tab_factory.add(0xC6)) as *const *const u8;
+            if !inside(vt as *const u8, 0x10) {
+                return fail(self, "lambda60 vtable outside the module");
+            }
+            let thunk = *vt.add(1);
+            if !inside(thunk, 9)
+                || !at(thunk, 0, &[0x48, 0x83, 0xC1, 0x08])
+                || branch(thunk, 4, 0xE9) != Some(press)
+            {
+                return fail(self, "lambda60 slot 1 does not reach the press body");
+            }
+
+            // ── press body / toggle body ──
+            let (Some(clear), Some(notify)) =
+                (branch(press, 0x19, 0xE8), branch(press, 0xD9, 0xE9))
+            else {
+                return fail(self, "press body call sites differ");
+            };
+            let Some(set_one) = branch(toggle, 0x18, 0xE8) else {
+                return fail(self, "toggle body set-one call differs");
+            };
+            if branch(toggle, 0x26, 0xE9) != Some(notify) {
+                return fail(self, "toggle body notify differs from the press body's");
+            }
+
+            // ── predicate ──
+            if self.get_address("version_predicate_lea") != Some(pred) {
+                return fail(
+                    self,
+                    "version_predicate_range is not the first version_predicate_lea match",
+                );
+            }
+            let Some(mapper) = self.get_address("series_mapper_bounds") else {
+                return fail(self, "series_mapper_bounds unresolved");
+            };
+            if !inside(pred.sub(0x22), 5)
+                || branch(pred.sub(0x22), 0, 0xE8) != Some(mapper.sub(0x5D))
+            {
+                return fail(
+                    self,
+                    "predicate mapper call does not reach the series mapper",
+                );
+            }
+
+            for (name, addr) in [
+                ("series_enh_tab_factory", tab_factory),
+                ("series_enh_set_template", set_template),
+                ("series_enh_string_assign", assign),
+                ("series_enh_clear_category", clear),
+                ("series_enh_set_one", set_one),
+                ("series_enh_notify", notify),
+                ("series_enh_operator_new", op_new),
+                ("series_enh_component_ctor", component_ctor),
+                ("series_enh_vector_grow", grow),
+            ] {
+                self.resolved.insert(name.into(), addr);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, addr as usize - base);
+            }
+        }
+    }
+
+    /// Every enhanced-layout site (see `derive_series_enhanced`), or `None`.
+    pub fn series_enhanced_sites(&self) -> Option<SeriesEnhancedSites> {
+        Some(SeriesEnhancedSites {
+            builder: self.get_address("version_filter_builder")?,
+            tab_factory: self.get_address("series_enh_tab_factory")?,
+            set_template: self.get_address("series_enh_set_template")?,
+            string_assign: self.get_address("series_enh_string_assign")?,
+            group_press: self.get_address("version_group_press")?,
+            clear_category: self.get_address("series_enh_clear_category")?,
+            set_one: self.get_address("series_enh_set_one")?,
+            notify: self.get_address("series_enh_notify")?,
+            predicate_range: self.get_address("version_predicate_range")?,
+            operator_new: self.get_address("series_enh_operator_new")?,
+            component_ctor: self.get_address("series_enh_component_ctor")?,
+            vector_grow: self.get_address("series_enh_vector_grow")?,
+        })
+    }
+
+    /// improved_song_title_sorting: verify the four MUSIC TITLE AOBs and
+    /// derive what the per-letter menu calls and patches. Offsets are
+    /// identical on every supported build.
+    ///
+    /// * builder (`title_builder_loop` − 0x168): the shared filter-builder
+    ///   prologue; +0x36 `MOV R13,RDX; MOV R15,RCX` (factory, capture);
+    ///   +0x45 `LEA RBX,[table+8]`; +0x50 `MOV RCX,[R13+0x18]` (factory
+    ///   impl); +0x69 `MOV EDX,[R15]` then +0x6F CALL SetTemplate (equal to
+    ///   `filter_button_panel_config` when resolved); +0x84 `MOV R8D,5`,
+    ///   +0x95 CALL string assign (equal to `string_assign` when resolved).
+    /// * predicate (`title_predicate`): its LEA (+0x3A) targets the builder's
+    ///   table, and the range loop at +0x50 is
+    ///   `stride 0x88, start +0x30 <= class < next start +0xB8`.
+    /// * summary (`title_label_builder_count`): count imm32 = 20; `LEA
+    ///   RCX,[table]` at −0x57 targets the same table; `LEA RDX` at −0x78
+    ///   points at `"TITLE "`.
+    /// * row break (`filter_header_alloc`): +0x05 / +0x19 CALLs (operator
+    ///   new, Component ctor), vtable LEAs +0x1E / +0x28, +0x63 `MOV
+    ///   RAX,[R15+0x40]; MOV R13,[RAX+0x228]` (the item grid), both vector
+    ///   grow CALLs (+0x9D, +0xC2) agree, +0xD8 `MOV [RBX+0x60],R13`.
+    ///
+    /// Any failure un-resolves all four AOBs so no consumer can install half
+    /// of the layout.
+    fn derive_title_filter(&mut self) {
+        const TAG: &str = "title_filter";
+        const NAMES: [&str; 4] = [
+            "title_builder_loop",
+            "title_predicate",
+            "title_label_builder_count",
+            "filter_header_alloc",
+        ];
+        const BUILDER_OFF: usize = 0x168;
+        const BUILDER_PROLOGUE: [u8; 24] = [
+            0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
+            0x6C, 0x24, 0xD9, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00,
+        ];
+        const PRED_LOOP: [u8; 28] = [
+            0x48, 0x63, 0x48, 0x10, 0x48, 0x69, 0xC9, 0x88, 0x00, 0x00, 0x00, 0x42, 0x39, 0x5C,
+            0x01, 0x30, 0x7F, 0x0A, 0x42, 0x3B, 0x9C, 0x01, 0xB8, 0x00, 0x00, 0x00, 0x7C, 0x10,
+        ];
+        let (Some(tail), Some(pred), Some(summary), Some(header)) = (
+            self.get_address(NAMES[0]),
+            self.get_address(NAMES[1]),
+            self.get_address(NAMES[2]),
+            self.get_address(NAMES[3]),
+        ) else {
+            if NAMES.iter().any(|n| self.get_address(n).is_some()) {
+                for n in NAMES {
+                    self.resolved.remove(n);
+                }
+                log_warn!(
+                    "  [-] {} -- not every title-filter AOB resolved; un-resolved all",
+                    TAG
+                );
+            }
+            return;
+        };
+        let base = self.base as usize;
+        let size = self.size;
+        let inside = |p: *const u8, len: usize| {
+            let off = (p as usize).wrapping_sub(base);
+            off < size && off.saturating_add(len) <= size
+        };
+        let fail = |this: &mut Self, why: &str| {
+            for n in NAMES {
+                this.resolved.remove(n);
+            }
+            log_warn!("  [-] {} -- {}; title-filter sites un-resolved", TAG, why);
+        };
+        let builder = (tail as usize).wrapping_sub(BUILDER_OFF) as *const u8;
+        if !inside(builder, BUILDER_OFF + 0x20)
+            || !inside(pred, 0x6C)
+            || !inside(
+                (summary as usize).wrapping_sub(0x78) as *const u8,
+                0x78 + 0x12,
+            )
+            || !inside(header, 0xDC)
+        {
+            return fail(self, "a title-filter site lies outside the module");
+        }
+        unsafe {
+            let at = |p: *const u8, off: usize, want: &[u8]| {
+                std::slice::from_raw_parts(p.add(off), want.len()) == want
+            };
+            // Decode a CALL (E8) / JMP (E9) rel32 at p+off after checking the opcode.
+            let branch = |p: *const u8, off: usize, op: u8| -> Option<*const u8> {
+                if *p.add(off) != op {
+                    return None;
+                }
+                let target = decode_call_rel32(p.add(off));
+                inside(target, 1).then_some(target)
+            };
+            // `LEA r64,[rip+disp32]` (3-byte opcode `op`) at p+off → target.
+            let lea = |p: *const u8, off: usize, op: [u8; 3]| -> Option<*const u8> {
+                if std::slice::from_raw_parts(p.add(off), 3) != op {
+                    return None;
+                }
+                let target = decode_rip_relative(p.add(off + 3));
+                inside(target, 1).then_some(target)
+            };
+
+            // ── builder ──
+            if !at(builder, 0, &BUILDER_PROLOGUE)
+                || !at(builder, 0x36, &[0x4C, 0x8B, 0xEA, 0x4C, 0x8B, 0xF9])
+                || !at(builder, 0x50, &[0x49, 0x8B, 0x4D, 0x18])
+                || !at(builder, 0x69, &[0x41, 0x8B, 0x17])
+                || !at(builder, 0x84, &[0x41, 0xB8, 0x05, 0x00, 0x00, 0x00])
+            {
+                return fail(self, "builder shape differs");
+            }
+            let (Some(key_field), Some(set_template), Some(assign)) = (
+                lea(builder, 0x45, [0x48, 0x8D, 0x1D]),
+                branch(builder, 0x6F, 0xE8),
+                branch(builder, 0x95, 0xE8),
+            ) else {
+                return fail(self, "builder table/call sites differ");
+            };
+            let table = key_field.sub(8);
+            if let Some(known) = self.get_address("filter_button_panel_config") {
+                if known != set_template {
+                    return fail(self, "SetTemplate is not filter_button_panel_config");
+                }
+            }
+            if let Some(known) = self.get_address("string_assign") {
+                if known != assign {
+                    return fail(self, "builder string assign is not string_assign");
+                }
+            }
+            if !inside(table, 21 * 0x88) {
+                return fail(self, "title table outside the module");
+            }
+
+            // ── predicate ──
+            if lea(pred, 0x3A, [0x4C, 0x8D, 0x05]) != Some(table) {
+                return fail(self, "predicate LEA does not load the title table");
+            }
+            if !at(pred, 0x50, &PRED_LOOP) {
+                return fail(self, "predicate range loop differs");
+            }
+
+            // ── summary ──
+            let summary_count = summary.add(14);
+            let summary_lea = summary.sub(0x57);
+            if std::ptr::read_unaligned(summary_count as *const u32) != 20 {
+                return fail(self, "summary count is not 20");
+            }
+            if lea(summary_lea, 0, [0x48, 0x8D, 0x0D]) != Some(table) {
+                return fail(self, "summary LEA does not load the title table");
+            }
+            match lea(summary.sub(0x78), 0, [0x48, 0x8D, 0x15]) {
+                Some(seed) if inside(seed, 7) && at(seed, 0, b"TITLE \0") => {}
+                _ => return fail(self, "summary does not seed with \"TITLE \""),
+            }
+
+            // ── row break (FilterHeader) ──
+            if !at(
+                header,
+                0x63,
+                &[
+                    0x49, 0x8B, 0x47, 0x40, 0x4C, 0x8B, 0xA8, 0x28, 0x02, 0x00, 0x00,
+                ],
+            ) || !at(header, 0xD8, &[0x4C, 0x89, 0x6B, 0x60])
+            {
+                return fail(self, "row-break grid/parent stores differ");
+            }
+            let (Some(op_new), Some(ctor), Some(vt1), Some(vt2), Some(grow), Some(grow_b)) = (
+                branch(header, 0x05, 0xE8),
+                branch(header, 0x19, 0xE8),
+                lea(header, 0x1E, [0x48, 0x8D, 0x15]),
+                lea(header, 0x28, [0x48, 0x8D, 0x05]),
+                branch(header, 0x9D, 0xE8),
+                branch(header, 0xC2, 0xE8),
+            ) else {
+                return fail(self, "row-break call/vtable sites differ");
+            };
+            if grow != grow_b {
+                return fail(self, "row-break vector grow calls disagree");
+            }
+            if !inside(vt1, 0x40) || !inside(vt2, 0x10) {
+                return fail(self, "FilterHeader vtables outside the module");
+            }
+
+            for (name, addr) in [
+                ("title_filt_builder", builder),
+                ("title_filt_set_template", set_template),
+                ("title_filt_string_assign", assign),
+                ("title_filt_table", table),
+                ("title_filt_predicate_lea", pred.add(0x3A)),
+                ("title_filt_summary_lea", summary_lea),
+                ("title_filt_summary_count", summary_count),
+                ("title_filt_operator_new", op_new),
+                ("title_filt_component_ctor", ctor),
+                ("title_filt_header_vtable", vt1),
+                ("title_filt_header_vtable2", vt2),
+                ("title_filt_vector_grow", grow),
+            ] {
+                self.resolved.insert(name.into(), addr);
+                log_info!("  [+] {} (derived) @ +0x{:X}", name, addr as usize - base);
+            }
+        }
+    }
+
+    /// Every MUSIC TITLE layout site (see `derive_title_filter`), or `None`.
+    pub fn title_filter_sites(&self) -> Option<TitleFilterSites> {
+        Some(TitleFilterSites {
+            builder: self.get_address("title_filt_builder")?,
+            set_template: self.get_address("title_filt_set_template")?,
+            string_assign: self.get_address("title_filt_string_assign")?,
+            table: self.get_address("title_filt_table")?,
+            predicate_lea: self.get_address("title_filt_predicate_lea")?,
+            summary_table_lea: self.get_address("title_filt_summary_lea")?,
+            summary_count: self.get_address("title_filt_summary_count")?,
+            operator_new: self.get_address("title_filt_operator_new")?,
+            component_ctor: self.get_address("title_filt_component_ctor")?,
+            header_vtable: self.get_address("title_filt_header_vtable")?,
+            header_vtable2: self.get_address("title_filt_header_vtable2")?,
+            vector_grow: self.get_address("title_filt_vector_grow")?,
+        })
+    }
+
     fn derive_ddr_sel_score_set(&mut self) {
         const TAG: &str = "ddr_sel_score_set";
         const HEAD: [u8; 7] = [0x44, 0x8B, 0x47, 0x04, 0x48, 0x8D, 0x8A];
@@ -12098,6 +12832,90 @@ impl SignatureStore {
                     );
                 }
                 None => log_warn!("  [-] {} -- shape not found (from {})", name, from),
+            }
+        }
+    }
+
+    /// FPS Unlock frame-limiter anchors, computed from the LINEAR
+    /// `app_tick_frame_begin_site` hit only so the mod can call this inside
+    /// `early_apply` (it does so ONLY for a sub-60 target);
+    /// [`Self::derive_frame_limiter`] publishes the same values for the boot
+    /// log / sweep. Both callees are shape-gated — an anchor hit proves
+    /// nothing about the bytes it points at:
+    /// - `frame_begin` = CALL target at match+9; its prologue must read
+    ///   `PUSH RBX; SUB RSP,0x20; CALL; CALL; CMP byte [rip+d],0; JNZ +5; CALL`.
+    /// - `frame_dt_clamp` = the RIP global loaded by `MOVSS XMM1,[rip+d]`
+    ///   (disp32 at frame_dt+0x44) in the CALL target at match+15, whose body
+    ///   must be the dt measure + `COMISS XMM0,XMM1; MOVSS [raw],XMM0; JBE;
+    ///   MOVSS [dt],XMM1` clamp — i.e. the loaded global IS the value stored
+    ///   as the frame dt when the measured one exceeds it.
+    pub fn frame_limiter_anchors(&self) -> FrameLimiterAnchors {
+        const FRAME_BEGIN_SHAPE: &str =
+            "40 53 48 83 EC 20 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 80 3D ?? ?? ?? ?? 00 75 05 E8";
+        const FRAME_DT_SHAPE: &str = "48 83 EC 28 48 8B 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 2B 05 ?? ?? ?? ?? 66 0F EF C0 F3 48 0F 2A C0 79 08 F3 0F 58 05 ?? ?? ?? ?? F3 0F 59 05 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ?? 0F 2F C1 F3 0F 11 05 ?? ?? ?? ?? 76 ?? F3 0F 11 0D";
+        const FRAME_BEGIN_CALL: usize = 9;
+        const FRAME_DT_CALL: usize = 15;
+        const CLAMP_DISP: usize = 0x44;
+
+        let mut a = FrameLimiterAnchors::default();
+        let Some(site) = self.get_address("app_tick_frame_begin_site") else {
+            return a;
+        };
+        let base = self.base as usize;
+        let end = base + self.size;
+        let in_module = |p: *const u8, len: usize| -> bool {
+            let p = p as usize;
+            p >= base && p.checked_add(len).is_some_and(|e| e <= end)
+        };
+        // Pattern at exactly `p` (a window the size of the pattern admits
+        // only offset 0).
+        let shape_at = |p: *const u8, pattern: &str| -> bool {
+            let len = pattern.split_whitespace().count();
+            in_module(p, len) && scan_pattern(p, len, pattern).is_some()
+        };
+        unsafe {
+            let frame_begin = decode_call_rel32(site.add(FRAME_BEGIN_CALL));
+            if shape_at(frame_begin, FRAME_BEGIN_SHAPE) {
+                a.frame_begin = Some(frame_begin);
+            }
+            let frame_dt = decode_call_rel32(site.add(FRAME_DT_CALL));
+            if shape_at(frame_dt, FRAME_DT_SHAPE) {
+                let clamp = decode_rip_relative(frame_dt.add(CLAMP_DISP));
+                if in_module(clamp, 4) {
+                    a.frame_dt_clamp = Some(clamp);
+                }
+            }
+        }
+        a
+    }
+
+    /// Publish [`Self::frame_limiter_anchors`] (boot log + sweep visibility;
+    /// read-only — nothing is hooked or written here).
+    fn derive_frame_limiter(&mut self) {
+        if self.get_address("app_tick_frame_begin_site").is_none() {
+            log_warn!(
+                "  [-] frame_begin / frame_dt_clamp -- app_tick_frame_begin_site not resolved"
+            );
+            return;
+        }
+        let a = self.frame_limiter_anchors();
+        for (name, v) in [
+            ("frame_begin", a.frame_begin),
+            ("frame_dt_clamp", a.frame_dt_clamp),
+        ] {
+            match v {
+                Some(p) => {
+                    self.resolved.insert(name.into(), p);
+                    log_info!(
+                        "  [+] {} (derived from app_tick_frame_begin_site) @ +0x{:X}",
+                        name,
+                        (p as usize).wrapping_sub(self.base as usize)
+                    );
+                }
+                None => log_warn!(
+                    "  [-] {} -- shape not found (from app_tick_frame_begin_site)",
+                    name
+                ),
             }
         }
     }

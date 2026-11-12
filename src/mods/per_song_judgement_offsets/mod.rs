@@ -22,9 +22,10 @@
 //!
 //! ## Submodules
 //!
-//! - `csv` / `store` / `musicdb_scan` — pure layers (CSV grammar, baseline +
-//!   session merge rules and the `code|offset|...` wire codec, basename scan).
-//!   `csv.rs` is also `#[path]`-mounted by the updater's CSV merge.
+//! - `csv` / `store` / `musicdb_scan` / `compose` — pure layers (CSV grammar,
+//!   baseline + session merge rules and the `code|offset|...` wire codec,
+//!   basename scan, the applied-value composition rule). `csv.rs` is also
+//!   `#[path]`-mounted by the updater's CSV merge.
 //! - `bootstrap` — boot crawl + baseline load, then the coalesced background
 //!   CSV writer for menu edits.
 //! - `ui` — rows `adjust_song_offset` (bool) + `current_song_offset` (scalar
@@ -49,6 +50,13 @@
 //!   priority is load-bearing: assist-tick reads `Option+0x24` on that same
 //!   dispatch at `Normal` and must see the override. The stock value is
 //!   cached, and a stock value outside ±100 aborts the write.
+//! - Composition (`compose.rs`): the value written is `(player's entry for
+//!   the song, else stock) + song delta`, clamped to ±100. The song delta is
+//!   a cabinet-wide per-song correction from a registered provider
+//!   (`override_hook::set_song_delta_provider`; today StepMania auto-sync,
+//!   `services::stepmania::sync_apply`), positive = judged later. It is
+//!   invisible in the option rows and never written to the CSV or the
+//!   profile; with neither an entry nor a delta nothing is written.
 //! - Restore: on the scene change with `prev == GAMEPLAY`, a full loader scene
 //!   before the per-stage save marshal. A restore inside the save trampoline
 //!   would be too late because the marshal has already copied PlayerWork. A
@@ -72,6 +80,7 @@
 //! `docs/per_song_judgement_offsets.md`.
 
 pub mod bootstrap;
+pub mod compose;
 pub mod csv;
 pub mod musicdb_scan;
 pub mod override_hook;

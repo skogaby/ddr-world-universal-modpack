@@ -467,6 +467,47 @@ So an exporter needs no DXT encoder: `scripts/ktmdl_dump.py::write_dds_a8r8g8b8`
 writes the stock 32-bit shape (header byte-identical to the stock files; level 0
 identical, mips differ only by the downsampling filter).
 
+**Sampler state (address mode / filters) — `data/data/texture.db`, VERIFIED 2026-10-06
+(20260915).** Nothing in the KTMDL loader or the material binder touches sampler
+state: the texture entry's `+0x0A..0x0C` bytes and `+0x10/+0x14` floats are not read
+(a sweep of every writer of the gs texture-registry entry — 0xA0-byte entries at
+`[DAT_1806f1a90] + (id >> 17) * 0xA0`, sampler desc at entry `+0x34` in
+`D3DSAMPLERSTATETYPE` order — finds exactly ONE: the entry initialiser
+`FUN_180236090`, called once from the create API `FUN_180236670`
+`u32 create(w, h, mips, fmt, usage)`). The desc is decoded from the `usage` word:
+`MAG = MIN = (usage >> 1) & 3` (0 → 1 POINT; 2 → POINT, 4 → LINEAR), `MIP =
+(usage >> 3) & 3`, `MAXANISOTROPY = (usage >> 5) & 0x1F` (0 → 1),
+`ADDRESSU = ADDRESSV = (usage >> 10) & 7` (0 → 3 CLAMP; `0x400` → 1 WRAP, `0xC00` →
+3 CLAMP); the gd executor (`FUN_18023a0a0` → `FUN_180239550`, device vtable
+`+0x228` `SetSamplerState`) replays it through a per-stage shadow cache on every
+bind. For a `.dds` loaded through `TextureFileTask` (`FUN_180208660`:
+`agcs::DdsFileCallback`) the usage comes from **`FUN_1802058c0`**: the texture's
+registry key (`FUN_1802020e0`: basename, lower-cased, every `_` deleted, no
+extension — the same key the registry hashes) is looked up by FNV-1 in
+`data/data/texture.db` (a member of `startup.arc`; header `{0x19751120, 2, count,
+0}`, then `count` 12-byte records `{u32 fnv1_key, u32 (0 or a second hash),
+u32 attr}` sorted by key). `attr` bits: `[1:0] ≠ 0` → LINEAR else POINT, `[5:4] ≠ 0`
+→ mip LINEAR else mip POINT, **`[7:6] ≠ 0` → CLAMP else WRAP**, `[8]` → aniso 2,
+`[9]` → usage bit 15 (masked off again by `0xFFFF7FFF`). A key that is NOT in
+the db gets the default attr **`0x55`** (`Application::onBoot`, `FUN_1800020d0`:
+`local_280 = 0x55`) = **CLAMP / LINEAR / mip LINEAR / aniso 1**. The stock db has
+1604 records: 1303 × `0x315` and 290 × `0x115` (WRAP, LINEAR, mip LINEAR, aniso 2),
+8 × `0` (WRAP, POINT), 3 × `0x55`; every stock stage / model DDS name found in
+`data/arc/*.arc` resolves to one of them (318 of 345 — the 27 misses are the
+`2d_font_*` sheets and the `arkdata` license images), whereas a custom-model DDS
+is in the db only by hash coincidence (1 of 75 in the HP3 STG201 port). **So every
+texture a mod ships samples CLAMP / LINEAR / mip LINEAR**, and any mesh whose UVs
+(plus `m_vTexAnime`) leave [0, 1] — sky spheres, repeating grids, scrolling
+strips — smears its edge texels and, when scrolled, snaps back once per texture
+period (the HP3 flight-tunnel jitter, `docs/wii_ddr_hottest_party_2_3_research.md`
+§7.5). The 2D/bm2d paths (`FUN_18021ca40`) and the engine's own dynamic textures
+pass their usage explicitly and are unaffected. **Fix (2026-10-06):** `background_dancers::texture_wrap` rewrites
+`onBoot`'s default-attr imm32 (`texture_db_default_attr_imm32`, match+12) from `0x55`
+to `0x15` in `early_apply` — db-absent textures WRAP, everything else unchanged. A
+`texture.db` overlay (one `0x315` record per custom DDS, served through the
+`startup_arc/` LayeredFS overlay) would do the same per texture but needs the custom
+content scanned at every boot; the maintainer chose the patch.
+
 ### 3.9 Node (0x30 bytes each)
 
 ```
@@ -789,7 +830,24 @@ are kind 8 floats.
   The record is seeded from the model's own material params at bind time and
   written back into the render item's material copy every frame (§3.7), so a
   `.sanm` literally animates VS `c24..` / PS `c3..`. Stock `.sanm`s animate
-  components 4,5,6 (fade 1 → 0) — effective only on `_c` shader variants.
+  components 4,5,6 (fade 1 → 0) — effective only on `_c` shader variants —
+  and `gm_boom00_bg` / `gm_boom00_stage` scroll components 2 / 3 (a sky).
+  Type-15 entry (32 bytes): `u64 material identity, u64 shading-group identity
+  (`ljxukconst`…), u32 FNV-1(shader name), u32 0x2000, u64 0`. Stock layout
+  detail: the type-14 offset list is padded so every track's times and values
+  land 16-byte aligned in the FILE (tracks themselves are packed, unaligned);
+  `anm_dump.write_anm` (`material_tracks` / `material_targets`) reproduces
+  that and `scripts/test_anm_dump.py` round-trips it.
+  **World-side consumer (modpack, 2026-09-30):** the Background Dancers
+  director does not use the engine's player, but it now parses a stage part's
+  `<part>_play_loop.sanm` itself (`src/core/anm/sanm.rs`, targets bound to the
+  `.model`'s material identities in file order), samples it on the part's
+  clock and writes the floats into the render item's PRIVATE material copies
+  at `+0x28 + 4·index` (`render_item::set_material_params_raw`, bounded by the
+  material's `param_count`) through the frame board — so the stock clips above
+  play (boom00's sky scroll; dawnstreet00's glow pulse, its `glo` material IS
+  `mdl_ch_constant_c_vc`) and custom stages can ship UV scrolls / colour and
+  glow pulses (the SuperNova port does).
 * **`.tanm` (type 10, object `+0x20`):** target byte `+6` = 0..4 (and 15..17),
   `+7` = 0; frame-0 values `(0,0,1,1,0)` — a legacy UV-transform layout.
   **No evaluator exists for `+0x20`** (see §8) — safe to omit from an exporter.

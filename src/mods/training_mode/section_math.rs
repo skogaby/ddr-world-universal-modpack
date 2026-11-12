@@ -20,14 +20,17 @@ pub const MIN_SECTION_MS: i32 = 5_000;
 pub const MIN_SECTION_S: i32 = MIN_SECTION_MS / 1_000;
 
 /// The bound rows' shared range cap (R2 amendment 2026-08-14: both rows
-/// are absolute timestamps, 0–200 s per the maintainer — no DDR chart
-/// runs longer; raise if a marathon custom bank ever needs it). An END
-/// TIME at this cap is the "natural end" sentinel — the row cannot
-/// express an end past 3:20, so the cap universally means "play to the
-/// song's own end" (also the row's registration default; the highlight
-/// seeder then re-bounds the ROW ITSELF to the song's length, so the
-/// live max is normally the song end, not this cap).
-pub const BOUND_ROW_MAX_S: i32 = 200;
+/// are absolute timestamps). Originally 200 s (no stock DDR chart runs
+/// longer); raised to 5000 s (83:20) on 2026-09-28 after a tester's
+/// 1-hour marathon custom bank played fine but could not set an END TIME
+/// past 3:20. It is only an abstract ceiling: the highlight seeder
+/// re-bounds the ROW ITSELF to the song's length
+/// ([`seed_end_seconds`]), so the live max is the song end for every
+/// song shorter than the cap. An END TIME at this cap is the "natural
+/// end" sentinel — the row cannot express an end past it, so the cap
+/// universally means "play to the song's own end" (also the row's
+/// registration default). Stays well inside i32 once scaled to ms.
+pub const BOUND_ROW_MAX_S: i32 = 5_000;
 
 /// The bound rows' fine step (seconds) — the stepper's nudge distance
 /// only. The highlight-time END seed is deliberately OFF this grid
@@ -501,6 +504,22 @@ mod tests {
     }
 
     #[test]
+    fn marathon_timestamps_resolve_past_the_old_cap() {
+        // A 1-hour custom bank: START 30:00, END 45:00 resolve literally
+        // (the old 200 s cap made END >= 3:20 read as "natural end").
+        const MARATHON_END: i32 = 3_600_000;
+        let bounds = resolve_bounds(1_800, 2_700, MARATHON_END, MARGIN);
+        assert_eq!(bounds.a_ms, 1_800_000);
+        assert_eq!(bounds.b_ms, 2_700_000);
+        // END at the seeded song length is still the natural end.
+        let seeded = seed_end_seconds(MARATHON_END as u32);
+        assert_eq!(
+            resolve_bounds(0, seeded, MARATHON_END, MARGIN),
+            ResolvedBounds { a_ms: 0, b_ms: 0 }
+        );
+    }
+
+    #[test]
     fn start_past_end_caps_at_chart_end_minus_margin() {
         let bounds = resolve_bounds(199, BOUND_ROW_MAX_S, CHART_END, MARGIN);
         assert_eq!(bounds.a_ms, CHART_END - MARGIN);
@@ -622,16 +641,26 @@ mod tests {
         // Just past a whole second rounds up (120.001 s → 121).
         assert_eq!(seed_end_seconds(120_001), 121);
         // The seed is always >= the real length (never truncates).
-        for len_ms in [1, 4_999, 90_000, 123_400, 199_999] {
+        for len_ms in [1, 4_999, 90_000, 123_400, 199_999, 3_599_500] {
             assert!(
                 seed_end_seconds(len_ms) as i64 * 1_000 >= i64::from(len_ms),
                 "seed below the real end for {len_ms} ms"
             );
         }
+        // Songs past the OLD 200 s cap seed at their own length — a 1-hour
+        // marathon bank's END row reaches 60:00 (2026-09-28 tester report:
+        // it previously pinned at 3:20).
+        assert_eq!(seed_end_seconds(200_000), 200);
+        assert_eq!(seed_end_seconds(700_000), 700);
+        assert_eq!(seed_end_seconds(3_600_000), 3_600);
         // Songs at/past the row cap seed AT the cap (the natural-end
         // sentinel — resolve_bounds never converts it to a section end).
-        assert_eq!(seed_end_seconds(200_000), BOUND_ROW_MAX_S);
-        assert_eq!(seed_end_seconds(700_000), BOUND_ROW_MAX_S);
+        assert_eq!(
+            seed_end_seconds(BOUND_ROW_MAX_S as u32 * 1_000),
+            BOUND_ROW_MAX_S
+        );
+        assert_eq!(seed_end_seconds(9_000_000), BOUND_ROW_MAX_S);
+        assert_eq!(seed_end_seconds(u32::MAX), BOUND_ROW_MAX_S);
         // Degenerate zero length seeds 0 (no publication should produce
         // this — parse rejects zero durations — but stay total).
         assert_eq!(seed_end_seconds(0), 0);

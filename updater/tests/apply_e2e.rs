@@ -218,13 +218,13 @@ fn a1_first_run_installs_release_owned_files_and_touches_nothing_else() {
     // Work dir: backup holds originals, download/stage/journal gone.
     let work = g.join(".ddr_world_hook_updater");
     assert_eq!(
-        fs::read(work.join("backup/ddr_world_hook.dll")).unwrap(),
+        fs::read(work.join("backup/base/ddr_world_hook.dll")).unwrap(),
         b"OLD DLL"
     );
     assert_eq!(
-        fs::read(
-            work.join("backup/data_mods/custom_options/select_music_option_v3_ifs/tex/shipped.png")
-        )
+        fs::read(work.join(
+            "backup/base/data_mods/custom_options/select_music_option_v3_ifs/tex/shipped.png"
+        ))
         .unwrap(),
         b"old png"
     );
@@ -325,7 +325,7 @@ fn a3_second_release_prunes_unchanged_and_keeps_modified_dropped_files() {
     assert!(!files.contains_key("README.md"));
     // Pruned original is in backup/.
     assert_eq!(
-        fs::read(g.join(".ddr_world_hook_updater/backup/data_mods/custom_options/select_music_option_v3_ifs/tex/shipped.png")).unwrap(),
+        fs::read(g.join(".ddr_world_hook_updater/backup/base/data_mods/custom_options/select_music_option_v3_ifs/tex/shipped.png")).unwrap(),
         b"new png v1"
     );
 }
@@ -608,7 +608,7 @@ fn m1_config_and_csv_merged_in_place() {
     );
     // Originals backed up.
     assert_eq!(
-        fs::read(g.join(".ddr_world_hook_updater/backup/mod-config.json")).unwrap(),
+        fs::read(g.join(".ddr_world_hook_updater/backup/base/mod-config.json")).unwrap(),
         USER_CONFIG.as_bytes()
     );
 }
@@ -665,7 +665,7 @@ fn m2_identical_files_are_not_rewritten() {
         csv_mtime
     );
     assert!(!g
-        .join(".ddr_world_hook_updater/backup/mod-config.json")
+        .join(".ddr_world_hook_updater/backup/base/mod-config.json")
         .exists());
 }
 

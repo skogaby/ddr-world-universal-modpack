@@ -2398,6 +2398,8 @@ fn press_body(lambda_this: *mut u8, press: Press) {
             return;
         }
         opt.values[side as usize] = next_value;
+        // A player's press is a choice (see RegisteredOption::authoritative).
+        opt.authoritative[side as usize] = true;
         let cb = opt.on_change;
         log_debug!(
             "custom_options/rows: press {} on {id_for_log:?} side={side} -> {next_value}",

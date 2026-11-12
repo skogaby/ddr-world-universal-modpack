@@ -152,6 +152,11 @@ pub struct StageCandidate {
     pub row: usize,
     /// `(part name, :N priority)` from fields `[2..]`.
     pub parts: Vec<(String, Option<i32>)>,
+    /// A FLIGHT stage (custom content: the arc holds [`STAGE_FLIGHT_MARKER`]):
+    /// the dancers take off and fly ([`super::pick::fly_pick`]); parts named
+    /// `pre_*` / `fly_*` switch at the end of the take-off
+    /// (`director_math::part_phase`). Stock rows: never.
+    pub flight: bool,
 }
 
 impl StageCandidate {
@@ -176,11 +181,78 @@ pub struct DancerCandidate {
     pub class: String,
     pub model_scale: f32,
     pub shadow_scale: f32,
+    /// The dancer's OWN choreography: clip stems of the body arc's
+    /// `data/chara/pl_<key>/motion/<stem>.anm` members, sorted (custom
+    /// dancers ported with their original rig — design 2026-09-28 D1). Empty
+    /// = the stock pool of `sex` from `mc_<sex>.arc` (every stock dancer).
+    pub motion: Vec<String>,
+    /// Its FLIGHT clips: `flight/<stem>` of the body arc's
+    /// `data/chara/pl_<key>/motion/flight/<stem>.anm` members, sorted
+    /// ([`own_flight_from_members`]); `takeoff*` stems are take-offs, the
+    /// rest flight loops. Never part of [`motion`](Self::motion) (direct
+    /// children only), so they play on flight stages alone.
+    pub flight: Vec<String>,
+    /// Winx Club: the ENCHANTIX twin this outfit transforms into mid-song
+    /// ([`own_twin_from_members`]; `None` = never transforms — every stock
+    /// dancer and the Fairy forms themselves).
+    pub twin: Option<String>,
 }
+
+/// The body-folder subdirectory holding a dancer's own clips.
+pub const OWN_MOTION_DIR: &str = "motion";
+/// The subdirectory of [`OWN_MOTION_DIR`] holding the flight clips.
+pub const FLIGHT_MOTION_DIR: &str = "flight";
+/// Flight-clip stems starting with this are take-offs.
+pub const TAKEOFF_PREFIX: &str = "takeoff";
+/// The member that marks a custom stage arc as a FLIGHT stage
+/// (`mapset_<key>/flight.txt` in a stage folder).
+pub const STAGE_FLIGHT_MARKER: &str = "data/map/flight.txt";
 
 impl DancerCandidate {
     pub fn body_arc_name(&self) -> String {
         format!("pl_{}.arc", self.key)
+    }
+    /// Plays its own clips (from its body arc) instead of the sex pool.
+    pub fn has_own_motion(&self) -> bool {
+        !self.motion.is_empty()
+    }
+    /// The arc file its clips live in: the body arc for own motion, else
+    /// `mc_<sex>.arc`.
+    pub fn motion_arc_name(&self) -> String {
+        if self.has_own_motion() {
+            self.body_arc_name()
+        } else {
+            format!("{}.arc", self.sex.arc_stem())
+        }
+    }
+    /// Its take-off clips (`flight/takeoff*`).
+    pub fn takeoff_clips(&self) -> Vec<&str> {
+        self.flight
+            .iter()
+            .filter(|c| is_takeoff_clip(c))
+            .map(String::as_str)
+            .collect()
+    }
+    /// Its flight loops (`flight/*` but the take-offs).
+    pub fn flight_loops(&self) -> Vec<&str> {
+        self.flight
+            .iter()
+            .filter(|c| !is_takeoff_clip(c))
+            .map(String::as_str)
+            .collect()
+    }
+    /// Can fly a flight stage: at least one take-off and one flight loop.
+    pub fn can_fly(&self) -> bool {
+        !self.takeoff_clips().is_empty() && !self.flight_loops().is_empty()
+    }
+    /// Arc member path of one of its playlist clips (a name from
+    /// [`playlist_for`] / [`flight_playlist_for`]).
+    pub fn clip_member(&self, clip: &str) -> String {
+        if self.has_own_motion() || is_flight_clip(clip) {
+            own_clip_member_path(&self.key, clip)
+        } else {
+            clip_member_path(self.sex, clip)
+        }
     }
     pub fn body_model_name(&self) -> String {
         format!("pl_{}", self.key)
@@ -226,6 +298,9 @@ pub const MIRROR_ATTACH_BONE: &str = "RightForeArmRoll";
 pub const GROUND_BONES: [&str; 5] = ["Hips", "Spine2", "Head", "LeftToeBase", "RightToeBase"];
 /// The bone whose height delta vs bind scales the shadow.
 pub const HIPS_BONE: &str = "Hips";
+/// The bone whose subtree Big Head scales (index 16 on every known rig — but
+/// always resolved by name through the body's `.b2it`).
+pub const HEAD_BONE: &str = "Head";
 
 /// The shared floor-shadow quad (one instance per dancer).
 pub const SHADOW_ARC: &str = "pl_shadow00.arc";
@@ -271,6 +346,7 @@ pub fn stage_candidates(
             key: key.clone(),
             row,
             parts,
+            flight: false,
         });
     }
     out
@@ -376,6 +452,9 @@ pub fn dancer_candidates(
             class: fields[2].trim().to_string(),
             model_scale,
             shadow_scale,
+            motion: Vec::new(),
+            flight: Vec::new(),
+            twin: None,
         });
     }
     out
@@ -405,20 +484,181 @@ pub fn playlist(rng: &mut Rng, sex: Sex) -> Vec<String> {
         .collect()
 }
 
+/// A dancer's playlist: its own clips shuffled when it has them (one
+/// shuffle — the same rng draw count as the stock path, so every other
+/// element of a pick draws identically), else [`playlist`] of its sex.
+pub fn playlist_for(rng: &mut Rng, dancer: &DancerCandidate) -> Vec<String> {
+    if !dancer.has_own_motion() {
+        return playlist(rng, dancer.sex);
+    }
+    let mut names = dancer.motion.clone();
+    rng.shuffle(&mut names);
+    names
+}
+
+/// A FLIGHT playlist: one of its take-offs (seeded) first, then its flight
+/// loops shuffled — [`super::schedule::DanceSchedule::with_intro`] plays
+/// element 0 once, uncut, and cycles the rest. Empty when it cannot fly.
+pub fn flight_playlist_for(rng: &mut Rng, dancer: &DancerCandidate) -> Vec<String> {
+    let takeoffs = dancer.takeoff_clips();
+    let mut loops: Vec<String> = dancer
+        .flight_loops()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if takeoffs.is_empty() || loops.is_empty() {
+        return Vec::new();
+    }
+    let first = takeoffs[rng.below(takeoffs.len() as u32) as usize].to_string();
+    rng.shuffle(&mut loops);
+    let mut out = vec![first];
+    out.extend(loops);
+    out
+}
+
+/// A playlist name naming a flight clip (`flight/<stem>`).
+pub fn is_flight_clip(clip: &str) -> bool {
+    clip.strip_prefix(FLIGHT_MOTION_DIR)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A playlist name naming a take-off (`flight/takeoff*`).
+pub fn is_takeoff_clip(clip: &str) -> bool {
+    clip.strip_prefix(FLIGHT_MOTION_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|stem| stem.starts_with(TAKEOFF_PREFIX))
+}
+
 /// Arc member path of a choreography clip: `data/chara/mc_<sex>/<clip>.anm`.
 pub fn clip_member_path(sex: Sex, clip: &str) -> String {
     format!("data/chara/{}/{}.anm", sex.arc_stem(), clip)
 }
 
+/// Arc member path of a dancer's OWN clip:
+/// `data/chara/pl_<key>/motion/<clip>.anm`.
+pub fn own_clip_member_path(key: &str, clip: &str) -> String {
+    format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{clip}.anm")
+}
+
+/// The own-motion clip stems among an arc's members for body `key`
+/// (`data/chara/pl_<key>/motion/<stem>.anm`, case-sensitive, direct
+/// children only), sorted and deduplicated. Empty ⇒ the dancer uses the
+/// stock pool of its sex.
+pub fn own_motion_from_members(key: &str, members: &[String]) -> Vec<String> {
+    let prefix = format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/");
+    let mut out: Vec<String> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".anm"))
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The flight clips among an arc's members for body `key`: `flight/<stem>`
+/// for every `data/chara/pl_<key>/motion/flight/<stem>.anm` (direct children
+/// of that directory), sorted and deduplicated.
+pub fn own_flight_from_members(key: &str, members: &[String]) -> Vec<String> {
+    let prefix = format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{FLIGHT_MOTION_DIR}/");
+    let mut out: Vec<String> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".anm"))
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| format!("{FLIGHT_MOTION_DIR}/{stem}"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A stage arc's members carry the FLIGHT marker.
+pub fn stage_flight_from_members(members: &[String]) -> bool {
+    members.iter().any(|m| m == STAGE_FLIGHT_MARKER)
+}
+
+/// Winx Club ENCHANTIX twins (`transform_logic.rs`): an outfit's body arc
+/// names the dancer it transforms into by a member
+/// `data/chara/pl_<key>/transform/<twin key>.txt` (the planner sees member
+/// NAMES only — the file's own text, `transform_logic::parse_marker`, adds
+/// the twin's lift at parse time).
+pub const TRANSFORM_MARKER_DIR: &str = "transform";
+/// The transformation clips: `motion/transform/{transform,pose}.anm` (a
+/// subdirectory of [`OWN_MOTION_DIR`]: never a dance clip).
+pub const TRANSFORM_MOTION_DIR: &str = "transform";
+pub const TRANSFORM_CLIP: &str = "transform";
+pub const POSE_CLIP: &str = "pose";
+
+/// The twin key an outfit's arc members name (the first, sorted), if any.
+pub fn own_twin_from_members(key: &str, members: &[String]) -> Option<String> {
+    let prefix = format!("data/chara/pl_{key}/{TRANSFORM_MARKER_DIR}/");
+    let mut keys: Vec<&str> = members
+        .iter()
+        .filter_map(|m| m.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|file| file.strip_suffix(".txt"))
+        .filter(|stem| !stem.is_empty() && *stem != key)
+        .collect();
+    keys.sort();
+    keys.first().map(|s| s.to_string())
+}
+
+/// Member paths inside a dancer's body arc (Winx Club content).
+pub fn transform_marker_member(key: &str, twin: &str) -> String {
+    format!("data/chara/pl_{key}/{TRANSFORM_MARKER_DIR}/{twin}.txt")
+}
+pub fn transform_clip_member(key: &str, clip: &str) -> String {
+    format!("data/chara/pl_{key}/{OWN_MOTION_DIR}/{TRANSFORM_MOTION_DIR}/{clip}.anm")
+}
+pub fn dynbones_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/dynbones.txt")
+}
+/// The body's material loop (the kira overlays' UV scroll).
+pub fn body_sanm_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/pl_{key}_play_loop.sanm")
+}
+pub fn transform_camera_member(key: &str) -> String {
+    format!("data/chara/pl_{key}/camera/transform.camanm")
+}
+/// `winx_fx/<bank>.teb` / `.txt` (`port_winx_fx.py`): `chenge` (the
+/// transformation effect) and `wing` (the wing-tip sparkles).
+pub fn winx_fx_member(key: &str, bank: &str, ext: &str) -> String {
+    format!("data/chara/pl_{key}/winx_fx/{bank}.{ext}")
+}
+
+/// A FLIGHT stage's take-off camera shots carry this in their name
+/// (`<key>_intro01..`, `port_stage_hottest2.is_intro_camera`): played in
+/// order during the take-off, never in the main / cut-away cycles.
+pub const INTRO_CAMERA_TAG: &str = "_intro";
+
+/// The take-off shots of a camera row, in name order ([`INTRO_CAMERA_TAG`]).
+pub fn intro_cameras(camera_row_fields: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = camera_row_fields
+        .iter()
+        .map(|f| f.trim())
+        .filter(|n| !n.is_empty() && n.contains(INTRO_CAMERA_TAG))
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The stage-mode camera lists: names containing `_non` are the cut-away
 /// list, everything else the main list; both shuffled (A3 `FUN_18005b490` +
-/// `FUN_18005b830`). Empty fields are skipped.
+/// `FUN_18005b830`). Empty fields and take-off shots ([`intro_cameras`]) are
+/// skipped.
 pub fn camera_lists(rng: &mut Rng, camera_row_fields: &[String]) -> (Vec<String>, Vec<String>) {
     let mut main = Vec::new();
     let mut non = Vec::new();
     for f in camera_row_fields {
         let name = f.trim();
-        if name.is_empty() {
+        if name.is_empty() || name.contains(INTRO_CAMERA_TAG) {
             continue;
         }
         if name.contains("_non") {
@@ -508,44 +748,71 @@ pub enum PickSource {
     /// The plain random path.
     #[default]
     Random,
+    /// A random draw WITHIN the source the DANCER SOURCE / STAGE SOURCE row
+    /// names (2026-09-30).
+    Source,
     /// The BACKGROUND DANCER / BACKGROUND STAGE option row.
     Option,
     /// The developer `DDR_DANCERS_PIN`.
     Pin,
+    /// A flight stage replaced a dancer that cannot fly
+    /// (`pick::fly_pick`).
+    Flight,
 }
 
 impl PickSource {
     pub fn tag(self) -> &'static str {
         match self {
             PickSource::Random => "random",
+            PickSource::Source => "source",
             PickSource::Option => "option",
             PickSource::Pin => "pin",
+            PickSource::Flight => "flight",
         }
     }
 }
 
-/// Resolve the BACKGROUND STAGE / BACKGROUND DANCER row choices into
-/// candidates (design §4.3). `stage_key = Some(k)` ⇒ uniform over the rows
-/// with key `k` (a stage with two rlist rows shows either, like
-/// [`pick_stage`]'s second draw); `None` ⇒ [`pick_stage`]. `dancer_keys[i]`
-/// (one per entered side, in entered order) `Some(k)` ⇒ that candidate,
-/// `None` ⇒ one uniform pick. An unknown key anywhere ⇒ `None` (the caller
-/// WARNs and retries with that element cleared); empty `dancer_keys` or empty
-/// tables ⇒ `None`. With every element `None` the draws are exactly
-/// `pick_stage` followed by `pick_dancers`, so RANDOM reproduces the plain
-/// random path under the same seed.
+/// One element of a pick request: an explicit stage key, or a random draw
+/// from an explicit pool of rows (the global screen-rule pool, or one
+/// source's rows — design 2026-09-30 §4.6).
+#[derive(Debug, Clone, Copy)]
+pub enum StageChoice<'a> {
+    Key(&'a str),
+    Random(&'a [StageCandidate]),
+}
+
+/// One dancer slot of a pick request: an explicit key, or a random draw from
+/// an explicit pool (every dancer, or one source's).
+#[derive(Debug, Clone, Copy)]
+pub enum DancerChoice<'a> {
+    Key(&'a str),
+    Random(&'a [DancerCandidate]),
+}
+
+/// Resolve the option rows' request into candidates (design §4.3 / 2026-09-30
+/// §4.6). `StageChoice::Key(k)` ⇒ uniform over the rows with key `k` in the
+/// FULL `stages` table (a stage with two rlist rows shows either, like
+/// [`pick_stage`]'s second draw); `Random(pool)` ⇒ [`pick_stage`] over the
+/// pool. `dancer_choices[i]` (one per entered side, in entered order):
+/// `Key(k)` ⇒ that candidate from the full `dancers` table, `Random(pool)` ⇒
+/// one uniform draw over the pool. An unknown key or an empty pool anywhere
+/// ⇒ `None` (the caller WARNs and retries with that element cleared); empty
+/// `dancer_choices` or empty tables ⇒ `None`. With `Random(&stages)` and
+/// `Random(&dancers)` everywhere the draws are exactly `pick_stage` followed
+/// by `pick_dancers`, so RANDOM reproduces the plain random path under the
+/// same seed.
 pub fn resolve_choice(
     rng: &mut Rng,
     stages: &[StageCandidate],
     dancers: &[DancerCandidate],
-    stage_key: Option<&str>,
-    dancer_keys: &[Option<&str>],
+    stage: StageChoice,
+    dancer_choices: &[DancerChoice],
 ) -> Option<(StageCandidate, Vec<DancerCandidate>)> {
-    if dancer_keys.is_empty() || dancers.is_empty() {
+    if dancer_choices.is_empty() || dancers.is_empty() {
         return None;
     }
-    let stage = match stage_key {
-        Some(key) => {
+    let stage = match stage {
+        StageChoice::Key(key) => {
             let rows: Vec<&StageCandidate> = stages.iter().filter(|s| s.key == key).collect();
             if rows.is_empty() {
                 return None;
@@ -553,16 +820,50 @@ pub fn resolve_choice(
             let i = rng.below(rows.len() as u32) as usize;
             (*rows.get(i)?).clone()
         }
-        None => pick_stage(rng, stages)?.clone(),
+        StageChoice::Random(pool) => pick_stage(rng, pool)?.clone(),
     };
-    let mut picked = Vec::with_capacity(dancer_keys.len());
-    for key in dancer_keys {
-        match key {
-            Some(k) => picked.push(dancers.iter().find(|d| &d.key == k)?.clone()),
-            None => picked.push(dancers[rng.below(dancers.len() as u32) as usize].clone()),
+    let mut picked = Vec::with_capacity(dancer_choices.len());
+    for choice in dancer_choices {
+        match choice {
+            DancerChoice::Key(k) => picked.push(dancers.iter().find(|d| d.key == *k)?.clone()),
+            DancerChoice::Random(pool) => {
+                if pool.is_empty() {
+                    return None;
+                }
+                picked.push(pool[rng.below(pool.len() as u32) as usize].clone());
+            }
         }
     }
     Some((stage, picked))
+}
+
+/// The within-source RANDOM stage pool (2026-09-30 §4.6 / R17): the rows of
+/// `stages` whose key is in `keys` (table order), run through the caller's
+/// screen rule like the global pool — `All` / `Filtered` / `NoneLeft` are
+/// RELATIVE TO THE SOURCE. Returns the source's rows alongside so a
+/// `NoneLeft` draw falls back to the whole SOURCE, never the whole table.
+pub fn source_stage_pool(
+    stages: &[StageCandidate],
+    keys: &[String],
+    keep: impl Fn(&str) -> bool,
+) -> (Vec<StageCandidate>, StagePool) {
+    let subset: Vec<StageCandidate> = stages
+        .iter()
+        .filter(|s| keys.iter().any(|k| *k == s.key))
+        .cloned()
+        .collect();
+    let pool = random_stage_pool(&subset, keep);
+    (subset, pool)
+}
+
+/// The within-source RANDOM dancer pool: the candidates whose key is in
+/// `keys`, in table order (unknown keys ignored).
+pub fn source_dancer_pool(dancers: &[DancerCandidate], keys: &[String]) -> Vec<DancerCandidate> {
+    dancers
+        .iter()
+        .filter(|d| keys.iter().any(|k| *k == d.key))
+        .cloned()
+        .collect()
 }
 
 /// Test fixtures shared with the sibling pure modules (`catalog.rs` mounts
@@ -788,6 +1089,26 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::{real_chara_rows, real_map_rows, rows};
     use super::*;
+
+    #[test]
+    fn intro_cameras_leave_the_cycles() {
+        let row: Vec<String> = [
+            "k_st01",
+            "k_intro02",
+            "k_non01",
+            " k_intro01 ",
+            "k_st02",
+            "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(intro_cameras(&row), vec!["k_intro01", "k_intro02"]);
+        let (mut main, non) = camera_lists(&mut Rng::new(3), &row);
+        main.sort();
+        assert_eq!(main, vec!["k_st01", "k_st02"]);
+        assert_eq!(non, vec!["k_non01"]);
+    }
 
     #[test]
     fn rng_basics() {
@@ -1021,6 +1342,189 @@ mod tests {
         );
     }
 
+    fn own_motion_dancer(motion: &[&str]) -> DancerCandidate {
+        DancerCandidate {
+            key: "umxafro00".into(),
+            row: 40,
+            sex: Sex::Male,
+            class: "A".into(),
+            model_scale: 1.0,
+            shadow_scale: 0.8,
+            motion: motion.iter().map(|s| s.to_string()).collect(),
+            flight: Vec::new(),
+            twin: None,
+        }
+    }
+
+    #[test]
+    fn transform_twin_comes_from_the_marker_member_name() {
+        let members: Vec<String> = [
+            "data/chara/pl_winxbloom01/pl_winxbloom01.model",
+            "data/chara/pl_winxbloom01/transform/winxbloom04.txt",
+            "data/chara/pl_winxbloom01/motion/transform/transform.anm",
+            "data/chara/pl_winxbloom01/motion/transform/pose.anm",
+            "data/chara/pl_winxbloom01/motion/wxs001_000.anm",
+            "data/chara/pl_other01/transform/x.txt",
+            "data/chara/pl_winxbloom01/transform/deeper/y.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            own_twin_from_members("winxbloom01", &members).as_deref(),
+            Some("winxbloom04")
+        );
+        // the transformation clips never join the dance playlist
+        assert_eq!(
+            own_motion_from_members("winxbloom01", &members),
+            vec!["wxs001_000".to_string()]
+        );
+        assert!(own_twin_from_members("winxbloom04", &members).is_none());
+        // its own key is no twin
+        let selfish = vec!["data/chara/pl_a/transform/a.txt".to_string()];
+        assert!(own_twin_from_members("a", &selfish).is_none());
+        assert_eq!(
+            transform_marker_member("winxbloom01", "winxbloom04"),
+            members[1]
+        );
+        assert_eq!(transform_clip_member("winxbloom01", POSE_CLIP), members[3]);
+        assert_eq!(
+            winx_fx_member("k", "wing", "teb"),
+            "data/chara/pl_k/winx_fx/wing.teb"
+        );
+        assert_eq!(body_sanm_member("k"), "data/chara/pl_k/pl_k_play_loop.sanm");
+    }
+
+    #[test]
+    fn flight_clips_route_to_the_body_arc_and_lead_with_a_takeoff() {
+        let members: Vec<String> = [
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/flight/fly_b.anm",
+            "data/chara/pl_umxafro00/motion/flight/takeoff.anm",
+            "data/chara/pl_umxafro00/motion/flight/fly_a.anm",
+            "data/chara/pl_umxafro00/motion/flight/deeper/x.anm",
+            "data/chara/pl_other00/motion/flight/fly_c.anm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let flight = own_flight_from_members("umxafro00", &members);
+        assert_eq!(
+            flight,
+            vec!["flight/fly_a", "flight/fly_b", "flight/takeoff"]
+        );
+        // the dance pool never sees them
+        assert_eq!(
+            own_motion_from_members("umxafro00", &members),
+            vec!["ht01_m"]
+        );
+        let d = DancerCandidate {
+            flight,
+            ..own_motion_dancer(&["ht01_m"])
+        };
+        assert!(d.can_fly());
+        assert_eq!(d.takeoff_clips(), vec!["flight/takeoff"]);
+        assert_eq!(d.flight_loops(), vec!["flight/fly_a", "flight/fly_b"]);
+        assert_eq!(
+            d.clip_member("flight/takeoff"),
+            "data/chara/pl_umxafro00/motion/flight/takeoff.anm"
+        );
+        let pl = flight_playlist_for(&mut Rng::new(3), &d);
+        assert_eq!(pl[0], "flight/takeoff");
+        assert_eq!(pl.len(), 3);
+        assert!(pl[1..].iter().all(|c| c.starts_with("flight/fly_")));
+        // a stock-pool dancer with flight clips still reads them from its body arc
+        let stock = DancerCandidate {
+            motion: vec![],
+            ..d.clone()
+        };
+        assert_eq!(
+            stock.clip_member("flight/fly_a"),
+            "data/chara/pl_umxafro00/motion/flight/fly_a.anm"
+        );
+        // no take-off (or no loop): cannot fly, no flight playlist
+        let half = DancerCandidate {
+            flight: vec!["flight/fly_a".into()],
+            ..d.clone()
+        };
+        assert!(!half.can_fly());
+        assert!(flight_playlist_for(&mut Rng::new(3), &half).is_empty());
+        assert!(
+            is_flight_clip("flight/x") && !is_flight_clip("flightx") && !is_flight_clip("ht01_m")
+        );
+        assert!(is_takeoff_clip("flight/takeoff2") && !is_takeoff_clip("takeoff"));
+        assert!(stage_flight_from_members(&[
+            "data/map/flight.txt".to_string()
+        ]));
+        assert!(!stage_flight_from_members(&[
+            "data/map/x/flight.txt".to_string()
+        ]));
+    }
+
+    #[test]
+    fn own_motion_members_are_direct_anm_children_sorted() {
+        let members: Vec<String> = [
+            "data/chara/pl_umxafro00/pl_umxafro00.model",
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/brk02_m_t7.anm",
+            "data/chara/pl_umxafro00/motion/ht01_m.anm",
+            "data/chara/pl_umxafro00/motion/deeper/x.anm",
+            "data/chara/pl_umxafro00/motion/readme.txt",
+            "data/chara/pl_umxafro00/motion/.anm",
+            "data/chara/pl_other00/motion/hh01_m.anm",
+            "data/chara/pl_umxafro00/ht02_m.anm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            own_motion_from_members("umxafro00", &members),
+            vec!["brk02_m_t7".to_string(), "ht01_m".to_string()]
+        );
+        assert!(own_motion_from_members("nobody00", &members).is_empty());
+    }
+
+    #[test]
+    fn own_motion_routes_arc_member_and_playlist() {
+        let stock = DancerCandidate {
+            motion: vec![],
+            ..own_motion_dancer(&[])
+        };
+        assert!(!stock.has_own_motion());
+        assert_eq!(stock.motion_arc_name(), "mc_male.arc");
+        assert_eq!(
+            stock.clip_member("mc_male_hh01_exec"),
+            "data/chara/mc_male/mc_male_hh01_exec.anm"
+        );
+        // A stock candidate's playlist is exactly the sex playlist.
+        assert_eq!(
+            playlist_for(&mut Rng::new(7), &stock),
+            playlist(&mut Rng::new(7), Sex::Male)
+        );
+
+        let own = own_motion_dancer(&["a_m", "b_m", "c_m", "d_m", "e_m"]);
+        assert!(own.has_own_motion());
+        assert_eq!(own.motion_arc_name(), "pl_umxafro00.arc");
+        assert_eq!(
+            own.clip_member("b_m"),
+            "data/chara/pl_umxafro00/motion/b_m.anm"
+        );
+        let a = playlist_for(&mut Rng::new(7), &own);
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(sorted, own.motion, "a permutation of the own pool");
+        assert_eq!(playlist_for(&mut Rng::new(7), &own), a, "seeded");
+        assert_ne!(playlist_for(&mut Rng::new(8), &own), a);
+        // Exactly one shuffle either way: the rng is left in the same state
+        // as after the stock path's shuffle of a pool of the same length.
+        let mut r1 = Rng::new(99);
+        let _ = playlist_for(&mut r1, &own);
+        let mut r2 = Rng::new(99);
+        let mut five = vec![0, 1, 2, 3, 4];
+        r2.shuffle(&mut five);
+        assert_eq!(r1.below(1000), r2.below(1000));
+    }
+
     #[test]
     fn camera_lists_split_on_non_and_paths() {
         let row: Vec<String> = [
@@ -1137,6 +1641,8 @@ mod tests {
         let stages = stage_candidates(&real_map_rows(), |_| true);
         let dancers = dancer_candidates(&real_chara_rows(), |_| true);
         assert_eq!(dancers.len(), 26);
+        let any_stage = StageChoice::Random(&stages);
+        let any_dancer = DancerChoice::Random(&dancers);
 
         // A chosen stage key ⇒ only that key's rows, every row reachable.
         let mut rows_seen = [false; 2];
@@ -1147,8 +1653,8 @@ mod tests {
                 &mut rng,
                 &stages,
                 &dancers,
-                Some("boom00"),
-                &[Some("emi01"), None],
+                StageChoice::Key("boom00"),
+                &[DancerChoice::Key("emi01"), any_dancer],
             )
             .expect("resolvable");
             assert_eq!(stage.key, "boom00");
@@ -1162,22 +1668,71 @@ mod tests {
 
         // Unknown keys anywhere ⇒ None (the caller clears + retries).
         let mut rng = Rng::new(3);
-        assert!(resolve_choice(&mut rng, &stages, &dancers, Some("nope"), &[None]).is_none());
-        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[Some("nobody")]).is_none());
-        assert!(
-            resolve_choice(&mut rng, &stages, &dancers, None, &[None, Some("nobody")]).is_none()
-        );
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Key("nope"),
+            &[any_dancer]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[DancerChoice::Key("nobody")]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[any_dancer, DancerChoice::Key("nobody")]
+        )
+        .is_none());
         // Degenerate inputs.
-        assert!(resolve_choice(&mut rng, &stages, &dancers, None, &[]).is_none());
-        assert!(resolve_choice(&mut rng, &stages, &[], None, &[None]).is_none());
-        assert!(resolve_choice(&mut rng, &[], &dancers, None, &[None]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &dancers, any_stage, &[]).is_none());
+        assert!(resolve_choice(&mut rng, &stages, &[], any_stage, &[any_dancer]).is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &[],
+            &dancers,
+            StageChoice::Random(&[]),
+            &[any_dancer]
+        )
+        .is_none());
+        // Empty pools ⇒ None.
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            any_stage,
+            &[DancerChoice::Random(&[])]
+        )
+        .is_none());
+        assert!(resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Random(&[]),
+            &[any_dancer]
+        )
+        .is_none());
 
         // All-RANDOM reproduces the plain random path under the same seed.
         for seed in 1..=200u64 {
             let mut a = Rng::new(seed);
             let mut b = Rng::new(seed);
-            let (stage, picked) =
-                resolve_choice(&mut a, &stages, &dancers, None, &[None, None]).unwrap();
+            let (stage, picked) = resolve_choice(
+                &mut a,
+                &stages,
+                &dancers,
+                any_stage,
+                &[any_dancer, any_dancer],
+            )
+            .unwrap();
             let want_stage = pick_stage(&mut b, &stages).unwrap().clone();
             let want_dancers = pick_dancers(&mut b, &dancers, 2);
             assert_eq!(stage, want_stage);
@@ -1187,9 +1742,127 @@ mod tests {
         // Stage chosen, dancer RANDOM: the dancer draw still follows the
         // stage's single row draw.
         let mut rng = Rng::new(9);
-        let (stage, picked) =
-            resolve_choice(&mut rng, &stages, &dancers, Some("club00"), &[None]).unwrap();
+        let (stage, picked) = resolve_choice(
+            &mut rng,
+            &stages,
+            &dancers,
+            StageChoice::Key("club00"),
+            &[any_dancer],
+        )
+        .unwrap();
         assert_eq!(stage.key, "club00");
         assert_eq!(picked.len(), 1);
+    }
+
+    #[test]
+    fn random_pools_are_respected() {
+        let stages = stage_candidates(&real_map_rows(), |_| true);
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let stage_pool: Vec<StageCandidate> = stages
+            .iter()
+            .filter(|s| s.key == "club00" || s.key == "disco00")
+            .cloned()
+            .collect();
+        let dancer_pool: Vec<DancerCandidate> = dancers
+            .iter()
+            .filter(|d| d.key == "emi01" || d.key == "gus00")
+            .cloned()
+            .collect();
+        assert_eq!(dancer_pool.len(), 2);
+        let mut stage_keys = std::collections::HashSet::new();
+        let mut dancer_keys = std::collections::HashSet::new();
+        for seed in 1..=500u64 {
+            let mut rng = Rng::new(seed);
+            let (stage, picked) = resolve_choice(
+                &mut rng,
+                &stages,
+                &dancers,
+                StageChoice::Random(&stage_pool),
+                &[
+                    DancerChoice::Random(&dancer_pool),
+                    DancerChoice::Key("zero00"),
+                ],
+            )
+            .unwrap();
+            stage_keys.insert(stage.key.clone());
+            dancer_keys.insert(picked[0].key.clone());
+            assert_eq!(picked[1].key, "zero00");
+        }
+        let want: std::collections::HashSet<String> = ["club00", "disco00"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(stage_keys, want);
+        let want: std::collections::HashSet<String> =
+            ["emi01", "gus00"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(dancer_keys, want);
+    }
+
+    #[test]
+    fn source_pools() {
+        // a (screens), b (no screens), c (screens); the table also holds z.
+        let stages = stage_candidates(
+            &fixtures::rows(&[
+                ("a00", &["000000", "000000", "bg"]),
+                ("b00", &["000000", "000000", "bg"]),
+                ("c00", &["000000", "000000", "bg"]),
+                ("z00", &["000000", "000000", "bg"]),
+            ]),
+            |_| true,
+        );
+        let has_screens = |k: &str| k == "a00" || k == "c00";
+        let keys = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["a00", "b00"]), has_screens);
+        assert_eq!(subset.len(), 2);
+        match &pool {
+            StagePool::Filtered { rows, excluded } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, "a00");
+                assert_eq!(*excluded, 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        let (subset, pool) =
+            source_stage_pool(&stages, &keys(&["a00", "b00"]), |k| !has_screens(k));
+        assert_eq!(
+            pool.rows(&subset)
+                .iter()
+                .map(|s| s.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b00"]
+        );
+        // Nothing in the source matches ⇒ NoneLeft over the SOURCE's rows, not the table.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["c00"]), |k| !has_screens(k));
+        assert_eq!(pool, StagePool::NoneLeft);
+        assert_eq!(
+            pool.rows(&subset)
+                .iter()
+                .map(|s| s.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c00"]
+        );
+        // Everything kept ⇒ All over the source's rows.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["a00", "b00"]), |_| true);
+        assert_eq!(pool, StagePool::All);
+        assert_eq!(pool.rows(&subset).len(), 2);
+        // Unknown keys are ignored; an empty source is an empty subset.
+        let (subset, pool) = source_stage_pool(&stages, &keys(&["nope"]), |_| true);
+        assert!(subset.is_empty());
+        assert_eq!(pool, StagePool::All);
+
+        // Dancer pool: table order, unknown keys ignored.
+        let dancers = dancer_candidates(&real_chara_rows(), |_| true);
+        let third = dancers[2].key.clone();
+        let first = dancers[0].key.clone();
+        let pool = source_dancer_pool(
+            &dancers,
+            &[third.clone(), "nobody".to_string(), first.clone()],
+        );
+        assert_eq!(
+            pool.iter().map(|d| d.key.clone()).collect::<Vec<_>>(),
+            vec![first, third]
+        );
+        assert!(source_dancer_pool(&dancers, &[]).is_empty());
     }
 }

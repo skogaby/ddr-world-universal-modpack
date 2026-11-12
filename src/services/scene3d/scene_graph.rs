@@ -232,6 +232,29 @@ pub struct GraphStats {
     pub records: u32,
 }
 
+/// Game thread: set the SceneGraph ENABLE bit (`graph + flags_off` bit 0)
+/// ahead of the game. The DancePlaySequence sets it itself only once its
+/// step-5 READY? dwell gate passes (20260915 `+0x592A9`, right after the
+/// gate's `0x1043` broadcast and the shutter reveal call); a READY hold that
+/// shows the 3D scene DURING step 5 (Background Dancers' flight take-off)
+/// sets it early. The bit is a normal pre-song state (it stays set from the
+/// previous scene while the loaders run). `false` = unreadable graph.
+pub fn set_enabled() -> bool {
+    let Some(s) = sites() else { return false };
+    let Some((_mgr, graph)) = manager_and_graph() else {
+        return false;
+    };
+    // SAFETY: probed by `manager_and_graph` (the flags word is in its span).
+    unsafe {
+        let f = graph.add(s.graph_flags_off);
+        let v = memory::read_u32(f);
+        if v & 1 == 0 {
+            memory::write_u32(f, v | 1);
+        }
+    }
+    true
+}
+
 /// Read [`GraphStats`] (probed; zeros when unreadable). The visible vector
 /// sits at `graph + 0x58` (RE §1.1) — derived only as the `**ctx` target of
 /// pass 4, so it is read here through the SAME layout facts: `graph+0x58 /

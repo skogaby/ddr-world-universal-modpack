@@ -636,7 +636,9 @@ pub enum BatchResult {
 /// On a hash match it additionally requires the merged XML to still exist —
 /// so deleting `_cache` (or the merged file) forces a rebuild even if the
 /// sidecar hash survived. The hash sidecar lives at
-/// `<cache_root>/<ifs_mod_path>/<merged-cache-key>.atlasbatch.md5`.
+/// `<cache_root>/<ifs_mod_path>/atlasbatch.md5` (one per IFS — a second
+/// cached batch on the same IFS must pass its own
+/// [`BatchOptions::sidecar_file`] to [`generate_cloned_atlases_cached_with`]).
 ///
 /// Returns [`BatchResult`] so callers can log/branch; all failure modes are
 /// graceful (a bad PNG is skipped per the underlying cloner).
@@ -647,8 +649,48 @@ pub fn generate_cloned_atlases_cached(
     mod_root: &str,
     batch: &[AtlasSet],
 ) -> BatchResult {
+    generate_cloned_atlases_cached_with(
+        texlist_xml,
+        ifs_mod_path,
+        cache_root,
+        mod_root,
+        batch,
+        &BatchOptions::default(),
+    )
+}
+
+/// Options for [`generate_cloned_atlases_cached_with`].
+pub struct BatchOptions<'a> {
+    /// File name of the input-hash sidecar under `<cache_root>/<ifs_mod_path>/`.
+    /// Callers sharing an IFS with another cached batch need their own name.
+    pub sidecar_file: &'a str,
+    /// Latch [`atlases_rebuilt_this_boot`] (the splash's "reboot at least
+    /// once" warning) on a rebuild. Callers whose textures are mounted only
+    /// after `enable()` — so a rebuild is picked up the same boot — pass false.
+    pub latch_reboot: bool,
+}
+
+impl Default for BatchOptions<'_> {
+    fn default() -> Self {
+        BatchOptions {
+            sidecar_file: "atlasbatch.md5",
+            latch_reboot: true,
+        }
+    }
+}
+
+/// [`generate_cloned_atlases_cached`] with an explicit sidecar name and
+/// reboot-latch choice.
+pub fn generate_cloned_atlases_cached_with(
+    texlist_xml: &str,
+    ifs_mod_path: &str,
+    cache_root: &str,
+    mod_root: &str,
+    batch: &[AtlasSet],
+    options: &BatchOptions<'_>,
+) -> BatchResult {
     let merged_path = format!("{}/{}/tex/texturelist.merged.xml", mod_root, ifs_mod_path);
-    let hash_file = format!("{}/{}/atlasbatch.md5", cache_root, ifs_mod_path);
+    let hash_file = format!("{}/{}/{}", cache_root, ifs_mod_path, options.sidecar_file);
 
     // Hash all inputs that affect the output.
     let mut hasher = CacheHasher::new(&hash_file);
@@ -717,7 +759,9 @@ pub fn generate_cloned_atlases_cached(
 
     // Commit the input hash so the next boot can skip.
     hasher.commit();
-    ATLASES_REBUILT_THIS_BOOT.store(true, Ordering::Relaxed);
+    if options.latch_reboot {
+        ATLASES_REBUILT_THIS_BOOT.store(true, Ordering::Relaxed);
+    }
     BatchResult::Rebuilt
 }
 

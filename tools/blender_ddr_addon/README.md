@@ -65,6 +65,15 @@ explicit `_vc` shader meets one; the proven stock combination for a flat-texture
 is a colour attribute filled with opaque white + `mdl_*_constant_vc` (that is what the
 two ports below do).
 
+**COLOR0 bytes (2026-10-04):** the exporter writes a BYTE_COLOR attribute's STORED bytes
+(`color_srgb`) as the D3DCOLOR, and the game multiplies those bytes as is. So a port writes
+the source's colour bytes with `attr.data.foreach_set('color_srgb', rgba)`. The `color`
+accessor is linear: Blender sRGB-encodes what it gets, and a source 0.5 ships as 188 (0.74),
+0.2 as 124. Alpha is stored linearly either way; white (1.0) and black are unaffected.
+Every affected source (the HOTTEST PARTY 1–3 and SuperNova / X stages, the SN / X GUS glasses) was
+re-ported with the fix, so all shipped COLOR0 bytes are the discs'. `scripts/fix_vertex_colour_srgb.py`
+undoes the encoding in place for a model ported by an older checkout; never run it on current output.
+
 ## Authoring a new asset
 
 * **Character:** `File > Import > DDR Character` on any stock body (e.g.
@@ -120,9 +129,22 @@ custom stage a screen:
   whole square; u runs 0 → 1 left to right as seen by the viewer (unmirrored). In Blender
   (bottom-up v) that is `v_blender = 1 − v_d3d`, i.e. the 16:9 band is also 0.21875 –
   0.78125. Mapping the 16:9 band onto the whole panel makes a 16:9 movie fill it and crops
-  a 4:3 one top and bottom; songs without a movie show a black screen.
+  a 4:3 one top and bottom; songs without a movie show a black screen. A source whose
+  screens were authored against a 2×2 video mosaic (HOTTEST PARTY 4/5 `quarter` stages)
+  must have each quadrant unfolded onto 0..1 first — see
+  `examples/port_stage_hottest2.py::unfold_quadrants`.
 
 ## Porting an existing model (playbook)
+
+> **Where ported models go.** The sources ported from other DDR releases are not part of
+> this repository: they live in the assets repository
+> (`skogaby/ddr-world-universal-modpack-assets`), checked out beside this one or named by
+> `DDR_WORLD_ASSETS`, laid out as `dancers/<Source>/…` and `stages/<Source>/…`
+> (`examples/assets_path.py` resolves it, and is the default output location of the port
+> scripts). Only the `Custom` sources remain under `data_mods/custom_models/` here. The
+> dated notes below were written before the move: read a path of the form
+> `data_mods/custom_models/{dancers,stages}/<Source>/` for any source other than `Custom`
+> as `<assets checkout>/{dancers,stages}/<Source>/`.
 
 Both flows are in-game verified on DDR A3 (Peter Griffin in the Griffin living room,
 2026-09-15); the scripts that did it are in `examples/` and are meant to be copied and
@@ -158,6 +180,14 @@ diffuse maps). Every step below exists because of a rule of the game's format:
    `pelvis → Hips` and `head`+face → `Head` outright. Log the groups you did not map (the
    Fortnite rig had belt/groin/lat helpers) and add them to a class rather than dropping
    them. Keep ≤ 4 influences, renormalise.
+   **Keep the head rigid:** like the stock rigs, weight everything from the jaw up 1.00 to
+   `Head` and confine the `Head`/`Neck` blend to a band under the chin and at the nape
+   (stock ~1.39–1.45 m). Auto/heat weights on an unrigged rip spread the blend over the whole
+   lower face, while inner features (eyes, teeth, glasses) stay at 1.00. That is invisible at
+   rest, but any Head-vs-Neck difference then shears the skin off those features. The
+   modpack's Big Head mode (Head ×3) pushed Big Smoke's eye whites and teeth through his
+   face. A strong nod does the same, more subtly. Check: no vertex above the lips should
+   carry a partial `Head` weight.
 4. **Textures:** use the flat diffuse maps (the `_DShaded` bakes look muddy unlit, the
    `_DF` masks are not ink lines), downscale to ≤ 1024 (1024², 1024×512 and 512² all
    load), name the images `xx_stem` (stems must be unique after lower-casing and dropping
@@ -173,6 +203,83 @@ diffuse maps). Every step below exists because of a rule of the game's format:
    if it should be the attract HOW TO PLAY dancer (kinds ≥ 3 index rows directly), the
    stock row moved to the end. No face-part arcs are needed (a body without `_face01..03`
    loads fine).
+
+### A current Fortnite rip with a tail and a weapon (`examples/port_character_fortnite.py`)
+
+Ironmouse (2026-10-04) ships as `data_mods/custom_models/dancers/Custom/Ironmouse` (`ironmouse00`,
+no weapon) and `Custom/Ironmouse 2` (`ironmouse01`, holding her *Blade of Love*); both sidecars are
+`<key>, pl, F, A, 0.9, 0.75, 0.0` on the `pl_emi00` donor. Round-trip previewed; not yet
+cabinet-tested. The source is the same UE rig family as Peter's, from a newer Fortnite build: an
+`F_MED` body FBX (304 bones, A-pose, 4 meshes: hair, body, head, tail) plus a separate weapon FBX.
+It uses `port_lib`, the Peter steps above, and these differences:
+
+* **Bone axes.** The raw UE bone Y axis runs across the limb, and Blender's automatic bone
+  orientation points thigh and `spine_04` at a helper child. `conform` stretches along Y, so
+  `port_lib.align_chain_bones(fa, next_of)` re-aims every chain bone at its child first, in edit
+  mode. The mesh does not move: at rest the pose equals the rest pose in any frame.
+* **A-pose hands.** The hand is a terminal bone. `conform` keeps a terminal bone in its rest
+  orientation, so the hand would stay bent 45° down when the forearm swings up to the T-pose.
+  `conform(..., follow_parent_rot=('hand_l', 'hand_r', 'ball_l', 'ball_r'))` gives each of these
+  the rotation of its parent instead. A T-pose source does not need this.
+* **Centimetre FBX.** The armature imports at object scale 0.01. Do not pass `terminal_len` (it
+  divides world metres by the armature-space length); leave it out and `s` = 1 keeps the size.
+* **Trunk.** The Fortnite pelvis sits 1 cm above the thigh sockets, while DDR's Hips sit 6 cm above.
+  The trunk takes the linear z-map of the CJ port (thigh sockets → DDR UpLeg, `neck_01` → DDR
+  Neck, kz ≈ 1.05), and the thighs keep the source socket width.
+* **Tail.** It is on its own root (`C_Root_Main_Root_Jnt` → `C_Tail_A_Base/1..9_Jnt`), authored
+  flat on the floor behind the feet. Before the bake, each joint's world matrix is set so the
+  chain hangs from the lower back in a curve: `TAIL_ATTACH` (source y,z) and `TAIL_PITCH`
+  (degrees below horizontal per segment). The tail is weighted rigidly to Hips.
+* **Textures.** These are toon maps:
+  - `*_ColorL`: the lit colour. This is the one used, downscaled from 2048² to 1024².
+  - `_ColorS`: the shadow colour.
+  - `_DFL` / `_DFLC`: an ink-line mask and its colour.
+  - `_STT`: shading thresholds.
+  - `_N`: normals.
+  - `_FX`: an effect mask.
+
+  The game's shaders are unlit, so only ColorL ships. Its lines are already enough: the brows and
+  lashes are geometry. The `_FX`-masked body islands render flat light grey: the band around the
+  waist and the patches on the sleeve tops. Fortnite draws an effect over them, which is not
+  reproduced here.
+* **Physics chains.** `dyn_skirt*` → `skirt`; jacket, bow, ribbon, hood and chest → `spine`;
+  belt, heart and the tail → `hips`; hair and pigtails → `head`. `rigid_head` forces every
+  vertex that started above the chin (jaw pivot − 4.5 cm) to `Head` 1.00. The 83 facial shape
+  keys are cleared, and the basis is the neutral face.
+* **Weapon** (`WEAPON=hand` + `WEAPON_SRC`). The right-hand fingers are curled into a fist
+  (`FIST_CURL` degrees per phalanx, about the knuckle axis expressed in each bone's rest frame).
+  The weapon's handle origin goes to the fist centre: the blade comes out of the thumb side and
+  the edge faces the knuckles. It is weighted 1.0 to `RightHand` as an extra body material slot.
+  A `forearm00` part would not work, because the game mirrors it onto the left arm too.
+  `WEAPON=back` slings it across the back on `Spine2` instead. `WEAPON_SCALE` and `WEAPON_TILT`
+  are optional. At full size the 1.08 m sword clips the legs in some moves.
+
+```bash
+# runbook (macOS paths; any scratch dir works)
+W=$TMPDIR/ironmouse; A="$DDR_WORLD_INSTALL/data/arc"
+for a in pl_emi00 mc_female mc_female_lovy; do python3 scripts/arc_tool.py unpack "$A/$a.arc" -o $W/game; done
+python3 scripts/arc_tool.py unpack "$A/startup.arc" -o $W/startup
+export DDR_3D_DATA=$W/game/data DDR_3D_RLIST=$W/startup/data/chara/chara_resources.rlist
+export PREVIEW_ANM=$DDR_3D_DATA/chara/mc_female/mc_female_hh01_exec.anm:$DDR_3D_DATA/chara/mc_female_lovy/mc_female_lovy_lovy_exec.anm
+B=/Applications/Blender.app/Contents/MacOS/Blender; S=tools/blender_ddr_addon/examples/port_character_fortnite.py
+SRC=~/Desktop/Ironmouse/Model/"Ironmouse FN.fbx" OUT_DIR=$W/v1 $B -b --factory-startup --python-exit-code 1 --python $S
+SRC=~/Desktop/Ironmouse/Model/"Ironmouse FN.fbx" OUT_DIR=$W/v2 CHARA_KEY=ironmouse01 WEAPON=hand \
+  WEAPON_SRC=~/Desktop/Ironmouse/Weapon/"Blade of Love.fbx" $B -b --factory-startup --python-exit-code 1 --python $S
+# check $W/v*/ironmouse0*_{front,side,close_*,mc_female_*}.png, then ship the export folders:
+cp -R $W/v1/export/. data_mods/custom_models/dancers/Custom/Ironmouse/
+cp -R $W/v2/export/. "data_mods/custom_models/dancers/Custom/Ironmouse 2/"
+```
+
+Adapting this to another Fortnite rip:
+
+1. Inspect the FBX first (bone list, mesh and material names, texture set).
+2. Edit `MAT_TEX` and `TWO_SIDED`.
+3. Check the bone names in `classify`. The unknown-groups line must print `{}`.
+4. Drop the tail block if there is no `C_Tail_*` chain.
+5. For an `M_MED` body, use `DONOR=pl_rage00 SEX=M MODEL_SCALE=1.0`.
+
+The folder name is the in-game label (≤ 15 bytes), and the key comes from `pl_<key>`. Two variants
+need two keys.
 
 ### Anime characters: a Rigify-style GLB and an MMD model (`examples/port_lib.py` + two configs)
 
@@ -255,6 +362,662 @@ what was different:
   `seam_report` in the config lists the largest displacement jumps across an edge, which is where
   a rigid bake tears.
 * **Small textures are fine:** 256², 128², 128×256 and 64² load at native size (no upscaling).
+
+### A dancer with ITS OWN rig and clips (`examples/port_character_ultramix.py`)
+
+This is the Omnimix path: no donor rig, no conform and no weight retarget. The source skeleton, its
+proportions and its own choreography are kept as they are. First used for *Dancing Stage
+Unleashed* / DDR ULTRAMIX (Xbox), 2026-09-28. It ships as `data_mods/custom_models/dancers/Ultramix
+Afro` and `Ultramix Lady`. The formats are documented in
+`docs/dancing_stage_unleashed_dancers_port_feasibility.md`.
+
+* **Rig.** Build it from the source bind matrices in GAME space (Y-up metres, facing +Z, left at +X)
+  and set each edit bone with `edit_bone.matrix = convert.rowmat_to_blender(bind)`. Blender makes
+  every bone's local Y point along the bone, but that does not matter: the clips are converted
+  against the EXPORTED bind frames (`Q = B_exported · B_source⁻¹`), so any rigid re-framing leaves
+  the skinning product unchanged. Export as usual. Any bone count works up to 52 per mesh palette
+  and 64 posed bones per instance (`frame_board`).
+* **Clips** go to `pl_<key>/motion/<clip>.anm`. Write them as LOCAL TRS against the exported
+  parents: `local = world · world_parent⁻¹`, kind `0x1C` rotations and `0x1D` translations, flag 0
+  like the stock `_exec` clips. When the source runs slower than the game, place its keys on
+  EXPLICIT times, e.g. `[0, 2, 4, …]` for a 30 Hz source on the 60 fps timeline. That needs no
+  resampling: the evaluator slerps between keys. Every clip is checked with `anm_dump.evaluate_pose`
+  against the source world transforms (< 1 mm).
+* **The DLL** plays a body that carries `motion/*.anm` members from that pool only, ignoring the
+  sex pool (`selection::DancerCandidate::motion`). The sidecar sex then only labels the dancer.
+* **Role bones.** The shadow, BIG HEAD and the part attach points look up `Hips`, `Spine2`,
+  `Head`, `LeftToeBase`, `RightToeBase` and `LeftForeArmRoll` BY NAME in the body's `.b2it`. Append
+  ALIAS entries to it (extra name, same index; `K.write_b2it` keeps the table sorted). The World
+  engine never opens a body `.b2it`, only the DLL does.
+* **Winding.** A source in D3D left-handed space needs a mirror (negate Z) and a reversed triangle
+  order to land in the game's right-handed convention. Quaternions follow as `(−x, −y, z, w)`,
+  handled implicitly by conjugating every frame with the mirror.
+* **Sequels on the same rig (`examples/port_character_ultramix2.py`).** DDR ULTRAMIX 2 /
+  *Dancing Stage Unleashed 2* reuses the K3D formats. It ships as the six
+  `data_mods/custom_models/dancers/UMX2 *` folders. Three differences are handled:
+  - Each model leaves out some ancestor joints (afro has no `root`, robo has no `Sternum` /
+    `Clav_*1`, …). The missing joints and the role-bone joints are added as UNWEIGHTED helper
+    bones, with binds copied from a sibling model. All six binds are one skeleton, and every clip
+    animates every joint.
+  - The texture and clip pool come from the rip's `default_model.csv` (NORMAL P1) and
+    `animations.csv` (GROUP) tables.
+  - Clips play whole (`loop_in = 0`).
+* **DSU3 (`examples/port_character_ultramix3.py`).** *Dancing Stage Unleashed 3* has eight new
+  dancers, which ship as `data_mods/custom_models/dancers/UMX3 *`. This port handles more
+  differences:
+  - A multi-material `.ddm` revision (cloth / face / pants / shoes). `parse_ddm` reads both
+    revisions, and each slot becomes a World material with the COSTUME1 texture from
+    `<COSTUME>.csv`.
+  - Maya-style joint names (`M_Root`, `L_Knee`, …) with no toe joints. The role aliases are
+    `M_Root` / `M_Chest` / `M_Head` / `L_Ankle` / `R_Ankle`.
+  - Separate male (`M_*.ani`) and female (`F_*.ani`) clip sets, picked by the GENDER column.
+  - Per-model bind origins. A helper bone's bind is shifted by the offset between the two rigs.
+* **DDR ULTRAMIX 4 (`examples/port_character_ultramix4.py`).** Ten dancers (2026-10-10), shipped
+  with the earlier three in ONE source folder, `data_mods/custom_models/dancers/ULTRAMIX 1-4/`:
+  `Yuni`, `Akira`, `Boldo`, `Charmy`, `Astro` (new characters) and `Lady 4`, `Honey 2`, `B 2`,
+  `Maid-Zukin 3`, `Konsento 2` (returning characters, but new meshes, rigs and textures; keys
+  `umx4<name>00`). Extract with `scripts/extract_ultramix_data.py ultramix4_us`. Differences
+  (RE note §13):
+  - A `.ddm` revision 4 (u32 `0x112` at 0x04): 6–22 materials with their own bone palettes,
+    4-weight 64-byte vertices, bind space = clip space (Y-up). `parse_ddm` reads it.
+  - HumanIK-style joint names (`Hips`, `Spine2`, `leftUpLeg`, …) in their own parent table
+    (`HIERARCHY_UMX4`); every model carries its gender's whole skeleton (male 32, female 57), so
+    there are no helper bones. Toe aliases → `left/rightFootIndex1`.
+  - One `.ddm` holds all four costumes' geometry; `<COSTUME>.csv` hides materials per costume
+    (empty cell or RENDER `hidden`). COSTUME 1 is built, materials sharing a texture are merged,
+    and `sphere` (chrome env-map) materials get rest-pose matcap UVs.
+  - The clips are **15 Hz** (4:1 decimations of World's own takes), so their keys go on every
+    4th World frame (`ani_to_anm_spec(..., frame_step=4)`), not every 2nd like DSU1–3's 30 Hz.
+    `ultramix_k3d_dump.py match <ani dir> <World mc_* dir> <factor>` shows the rate of a new rip.
+
+```bash
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_ultramix4.py   # ~80 s for 10
+```
+
+### A DanceDanceRevolution Universe (Xbox 360) dancer (`examples/port_character_universe.py`)
+
+Universe is the same KCEH K3D engine again, and its data is still little-endian on the 360, so
+this is the ULTRAMIX 4 port with HD rigs. All 25 ship as
+`data_mods/custom_models/dancers/UNIVERSE 1-3/<Name> <n>`: Emi, Rage, Lady, Afro, Honey and B in
+costumes 1–4 (every costume is its own model on the disc), plus `Queen 1` (keys `univ<type>0<n>`).
+RE note: `docs/dancing_stage_unleashed_dancers_port_feasibility.md` §14. Differences from UMX4:
+
+- **Getting the files.** The disc is an XGD2 image. `scripts/xdvdfs_extract.py` lists and extracts
+  XDVDFS images (Xbox and Xbox 360; plain XISOs and redump-style dumps), then
+  `scripts/extract_ultramix_data.py universe_us` unpacks `x_data_XENON_US.bin`.
+- **`.ddm` 0x112 with palette groups.** A material holds 1–7 groups, each with its own 30-bone
+  palette and index range, and an odd index count is padded to 4 bytes. `parse_ddm` reads both
+  UMX4 and Universe.
+- **Big rigs.** The male skeleton has 87 joints and the female 113: fingers, `*Roll` joints, hair
+  and tie chains (`HIERARCHY_UNIVERSE`). Earlier ports asserted ≤ 64 posed bones. The frame board
+  now holds 256, so this port checks that limit instead.
+- **Costume CSV quirks.** Materials match their row exactly or by a `_<cell>` suffix
+  (`cow_model_*`). `shoessshader` is a known typo. A texture that is not on the disc falls back to
+  the `.ddm`'s own texture name. Unlisted untextured `lambert1` slivers are dropped.
+- **Render styles.** `toon` / `toonSphere` → `mdl_ch_constant_vc`. `sphere` gets matcap UVs. The
+  `semitrans` sunglass lenses go to an alpha-blended slot with COLOR0 alpha `GLASS_ALPHA` (0.5,
+  a guess: the texture has no alpha).
+- **Clips.** The clips are 15 Hz, like UMX4's, so keys go every 4th frame. The pool is the
+  gender's group plus `unisex`.
+
+```bash
+python3 scripts/xdvdfs_extract.py extract ~/Desktop/ddr_universe/ddr_universe.iso ~/Desktop/ddr_universe/disc 'x_data_*'
+python3 scripts/extract_ultramix_data.py universe_us ~/Desktop/ddr_universe/disc ~/Desktop/ddr_universe/extracted
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe.py    # ~20 min for 25; DANCERS=lady:3 for one
+```
+
+### A DanceDanceRevolution Universe 2 (Xbox 360) dancer (`examples/port_character_universe2.py`)
+
+Universe 2 uses Universe 1's formats, so this script sets Universe 2's file names on
+`port_character_universe.py` and runs it. The 29 dancers ship in the same
+`data_mods/custom_models/dancers/UNIVERSE 1-3/` folder as Universe 1's (keys `uni2<type><nn>`,
+texture stems `u2<type><n>_*`). RE note: §15 of the same doc.
+
+- **Getting the files.** The disc is the PAL release (XGD2). Unpack it with
+  `scripts/extract_ultramix_data.py universe2_eu` (`x_data_XENON_EU.*`). Every file has a `z2_`
+  prefix, and the costume CSVs have five costume columns.
+- **Labels.** Emi, Rage, Afro and Honey costumes A–D reuse Universe 1's meshes with new outfit
+  colours, so they ship as `<Name> <n> Alt`. Costume E is new and ships as `<Name> 5`. B and Queen
+  have four new costumes each: `B 5..8` and `Queen 2..5`. Universe 1's Queen is `Queen 1`. Angel
+  is a new character. Lady is not in Universe 2.
+- **Dropped.** Column 5 of B and Queen repeats column 4. The script checks that before skipping
+  it. `z2_Britney_*` is an unused near-copy of Angel. The create-your-own avatar bodies and heads
+  are not ported.
+- **Render styles.** `specular` is new and is drawn like `toon`.
+
+```bash
+python3 scripts/xdvdfs_extract.py extract ~/Desktop/universe/ddr_universe_2.iso ~/Desktop/universe/disc 'x_data_*'
+python3 scripts/extract_ultramix_data.py universe2_eu ~/Desktop/universe/disc ~/Desktop/universe/extracted
+PLAN_ONLY=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe2.py    # material plan only, seconds
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe2.py    # ~11 min for 29; DANCERS=emi:5 for one
+```
+
+### A DanceDanceRevolution Universe 3 (Xbox 360) dancer (`examples/port_character_universe3.py`)
+
+Universe 3 again uses Universe 1's formats and Universe 2's skeleton and clips. Its nine new
+characters (Valencia, Guy, Silvia, Rico, Miki, Claudia, Roxy, Hanzo and Simba) have one costume
+each and ship in the same `UNIVERSE 1-3/` folder. Keys are `uni3<name>01` and texture stems
+`u3<name>_*`. RE note: §16 of the same doc.
+
+- **Getting the files.** The disc is NTSC-U and keeps Universe 1's US file names, so
+  `scripts/extract_ultramix_data.py universe_us` unpacks it.
+- **Tables.** `z3_character_models.csv` has no TYPE column, so the script takes each label from
+  the NAME column in title case. Each `z3_chr_<id>.csv` has a single costume column.
+- **Not ported.** The create-your-own avatar parts, as in Universe 2.
+
+```bash
+python3 scripts/xdvdfs_extract.py extract ~/Desktop/universe/ddr_universe_3.iso ~/Desktop/universe/u3/disc 'x_data_*'
+python3 scripts/extract_ultramix_data.py universe_us ~/Desktop/universe/u3/disc ~/Desktop/universe/u3/extracted
+PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_universe3.py    # ~3 min for 9; DANCERS=simba for one
+```
+
+### A System 573 polygon dancer (`examples/port_character_sys573.py`)
+
+The same Omnimix path for the arcade dancers of DDR 3rdMIX PLUS / 4thMIX PLUS / 5thMIX (Konami
+System 573, 49 characters, 16 shared dance routines). All 49 ship as
+`data_mods/custom_models/dancers/<N>MIX <Name>` (keys `ddr<3|4|5><chara>00`). `3rdMIX Afro` was
+cabinet-tested 2026-09-29; the other 48 were ported the same day with the same checks. The
+decoders and all conversion math are pure numpy in `scripts/sys573_dancer_dump.py`
+(`world_bones`, `world_binds`, `world_mesh`, `world_atlas`, `routine_samples`,
+`routine_to_anm_spec`). Formats and RE: `docs/sys573_dancers_research.md`. Extract a mix first
+with `scripts/extract_sys573_data.py`.
+
+* **Rig.** 31 bones: `root` (the routine's travel), the 16 joints and 14 HELPER bones. The 573
+  draws one of 5 hand shapes per hand and one of 4 faces per frame. Here every alternate is in the
+  mesh, each on its own helper bone, and the clip scales the hidden ones' helpers to 1e-3 with
+  kind-10 scale tracks (key pairs one frame apart at each change). Helpers are leaves, so no
+  segment-scale compensation reaches anything else.
+* **Mesh.** One rigid-skinned mesh; every PSX object rides one bone. The texture is a 512×256
+  atlas: the PSX 256×256 page on the left, and the untextured polygons' flat colours (as is: an
+  untextured lit PSX primitive draws its RGB unscaled) as 16 px swatches on the right. It is upscaled 2× nearest-neighbour. PSX
+  triangles are clockwise from outside; the triangle order is reversed.
+* **Clips.** One `.anm` per routine, not per 573 clip: a 573 clip is ONE measure and only
+  flows into its successor when chained. 120 frames per measure (World's dance clock runs at
+  120 BPM under `bpm_sync`), keys every 2nd frame. A routine is 13–14 measures, 26–28 s at
+  120 BPM. The 1-measure `normal_*` idles are skipped.
+* **Root travel.** The 573 re-bases the root on the previous measure's end pose, so a routine
+  wanders up to ~3 m and ends turned. `ROOT_MODE`:
+  - `recentre` (default): the 573 path, shifted so its bounding-box centre is the dancer's mark;
+  - `travel`: exactly as the 573 plays it;
+  - `inplace`: root x/z translation removed; turns, hops and bobbing are kept.
+  Each routine ends somewhere else than it starts, so the next clip starts with a jump.
+* **Checks** per clip: joint positions of the written `.anm` against the 573 pose (< 1 mm; the
+  proof of concept measured ≤ 0.11 mm) and every helper's scale against the 573 draw selection
+  (0 mismatches). Model: codec round trip, unique bone identities, palette ≤ 52, ≤ 64 bones.
+* **Batch.** `DANCERS=all` ports every model of every extracted mix (~7 min for 49). Labels are
+  `3rdMIX` / `4thMIX` / `5thMIX` + the character name, ≤ 15 bytes (`display_name` drops a trailing
+  mix-number marker: `afro4` → `4thMIX Afro`, `zukin5a` → `5thMIX Zukin A`). Labels are
+  `<3rd|4th|5th> <Name>` (≤ 15 bytes) and keys `ddr<3|4|5><name>00`. The sidecar sex comes from
+  a hand-made table in the script (it only affects the shadow scale and the label).
+
+```bash
+SYS573_DIR=~/Desktop/ddr_573_extracted DANCERS=3rdmix_plus/afro PREVIEW=1 \
+  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_sys573.py
+```
+
+### A DDR STRIKE / FESTIVAL / PARTY COLLECTION (PS2) dancer (`examples/port_character_strike.py`)
+
+DDR STRIKE's 45 polygon dancers (22 characters in two costumes, plus the gold RHYTHM3) are the
+System 573 engine's data on the PS2, so the port is the 573 one (`port_character_sys573.port_loaded`)
+with a different loader. All 45 ship as `data_mods/custom_models/dancers/DDR Strike/<Name> <n>` (keys
+`strk<name><n>00`), ported and round-trip previewed 2026-09-29; not yet cabinet-tested. RE:
+`docs/ps2_ddr_filedata_research.md` §4. DDR FESTIVAL (`GAME=festival`, 26 dancers) and DDR PARTY
+COLLECTION (`GAME=pc`, 60: the dancers of 1st..7thMIX and the CS mixes) are the same engine again
+(RE §6.1) and ship as `dancers/DDR FESTIVAL/<Name> <n>` (keys `fest<name><n>00`) and
+`dancers/DDR PARTY COLLN/<Name> <mix>` (keys `pc<name><mix>00`), ported 2026-10-03; not yet
+cabinet-tested. Neither disc has 3D stages.
+
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract strike_jp | festival_jp |
+  party_collection_jp <disc> <out> --unpack` (`PS2_DIR`; `STRIKE_DIR` still works for STRIKE):
+  `unpacked/<id>/001.cmd` meshes and `000.tcb` textures, the 8 `unpacked/<set>/*.cmm` motion
+  sets, and `elf/chara.lst` / `chara20.lst` / `chara.pos`. `GAMES` in the script has each disc's
+  ids and table address.
+* **Differences from the 573 port.**
+  - The texture is a 192×256 8 bpp TCB at the left of the 256² page the UVs address. Palette
+    alpha 0 is transparent and anything else opaque.
+  - The motion files use the PS2 key-block layout, which `sys573_dancer_dump.parse_cmm`
+    detects. The 16 routines are the 5thMIX set; each is taken once from the 8 sets.
+  - A 20-object mesh (six of Party Collection's) uses `chara20.lst`: one hand shape per hand, so
+    the rig has no hand helpers (21 bones).
+  - Names, the sex call and the model scale come from the game's character table, hard-coded in
+    the script and checked against the ELF when it sits beside the extraction. The table's
+    scale is uniform: BABY-LON is 0.4 and AKIRA 1.06. It goes into the sidecar's model_scale
+    column. The sex comes from the record's motion-set list (male / female routine sets);
+    STRIKE's is judged from the models.
+  - The script writes `OUT_BASE/<source>/<label>/` directly: `DDR Strike`, `DDR FESTIVAL`,
+    `DDR PARTY COLLN`. Labels are the game's names with the costume digit (`Blues 1`) or the mix
+    (`Afro 1st`), shortened to 15 bytes where needed: BABY-LON → Baby-Lon, PRINCESS-ZUKIN →
+    P-Zukin, OSHARE-ZUKIN → O-Zukin, ROBO2001 → Robo (STRIKE).
+* **Checks.** They are the 573 port's. The worst joint error over all 131 × 16 clips is
+  0.11 mm, and a re-run is byte-identical. The clips depend only on the object table: every
+  28-object dancer of the three discs has byte-identical `.anm` files, and the six 20-object ones
+  share a second set.
+
+```bash
+DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~6 min for 45
+GAME=festival DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # ~4 min for 26
+GAME=pc DANCERS='AFRO(1st),BUS(7th)' /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_strike.py      # names as in the table
+```
+
+### A Dance Dance Revolution for Windows (2002, "DDR PC") dancer (`examples/port_character_ddrpc.py`)
+
+KCEA's Windows port is the System 573 engine on Direct3D 8 with the 573 content **compiled into the
+executables as C data**: 24 built-in characters (the 3rd–5thMIX cast re-dressed) in
+`DanceDanceRevolution.exe` + `data.bin`, and 25 downloadable characters as `character_dll/<name>.dll`
+(exporting one record, `dll_header`) + `<name>.bin` (its BMPs). Meshes are already posed in each
+joint's frame, textures are BMPs, and every routine is baked to per-frame 4×3 joint matrices at 60
+frames per measure — no rotation tracks, no alternates. All 49 ship as
+`data_mods/custom_models/dancers/DDR WINDOWS 2K2/<Name>` (keys `ddrpc<name>00`). Decoders and all
+conversion math are pure numpy in `scripts/ddrpc_dancer_dump.py` (`Game`, `load_dll`,
+`rest_matrices`, `world_binds`, `world_mesh`, `world_atlas`, `routine_worlds`, `retarget_worlds`,
+`worlds_to_anm_spec`); formats and RE in `docs/ddr_pc_dancers_research.md` (§0 has the unpack
+steps: `cabextract` the installer's `Data.Cab`, `unzip` the `ddr_char*.exe` packs).
+
+* **Rig.** 17 bones: `root` + the 16 PC joints in parent-first order under the 573 hierarchy.
+  **Binds are the sex's idle (`M_normal` / `F_normal`) frame-0 joint matrices, rotation included** —
+  the joint-local meshes are authored in those rotated frames; translation-only binds twist every
+  limb (the first attempt did).
+* **Mesh.** One rigid-skinned mesh, the file's normals, two-sided (the game draws dancers
+  `D3DCULL_NONE`). Atlas: every BMP at 2× nearest, colour key (248, 0, 248) → alpha 0, plus a 16 px
+  swatch per untextured material's flat colour (the game shades the vertex diffuse alone there;
+  every shipped one is a single colour) with white COLOR0 — the 573 convention, so Workbench
+  previews are truthful. Blink / mouth texture frames (`t1..t3`) are dropped: frame 0 only.
+* **Space.** D3D is left-handed facing −Z; `diag(1, 1, −1)` + ×0.1 puts it in World. The mirror
+  flips CW → CCW, so the index order is KEPT (the 573 port reverses it).
+* **Clips.** One `.anm` per routine of the dancer's own playlist (8 male / 12 female, from the
+  exe's `id & 7` tables), 120 World frames per measure with one key per PC frame. The bake is in
+  place (hips x/z ≈ 0), so `ROOT_MODE=inplace` is the default; `recentre` is available. Checked
+  against the PC matrices: worst joint error 0.13 mm over 484 clips.
+* **Batch.** `DANCERS=all` (~10 min for 49 without previews; `PREVIEW=1` adds ~15 s each). Labels
+  are the game's select-screen names (`Mr Spanky`, `Ni-Na`, `Robo2000` → key `ddrpcrobo2k00`). The
+  sidecar sex and scale come from `dll_header` (Ni-Na is flagged male there and dances the male
+  pool; the port keeps it).
+
+```bash
+DDRPC_DIR=~/Desktop/ddrpc_work/game DANCERS=Rage,alex PREVIEW=1 \
+  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_ddrpc.py
+./scripts/validate_ddrpc_tools.sh ~/Desktop/ddrpc_work/game ~/Desktop/ddrpc_work/character_dll
+```
+
+### A DDR SuperNova / SuperNova 2 / X / X2 (PS2) dancer (`examples/port_character_supernova.py`)
+
+SuperNova's eight dancers (AFRO, BABYLON, EMI, GUS, JENNY, RAGE, ROBOZUKIN, RUBY) are a new,
+XSI-exported engine: skinned strip meshes with up to three weights per vertex on a 22-joint
+HumanIK-named skeleton, and 30 Hz quaternion routines. Decoders and the World-space math are in
+`scripts/tzm_dump.py`; formats and RE in `docs/ps2_ddr_filedata_research.md` §7.4. Ported
+2026-09-30 and round-trip previewed (all eight re-import and render, rest and mid-clip). Staged as
+one folder per character (`Afro`, `Baby-Lon`, ...; keys `sn<name>00`) under `OUT_BASE` (default
+`~/Desktop/SuperNova Dancers`); shipped under `data_mods/custom_models/dancers/DDR SUPRNVA 1+2/`
+as `Afro 1` .. `Ruby 1` beside the SuperNova 2 content below.
+
+**SuperNova 2** (`GAME=sn2`, 2026-10-03): twelve characters × two costumes (`<skin>01` / `02`:
+the eight above + YUNI, ALICE, CONCENT, JULIO) dancing the same 29 routine packs byte for byte.
+The costume-01 bodies of the returning eight ARE the SuperNova skins (same sheets — EMI's and
+ROBOZUKIN's recoloured — same rigs, same geometry), so `DANCERS=all` ports the sixteen that are
+new (every costume 02 + both costumes of the four new characters; `DANCERS=afro01` still works),
+labelled `<Name> 2` / `<Name> 1`, keys `sn2<skin>`. Two things changed in the packs:
+* the body meshes have **no face** — the eyes / mouth triangles moved to `<skin>_face.TZM`, an
+  unskinned mask (`face01` neutral, `face02` smile, `face03` eyes shut; three 128² sheets) hung
+  off the Head joint through a `trans_null` whose rotation is the Head bind rotation's inverse.
+  `tzm_dump.face_overlay` puts the chosen sheet (`FACE`, default `face01`) into the body's game
+  space (`Head_bind · W_object · v`, verified on all 24 packs) and the port joins it to the body
+  mesh as its own material slot (`sn2<skin>_face`), weighted 1.0 to `Head`;
+* the root node is named after the pack (`afro01`, `concent01`) instead of `globalSRT` while the
+  clips still carry the original rig's static root track — `tzm_dump.clip_worlds` matches the
+  rig root by position (CONCENT's root carries a 0.41 pose offset the game discards; with it the
+  character would hover 4 cm). JULIO 1 (`SCALE` 0.9) and BABY-LON 2 (0.4, a chibi) fold their
+  scale like BABYLON. Not ported: the two other expressions.
+* CONCENT's chest fan (`body01 > body_trans_null > fan01` in its face pack, hung off `Spine1`,
+  spun -720° per 4 s loop by the pack's own `ddr_concent_fan` record) is ported SPINNING: the fan
+  object becomes a 24th joint `fan01` under `Spine1` (`tzm_dump.attach_part_bone`: pose = the
+  chain below the pack root, bind = Spine1's bind × that chain — exactly where
+  `tzm_dump.part_overlay` puts its vertices, which weight 1.0 to it, slot `sn2<skin>_body01`), and
+  every dance clip gets a `fan01` rotation track = the chain's static tilt × the spin sampled at
+  the clip's own key frames, wrapping over the 240-frame loop (`tzm_dump.part_spin_track`). The
+  `.anm` evaluates to one revolution per 2 s relative to Spine1. `SPIN=0` joins it static instead.
+
+**DDR X / X2** (`GAME=x` / `GAME=x2`, 2026-10-03): the same engine, routines and face-pack layout
+once more (RE doc §7.6). Both games bundle SuperNova 2's skins (X's costumes 02 / 03, X2's 03) and
+add their own — X's costume 01 for all twelve characters, `babylon02`, BONNIE, ZERO; X2's costume
+02 (X's 01 bodies on new sheets), `bonnie02` / `zero02` and the four PIX pigs (`SCALE` 0.45).
+`DANCERS=all` ports only what SuperNova 2 does not have (15 + 18), and the two games ship into ONE
+source folder, `data_mods/custom_models/dancers/DDR X + X2/` (`Afro 1` = X's 01, `Afro 2` = X2's
+recolour, `Baby-Lon 1/2` X, `Baby-Lon 3` X2, `Pix 1..4`; keys `x<skin>` / `x2<skin>`). The X
+tables carry what SuperNova 2's did not: the per-costume face root (`face01`; PIX
+`jx_pixNN_face1`) and face pack (X2's bonnie02 / zero02 reuse the 01 masks), the sex flag (PIX
+dances a mixed MM/FF six), the game's own shadow scale (+0x8C: BABYLON / PIX 0.35 .. CONCENT
+0.85 — the sidecar's), and CONCENT's fan from `parts/convent01_body01.tzm` on `Spine1`
+(`x<skin>_body01`). Not ported: the DISK-A/B/? ring mannequins (`wakka_*`, zero-area strips) and
+X2's `dmm/` board-game chibis (another rig). Routine lists are long here — 12–14 per character.
+
+* **Input.** The extraction of `scripts/extract_ps2_ddr_data.py extract supernova_jp |
+  supernova2_jp <disc> <out>` (`SN_DIR`): `files/IMAGE/model/chara/skin/<name>.TZM` and
+  `chara/motion/<clip>.TZM`.
+* **Rig.** The TZM's own bones, bind = the file's GLOBAL bind pose (`T2`, `R2`), in game space
+  through one scale (`tzm_dump.GAME_SCALE` = 0.970 / 9.655: the Hip at World's Hips height; the
+  TZM frame already faces +Z with its left at +X, so no mirror). BABYLON's `SCALE` node (0.6) is
+  folded into that scale and dropped. The exported rest pose is the T-pose lifted onto the floor.
+* **Mesh.** Every mesh of every object joined into one, object transforms applied (AFRO's muffler
+  is authored in its own frame), the file's normals via `ddr_normal`, strip winding made
+  consistent with the normals (the GS never culled, so the strips face either way), the 512² CLUT
+  sheet as `sn<name>_tex`. Vertex colours are kept where a mesh has them: GUS's 60 %-alpha glasses
+  go to a second, alpha-blended material slot (`MESH_FLAG_TRANSPARENT`).
+* **Clips.** The character's OWN routine list from the ELF character table (AFRO jazz + soul-funk,
+  RAGE break + hip-hop + house, ...; the 4 s `*_NE_01` idles are left out), one `.anm` per
+  routine, 30 Hz keys on even frames of the 60 fps timeline (the clips are authored at 120 BPM
+  like World's — `MM_NE_01` is 241 frames, `mc_*_ne01_loop` 242). Each clip is checked against
+  the TZM pose (< 0.15 mm per joint). Role aliases `Hips` / `LeftToeBase` / `RightToeBase` →
+  `Hip` / `LeftToes` / `RightToes` (`Spine2` and `Head` are named alike).
+* **Sidecar.** `sn<name>00, pl, <sex>, A, 1.0, <0.75 F / 0.8 M>, 0.0`; the sex is the routine
+  family's (`FF_*` / `MM_*`, which is what the table's flag says too).
+
+```bash
+DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~25 s for 8
+GAME=sn2 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~60 s for the 16 SuperNova 2 ones
+GAME=x DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~2 min for the 15 X-only ones
+GAME=x2 DANCERS=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_supernova.py   # ~2 min for the 18 X2-only ones
+```
+
+### The DDR SuperNova / SuperNova 2 / X (PS2) stages (`examples/port_stage_supernova.py`)
+
+SuperNova's 20 stages (+ `system_bg001`; SuperNova 2 ships the same packs byte for byte and adds
+only `system_bg002` — `GAME=sn2`, 2026-10-03) are XSI scenes: objects grouped under blend-layer roots
+(`dec` opaque, `add` additive, `sub` subtractive, `glo` glow, `ble` alpha), coloured strip meshes
+(format 0x152), a `stageNNN` MOTION record with SRT tracks on the animated parts (a 4 s / 8-beat
+loop at 60 fps, 8 s at 29.97) and material fcurves, and a `cameraNNN` record with ten shots + a
+neutral one. World's own stage parts carry the same layer names (`gm_dawnstreet00_{dec,ble,glo}` —
+`dawnstreet00` is DDR X's `st005`), so one layer becomes one part with the stock flag conventions.
+Ported 2026-09-30 (geometry, object loops, material animation, cameras) and round-trip previewed
+(every part re-imports; the Workbench render shows the additive layers opaque); not yet
+cabinet-tested.
+Staged as `Stage 01` .. `Stage 20` + `System BG 1` (keys `snstage001`.., `snsystembg001`) under
+`OUT_BASE` (default `~/Desktop/SuperNova Stages`; `GAME=sn2`: `System BG 2`, `snsystembg002`, under
+`~/Desktop/SuperNova 2 Stages`); shipped together under `data_mods/custom_models/stages/DDR SUPRNVA
+1+2/` (the source folder supplies the label prefix).
+
+**DDR X** (`GAME=x`, 2026-10-03): six stages of its own (`stage001..006`; X2 ships them again plus
+SuperNova 2's `system_bg002` byte for byte, so there is no `GAME=x2` here), the same layer / record
+layout with 29.97 fps records on 001 / 002 and camera records named `jx_stNNN_cam_FIX2`
+(`Camera_001..008`, `Camera_neu`, `Camera_non_chara01..04` → `_st01..08`, `_non01..05`, then the
+shared close-ups `_non06..15`; `is_camera_record` now classifies by content). `Stage 01` is read
+from `stage001_2play.TZM` — the 1P pack plus the eighteen beat-pulsing speakers the game overlays
+from `stage001_speaker.TZM`, same cameras; the other `_2play` packs are reduced two-player dressings
+and are skipped. Shipped as `data_mods/custom_models/stages/DDR X + X2/Stage 01..06` (keys
+`xstage001..006`, texture stems `x001...`). **Stage 02's TVs are movie screens**: X drew its
+sub-monitor feed on the `Render*` objects (`RenderBIGTV`, `RenderSBTOPTV`, `RenderSBTVa/b/c`), so
+the port textures them `offscreen1` (the "Stage screens" section above — World's STAGE SCREENS mode
+then plays the song's movie on them), remaps each surface's authored v band onto the square's 16:9
+band (0.21875–0.78125; u already runs left to right as seen), paints them white and skips material
+animation on them; `RenderBIGTV2`, a coplanar glass over the big TV with a gradient placeholder, is
+dropped. `CFG['screens']` / `CFG['drop']` carry the per-game object-name rules.
+
+* **Parts / flags.** `bg` (the skydome subtree of `dec`, `:-2`) and `dec` two-sided opaque
+  `0x0001`; `ble` alpha `0x02C1` (`:-1`); `add` additive `0x06C1` + `flags2 4`; `sub` subtractive
+  `0x06C1` + `flags2 8`; `glo` = an opaque copy with the `_t` sheet PLUS an additive copy with the
+  `_g` glow sheet. Two-sided everywhere because the GS never culled. Vertex RGBA colours are kept
+  (`_vc`), the MATERIALLIST maps each mesh's (0x18-byte, truncated) material name to its textures.
+* **Rig / loop.** Per part a `root` bone plus one FLAT bone per animated object (a mesh's anchor
+  is its deepest animated ancestor; the static sub-chain is baked into the vertices; bind = the
+  rigid part of the anchor's rest world; a zero rest scale — flattened decals — is baked too).
+  `gm_<key>_<part>_play_loop.anm` (loop bit) carries q / t / relative scale per key with a wrap
+  key, checked against the TZM object worlds (rotation < 3e-4, translation < 1e-4 relative). Flat
+  bones side-step World's segment-scale compensation.
+* **Foot panel.** `FOOTPANEL=1` adds `model/footpanel.TZM`'s unlit `ftpnl` mesh as `footpanel`
+  (texture `snfootpanel`; its arrow layout matches the stock `gm_boom00_footpanel`). Off by
+  default: stock World stages carry that part only on the lesson-only `boom00`, and the shipped
+  SuperNova stages dropped theirs.
+* **Material animation.** The `stageNNN` record's material fcurves (`tzm_dump.material_animation`:
+  kind 503 texture translation, 504 colour, 1302 glow strength — RE doc §7.4) become one
+  `gm_<key>_<part>_play_loop.sanm` per part in World's own material-clip layout (`anm_dump.write_anm`
+  `material_tracks` / `material_targets`, format doc §7): one kind-8 key per record frame plus a
+  wrap key, on parameter floats 2 / 3 (`m_vTexAnime` offU / offV — the `_uvani` conveyors, water and
+  light strips scroll), 4..6 (`vConstatntColor` rgb: the 504 pulse on the base pass, the 1302 glow
+  on the `_g` additive copy). Materials driven on 4..6 are exported with `mdl_ch_constant_c_vc` and
+  their frame-0 values in `ddr_params` (`mat["ddr_sn_material"]` / `["ddr_sn_pass"]` record the
+  source). The hook DLL samples the `.sanm` on the stage clock into the part's private material
+  copies (`src/core/anm/sanm.rs`); without that build the model shows the frame-0 state.
+* **Cameras.** Each camera record's `Camera_001..010` → `camera/<key>_st01..10.camanm` (the
+  director's main rotation), `Camera_neu` → `<key>_non01`, and — `CHARA_CAMERAS=1` (default) — the
+  shared `stage_chara_camera.TZM` close-ups → `_non02..11` (`tzm_dump.camera_to_camanm_spec`): one key
+  per record frame at 60 fps (`60 / fps` apart: 4 s clips, 8 s for the 29.97 fps stages), position
+  × `GAME_SCALE` in cm, the look-at orientation with roll, near 0.1 / far 32768 / aspect 1.333, and
+  the FOV through the inverse of the game's projection. SuperNova's kind-7 FOV is XSI's HORIZONTAL
+  angle of the 4:3 frame (0.93616 rad = 53.638°, XSI's default — and exactly A3's stock 41.53°
+  vertical at 1.333); `FOV_KEEP=vertical` (default) keeps that vertical extent on 16:9 (game hFOV
+  68°: what SuperNova showed top to bottom stays in frame, the sides widen), `horizontal` keeps the
+  horizontal extent (top / bottom cropped). Static shots collapse to single keys. With `PREVIEW=1`
+  the stage and a ported dancer (`PREVIEW_DANCER`, default the SuperNova `Afro 1` under
+  `data_mods/custom_models/dancers/DDR SUPRNVA 1+2/`) are rendered through the written clips as the game projects them
+  (`import_anm.load_camanm`): `<key>_cam_non01_f0.png`, `<key>_cam_st01..03_f<mid>.png`.
+* **Sidecar** `map_resources.rlist.txt`: `<key>, 000000, 000000, bg:-2, dec, glo, add, sub, ble:-1`
+  (present parts; `footpanel` last when `FOOTPANEL=1`).
+* **Not ported:** the `_conf.PTF` lighting; the material diffuse colour (0.7 grey on 19 materials —
+  whether SuperNova multiplies it into the draw is untraced); a texture scale / rotation fcurve
+  would be reported as UNSUPPORTED (none exist).
+
+```bash
+STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~40 s for 21
+GAME=sn2 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # system_bg002 only
+GAME=x STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_supernova.py   # ~1 min for the 6 DDR X stages
+```
+
+### The Dancing Stage / DDR HOTTEST PARTY (Wii) dancers (`examples/port_character_hottest.py`)
+
+Hottest Party runs on Hudson's Mario Party engine, so its models are **HSFV037** (decoder and
+World-space math: `scripts/hsf_dump.py`; formats and RE: `docs/wii_ddr_hottest_party_research.md`).
+Extract the disc first with `scripts/extract_wii_ddr_data.py extract <unpacked disc> <out> --png`
+(`HP_DIR`). Ported 2026-10-03 and round-trip previewed; not yet cabinet-tested. **Retired
+2026-10-04**: MUSIC FIT remakes this cast on its own rig, and the shipped HOTTEST PARTY dancers are
+that port (`HOTTSTPARTY 1-3`, next section; this one stays as the HSF reference). The 40 were
+`<Label> <costume>`, keys `hp<stem><costume>` (who they are: the research note §6):
+- Emi / Jenny / Afro / Rage;
+- `Dancer A..D` (the four new characters, models `hispanic`, `black_f`, `korea_m`, `jamaika`;
+  neutral labels because nothing on the disc maps the EU names to them);
+- `Backup F / M`.
+
+Each comes in costumes 1..4.
+
+* **Rig.** All 40 models share one 26-joint Maya skeleton (Hips .. `Head*end`, `*Wrist*end`,
+  `*Toe*end`; `*` becomes `_` in bone names).
+  - MayaConverter's `<J>*root` / `<J>*leaf` helper objects are identity and are dropped
+    (`hsf_dump.rig_joints`, parents first: the file lists children first).
+  - The file frame is World's. One scale (`hsf_dump.GAME_SCALE`) puts the Hips at 0.97 m.
+  - Role alias `Spine2` -> `Spine1`.
+* **Mesh.** One vertex per distinct (position, normal, colour, st) corner, since HSF indexes them
+  separately.
+  - Envelope weights (single / dual / multi, up to 5 influences; the exporter keeps 4).
+  - Two-sided (the materials carry NOCULL). Winding is made consistent with the normals, because
+    GX's (0, 2, 1) corner order is mirrored.
+  - A 512^2 body sheet plus the 128 x 64 open-eyes sheet (the game swaps in blink sprites).
+* **Clips.** Every character dances ONE library: `data/c_000.bin`'s 256 clips.
+  - Pieces whose end pose is the next one's start are joined into takes (`hsf_dump.chain_clips`).
+    The 34 takes of >= 3 bars are kept; "Lesson by DJ"'s step demonstrations are left out.
+  - Each piece's length in bars comes from the dance viewer's table (`dll/danceviewDll.rel`,
+    `extract_wii_ddr_data.danceview_clip_bars`). The library mixes 120 / 145 / 177 / 70 BPM
+    takes, and each is retimed so a bar is 120 frames (World's `bpm_sync` clock).
+  - Keys every 2nd frame; Hips x/z re-centred (`ROOT_MODE`); < 0.1 mm per joint.
+  - The takes are **dealt** across a character's four costumes (~154 bars, ~1.7 MB each), and
+    the four together dance all 617.5 bars. Giving every dancer the full library would take
+    ~6.9 MB each.
+
+```bash
+DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_hottest.py   # ~14 min for 40
+DANCERS=emi PREVIEW=1 ...                                                # one character's 4 costumes
+```
+
+### The Dancing Stage / DDR HOTTEST PARTY (Wii) stages (`examples/port_stage_hottest.py`)
+
+42 stages (`data/stgNN.bin`, minus the `stg05` test stub and its three copies) ship as
+`data_mods/custom_models/stages/HOTTEST PARTY 1/Stage NN` (keys `hpstageNN`). Ported
+2026-10-03 and previewed through their own cameras; not yet cabinet-tested.
+
+* **Input.** A pack is a list of (model, motion) pairs: the BG backdrop, the floor pieces and
+  the props, each with its own loop of 180..6000 frames. Then come the dancers' `chr*` / `look*`
+  formation markers (not ported) and six camera motions.
+* **Colour is COLOR0.** Most stage textures are white alpha masks; the vertex colours carry the
+  colour (vtxMode 5). The `_vc` shader multiplies them in. A Workbench render shows them white,
+  so `preview` rewires the materials to emit texture x vertex colour (EEVEE).
+* **Blend groups.** ADDCOL -> `add` (0x06C1/4), INVCOL -> `sub` (0x06C1/8), a translucent pass
+  with real partial alpha -> `ble:-1` (0x02C1), else `dec` alpha-tested. The backdrop model's
+  opaque meshes -> `bg:-2`. All meshes are two-sided.
+* **Parts.** Models sharing a loop length, or one dividing it (sampled at `t mod L`), share a
+  part per blend group. A part is split at 63 animated anchors (frame board: 64 bones per
+  instance). That keeps stages at 2..9 parts.
+* **Rig and loops.** One flat bone per animated anchor (the SuperNova stage scheme).
+  - The geometry is baked at the frame-0 pose: a constant HSF track re-poses its object.
+  - `_play_loop.anm` keys every 2nd frame plus a wrap key.
+  - `_play_loop.sanm`: UV scroll = -(attribute T), unwrapped across the repeats of a shorter
+    loop, on params 2 / 3; litColor tracks on 4..6 (`mdl_ch_constant_c_vc`).
+  - **The curve evaluator must scan, not bisect.** MayaConverter writes pre-roll keys at negative
+    times after key 0 (`hsf_dump.sample_curve`).
+* **Cameras.** The pack's shots -> `_st01..06`; `data/ddrcam.bin`'s 59 dance cameras ->
+  `_non01..59`. Position / aim / roll; the FOV is vertical, its extent kept on 16:9.
+
+```bash
+STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_hottest.py   # ~40 min for 42
+```
+
+### The DDR FuruFuru Party / MUSIC FIT (Wii JP = HOTTEST PARTY 2 / 3) dancers (`examples/port_character_hottest2.py`)
+
+Both games run on Konami's `zan` library (decoder `scripts/zan_dump.py`; formats, Ghidra findings
+and the naming evidence: `docs/wii_ddr_hottest_party_2_3_research.md`). Dump the discs with
+`scripts/extract_wii_ddr_data.py disc` (`HP3_GAME` / `HP2_GAME`). MUSIC FIT re-ships FuruFuru
+Party's whole cast and remakes HOTTEST PARTY 1's in their HP1 outfits, so ONE source folder
+`data_mods/custom_models/dancers/HOTTSTPARTY 1-3/<Name> <n>` (keys `hp<person><nn>`) holds all
+137 from MUSIC FIT's costume files: the eight leads, NAOKI / U1 / jun, Dyna / Bridget / Ceja and
+the eight back-ups Pia, Gliss, Forte, Sharp, Bossa, Nova, Hip, Hop (a back-up costume file holds
+two of them: variants 1/2 and 3/4). A person's variants run HP1 outfit → HP2 → HP3.
+
+* **Rig / mesh** as the HP1 port: one 37-bone rig rebuilt from the rest worlds, the head rigid on
+  `mii_head`, skin weights by joint name, the eye / mouth overlay layers baked into the face
+  texture (`zan_dump.bake_overlay`), accessories on their joints, role alias `Spine2` -> `Spine1`.
+* **Clips.** One library: MUSIC FIT's song motions plus the FuruFuru Party pieces it lacks (1022
+  ~8-bar clips), retimed to 120 frames a bar, dealt 12 per dancer.
+
+```bash
+DANCERS=all /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_character_hottest2.py   # ~10 min for 137
+DANCERS=pia PREVIEW=1 ...                                                 # one person's costumes
+```
+
+### The DDR FuruFuru Party / MUSIC FIT stages (`examples/port_stage_hottest2.py`)
+
+`stages/HOTTEST PARTY 2/Stage NN` (FuruFuru Party, 59, keys `hp2stageNNN`) and `stages/HOTTEST
+PARTY 3/` (MUSIC FIT's 17 own stages; its STG000 / 041–055 are FuruFuru Party's again and ship
+once). The part / flat-rig / camera scheme is the HP1 port's; what is new:
+
+* **Movie screens.** The `root` quad of a `*_MOV*` prop is where the Wii plays a stage movie or
+  the song's PV: textured `offscreen1` ("Stage screens" above), v remapped onto the 16:9 band.
+* **Texture flip-books -> atlases.** World's `.sanm` animates shader parameters, never the
+  texture, so a material cycling TPL images gets its frames side by side along the axis that does
+  not scroll (wrap gutters, triangles clipped at that axis' tile lines into one cell) and the UV
+  offset steps from cell to cell. Steps are two keys on one frame (the sampler takes the later),
+  so nothing blends.
+* **UV scrolls** are the texture matrix's translation `(-u, +v)` of the zan keys (per-axis key
+  counts and holds: `zan_dump.sample_uv`). Every part with animated materials gets a `.sanm`
+  with its own clip length, static parts too; parts split at 48 animated material floats.
+* **Binds** are the nearest rotation of the anchor's rest world and the keys `bind · rest⁻¹ ·
+  world(t)`; a node rotating under a non-uniformly scaled parent shears, which TRS bones cannot
+  carry (logged `SHEAR`, ≤ 0.55 m at the tips of STG049's light cones).
+
+```bash
+GAME=hp2 STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
+  --python tools/blender_ddr_addon/examples/port_stage_hottest2.py   # 59 stages; GAME=hp3 for 17
+```
+
+### A JoJo's Bizarre Adventure: Eyes of Heaven (PS4) character (`examples/port_character_eoh.py`)
+
+CyberConnect2's XFBIN / NUD / NTP3 formats (shared with All Star Battle R), read straight from the
+CPK extraction by `examples/eoh_source.py` + `scripts/xfbin_dump.py`; RE and the content map in
+`docs/jojo_eoh_research.md`. Jotaro, Dio Brando, DIO, Star Platinum, The World and Gyro (2026-10-24)
+ship as `data_mods/custom_models/dancers/JOJO EOH/<Name>` (keys `eoh<code>`), round-trip previewed;
+not yet cabinet-tested. The donor-rig flow with a Biped-style source:
+
+* **Rig.** Z-up centimetres facing −Y, T-pose — Blender's and the donor's axes, so the conform is a
+  straight joint placement (trunk z-map thigh sockets → UpLeg, neck → Neck, `S = kz`); twist
+  helpers ride their limb, `cloth*` coat tails are `skirt`, collar / chain / scarf / cape `spine`,
+  the whole face rig rigid on Head. `HANG` drapes a chain authored streaming straight back (Dio's
+  muffler) before the bake; soles are stretched below the ankle to the stock height.
+* **Mesh.** NUD strips are clockwise from outside — the decoder reverses them. Unskinned models
+  (teeth) are moved to their coord's world and weighted to it. Source cull mode 0 → two-sided.
+* **Textures.** The `col<N>` file's `_d` diffuse (2048×1024 DXT5 → top mip dropped, copied as DDS)
+  and the iris sheet, which keeps the iris at UV (0, 0) for wrap sampling: `roll_half_dds` rolls
+  the DXT blocks by half and the eye UVs (set 1) shift by 0.5. `_n` / `_m` / `_s` are not used.
+* **Dynamic chains** (`DYN_CHAINS`: Jotaro's chain, Dio's muffler). The source chain becomes `DB_*`
+  bones appended after the 33 (a donor-rig first: untracked bones ride their parent at rest), posed
+  to drape before the bake, and `pl_<key>/dynbones.txt` hands them to the DLL's Winx-hair solver.
+
+```bash
+EOH_DIR=~/Desktop/EoH/cpk CHARA=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/port_character_eoh.py   # ~15 s for 6
+```
+
+### A dynamic chain on an already-exported dancer (`examples/add_dynchain_dancer.py`)
+
+When the source rip is gone, a scarf / tail can still get physics: the script imports the shipped
+`pl_<key>.model`, selects the strip's vertices by a box, fits joints along it, re-poses it to hang
+(that pose is the solver's rest), appends `DB_*` bones under a DDR bone, re-weights the strip along
+them and writes the model + `dynbones.txt` over the folder. Add a `CHAINS` entry per character
+(EoH Joseph's scarf is the first).
+
+```bash
+IN=<pl_key dir> OUT=<pl_key dir> CHAIN=joseph /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/add_dynchain_dancer.py
+```
+
+### A JoJo's Bizarre Adventure: All Star Battle R (PS4) stage (`examples/port_stage_asbr.py`)
+
+The 15 ASBR arenas (2026-10-25, `data_mods/custom_models/stages/JOJOS BZRRE ADV/<Label>`, keys
+`jj<id>`; RE in `docs/jojo_eoh_research.md` §3 "Anm" and §5). A stage xfbin is a flat list of
+clumps; each is baked through its coord chain (cm → m × 0.7, the fighting camera's side turned to
+the DDR camera with `FACING`) and joined per clump into `bg` (skydome) / `dec` / `add` / `ble`
+parts. Diffuse sheets only (lightmaps and normal maps dropped; vegetation keeps its leaf cut-out
+sheet on UV set 1) with the material's UV transform as m_vTexAnime, 2048² mip-less sheets
+downsampled in DXT block space (`xfbin_dump.dxt_chain`; cached in `<OUT_BASE>/_texcache`).
+
+* **Loops** (`ANIMATE=1`, the default): the stage's looping `nuccChunkAnm` clips (not the gimmick /
+  cut-in / hazard ones). UV offsets → `_play_loop.sanm` (crowd and flame flip-books stepped, water
+  and sky scrolls interpolated); animated coords (cloud rings, wave strips) → a flat rig +
+  `_play_loop.anm`, every clip checked against the source worlds. Only parts with animated
+  anchors are rigged; a part with just a `.sanm` stays static (`mdl_bg_*`). Sky / cloud loops play
+  at `SKY_SPEED` (0.1) in their own part `sky_bg`.
+* **Water** the source draws with a cube map + normal map is shown as its normal map shaded into a
+  tint sheet (`water_sheet`, colour from `WATER`), scrolled like the source.
+* **Battlefield's chariot** (`LAPS`): the horse / chariot / rider rigs of the gallop clip carried
+  around the rim by the route clip, parts `lap`, `lap2`, `lap3` (≤ 63 animated anchors per part).
+  Other drive-through gimmicks are not ported.
+* Cameras are borrowed (a stock set; Griffin House's for Kira Estate and Wall Eyes, scaled with the
+  stage) plus `_non` cut-aways from `scripts/gen_cutaway_shots.py`.
+
+**`_non` cut-aways.** The director hard-cuts to the next `_non` shot at every dance-clip change and
+holds it 1–2 s (A3's camera rule), which hides the switch. A camera set with only `_st` shots keeps
+filming through it. `python3 scripts/gen_cutaway_shots.py <camera dir> [--prefix KEY] [--scale S]`
+writes 8 slow push-ins on the dancer, each on the line from the dancer to one main shot's eye (so
+inside whatever room that shot fits).
+
+```bash
+ASBR_DIR=~/Desktop/ASBR/cpk STAGES=all PREVIEW=1 /Applications/Blender.app/Contents/MacOS/Blender -b \
+  --factory-startup --python tools/blender_ddr_addon/examples/port_stage_asbr.py   # ~15 min for 15
+```
 
 ### A room / stage from a .blend (`examples/port_room_stage.py`)
 

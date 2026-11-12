@@ -15,20 +15,26 @@
 | `texpresso` | 2 | DXT5 compression |
 | `md5` | 0.7 | Cache fingerprints. The pure layer has its own dependency-free MD5 in `core/xact/digest.rs`. |
 | `aho-corasick` | 1 | Batch AOB prefilter |
+| `encoding_rs` | 0.8 | StepMania simfile text: strict UTF-8, else Shift-JIS, else Windows-1252 (`core/sm/text.rs`). The only external crate `core/sm` uses. |
+| `symphonia` | 0.6 (no default features; `mp3`, `vorbis`, `ogg`, `wav`, `pcm`) | Pack audio decoding in `core/audio/`. No FLAC/MKV/metadata readers and no `opt-simd` (it would pull `rustfft`'s default features). Vorbis decodes gapless (libvorbisfile semantics), MP3 without trimming (libmad semantics). |
+| `rustfft` | 6 (no default features; `sse`, `avx`) | 512-point FFTs for the auto-sync onset analysis (`core/sync/`). Only the runtime-detected x86 SIMD paths — no NEON/WASM — so the same crate builds under `./build.sh` and `./build_win7.sh`. |
 
 `cargo-features = ["trim-paths"]` together with `trim-paths = "all"` strips builder paths from the release binary. The release profile uses `lto = true` and `opt-level = 2`. `Cargo.lock` is committed.
+
+The three pack-conversion crates are pure Rust, so the pipeline they serve (`core/{sm,audio,sync}`, plus `image`/`texpresso` for `core/art`) also compiles natively inside the prep tool `prep/` and the `validate_stepmania.sh` harness crate.
 
 ## Toolchain
 
 - **Rust nightly** is pinned in `rust-toolchain.toml` with the `x86_64-pc-windows-msvc` and `x86_64-win7-windows-msvc` targets plus the `rust-src` and `rust-analyzer` components. Do not switch to stable.
 - **`cargo-xwin`** cross-compiles from macOS/Linux.
-- **Win7 builds** use `-Z build-std=std,panic_abort`, because std on the default msvc target imports `bcryptprimitives!ProcessPrng`, which Windows 7 lacks.
+- **Win7 builds** use `-Z build-std=std,panic_abort`, because std on the default msvc target imports `bcryptprimitives!ProcessPrng`, which Windows 7 lacks. `symphonia` and `rustfft` (sse+avx only) were confirmed to build under both `./build.sh` and `./build_win7.sh`.
 
 ## Other crates in the repo
 
 | Crate | Notable deps | Notes |
 |---|---|---|
 | `updater/` | `ureq` (rustls + webpki roots, never OS TLS), `serde_json` (`preserve_order`), `sha2`, `zip`, `dunce`, `windows-sys` (console) | Not a workspace member. Release builds use the Win7 recipe only. |
+| `prep/` | `encoding_rs`, `symphonia` (same feature set as the DLL), `rustfft` (`sse`, `avx` — same recipe as the DLL), `image`, `texpresso`, `serde` + `serde_json` (two keys of `mod-config.json`), `dunce`, `windows-sys` (console + ToolHelp process snapshot, Windows only) | Not a workspace member (own `[workspace]`); `trim-paths = "all"`, `lto`. Mounts the DLL's pure `core::{audio,sm,ssq,sync,xact}`, `core::art::{jacket,placeholder,source,thumbnail}` and `services::stepmania::{cache,ceiling,convert,identity,model,musicdb,records,sync_state}` with `#[path]`; `prep/src/log.rs` shims the `log_*` macros. Host `cargo test` runs the mounted suites too; release builds use the Win7 recipe (`-Z build-std`) and must pass the same `ProcessPrng` import check as the DLL and updater. |
 | `tools/bot_sim/` | std only | Mounts the DLL's pure bot files with `#[path]` |
 
 ## Runtime game modules
@@ -68,11 +74,14 @@ graph LR
     SVC --> IMG[image / texpresso / md5]
     MODS --> SERDE[serde_json]
     CORE -.dep-free pure layers.-> PURE[core/xact, core/ssq, core/anm, core/ap2]
+    CORE -.pure, external crates only.-> SMP[core/sm → encoding_rs<br/>core/audio → symphonia<br/>core/sync → rustfft<br/>core/art → image / texpresso]
     UPD[updater] -.mounts csv grammar.-> MODS
     SIM[tools/bot_sim] -.mounts pure bot files.-> MODS
+    PREP[prep — ddr_world_hook_prep.exe] -.mounts pure pipeline + services/stepmania pure files.-> SMP
 ```
 
 ## Upgrade Considerations
 
 - `retour` is pinned to an alpha. Upgrading it means auditing `core/hooks.rs` and every `GenericDetour` site.
+- `symphonia` / `rustfft` upgrades must keep the no-default-features recipes (no `opt-simd`, x86 SIMD only) and be re-checked with `./build_win7.sh`; `core/audio`'s MP3/Vorbis parity rules depend on symphonia's gapless semantics, so re-run `scripts/validate_stepmania.sh` (incl. its auto-sync parity leg against `ddr-chart-tools`) and `scripts/validate_prep.sh` after a bump.
 - New game builds are handled by signature tolerance rather than code changes. Add the build to the sweep directory and run `scripts/validate_signatures.sh`.

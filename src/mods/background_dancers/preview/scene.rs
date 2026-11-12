@@ -91,6 +91,9 @@ pub fn build_pick(
                     stage.parts.truncate(MAX_PREVIEW_INSTANCES);
                 }
             }
+            // A flight stage previews its take-off switch (no dancers: the
+            // default take-off length).
+            let (pick, _) = super::super::pick::fly_pick(rng, pick, dancers, |_| false);
             Some(pick)
         }
         Kind::Dancer => {
@@ -104,18 +107,27 @@ pub fn build_pick(
 }
 
 /// The session a preview builds when its parse lands: the gameplay style
-/// (FR-12), NO hulls, real time, the side's slot base and private pass-mask
-/// bit; a stage-only scene gets the synthetic schedule for its camera cuts.
+/// (FR-12) — live: every LIGHTING STYLE edit switches the looks at once,
+/// RANDOM per 2-s bar (`Session::style_tick`) — real time, the side's slot
+/// base and private pass-mask bit; a stage-only scene gets the synthetic
+/// schedule for its camera cuts. Hulls: a dancer preview builds them
+/// (shown per look — OUTLINE ONLY is nothing else); a stage preview none
+/// (design D8).
 pub fn make_session(side: usize, pick: &Pick, parsed: Parsed, requested_at: Instant) -> Session {
     let side = side.min(1);
     let eff = style::effective();
+    let hulls = if pick.stage.is_none() && !pick.dancers.is_empty() {
+        style::hull_plan(&eff, true)
+    } else {
+        HullPlan::none()
+    };
     let session = Session::new(
         pick.clone(),
         parsed,
         requested_at,
         TempoOptions::REAL_TIME,
-        eff.style,
-        HullPlan::none(),
+        eff,
+        hulls,
         SLOT_BASE[side],
         Some(FILTER_BIT[side]),
     );

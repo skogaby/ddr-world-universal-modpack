@@ -53,7 +53,10 @@
 //!
 //! - `avs_resolver` — libavs export resolution across AVS versions.
 //! - `file_hooks` — the detours and request routing above.
-//! - `mod_paths` — mod folder scan, path normalization, lookup.
+//! - `mod_paths` — mod folder scan, path normalization, lookup. Every
+//!   top-level folder except `mod_paths::PRIVATE_FOLDERS` (`_cache`,
+//!   `custom_models`) is an overlay; the private ones are never indexed, so
+//!   the step-0b scan cost stays independent of installed custom content.
 //! - `arc_handler` — `.arc` overlay and repack.
 //! - `shader_synthesis` / `shader_layout` — runtime shader-container synthesis and
 //!   its pure layout rules.
@@ -64,7 +67,7 @@
 //! - `avslz` — AVSLZ compression; `cache_hasher` — cache invalidation hashes.
 
 pub(crate) mod afplist_ext;
-pub(super) mod arc_handler;
+pub(crate) mod arc_handler;
 pub(crate) mod atlas_cloner;
 pub(super) mod avs_resolver;
 pub(crate) mod avslz;
@@ -230,6 +233,11 @@ pub fn init() -> bool {
     log_info!("LayeredFS: initialized successfully");
     true
 }
+
+/// Game-path probe (see `file_hooks`): read the mod file the open detour
+/// would serve for a game path, through the game's own AVS open — proves an
+/// asset is loadable before a loader that cannot survive a failed load sees it.
+pub use file_hooks::{read_mod_file_as_game, GameReadError};
 
 /// Check if the LayeredFS service initialized successfully.
 pub fn is_available() -> bool {

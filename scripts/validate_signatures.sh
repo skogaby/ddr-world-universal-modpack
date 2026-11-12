@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 CORE="$REPO_ROOT/src/core"
-for f in scanner.rs signatures.rs profiling.rs; do
+for f in scanner.rs signatures.rs profiling.rs song_limit_sites.rs; do
   [[ -r "$CORE/$f" ]] || die "missing $CORE/$f"
 done
 
@@ -94,6 +94,8 @@ pub mod core {
     pub mod scanner;
     #[path = "$CORE/signatures.rs"]
     pub mod signatures;
+    #[path = "$CORE/song_limit_sites.rs"]
+    pub mod song_limit_sites;
 }
 pub use core::logger::*;
 EOF

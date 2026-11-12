@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "packs": [
+    {
+      "id": "dancers-fixture-mix",
+      "group": "Dancers",
+      "title": "Fixture Mix",
+      "items": 2,
+      "root": "data_mods/custom_models/dancers/Fixture Mix",
+      "content_id": "6f47e455e8f535b4c53deb86579cd43e8e4174ebf407b3467fd1f916bc1eddfc",
+      "asset": "ddr-world-pack-dancers-fixture-mix-6f47e455e8f5.zip",
+      "url": "https://github.com/skogaby/ddr-world-universal-modpack-assets/releases/download/packs/ddr-world-pack-dancers-fixture-mix-6f47e455e8f5.zip",
+      "zip_size": 2348,
+      "zip_sha256": "6542b82052389167fe1913de1647876838bd4c7848cc482c5dc74653081b547d",
+      "installed_size": 2609
+    },
+    {
+      "id": "stages-fixture-hall",
+      "group": "Stages",
+      "title": "Fixture Hall",
+      "items": 1,
+      "root": "data_mods/custom_models/stages/Fixture Hall",
+      "content_id": "05803049444154a90d6d8fd791328b245cf9c4f310ce85ece6e7b04601eb08c1",
+      "asset": "ddr-world-pack-stages-fixture-hall-058030494441.zip",
+      "url": "https://github.com/skogaby/ddr-world-universal-modpack-assets/releases/download/packs/ddr-world-pack-stages-fixture-hall-058030494441.zip",
+      "zip_size": 1383,
+      "zip_sha256": "1c5f460a34e1d228977b398890c2d28bf2695e19b760d81936a402dc407792b8",
+      "installed_size": 670
+    }
+  ]
+}

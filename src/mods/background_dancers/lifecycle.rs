@@ -16,7 +16,8 @@
 //! - graph disabled (DPS before step 5) ⇒ everything hidden, `t = 0`;
 //! - graph enabled but not anchored ⇒ the scene shows its `t = 0` pose
 //!   (A3: everything appears on the start edge) — or, once a run WAS
-//!   anchored, holds its last `t` (A3: dancers keep going through the tail);
+//!   anchored, keeps its clock running on wall time from the last anchored
+//!   count (A3: dancers keep going through the song-end tail, DPS 8/9);
 //! - anchored ⇒ `t = (count − t0) / 1000`, `t0` latched ONCE on the anchor
 //!   edge; a count jump back (training rewind / loop / in-place restart)
 //!   moves the timeline back — never re-latches (an in-place restart lands
@@ -30,34 +31,39 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::anm::rlist;
 use crate::core::arc as arcfile;
 use crate::services::movie_policy::{self, MovieSuppressor};
 use crate::services::scene3d::{arc_set, frame_board, scene_graph};
-use crate::services::{song_reset, stage_records, widget_renderer};
+use crate::services::{game_audio, ready_hold, song_reset, stage_records, widget_renderer};
 use crate::types::scenes::scene;
 use crate::{log_info, log_warn};
 
 use super::background_hide;
 use super::clock::{Clock, ClockEvent};
 use super::director;
+use super::flight_hold;
+use super::flight_hold_logic::{self as hold_logic, Hold, Phase as HoldPhase};
 use super::movie_backdrop;
 use super::movie_camera;
 use super::movie_mode::{
     self, Backdrop, Capabilities, MovieMode, SceneMask, ScreenFilter, SongMovie,
 };
 use super::movie_size;
+use super::options::Request;
+use super::pick::FlightOutcome;
 use super::scene_window::{self, ScenePhase, SceneWindow};
 use super::screen_route;
 use super::selection::{
     apply_pin, dancer_candidates, parse_pin, random_stage_pool, seed_from, stage_candidates,
-    DancerCandidate, PickSource, Pin, Rng, StageCandidate, StagePool,
+    DancerCandidate, DancerChoice, PickSource, Pin, Rng, StageCandidate, StageChoice, StagePool,
 };
 use super::session::{assemble_pick, make_pick, CameraSet, ParseOptions, Pick, Session};
 use super::tempo::{TempoMap, TempoOptions};
 use super::tempo_source;
+use super::universe_logic;
 
 /// The music count the scene is posed at before the run anchors (a few
 /// frames between the DPS step-5 edge and the `0x1044` anchor): close to
@@ -79,9 +85,9 @@ struct Tables {
     camera_rows: Vec<(String, Vec<String>)>,
     dancers: Vec<DancerCandidate>,
     pin: Option<Pin>,
-    /// `(key, label)` of every CUSTOM entry (`data_mods/custom_models`) — the catalog
-    /// appends these after the stock block with their folder-derived names.
-    custom_labels: Vec<(String, String)>,
+    /// Every CUSTOM entry (`data_mods/custom_models`) with its label and
+    /// SOURCE — the catalog groups these after the stock block.
+    custom: Vec<super::sources::CustomEntry>,
     /// Stage keys whose arc carries video screens (an `offscreen1.dds`
     /// member — `movie_mode::arc_members_have_screen`), for Background
     /// Movies = STAGE SCREENS. Built once at enable, stock + custom +
@@ -147,7 +153,7 @@ pub fn init_tables() -> bool {
     // Custom dancers / stages from `data_mods/custom_models` (design
     // 2026-09-22): appended AFTER the stock rows so stock row indices and
     // option values never move; the stage camera rows stay row-parallel.
-    let (stages, camera_rows, dancers, custom_labels) = if bd.custom_content {
+    let (stages, camera_rows, dancers, custom) = if bd.custom_content {
         let default_camera_row = stages
             .first()
             .and_then(|s| camera_rows.get(s.row))
@@ -178,7 +184,7 @@ pub fn init_tables() -> bool {
         }
         stages.extend(plan.stages);
         dancers.extend(plan.dancers);
-        (stages, camera_rows, dancers, plan.labels)
+        (stages, camera_rows, dancers, plan.entries)
     } else {
         log_info!(
             "BackgroundDancers: custom content OFF -- data_mods/custom_models is not scanned"
@@ -203,26 +209,35 @@ pub fn init_tables() -> bool {
             "BackgroundDancers: DDR_DANCERS_STATIC -- poses published once per song (bisect mode)"
         );
     }
+    let custom_sources = {
+        let mut slugs: Vec<&str> = custom.iter().map(|e| e.source.slug.as_str()).collect();
+        slugs.sort_unstable();
+        slugs.dedup();
+        slugs.len()
+    };
     log_info!(
-        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows, {} custom{}",
+        "BackgroundDancers: tables ready -- {} stage rows ({} distinct stages), {} dancers, {} camera rows, {} custom in {} source(s){}",
         stages.len(),
         distinct,
         dancers.len(),
         camera_rows.len(),
-        custom_labels.len(),
+        custom.len(),
+        custom_sources,
         match &pin {
             Some(p) => format!(" (DDR_DANCERS_PIN honoured: {:?})", p),
             None => String::new(),
         }
     );
     let screen_stages = scan_screen_stages(&stages);
+    // The discovery's member lists have served their last consumer.
+    super::custom_scan::release_known_members();
     if let Ok(mut t) = TABLES.lock() {
         *t = Some(Tables {
             stages,
             camera_rows,
             dancers,
             pin,
-            custom_labels,
+            custom,
             screen_stages,
         });
     }
@@ -236,16 +251,22 @@ pub fn tables_ready() -> bool {
 
 /// Which distinct stages have video screens (design R5): the stage arc — as
 /// the engine will load it (mounts / LayeredFS / stock, `arc_set`) — lists
-/// an `offscreen1.dds` member. One header read per distinct key at enable
-/// (a 64 KiB prefix). An unreadable arc counts as "no screens" and is named
-/// in the INFO.
+/// an `offscreen1.dds` member. A custom (mounted) stage answers from the
+/// member list discovery already holds (`custom_scan::known_members` — no
+/// stat, no read); any other stage costs one header read (a 64 KiB prefix).
+/// An unreadable arc counts as "no screens" and is named in the INFO.
 fn scan_screen_stages(stages: &[StageCandidate]) -> HashSet<String> {
     let keys = super::selection::distinct_stage_keys(stages);
     let mut with = HashSet::new();
     let mut unreadable: Vec<&str> = Vec::new();
     for key in &keys {
-        let members = arc_set::resolve_path(&format!("data/arc/mapset_{key}.arc"))
-            .and_then(|path| super::custom_scan::read_arc_members(&path));
+        let rel = format!("data/arc/mapset_{key}.arc");
+        let members = arc_set::mounted_path(&rel)
+            .and_then(|path| super::custom_scan::known_members(&path))
+            .or_else(|| {
+                arc_set::resolve_path(&rel)
+                    .and_then(|path| super::custom_scan::read_arc_members(&path))
+            });
         match members {
             Some(m) => {
                 if movie_mode::arc_members_have_screen(&m) {
@@ -287,13 +308,13 @@ fn stage_has_screens(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `(key, label)` of the custom (`data_mods/custom_models`) entries in the tables — empty
-/// with the toggle off or nothing installed.
-pub(super) fn custom_labels_snapshot() -> Vec<(String, String)> {
+/// The custom (`data_mods/custom_models`) entries in the tables — key, label
+/// and source — empty with the toggle off or nothing installed.
+pub(super) fn custom_entries_snapshot() -> Vec<super::sources::CustomEntry> {
     TABLES
         .lock()
         .ok()
-        .and_then(|t| t.as_ref().map(|t| t.custom_labels.clone()))
+        .and_then(|t| t.as_ref().map(|t| t.custom.clone()))
         .unwrap_or_default()
 }
 
@@ -346,6 +367,8 @@ struct Window {
     generation: u64,
     scene: SceneWindow,
     clock: Clock,
+    /// Last frame's clock was anchored (edge detect for the tail log).
+    clock_anchored: bool,
     /// The live song's tempo map (dance time from the music count) and the
     /// DPS instance / basename it belongs to; `None` ⇒ real time.
     tempo: Option<TempoMap>,
@@ -357,6 +380,7 @@ struct Window {
     visible_logged: bool,
     playing_logged: u32,
     rewind_logged: bool,
+    tail_logged: bool,
     /// The camera source of the last frame (`None` before the first).
     camera_source: Option<CamSource>,
     hide_armed: bool,
@@ -367,6 +391,22 @@ struct Window {
     /// The live song's movie state (re-probed every frame in FULLSCREEN and
     /// MOVIE ONLY — `movie_mode::probes_backdrop`; always `None` otherwise).
     backdrop: Backdrop,
+    /// The wall-clock stamp of a READY hold's take-off start: the take-off
+    /// then plays BEFORE the song, with no music count to follow, so its
+    /// clock is plain wall time from this stamp (`None` = no held take-off).
+    takeoff_started: Option<Instant>,
+    /// The previous frame's wall time (the hold's wait budgets).
+    last_frame: Option<Instant>,
+    /// The READY hold of the live DPS (`flight_hold_logic`) and that DPS.
+    hold: Hold,
+    hold_dps: usize,
+    /// The held DPS's song anchored at least once (the take-off clock then
+    /// follows the count for good).
+    hold_anchored: bool,
+    /// `DDR_DANCERS_NO_FLIGHT_HOLD` (developer_mode): never hold READY.
+    hold_disabled: bool,
+    /// The held DPS reached its READY? step (one-shot state log).
+    hold_seen_ready: bool,
 }
 
 struct State {
@@ -412,6 +452,14 @@ fn in_song_window(s: i32) -> bool {
         s,
         scene::SONG_TO_STAGE_INTERSTITIAL | scene::STAGE_INDICATOR | scene::GAMEPLAY
     )
+}
+
+/// Monotonic milliseconds since the first call (the song clock's tail
+/// extrapolation only uses differences).
+fn wall_ms(now: Instant) -> f64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(|| now);
+    now.saturating_duration_since(epoch).as_secs_f64() * 1000.0
 }
 
 /// Scene callback (game thread, fires before the game's `createNextSequence`).
@@ -488,11 +536,21 @@ fn apply_movie_mode(has_screens: bool) -> MovieMode {
         stage_records::side_entered(0).unwrap_or(false),
         stage_records::side_entered(1).unwrap_or(false),
     ];
+    // The STAGE SCREENS route is a cabinet-wide DECISION: the Multiplayer
+    // Bot's phantom side is not a player for it — its VIDEO SIZE is the
+    // last real player's cache (the bot mod's governance rule). The
+    // movie-size OVERRIDE below still touches every entered side (the game
+    // reads the governing side's field, which a bot session may govern
+    // through the phantom pad, and the write is restored at exit).
+    let entered_human = [
+        entered[0] && !crate::mods::multiplayer_bot::is_bot_side(0),
+        entered[1] && !crate::mods::multiplayer_bot::is_bot_side(1),
+    ];
     let mut mode = movie_mode::window_mode(effective_movie_mode(requested), has_screens);
     let mut routed = false;
     let mut route_note = "";
     if movie_mode::routes_to_screens(mode) {
-        if !movie_size::any_shows_movie(entered) {
+        if !movie_size::any_shows_movie(entered_human) {
             // Nobody shows a movie: nothing to route (and 20250805 would
             // still build a MovieActor for VIDEO SIZE OFF).
             mode = MovieMode::Thumbnail;
@@ -660,8 +718,17 @@ fn window_entry(scene_id: i32) {
         stage_records::side_entered(0).unwrap_or(false),
         stage_records::side_entered(1).unwrap_or(false),
     ];
+    // Cabinet-wide movie decisions (the STAGE SCREENS route and the
+    // song-has-a-movie read) must not count the Multiplayer Bot's phantom
+    // side — its Customize/row values are the last real player's cache
+    // (the bot mod's governance rule). The per-side DANCER pick keeps the
+    // bot side: FR-3 says the phantom side gets a dancer of its own.
+    let entered_human = [
+        entered[0] && !crate::mods::multiplayer_bot::is_bot_side(0),
+        entered[1] && !crate::mods::multiplayer_bot::is_bot_side(1),
+    ];
     let pool_mode = effective_movie_mode(super::style::movie_mode());
-    let song_movie = super::song_movie::committed_song_movie(entered);
+    let song_movie = super::song_movie::committed_song_movie(entered_human);
     let screen_filter = movie_mode::random_pool_filter(pool_mode, song_movie);
     // Part arcs are probed through the same LayeredFS-aware resolver as the
     // candidates (a missing part is silent — A3 behaviour).
@@ -711,7 +778,14 @@ fn window_entry(scene_id: i32) {
                     );
                 }
                 // 2. The BACKGROUND DANCER / BACKGROUND STAGE rows.
-                match option_pick(&mut rng, t, random_stages, &sides, &arc_exists) {
+                match option_pick(
+                    &mut rng,
+                    t,
+                    random_stages,
+                    screen_filter,
+                    &sides,
+                    &arc_exists,
+                ) {
                     Some(p) => p,
                     // 3. Plain random.
                     None => match make_pick(
@@ -736,6 +810,60 @@ fn window_entry(scene_id: i32) {
     };
     let mut pick = pick;
     pick.seed = seed;
+    // FLIGHT stages fly only flight-capable dancers (a non-capable pick is
+    // replaced, a capable one kept) and play take-off + flight playlists.
+    let all: Vec<DancerCandidate> = if pick.stage.as_ref().is_some_and(|s| s.flight) {
+        TABLES
+            .lock()
+            .ok()
+            .and_then(|t| t.as_ref().map(|t| t.dancers.clone()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let (flown, outcome) = super::pick::fly_pick(&mut rng, pick, &all, &arc_exists);
+    pick = flown;
+    match outcome {
+        FlightOutcome::NotFlight => {}
+        FlightOutcome::Flight { replaced } => {
+            for (i, old, new) in &replaced {
+                log_info!(
+                    "BackgroundDancers: flight stage -- dancer {} ({}) cannot fly: {} flies instead",
+                    i + 1,
+                    old,
+                    new
+                );
+            }
+        }
+        FlightOutcome::NoCapableDancer => log_warn!(
+            "BackgroundDancers: flight stage, but no installed dancer has flight clips (motion/flight/) -- they dance on the platform"
+        ),
+    }
+    // Winx Club: a transform-capable outfit on a HUMAN side loads its
+    // Enchantix twin beside it (the combo trigger, `transform_trigger_tick`).
+    let all: Vec<DancerCandidate> = if pick.dancers.iter().any(|d| d.twin.is_some()) {
+        TABLES
+            .lock()
+            .ok()
+            .and_then(|t| t.as_ref().map(|t| t.dancers.clone()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let human = |side: u8| -> bool {
+        entered.get(side as usize).copied().unwrap_or(false)
+            && !crate::mods::multiplayer_bot::is_bot_side(side as usize)
+    };
+    let (twinned, missing) = super::pick::transform_pick(pick, &all, &sides, human);
+    pick = twinned;
+    for (i, key) in missing {
+        log_warn!(
+            "BackgroundDancers: dancer {} ({}) transforms into {} -- not installed, no transformation",
+            i + 1,
+            pick.dancers.get(i).map_or("?", |d| d.key.as_str()),
+            key
+        );
+    }
     let has_screens = pick
         .stage
         .as_ref()
@@ -789,80 +917,160 @@ fn log_random_pool(
     }
 }
 
-/// The option rows' pick (design §4.3 / FR-6): the first entered side's
-/// BACKGROUND STAGE (mirrored in versus, so both sides agree) and each
-/// entered side's BACKGROUND DANCER for that side's dancer index. `None`
-/// when every element is RANDOM (the plain random path then runs). A key the
-/// catalog no longer covers (data drift between the cached value and the
-/// install) ⇒ one WARN naming it, that element falls back to RANDOM.
-/// `random_stages` is the RANDOM stage pool (the screen rule applied); an
-/// explicitly chosen stage is looked up in the whole table.
+/// The option rows' pick (design §4.3 / FR-6; sources 2026-09-30 §4.7): the
+/// first entered side's stage request (the stage rows are mirrored in
+/// versus, so both sides agree) and each entered side's dancer request for
+/// that side's dancer index. During a Multiplayer Bot song BOTH sides read
+/// as entered but the versus mirror never engaged (it only engages at song
+/// select with both sides entered), so the bot side's rows hold whatever
+/// the last real player on that pad cached — the stage fold (one stage per
+/// cabinet) therefore governs by the first entered side that is NOT the
+/// bot's phantom side (the human; the bot mod's governance rule). `None`
+/// when every element is `Any` (the plain
+/// random path then runs). Per element: an explicit key the tables no longer
+/// hold (data drift between the cached value and the install) ⇒ one WARN
+/// naming it, `Any` for this song; `Within` a source ⇒ that source's pool —
+/// the stage pool through the song's screen rule, falling back to the WHOLE
+/// SOURCE (one WARN) when nothing in it qualifies; `Any` ⇒ the global pools
+/// (`random_stages` is the RANDOM stage pool with the screen rule applied).
 fn option_pick(
     rng: &mut Rng,
     t: &Tables,
     random_stages: &[StageCandidate],
+    screen_filter: ScreenFilter,
     sides: &[u8],
     arc_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Pick> {
-    let mut stage_key = sides.first().and_then(|&s| super::options::stage_choice(s));
-    let mut dancer_keys: Vec<Option<String>> = sides
+    let bot_side = crate::mods::multiplayer_bot::is_bot_side;
+    let mut stage_req = sides
         .iter()
-        .map(|&s| super::options::dancer_choice(s))
+        .find(|&&s| !bot_side(s as usize))
+        .map(|&s| super::options::stage_request(s))
+        .unwrap_or(Request::Any);
+    let mut dancer_reqs: Vec<Request> = sides
+        .iter()
+        .map(|&s| super::options::dancer_request(s))
         .collect();
-    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+    if stage_req == Request::Any && dancer_reqs.iter().all(|r| *r == Request::Any) {
         return None;
     }
-    // Drop unknown keys up front (resolve_choice refuses the whole request
-    // on any unknown key, so validate element by element).
-    if let Some(k) = stage_key.as_deref() {
-        if !t.stages.iter().any(|s| s.key == k) {
+    // Drop unknown keys and empty sources up front (resolve_choice refuses
+    // the whole request on any unresolvable element).
+    if let Request::Key(k) = &stage_req {
+        if !t.stages.iter().any(|s| s.key == *k) {
             log_warn!(
                 "BackgroundDancers: BACKGROUND STAGE names unknown stage {:?} -- RANDOM for this song",
                 k
             );
-            stage_key = None;
+            stage_req = Request::Any;
         }
     }
-    for (i, key) in dancer_keys.iter_mut().enumerate() {
-        if let Some(k) = key.as_deref() {
-            if !t.dancers.iter().any(|d| d.key == k) {
+    for (i, req) in dancer_reqs.iter_mut().enumerate() {
+        let side = sides.get(i).map(|s| s + 1).unwrap_or(0);
+        match req {
+            Request::Key(k) if !t.dancers.iter().any(|d| d.key == *k) => {
                 log_warn!(
                     "BackgroundDancers: BACKGROUND DANCER (P{}) names unknown dancer {:?} -- RANDOM for this song",
-                    sides.get(i).map(|s| s + 1).unwrap_or(0),
+                    side,
                     k
                 );
-                *key = None;
+                *req = Request::Any;
             }
+            Request::Within { source, keys }
+                if super::selection::source_dancer_pool(&t.dancers, keys).is_empty() =>
+            {
+                log_warn!(
+                    "BackgroundDancers: DANCER SOURCE (P{}) {} has no loadable dancer -- RANDOM for this song",
+                    side,
+                    source
+                );
+                *req = Request::Any;
+            }
+            _ => {}
         }
     }
-    if stage_key.is_none() && dancer_keys.iter().all(Option::is_none) {
+    if stage_req == Request::Any && dancer_reqs.iter().all(|r| *r == Request::Any) {
         return None;
     }
-    let stage_src = if stage_key.is_some() {
-        PickSource::Option
-    } else {
-        PickSource::Random
-    };
-    let dancer_src: Vec<PickSource> = dancer_keys
-        .iter()
-        .map(|k| {
-            if k.is_some() {
-                PickSource::Option
+    // The within-source stage pool (owned here so the choice can borrow it).
+    let source_pool: Option<Vec<StageCandidate>> = match &stage_req {
+        Request::Within { source, keys } => {
+            let (subset, pool) = super::selection::source_stage_pool(&t.stages, keys, |k| {
+                screen_filter.keeps(t.screen_stages.contains(k))
+            });
+            if subset.is_empty() {
+                log_warn!(
+                    "BackgroundDancers: STAGE SOURCE {} has no loadable stage -- RANDOM for this song",
+                    source
+                );
+                stage_req = Request::Any;
+                None
             } else {
-                PickSource::Random
+                match &pool {
+                    StagePool::NoneLeft => log_warn!(
+                        "BackgroundDancers: no stage in source {} matches ({}); drawing from all {} row(s) of {}",
+                        source,
+                        screen_filter.label(),
+                        subset.len(),
+                        source
+                    ),
+                    StagePool::All => log_info!(
+                        "BackgroundDancers: random stage pool -- source {}: all {} row(s) ({})",
+                        source,
+                        subset.len(),
+                        screen_filter.label()
+                    ),
+                    StagePool::Filtered { rows, excluded } => log_info!(
+                        "BackgroundDancers: random stage pool -- source {}: {} of {} row(s), {} stage(s) excluded ({})",
+                        source,
+                        rows.len(),
+                        subset.len(),
+                        excluded,
+                        screen_filter.label()
+                    ),
+                }
+                Some(pool.rows(&subset).to_vec())
             }
+        }
+        _ => None,
+    };
+    let dancer_pools: Vec<Option<Vec<DancerCandidate>>> = dancer_reqs
+        .iter()
+        .map(|r| match r {
+            Request::Within { keys, .. } => {
+                Some(super::selection::source_dancer_pool(&t.dancers, keys))
+            }
+            _ => None,
         })
         .collect();
-    let refs: Vec<Option<&str>> = dancer_keys.iter().map(Option::as_deref).collect();
-    // resolve_choice draws a RANDOM stage from `stages` and looks a chosen
-    // key up in it: the pool for RANDOM, the whole table for a choice.
-    let stages = if stage_key.is_some() {
-        &t.stages[..]
-    } else {
-        random_stages
+    let stage_choice = match (&stage_req, &source_pool) {
+        (Request::Key(k), _) => StageChoice::Key(k),
+        (Request::Within { .. }, Some(pool)) => StageChoice::Random(pool),
+        _ => StageChoice::Random(random_stages),
     };
-    let (stage, dancers) =
-        super::selection::resolve_choice(rng, stages, &t.dancers, stage_key.as_deref(), &refs)?;
+    let dancer_choices: Vec<DancerChoice> = dancer_reqs
+        .iter()
+        .zip(dancer_pools.iter())
+        .map(|(r, pool)| match (r, pool) {
+            (Request::Key(k), _) => DancerChoice::Key(k),
+            (Request::Within { .. }, Some(pool)) => DancerChoice::Random(pool),
+            _ => DancerChoice::Random(&t.dancers),
+        })
+        .collect();
+    let provenance = |r: &Request| match r {
+        Request::Any => PickSource::Random,
+        Request::Within { .. } => PickSource::Source,
+        Request::Key(_) => PickSource::Option,
+    };
+    let stage_src = provenance(&stage_req);
+    let dancer_src: Vec<PickSource> = dancer_reqs.iter().map(provenance).collect();
+    let (stage, dancers) = super::selection::resolve_choice(
+        rng,
+        &t.stages,
+        &t.dancers,
+        stage_choice,
+        &dancer_choices,
+    )?;
     Some(
         assemble_pick(rng, stage, &t.camera_rows, dancers, false, arc_exists)
             .with_sources(stage_src, dancer_src),
@@ -872,6 +1080,10 @@ fn option_pick(
 /// Game thread: hand the arcs to the FileManager and start the parse thread.
 fn request_load(generation: u64, pick: Pick) {
     let loaded = scene_window::load_arcs(&pick, &ParseOptions::GAMEPLAY);
+    let hold_disabled = dev_mode() && std::env::var_os("DDR_DANCERS_NO_FLIGHT_HOLD").is_some();
+    // Announce the READY hold before the DPS exists, so the dwell skippers
+    // that defer (DDR SELECTION's legacy panel) never seed this song's dwell.
+    let hold_wanted = pick.flight && flight_hold::available() && !hold_disabled;
     let Ok(mut st) = STATE.lock() else {
         loaded.free();
         return;
@@ -908,6 +1120,7 @@ fn request_load(generation: u64, pick: Pick) {
             ParseOptions::GAMEPLAY,
         ),
         clock: Clock::new(),
+        clock_anchored: false,
         tempo: None,
         tempo_dps: 0,
         tempo_basename: String::new(),
@@ -916,12 +1129,21 @@ fn request_load(generation: u64, pick: Pick) {
         visible_logged: false,
         playing_logged: 0,
         rewind_logged: false,
+        tail_logged: false,
         camera_source: None,
         hide_armed: false,
         static_published: false,
         movie_mode: window_movie_mode(),
         backdrop: Backdrop::None,
+        takeoff_started: None,
+        last_frame: None,
+        hold: Hold::new(false),
+        hold_dps: 0,
+        hold_anchored: false,
+        hold_disabled,
+        hold_seen_ready: false,
     });
+    ready_hold::set_hold_wanted(hold_wanted);
     ACTIVE.store(true, Ordering::Release);
 }
 
@@ -934,6 +1156,11 @@ fn begin_teardown(window_gen: u64) {
     }
     background_hide::disarm();
     let Some(w) = st.live.as_mut() else { return };
+    if matches!(w.hold.phase(), HoldPhase::Playing { .. }) {
+        let _ = flight_hold::panel(hold_logic::PanelOp::Show);
+        w.hold = Hold::new(false);
+    }
+    ready_hold::set_hold_wanted(false);
     if w.scene.begin_teardown("song-window exit") {
         ACTIVE.store(true, Ordering::Release);
     }
@@ -980,25 +1207,35 @@ fn drive_live(w: &mut Window) {
     let since_request_ms = w.scene.since_request_ms();
 
     // Parse result → session (once), build what is resident, residency
-    // timeout — the shared machinery; the session's style / outline plan is
-    // decided here, when the parse lands: the operator's request gated on
-    // what the synthesis actually serves this boot (a bit-31 twin against a
-    // stock 4×(0,0,0) container would just draw the body twice). The hull
-    // plan (INK / LAYERED colours + width bands) is frozen per song.
+    // timeout — the shared machinery; the session's hull plan is decided
+    // here, when the parse lands: the operator's request gated on what the
+    // synthesis actually serves this boot (a bit-31 twin against a stock
+    // 4×(0,0,0) container would just draw the body twice). The hulls (DSU's
+    // one black hull) are built per song; the looks — and which hulls show —
+    // follow LIGHTING STYLE live (`Session::style_tick`).
     let has_built = w.scene.drive_assets(|pick, parsed, requested_at| {
         let eff = super::style::effective();
-        let hulls = super::style::hull_plan(&eff);
+        let hulls = super::style::hull_plan(&eff, false);
         Session::new(
             pick.clone(),
             parsed,
             requested_at,
             tempo_options(),
-            eff.style,
+            eff,
             hulls,
             0,
             None,
         )
     });
+    // The frame's wall dt (the hold's wait budgets) and the READY hold —
+    // stepped even before the scene is built (the hold waits for it with the
+    // dwell held), always before the DPS update reads its dwell timer.
+    let now = Instant::now();
+    let dt = w
+        .last_frame
+        .map_or(0.0, |p| now.saturating_duration_since(p).as_secs_f64());
+    w.last_frame = Some(now);
+    hold_tick(w, now, dt, has_built);
     if !has_built {
         return;
     }
@@ -1025,7 +1262,23 @@ fn drive_live(w: &mut Window) {
     } else {
         None
     };
-    let (mc, visible, event) = w.clock.step(graph_enabled, anchored, count);
+    let wall = wall_ms(now);
+    let was_anchored = w.clock_anchored;
+    let (mc, visible, event) = w.clock.step(graph_enabled, anchored, count, wall);
+    w.clock_anchored = graph_enabled && anchored && count.is_some();
+    if was_anchored && !w.clock_anchored && graph_enabled && !w.tail_logged {
+        // The song-end tail (DPS 8/9) — or a transient anchor loss. The
+        // dancers keep going on the extrapolated count; log what the live
+        // count does meanwhile so a deploy shows whether it still runs.
+        w.tail_logged = true;
+        log_info!(
+            "BackgroundDancers: anchor lost (dps step {:?}) -- dance clock extrapolated from {:?} ms at rate {:.3} (live count now {:?})",
+            song_reset::dps_step(),
+            mc,
+            w.clock.rate(),
+            song_reset::current_raw_music_count()
+        );
+    }
     // Dance time from the music count (design + RE doc §3.5): the tempo map
     // when it resolved, real time from music 0 otherwise. Pre-song frames
     // pose the scene just before the expected first count.
@@ -1041,6 +1294,8 @@ fn drive_live(w: &mut Window) {
             if let Some(sess) = w.scene.session_mut() {
                 sess.reset_shadow();
                 sess.reset_camera();
+                // Winx Club: hair at rest, every transformation re-armed.
+                sess.reset_winx(true);
             }
             if w.playing_logged < 3 {
                 w.playing_logged += 1;
@@ -1064,6 +1319,11 @@ fn drive_live(w: &mut Window) {
             // to that position; in-place restart ⇒ the song-start count ⇒
             // the start). Dance/camera/stage loops are pure functions of the
             // dance time; the camera director re-simulates on t < prev.
+            // Winx Club: the dynamic bones restart at rest; a transformation
+            // whose trigger now lies ahead is dropped by the director.
+            if let Some(sess) = w.scene.session_mut() {
+                sess.reset_winx(false);
+            }
             if !w.rewind_logged {
                 w.rewind_logged = true;
                 log_info!(
@@ -1155,13 +1415,305 @@ fn drive_live(w: &mut Window) {
     } else {
         true
     };
-    if publish {
-        w.scene.publish(t, visible, mask);
+    // FLIGHT stages: the take-off runs on the REAL clock (the Wii's 60 Hz
+    // intro: its cameras, the platform script, the sky burst, the leap), the
+    // flight after it on dance time (`Session::schedule_time`). The real
+    // clock is the music count, read as is (never smoothed or substituted —
+    // a smoothed tracker was tried, deployed and removed: no visible effect);
+    // with the READY hold the take-off plays BEFORE the song on wall time
+    // from its start stamp, and the song's music 0 is the switch (the clock
+    // = count + take-off length).
+    let switch = w.scene.session_mut().and_then(|s| s.flight_switch);
+    if anchored {
+        w.hold_anchored = true;
     }
+    let offset = match switch {
+        Some(sw) if w.hold.offsets_song() => sw as f64,
+        _ => 0.0,
+    };
+    let real_s = if w.hold.free_runs(w.hold_anchored) {
+        takeoff_elapsed(w, now)
+    } else {
+        mc_ms as f64 / 1000.0 + offset
+    } as f32;
+    let t = match w.scene.session_mut() {
+        Some(sess) => {
+            if let Some(sw) = sess.flight_switch {
+                let song_ms = (sw as f64 - offset) * 1000.0;
+                sess.dance_at_switch = Some(match w.tempo.as_ref() {
+                    Some(map) => map.tau(song_ms),
+                    None => (song_ms / 1000.0) as f32,
+                });
+            }
+            sess.schedule_time(t, real_s)
+        }
+        None => t,
+    };
+    // Winx Club: the Enchantix transformation's trigger (read-only: the
+    // side's combo and the chart's song-over, never the clock).
+    if anchored && visible {
+        if let Some(sess) = w.scene.session_mut() {
+            transform_trigger_tick(sess, mc_ms as i64, real_s);
+        }
+    }
+    if let Some(sess) = w.scene.session_mut() {
+        sess.real_now = real_s;
+    }
+    // The camera first: the flight effects' billboards face THIS frame's
+    // camera (`Session::fx_camera`, read by the publish).
     camera_tick(w, t, mask);
+    if publish {
+        // The chart bar RANDOM / STENCIL change on: the tempo map's measure
+        // position, else a 120-BPM bar of music time.
+        let bar = match w.tempo.as_ref() {
+            Some(map) => universe_logic::bar_at_ticks(map.tick_at(mc_ms as f64)),
+            None => universe_logic::bar_at_seconds(mc_ms as f64 / 1000.0),
+        };
+        if let Some(sess) = w.scene.session_mut() {
+            sess.style_bar = bar;
+        }
+        w.scene.publish(t, real_s, visible, mask);
+    }
+    if let Some(sess) = w.scene.session_mut() {
+        flight_sound_tick(sess, real_s, visible);
+    }
 
     w.scene.retry_textures();
     w.scene.attached_diagnostics();
+}
+
+/// The READY hold (`flight_hold_logic`): per live DPS, armed for a flight
+/// take-off; holds the DPS's READY? dwell while the take-off plays before
+/// the song, the stage panel hidden, and releases it at the take-off's end.
+fn hold_tick(w: &mut Window, now: Instant, dt: f64, built: bool) {
+    let dps = flight_hold::live_dps();
+    if dps != w.hold_dps {
+        // A take-off cut short by a new DPS: never leave the (singleton)
+        // shutter's stage panel hidden.
+        if matches!(w.hold.phase(), HoldPhase::Playing { .. }) {
+            let _ = flight_hold::panel(hold_logic::PanelOp::Show);
+        }
+        w.hold_dps = dps;
+        w.hold_anchored = false;
+        w.hold_seen_ready = false;
+        w.takeoff_started = None;
+        let armed =
+            dps != 0 && !w.hold_disabled && w.scene.pick().flight && flight_hold::available();
+        w.hold = Hold::new(armed);
+    }
+    if w.hold.phase() == HoldPhase::Off {
+        return;
+    }
+    let step = flight_hold::dps_step();
+    let timer = flight_hold::read_timer();
+    let (scene_ready, takeoff_s) = match w.scene.session_mut() {
+        Some(sess) if built => match sess.flight_switch {
+            Some(sw) if sess.flight_stage && sess.pick.flight => (true, sw as f64),
+            _ => (false, director_math_takeoff()),
+        },
+        _ => (false, director_math_takeoff()),
+    };
+    let (panel_settled, panel_state) = flight_hold::panel_settled();
+    let mask = movie_mode::scene_mask(w.movie_mode, w.backdrop);
+    let scene_hidden = !(mask.stage && mask.dancers);
+    if step == Some(hold_logic::STEP_READY) && !w.hold_seen_ready {
+        w.hold_seen_ready = true;
+        log_info!(
+            "BackgroundDancers: flight take-off -- READY? step reached: timer {:?}, scene {}, stage panel state {:?}, 3D {}",
+            timer,
+            if scene_ready { "built" } else { "not built yet" },
+            panel_state,
+            if scene_hidden { "masked off" } else { "shown" }
+        );
+    }
+    let intro_s = takeoff_elapsed(w, now);
+    let a = w.hold.step(hold_logic::Inputs {
+        step,
+        timer,
+        scene_ready,
+        panel_settled,
+        scene_hidden,
+        intro_s,
+        takeoff_s,
+        dt,
+    });
+    if a.started {
+        w.takeoff_started = Some(now);
+    }
+    if let Some(v) = a.write_timer {
+        let _ = flight_hold::write_timer(v);
+    }
+    if a.enable_graph && !scene_graph::set_enabled() && a.started {
+        log_warn!("BackgroundDancers: flight take-off -- the SceneGraph could not be enabled; the take-off may not draw");
+    }
+    if a.released.is_some() || a.stood_down.is_some() {
+        ready_hold::set_hold_wanted(false);
+    }
+    let layer = flight_hold::panel(a.panel);
+    if a.started {
+        log_info!(
+            "BackgroundDancers: flight take-off before the song -- READY? dwell held at {:.1} s (timer {:.2} s), stage panel {}; {:.2} s take-off",
+            hold_logic::HOLD_AT_S,
+            timer.unwrap_or(f32::NAN),
+            match layer {
+                Some(l) => format!("layer 0x{l:08X} hidden"),
+                None => String::from("NOT hidden"),
+            },
+            takeoff_s
+        );
+    }
+    if let Some(why) = a.released {
+        log_info!(
+            "BackgroundDancers: flight take-off -- READY? dwell released ({why}) at take-off {:.2} s, dps step {:?}, stage panel {}",
+            intro_s,
+            step,
+            if layer.is_some() { "shown" } else { "not touched" }
+        );
+    }
+    if let Some(why) = a.stood_down {
+        log_info!(
+            "BackgroundDancers: flight take-off plays over the song -- READY hold stood down: {why} (dps step {:?}, timer {:?})",
+            step,
+            timer
+        );
+    }
+}
+
+fn director_math_takeoff() -> f64 {
+    super::director_math::DEFAULT_TAKEOFF_S as f64
+}
+
+/// Wall seconds since a held take-off began (0 without one).
+fn takeoff_elapsed(w: &Window, now: Instant) -> f64 {
+    w.takeoff_started
+        .map_or(0.0, |s| now.saturating_duration_since(s).as_secs_f64())
+}
+
+/// The flight intro's sound (SE_DDR_BOSS at intro frame 180, with the sky
+/// burst): played once when the real clock passes its start while the scene
+/// shows (gameplay only — previews never call this); a jump back before the
+/// start stops it and re-arms. Its one-cue bank registers on first use.
+fn flight_sound_tick(sess: &mut Session, real_s: f32, visible: bool) {
+    let Some((name, start_s)) = sess
+        .parsed
+        .flight_fx
+        .as_ref()
+        .and_then(|a| a.stage_sound.as_ref())
+        .map(|s| (s.name.clone(), s.start_s))
+    else {
+        return;
+    };
+    if sess.flight_switch.is_none() {
+        return;
+    }
+    if real_s < start_s {
+        if sess.stage_sound_played {
+            sess.stage_sound_played = false;
+            stop_flight_sound(sess);
+        }
+        return;
+    }
+    // Only a start seen live plays (a song entered past it stays silent).
+    if !visible || sess.stage_sound_played || real_s > start_s + 0.5 {
+        return;
+    }
+    sess.stage_sound_played = true;
+    let bank = sess.stage_sound_bank.or_else(|| {
+        let s = sess.parsed.flight_fx.as_ref()?.stage_sound.as_ref()?;
+        game_audio::register_one_shot_bank(&s.name, s.xwb.clone(), s.xsb.clone())
+    });
+    sess.stage_sound_bank = bank;
+    let (Some(h), Ok(cue)) = (bank, std::ffi::CString::new(name.as_str())) else {
+        log_warn!(
+            "BackgroundDancers: flight intro sound {} -- bank not registered, silent",
+            name
+        );
+        return;
+    };
+    let ok = game_audio::play_one_shot(&h, &cue);
+    log_info!(
+        "BackgroundDancers: flight intro sound {} at {:.2} s{}",
+        name,
+        real_s,
+        if ok { "" } else { " -- play FAILED" }
+    );
+}
+
+/// Stop the flight intro's sound (a rewind before its start, the window
+/// teardown). No-op when it never played.
+pub fn stop_flight_sound(sess: &Session) {
+    let (Some(h), Some(s)) = (
+        sess.stage_sound_bank,
+        sess.parsed
+            .flight_fx
+            .as_ref()
+            .and_then(|a| a.stage_sound.as_ref()),
+    ) else {
+        return;
+    };
+    if let Ok(cue) = std::ffi::CString::new(s.name.as_str()) {
+        game_audio::stop_one_shot(&h, &cue);
+    }
+}
+
+/// Winx Club (maintainer 2026-10-20): arm dancer `i`'s ENCHANTIX
+/// transformation when its side still holds a full combo of any kind as the
+/// song reaches 80 % (`transform_logic::should_trigger`) — once per side per
+/// play, one transformation at a time (the Wii's sequencer), human sides
+/// only (the pick gave the bot's phantom side no twin). Reads the judge
+/// counts and the chart end; writes nothing to the game.
+fn transform_trigger_tick(sess: &mut Session, mc_ms: i64, real_s: f32) {
+    if sess.transform_in_progress() {
+        return;
+    }
+    for i in 0..sess.winx.len() {
+        if !sess.can_transform(i) || sess.winx.get(i).is_some_and(|r| r.transform.is_some()) {
+            continue;
+        }
+        let Some(&side) = sess.pick.sides.get(i) else {
+            continue;
+        };
+        if crate::mods::multiplayer_bot::is_bot_side(side as usize) {
+            continue;
+        }
+        let end = song_reset::chart_end_raw(side as i32);
+        // Cheap gate first: the judge counts are read only from 80 % on.
+        if !end.is_some_and(|e| super::transform_logic::past_trigger_point(mc_ms, e)) {
+            continue;
+        }
+        let diag = song_reset::judge_diag(side as i32);
+        let grades = diag.as_ref().map(|j| j.grades);
+        if !super::transform_logic::should_trigger(grades, mc_ms, end) {
+            continue;
+        }
+        let combo = diag.map(|j| j.combo);
+        if let Some(r) = sess.winx.get_mut(i) {
+            r.transform = Some(super::session::TransformRun {
+                r0: real_s,
+                switch_dance: None,
+                switch_real: None,
+            });
+        }
+        log_info!(
+            "BackgroundDancers: Enchantix transformation -- P{} full combo ({:?}) at {} ms (80 % of the song, over at {:?} ms): {} -> {} ({})",
+            side + 1,
+            combo,
+            mc_ms,
+            end,
+            sess.parsed.dancers.get(i).map_or("?", |d| d.key.as_str()),
+            sess.parsed
+                .dancers
+                .get(i)
+                .and_then(|d| d.twin.as_ref())
+                .map_or("?", |t| t.body.key.as_str()),
+            if sess.wipe_ok {
+                "wipe"
+            } else {
+                "crossfade -- wipe containers not served"
+            }
+        );
+        return;
+    }
 }
 
 /// Which camera films a frame.
@@ -1221,6 +1773,19 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
             p.movie_camera_non.clone(),
         )
     };
+    // Winx Club: the transformation's event camera (GAME_DEF_CAM /#3/#0)
+    // films while it runs; the set below takes over again after the switch
+    // (`camera_source` reset so even the fixed camera is rewritten then).
+    let event = w.scene.session_mut().and_then(|sess| {
+        let cam = director::transform_camera(sess, sess.real_now)?;
+        sess.fx_camera = Some(cam);
+        Some(cam)
+    });
+    if let Some(cam) = event {
+        let _ = scene_graph::write_camera0(&cam);
+        w.camera_source = None;
+        return;
+    }
     let Some(sess) = w.scene.session_mut() else {
         return;
     };
@@ -1228,6 +1793,7 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
     let changed = w.camera_source != Some(source);
     match source {
         CamSource::Fixed => {
+            sess.fx_camera = Some(fixed_camera());
             if changed {
                 if scene_graph::write_camera0(&fixed_camera()) {
                     log_info!(
@@ -1242,6 +1808,7 @@ fn camera_tick(w: &mut Window, t: f32, mask: SceneMask) {
         }
         CamSource::Set(set) => match director::camera_frame(sess, t, set) {
             Some(cam) => {
+                sess.fx_camera = Some(cam);
                 let ok = scene_graph::write_camera0(&cam);
                 if changed {
                     if ok {

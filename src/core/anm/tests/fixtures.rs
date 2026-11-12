@@ -11,7 +11,7 @@ use super::super::anm::parse;
 use super::super::camera::{camera_from_slots, sample_slots};
 use super::super::pose::{evaluate, sampled_trs, seed_local_trs, Skeleton, Trs};
 use super::super::sample::{sample, Sample};
-use super::super::{b2it, ktmdl, mat_mul, rlist, Mat4, MAT4_IDENTITY};
+use super::super::{b2it, ktmdl, mat_mul, rlist, sanm, Mat4, MAT4_IDENTITY};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -365,6 +365,93 @@ fn loop_flag_matches_names() {
             clip["path"]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Material clips (.sanm)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stage_sanm_match_reference() {
+    let Some((fx, arcs)) = env("stage_sanm_match_reference", "stage_sanm.json") else {
+        return;
+    };
+    let clips = fx.as_array().unwrap();
+    assert!(
+        clips.len() >= 20,
+        "expected every mapset .sanm, got {}",
+        clips.len()
+    );
+    let mut samples = 0;
+    for clip in clips {
+        let arc_name = clip["arc"].as_str().unwrap();
+        let path = clip["path"].as_str().unwrap();
+        let arc = ArcFile::open(&arcs.join(arc_name)).unwrap_or_else(|| panic!("{arc_name}"));
+        let bytes = arc.get(path).unwrap_or_else(|| panic!("missing {path}"));
+        let s = sanm::parse(&bytes).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(s.frame_count as i64, i(&clip["frame_count"]), "{path}");
+        assert_eq!(s.fps, f(&clip["fps"]), "{path} fps");
+        assert_eq!(s.loops, clip["loops"].as_bool().unwrap(), "{path}");
+        let targets = clip["targets"].as_array().unwrap();
+        assert_eq!(s.targets.len(), targets.len(), "{path} targets");
+        for (got, exp) in s.targets.iter().zip(targets) {
+            let id = u64::from_str_radix(exp["identity"].as_str().unwrap(), 16).unwrap();
+            assert_eq!(got.identity, id, "{path}");
+            assert_eq!(got.shader_hash as i64, i(&exp["hash"]), "{path}");
+        }
+        let tracks = clip["tracks"].as_array().unwrap();
+        assert_eq!(s.tracks.len(), tracks.len(), "{path} tracks");
+        for (got, exp) in s.tracks.iter().zip(tracks) {
+            assert_eq!(got.kind as i64, i(&exp["kind"]), "{path}");
+            assert_eq!(got.target as i64, i(&exp["target"]), "{path}");
+            assert_eq!(got.sub as i64, i(&exp["sub"]), "{path}");
+            assert_eq!(got.key_count as i64, i(&exp["keys"]), "{path}");
+            let times: Option<Vec<u16>> = exp["times"]
+                .as_array()
+                .map(|a| a.iter().map(|v| i(v) as u16).collect());
+            assert_eq!(got.times, times, "{path}");
+        }
+        // the model's identities bind every target in file order
+        let model_path = path.replace("_play_loop.sanm", ".model");
+        let model = arc
+            .get(&model_path)
+            .unwrap_or_else(|| panic!("missing {model_path}"));
+        let ids = ktmdl::material_identities(&model).unwrap();
+        let exp_ids: Vec<u64> = clip["model_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from_str_radix(v.as_str().unwrap(), 16).unwrap())
+            .collect();
+        assert_eq!(ids, exp_ids, "{model_path} identities");
+        let binding = sanm::bind_targets(&s, &ids);
+        assert!(
+            binding.iter().all(|b| b.is_some()),
+            "{path}: unbound target"
+        );
+        // samples at the reference frames (keyed "slot:sub")
+        let frames = farr(&clip["frames"]);
+        let sample_rows = clip["samples"].as_array().unwrap();
+        let mut out = Vec::new();
+        for (frame, row) in frames.iter().zip(sample_rows) {
+            sanm::evaluate_into(&s, &bytes, *frame, &binding, &mut out);
+            let row = row.as_object().unwrap();
+            assert_eq!(out.len(), row.len(), "{path} @ {frame}");
+            for w in &out {
+                // out is keyed by material index; map back to the slot
+                let slot = binding.iter().position(|b| *b == Some(w.material)).unwrap();
+                let exp = f(&row[&format!("{slot}:{}", w.index)]);
+                assert!(
+                    close(w.value, exp, 1e-5),
+                    "{path} @ {frame} {slot}:{} {} vs {exp}",
+                    w.index,
+                    w.value
+                );
+                samples += 1;
+            }
+        }
+    }
+    eprintln!("stage sanm: {} clips, {samples} samples", clips.len());
 }
 
 // ---------------------------------------------------------------------------

@@ -141,4 +141,23 @@ ViewFrame view_frame(float4 clip, float4 nclip)
     return f;
 }
 
+// ── The Winx Club transformation WIPE (Background Dancers, research
+// docs/wii_ddr_winx_club_research.md §7.3) ───────────────────────────────
+// The Wii splits the screen at a projected world point: the outfit twin is
+// drawn ABOVE the line, the Enchantix twin BELOW it. The `_wipe` variants'
+// VS hand the clip position's (y, w) through TEXCOORD6 (perspective-correct,
+// so y / w is the pixel's exact NDC y — resolution independent); the PS
+// discards against PS c2.w (= ModelParameters.w, item+0x4C, written per
+// frame by the DLL for the two twins' BODY items only):
+//   w = side · (edge + 4)   edge = the wipe's NDC y (−1 bottom … +1 top)
+//   side = +1 keeps ndc ≥ edge (the outfit, above), −1 keeps ndc ≤ edge
+//   w = 0  no wipe (every other frame).
+void wipe_clip(float2 wp, float w)
+{
+    float s = sign(w);
+    float edge = abs(w) - 4.0;
+    float ndc = wp.x / wp.y;
+    clip(s == 0.0 ? 1.0 : s * (ndc - edge));
+}
+
 #endif // MDL_COMMON_HLSLI

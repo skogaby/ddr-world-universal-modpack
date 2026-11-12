@@ -59,6 +59,8 @@ pub enum NetError {
     BadJson(String),
     /// No release at all (empty list).
     NoRelease,
+    /// A transfer completed but its size or digest was not the expected one.
+    Verify(String),
 }
 
 impl fmt::Display for NetError {
@@ -73,6 +75,7 @@ impl fmt::Display for NetError {
             NetError::Status(code, url) => write!(f, "GitHub returned HTTP {code} for {url}"),
             NetError::BadJson(e) => write!(f, "unexpected response from the GitHub API: {e}"),
             NetError::NoRelease => write!(f, "the repository has no releases"),
+            NetError::Verify(e) => write!(f, "{e}"),
         }
     }
 }

@@ -62,6 +62,21 @@
 //!   effective bound = `max(720, distance)/min(scale, 1)` (multiplicative —
 //!   the fill's scale and the perspective map stack).
 //!
+//! - **scroll_remap** — The ONE owner of the detour on the renderer's
+//!   per-note scroll-Y function (`get_offset_y`). Reproduces StepMania's
+//!   display-only `#SCROLLS`/`#SPEEDS` gimmicks for injected songs by
+//!   remapping the beat delta in and scaling the pixel offset out around
+//!   the stock math; passthrough (one atomic load) unless a gimmick song's
+//!   tables are published. Fed by `services::stepmania` at gameplay load.
+//!
+//! - **ssq_path** — The ONE owner of the detour on the game's SSQ path
+//!   builder (`build_ssq_path`: basename + difficulty → `<b>.ssq` or
+//!   `<b>_N.ssq`). Priority resolver chain: `stepmania::ssq_split` (10,
+//!   injected basenames from the index), `split-ssq-auto-discovery` (20,
+//!   Rule-A disk index), then the original's stock table. Bad-arg guards
+//!   and the opt-in divergence oracle live here; `ssq_path_logic` is the
+//!   pure chain.
+//!
 //! - **custom_options** — Custom player options framework. Mods register option
 //!   rows that appear in the game's native options menu (including a mod-owned
 //!   Page6 "Mods" tab) with first-class UI, per-player state, change callbacks,
@@ -130,6 +145,20 @@
 //!   eight persistent text objects instead of recomposing them. Contributors:
 //!   the `hide-bottom-text` mod (operator toggle) and power_user_statistics'
 //!   horizontal readout (needs the stock line gone under its own layout).
+//!
+//! - **filter_entry_count** — The ONE owner of the detour on the filtersort
+//!   per-category entry-count leaf, which bounds each filter category's saved
+//!   `u64` round-trip. Contributors override one category each:
+//!   series_expansion (VERSION) and improved_song_title_sorting (MUSIC TITLE).
+//!
+//! - **ready_hold** — Ownership of the DPS READY? dwell timer between dwell
+//!   skippers (DDR SELECTION's legacy panel defers) and the one holder
+//!   (Background Dancers' flight take-off before the song).
+//!
+//! - **wheel_cards** — The ONE owner of the song-select wheel-card refresh
+//!   detour (`selectmusic_card_refresh`): post-original `CardBound { card,
+//!   holder, mcode }` events for s_marvelous' S-MFC lamp badge and the
+//!   StepMania prefetch scheduler.
 
 pub mod afp_patcher;
 pub mod analyze_hook;
@@ -147,6 +176,7 @@ pub mod combo_hooks;
 pub mod cull_window;
 pub mod custom_options;
 pub mod custom_options_persistence;
+pub mod filter_entry_count;
 pub mod foot_panel_swap;
 pub mod game_audio;
 pub mod hud_layout_hooks;
@@ -159,10 +189,12 @@ pub mod movie_sync;
 pub mod ntdll_state_shim;
 pub mod options_scroll;
 pub mod overlay_draw;
+pub mod ready_hold;
 pub mod render_notes_hook;
 pub mod scene3d;
 pub mod scene_manager;
 pub mod score_guard;
+pub mod scroll_remap;
 pub mod se_bank_synth;
 pub mod selectmusic_highlight;
 pub mod series_filter_scroll;
@@ -170,10 +202,14 @@ pub mod shutter;
 pub mod smx;
 pub mod song_rate;
 pub mod song_reset;
+pub mod ssq_path;
+pub mod ssq_path_logic;
 pub mod stage_records;
+pub mod stepmania;
 pub mod texture_resolver;
 pub mod toast;
 pub mod versus_mirror;
+pub mod wheel_cards;
 pub mod widget_renderer;
 
 #[cfg(test)]

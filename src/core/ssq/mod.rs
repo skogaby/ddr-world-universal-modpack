@@ -8,7 +8,14 @@
 //! original module paths remain valid via re-exports in
 //! `note_types_expansion`.
 //!
-//! Format reference: `docs/ssq_format.md`.
+//! The write side (`writer`, `check`) was added 2026-10-22 for the
+//! StepMania pack loader: pure synthesis of SSQ files from the
+//! `core::sm` model and a self-check over the produced bytes, both
+//! host-tested by `scripts/validate_stepmania.sh`.
+//!
+//! Format reference: `docs/ssq_format.md`, `docs/ssq_mine_chunk_format.md`.
 
+pub mod check;
 pub mod ssq_chunk;
 pub mod timing;
+pub mod writer;

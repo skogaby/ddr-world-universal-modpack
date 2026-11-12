@@ -10,7 +10,8 @@
 //! points (render items, the mod-owned scene node, the seqlocked
 //! `frame_board`, camera slot 0, `arc_set`, the `viewport_pass` compositor);
 //! this mod supplies the game logic. No rendering detours; the only code
-//! patch is STAGE SCREENS' layer-select byte. RE:
+//! patches are STAGE SCREENS' layer-select byte and `texture_wrap`'s boot
+//! imm32 (mod textures WRAP, not CLAMP). RE:
 //! `docs/background_dancers_research.md`, `docs/3d_model_format_research.md`.
 //!
 //! **Per song:** at the first entry into the song window {26, 27, 28} the
@@ -35,14 +36,61 @@
 //! will play on screens, screen-less stages otherwise); a chosen stage is
 //! never filtered. Missing dependencies degrade to THUMBNAIL with one WARN.
 //!
+//! **Flight stages** (custom content: `mapset_<key>/flight.txt`; the ported
+//! HOTTEST PARTY tunnels): only dancers with `motion/flight/` clips appear
+//! (`pick::fly_pick` replaces any other pick with a random capable one and
+//! keeps a capable one); each plays its take-off once, whole, then flight
+//! loops (`DanceSchedule::with_intro`); at the take-off's end the stage's
+//! `pre_*` parts (launch platform, which replay MUSIC FIT's intro script on
+//! the way — `director_math::intro_look`) give way to its `fly_*` parts
+//! (tunnel, clock from there) and the shadows go. Nobody capable ⇒ the platform
+//! stays. Flight clips never join a dance playlist, so they never show on a
+//! normal stage or in the BACKGROUND DANCER preview. The flyers carry the
+//! games' own effects (`flight_fx.rs`: zan's `CzanEff` particle runtime run
+//! from the stage's `flight_fx/flight_fx.teb`, drawn through per-player
+//! sprite / ribbon POOL models — instances `InstanceKind::Fx`). The take-off
+//! is the Wii's intro: on the real clock, filmed by the stage's `_intro`
+//! shots, with the sky burst at the tunnel mouth (`StageFx`) and its sound
+//! (a one-shot XACT bank); the tunnel scrolls on the real clock too.
+//!
+//! **Winx Club** (custom content `WINX CLUB`, research
+//! `docs/wii_ddr_winx_club_research.md`): DYNAMIC BONES — a body arc's
+//! `dynbones.txt` drives its hair / side locks / ribbons / wings with the
+//! Wii's own lag-spring solver (`dynbones_logic.rs`, 60 Hz steps on the real
+//! clock, solved after the clip and before Big Head; reset at every song
+//! (re)start and rewind, a clip cut is a teleport); the additive `kira`
+//! overlays scroll through the body's `pl_<key>_play_loop.sanm` (sampled
+//! on the real clock like a stage part's); a Fairy body's wing sparkles
+//! (`winx_fx/wing.*`, `chara_fx.rs`) ride both `DB_*wing_02` joints. The
+//! ENCHANTIX TRANSFORMATION (`transform_logic.rs`): an outfit whose arc
+//! names a twin (`transform/<twin>.txt`) on a human side gets that Fairy
+//! loaded beside it (`pick::transform_pick`, `InstanceKind::Twin`); a full
+//! combo of any kind held to 80 % of the song (`lifecycle::
+//! transform_trigger_tick`, read-only judge counts) runs the Wii's sequence
+//! on the real clock — scene fade, both bodies' `transform.anm` under the
+//! outfit's event camera with `chenge_effect` riding a screen-space WIPE
+//! (the `_wipe` shader containers read the line in ModelParameters.w — the
+//! frame board's AUX word; a crossfade when they are not served), the pose
+//! until the next choreography piece, then the twin dances the outfit's
+//! playlist (retargeted by bone name) for the rest of the song. Never in
+//! previews, never on flight stages, never the Multiplayer Bot's side.
+//!
 //! **Lighting Style** STOCK (UNLIT) / SMOOTH SHADING / CEL SHADING + **Scene
-//! Outlines** (INK or LAYERED inverted-hull twins, per-kind widths): applied
+//! Outlines** (one black inverted-hull twin per mesh; CEL + outline are
+//! Dancing Stage Unleashed's toon shading and ink since 2026-09-28): applied
 //! per song at item build by re-pointing each item's private material copies
 //! at the `<material>_lit` / `_cel` containers that
 //! `services/avs_layeredfs/shader_synthesis.rs` packs when `shader-fixes` is
 //! also on (hull twins run their program 0). Not served ⇒ stock / no
 //! outlines, one WARN. The shadow, `_bg` skydome parts, blended materials
 //! and screen materials always stay stock.
+//!
+//! **Big Head** (live, cosmetic): every dancer's `Head` subtree — resolved by
+//! name through the body's `.b2it` at parse — is scaled ×3 about the Head
+//! joint in the director's evaluated bones before the body publish, so the
+//! skinned head and hair, the `head00` / `face01` parts, their hull twins and
+//! the previews all follow; the engine's cull tests the published bones, so
+//! nothing pops (`docs/big_head_mode_feasibility.md`).
 //!
 //! **Choice, previews, custom content:** two in-game `custom_options` rows
 //! (`PersistMode::Local`) — BACKGROUND DANCER (per player) and BACKGROUND
@@ -55,7 +103,12 @@
 //! fingerprinted cache arc under `data_mods/_cache/custom_models/` — a ready
 //! `.arc` is still accepted — and mounted in `scene3d::arc_set`; entries are
 //! labelled by folder name, keys colliding with stock are refused, and the
-//! custom block follows the stock block of the catalog.
+//! custom block follows the stock block of the catalog. The scan is built to
+//! scale with the content (`custom_scan` module docs): nothing per FILE on a
+//! warm boot (`scan_index`), the walk prefetched on its own thread from
+//! `lib.rs` right after `early_apply` ([`prefetch_custom_content`]), and
+//! LayeredFS never indexes `custom_models/` (`mod_paths::PRIVATE_FOLDERS`),
+//! so no boot race moves however many models are installed.
 //!
 //! **Threads:** engine calls happen on the game thread only (scene
 //! callbacks, the mod's `input_manager::on_frame` callback,
@@ -68,11 +121,13 @@
 //!
 //! **Config** `background_dancers` (DLL-written, rewritten whole by
 //! `style.rs` on every GLOBAL SETTINGS edit): `style`, `outlines`,
-//! `outline_style`, `outline_px`, `outline_px_stage`, `bpm_sync`,
-//! `stop_slow`, `movie_mode`, `custom_content`, plus the operator-set
-//! `outline_layer_colors` (re-emitted when present). All apply next song
-//! except `custom_content` (next launch). Legacy `shader_fixes.dancer_*` /
-//! `lit_models` seed `style` / `outlines` when absent.
+//! `bpm_sync`, `stop_slow`, `movie_mode`, `custom_content`, `big_head`
+//! (the retired `outline_style` / `outline_px` / `outline_px_stage` /
+//! `outline_layer_colors` are logged as ignored and dropped by the next
+//! write). All apply next song except `custom_content` (next launch) and
+//! `big_head` (live).
+//! Legacy `shader_fixes.dancer_*` / `lit_models` seed `style` / `outlines`
+//! when absent.
 //!
 //! **Degradation:** `required_signatures` = the all-or-nothing `scene3d`
 //! group anchor + FileManager (a miss skips the mod). Without the
@@ -80,7 +135,8 @@
 //! Everything else is per-song fail-open, one WARN/INFO each. `is_active()`
 //! = "this mod CAN work", never "something rendered this boot". Developer
 //! knobs (`layeredfs.developer_mode`): `DDR_DANCERS_PIN`,
-//! `DDR_DANCERS_STATIC`, `DDR_DANCERS_VIEWPORT_SMOKE`.
+//! `DDR_DANCERS_STATIC`, `DDR_DANCERS_VIEWPORT_SMOKE`,
+//! `DDR_DANCERS_NO_FLIGHT_HOLD` (no READY hold on flight stages).
 //!
 //! **Host tests:** `scripts/validate_background_dancers.sh` mounts the pure
 //! files marked † below plus the pure `scene3d` / `core::anm` layers; its
@@ -90,24 +146,37 @@
 //!
 //! - Tables + choice: [`lifecycle`] (tables, song window, gameplay wrapper),
 //!   [`selection`]†, [`pick`]†, [`catalog`]†, [`options`], [`custom_content`]†
-//!   (pure planner), [`custom_scan`] (folder walk, packing, mounts).
+//!   (pure planner), [`custom_scan`] (folder walk, packing, mounts, the
+//!   boot-time prefetch), [`scan_index`]† (its warm-boot index codec).
 //! - Scene: [`session`] (parse + instance build), [`instance_plan`]†,
 //!   [`scene_window`] (load / build / teardown, shared with previews),
 //!   [`director`] + [`director_math`]†, [`schedule`]†, [`clock`]†,
 //!   [`tempo`]† + [`tempo_source`], [`background_hide`].
+//! - Winx Club: [`dynbones_logic`]† (the dynamic bones), [`transform_logic`]†
+//!   (the transformation's trigger / sequence / wipe), [`chara_fx`]†
+//!   (joint-bound effects over the flight runtime).
+//! - Flight stages: [`flight_fx`]† (the zan particle runtime),
+//!   [`flight_hold_logic`]† + [`flight_hold`] (the READY hold: the take-off
+//!   before the song).
 //! - Movies: [`movie_mode`]†, [`movie_size`], [`movie_backdrop`],
 //!   [`movie_camera`]†, [`screen_route`], [`song_movie`].
-//! - Look: [`style`] (rows, live values, config), [`outline`]†.
+//! - Look: [`style`] (rows, live values, config — incl. BIG HEAD),
+//!   [`outline`]†.
 //! - [`preview`] (`layout`†, `state`†, camera, scene, badge);
 //!   [`viewport_smoke`] (dev compositor smoke).
 
 pub mod background_hide;
 pub mod catalog;
+pub mod chara_fx;
 pub mod clock;
 pub mod custom_content;
 pub mod custom_scan;
 pub mod director;
 pub mod director_math;
+pub mod dynbones_logic;
+pub mod flight_fx;
+pub mod flight_hold;
+pub mod flight_hold_logic;
 pub mod instance_plan;
 pub mod lifecycle;
 pub mod movie_backdrop;
@@ -115,29 +184,55 @@ pub mod movie_camera;
 pub mod movie_mode;
 pub mod movie_size;
 pub mod options;
+pub mod options_logic;
 pub mod outline;
 pub mod pick;
 pub mod preview;
+pub mod scan_index;
 pub mod scene_window;
 pub mod schedule;
 pub mod screen_route;
 pub mod selection;
 pub mod session;
 pub mod song_movie;
+pub mod sources;
 pub mod style;
+pub mod style_rig;
 pub mod tempo;
 pub mod tempo_source;
+pub mod texture_wrap;
+pub mod transform_logic;
+pub mod universe_logic;
 pub mod viewport_smoke;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::mods::mod_trait::{Mod, ModContext};
+use crate::mods::mod_trait::{EarlyContext, Mod, ModContext};
 use crate::services::{input_manager, scene3d, scene_manager};
 use crate::{log_info, log_warn};
 
 /// Mod enabled (registry toggle); read by the callbacks.
 static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Boot hook (`lib.rs`, right after `early_apply`): when this mod and its
+/// `custom_content` toggle are on in the config, start listing
+/// `data_mods/custom_models` on its own thread so the enable only joins it
+/// (`custom_scan::prefetch`). No-op otherwise — a live enable from the menu
+/// scans inline, as before.
+pub fn prefetch_custom_content(mods: &std::collections::HashMap<String, bool>) {
+    if !crate::mods::mod_trait::mod_enabled_in_config(mods, "background-dancers") {
+        return;
+    }
+    // Same resolution as `lifecycle::init_tables` (absent section ⇒ defaults).
+    let custom_content = crate::mods::config::get()
+        .and_then(|c| c.background_dancers.clone())
+        .unwrap_or_default()
+        .custom_content;
+    if custom_content {
+        custom_scan::prefetch();
+    }
+}
 
 pub struct BackgroundDancersMod {
     scene_cb: Option<usize>,
@@ -177,11 +272,19 @@ impl Mod for BackgroundDancersMod {
         ]
     }
 
+    fn early_apply(&mut self, ctx: &EarlyContext) -> bool {
+        // Custom-model textures must WRAP like the stock ones: the default
+        // sampler attr onBoot gives db-absent textures is CLAMP, and onBoot
+        // runs right after this phase (`texture_wrap`).
+        texture_wrap::apply(ctx.signatures)
+    }
+
     fn init(&mut self, ctx: &ModContext) -> bool {
         // Optional: the movie-size override and the fullscreen-movie probe
         // behind Background Movies = FULLSCREEN (fail-open without them).
         let _ = movie_size::init(ctx.signatures);
         let _ = movie_backdrop::init(ctx.signatures);
+        let _ = flight_hold::init(ctx.signatures);
         // Optional: Background Movies = STAGE SCREENS (the layer-select
         // byte + the MovieActor fit fields; THUMBNAIL without them).
         let _ = screen_route::init(ctx.signatures);
@@ -207,7 +310,7 @@ impl Mod for BackgroundDancersMod {
         // ⇒ random picks, one WARN inside).
         match lifecycle::tables_snapshot() {
             Some((stages, _camera_rows, dancers)) => {
-                let custom = lifecycle::custom_labels_snapshot();
+                let custom = lifecycle::custom_entries_snapshot();
                 options::register(catalog::build_catalog_with_custom(
                     &stages, &dancers, &custom,
                 ));

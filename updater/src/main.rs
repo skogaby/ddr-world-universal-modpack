@@ -19,6 +19,7 @@ mod github;
 mod log;
 mod manifest;
 mod merge;
+mod packs;
 mod plan;
 mod relpath;
 mod selfupdate;
@@ -136,6 +137,10 @@ fn run_in_game_folder(cli: Cli, argv: &[String]) -> Outcome {
             return Outcome::Skipped;
         }
     };
+    if cli.packs_list {
+        // Read-only and local: no log file, no recovery, no network.
+        return packs::list(&game);
+    }
     if let Err(e) = log::attach_file(&game.log_path()) {
         log_warn!(
             "could not open {} for writing ({e}); continuing with console output only",
@@ -169,17 +174,120 @@ fn run_in_game_folder(cli: Cli, argv: &[String]) -> Outcome {
         }
     }
 
-    if cli.from_zip.is_some() {
-        return run_from_zip(&cli, &game);
+    let session = apply::Session::new();
+    // Cleared by the base step when GitHub itself could not be reached, so
+    // the pack step does not wait on one timeout per pack.
+    let mut network = true;
+    let base = if cli.from_zip.is_some() {
+        run_from_zip(&cli, &game, &session)
+    } else {
+        run_default(&cli, &game, &session, &mut network)
+    };
+    if base == Outcome::RollbackFailed {
+        // The folder is suspect: touch nothing else.
+        return base;
     }
-    run_default(&cli, &game)
+    run_packs(&cli, &game, &session, base, network)
+}
+
+/// The pack step (optional content packs design §3.1): runs after the base
+/// step whatever its outcome — the updater that first sees a catalog is the
+/// one a previous release installed, with the base already current.
+fn run_packs(
+    cli: &Cli,
+    game: &GameDir,
+    session: &apply::Session,
+    base: Outcome,
+    network: bool,
+) -> Outcome {
+    if let (Some(spec), false) = (&cli.packs_install, cli.check) {
+        let target = packs::step::parse_target(spec);
+        if !packs::step::set_target(game, session, &target) {
+            return Outcome::RollbackFailed;
+        }
+    }
+    let report = packs::step::run(
+        game,
+        session,
+        &packs::step::Options {
+            packs_dir: cli.packs_dir.as_deref(),
+            force: cli.force,
+            check_only: cli.check,
+            network,
+        },
+    );
+    if report.rollback_failed {
+        return Outcome::RollbackFailed;
+    }
+    if let Some(status) = &report.status {
+        log_info!("{status}");
+    }
+    if cli.check && report.pending > 0 {
+        return Outcome::UpdateAvailable;
+    }
+
+    // The pack prompt: every normal run offers the chooser for a few seconds.
+    let invocation = packs::step::Invocation {
+        check: cli.check,
+        scripted: cli.packs_install.is_some(),
+        asked: cli.packs,
+        alone_on_console: console::owns_console_alone(),
+    };
+    let open = match packs::step::prompt_for(invocation, &report) {
+        packs::step::Prompt::None => false,
+        packs::step::Prompt::Chooser => true,
+        packs::step::Prompt::Countdown => console::with_stdin(|input| {
+            console::countdown(
+                input,
+                PACK_PROMPT_SECONDS,
+                &mut console::LiveLine::stdout(),
+                &pack_prompt_text,
+            )
+        }),
+    };
+    if !open {
+        return base;
+    }
+    match console::with_stdin(|input| packs::step::choose(game, session, input)) {
+        packs::step::Chosen::Unchanged => base,
+        packs::step::Chosen::RollbackFailed => Outcome::RollbackFailed,
+        packs::step::Chosen::Applied => {
+            let report = packs::step::run(
+                game,
+                session,
+                &packs::step::Options {
+                    packs_dir: cli.packs_dir.as_deref(),
+                    force: false,
+                    check_only: false,
+                    network,
+                },
+            );
+            if report.rollback_failed {
+                return Outcome::RollbackFailed;
+            }
+            if let Some(status) = &report.status {
+                log_info!("{status}");
+            }
+            base
+        }
+    }
+}
+
+/// How long every run offers the pack chooser.
+const PACK_PROMPT_SECONDS: u64 = 5;
+
+fn pack_prompt_text(seconds_left: u64) -> String {
+    format!(
+        "Press Enter to choose packs ... starting the game in {seconds_left} second{}",
+        if seconds_left == 1 { "" } else { "s" }
+    )
 }
 
 /// The normal run (design §3.1): ask GitHub for the latest release, decide via
 /// the manifest, download + verify, then the shared install pipeline. Every
 /// network or API failure is one "skipped" line and exit 0 — the game must
 /// start regardless.
-fn run_default(cli: &Cli, game: &GameDir) -> Outcome {
+fn run_default(cli: &Cli, game: &GameDir, session: &apply::Session, network: &mut bool) -> Outcome {
     log_info!(
         "Checking github.com/{}{} ...",
         cli.repo,
@@ -193,6 +301,7 @@ fn run_default(cli: &Cli, game: &GameDir) -> Outcome {
     let release = match github::fetch_latest(&agent, &cli.repo, cli.include_prerelease) {
         Ok(r) => r,
         Err(e) => {
+            *network = !matches!(e, github::NetError::Transport(_));
             log_warn!("skipped ({e}) -- starting the game with the installed version");
             return Outcome::Skipped;
         }
@@ -268,21 +377,20 @@ fn run_default(cli: &Cli, game: &GameDir) -> Outcome {
 
     let mb = asset.size as f64 / (1024.0 * 1024.0);
     log_info!("Downloading {} ({mb:.1} MB) ...", asset.name);
-    let mut last_pct: i64 = -1;
-    let mut progress = |done: u64, total: u64| {
-        if total == 0 {
-            return;
-        }
-        let pct = (done * 100 / total) as i64;
-        if pct / 10 != last_pct / 10 || pct == 100 && last_pct != 100 {
-            log_info!("  {pct}%");
-            last_pct = pct;
-        }
-    };
-    let downloaded = match download::fetch_asset(&agent, asset, &game.download_dir(), &mut progress)
-    {
+    let target = download::Target::from_asset(asset);
+    let mut progress = console::Progress::stdout();
+    let result = download::fetch(
+        &agent,
+        &target,
+        &game.download_dir(),
+        false,
+        &mut |done, total| progress.update(done, total),
+    );
+    progress.finish();
+    let downloaded = match result {
         Ok(d) => d,
         Err(e) => {
+            *network = !matches!(e, github::NetError::Transport(_));
             log_warn!(
                 "skipped (download failed: {e}) -- starting the game with the installed version"
             );
@@ -302,6 +410,7 @@ fn run_default(cli: &Cli, game: &GameDir) -> Outcome {
 
     install(
         game,
+        session,
         &release.tag_name,
         release.name.as_deref(),
         &asset.name,
@@ -314,7 +423,7 @@ fn run_default(cli: &Cli, game: &GameDir) -> Outcome {
 
 /// Install a local release archive through the full pipeline (design R27):
 /// identity → needs-update → extract → merge inputs → plan → transactional apply.
-fn run_from_zip(cli: &Cli, game: &GameDir) -> Outcome {
+fn run_from_zip(cli: &Cli, game: &GameDir, session: &apply::Session) -> Outcome {
     let zip = cli.from_zip.as_deref().expect("caller checked from_zip");
     if !zip.is_file() {
         log_warn!("skipped: {} is not a file", zip.display());
@@ -338,6 +447,7 @@ fn run_from_zip(cli: &Cli, game: &GameDir) -> Outcome {
 
     install(
         game,
+        session,
         &tag,
         None,
         &asset_name,
@@ -352,6 +462,7 @@ fn run_from_zip(cli: &Cli, game: &GameDir) -> Outcome {
 #[allow(clippy::too_many_arguments)]
 fn install(
     game: &GameDir,
+    session: &apply::Session,
     tag: &str,
     release_name: Option<&str>,
     asset_name: &str,
@@ -431,8 +542,9 @@ fn install(
     );
 
     log_info!("Installing ...");
-    match apply::execute(
+    match apply::execute_release(
         game,
+        session,
         &plan,
         &staged.root,
         &merged,
@@ -685,6 +797,16 @@ mod tests {
         let (outcome, msg) = run_guarded(|| Outcome::NothingToDo);
         assert_eq!(outcome, Outcome::NothingToDo);
         assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn m6_pack_prompt_text_fits_a_console_line() {
+        assert_eq!(
+            pack_prompt_text(5),
+            "Press Enter to choose packs ... starting the game in 5 seconds"
+        );
+        assert!(pack_prompt_text(1).ends_with("in 1 second"));
+        assert!(pack_prompt_text(PACK_PROMPT_SECONDS).len() <= console::LIVE_COLUMNS);
     }
 
     #[test]

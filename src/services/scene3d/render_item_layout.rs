@@ -28,7 +28,8 @@ pub const ITEM_MODEL_PARAMS: usize = 0x40;
 /// `ModelParameters.w` (`item+0x4C`): read by NO stock shader (`.x/.z` = the
 /// bone texture height, `.y` = the stipple threshold), so the DLL uses it as
 /// a per-item constant — the synthesized outline VS reads it as the hull's
-/// rim width in 720p pixels (0 ⇒ the shader's default).
+/// push multiplier (1.0 = DSU's outline; 0 ⇒ 1). The name is the retired
+/// 720p pixel-width meaning (2026-09-21..28).
 pub const ITEM_OUTLINE_PX: usize = 0x4C;
 /// `f32[4]` tint, multiplied into every draw record's colour → VS c23.
 pub const ITEM_TINT: usize = 0x50;
@@ -117,6 +118,53 @@ pub fn hull_record_flags(body_flags: u32) -> u32 {
     f
 }
 
+/// `REC_FLAGS` low-byte bits (the loader's folded mask,
+/// `docs/3d_model_format_research.md` "Flag word → render states"): drawn by
+/// the TRANS passes instead of OPACITY, two-sided, z-write off, and the
+/// ADDITIVE blend group (`SRCALPHA, ONE`).
+pub const REC_TRANSPARENT_BIT: u32 = 0x01;
+pub const REC_TWO_SIDED_BIT: u32 = 0x02;
+pub const REC_ZWRITE_OFF_BIT: u32 = 0x08;
+pub const REC_BLEND_ADDITIVE: u32 = 0x40;
+
+/// Flags of a restyled dancer record in the additive DDR Universe styles
+/// (CANDY / BUBBLE / CRYSTAL / X-RAY — Universe draws them blend ONE/ONE,
+/// z-write off, cull none; `docs/ddr_universe_render_styles_research.md`
+/// §2): transparent + two-sided + z-write off + the additive group, every
+/// other bit (hidden, hull, z-test, alpha test, the top nibble) kept. With
+/// an opaque texture `SRCALPHA, ONE` is Universe's `ONE, ONE`; cut-out texels
+/// (alpha 0) add nothing.
+pub fn additive_record_flags(flags: u32) -> u32 {
+    (flags & !REC_BLEND_GROUP_MASK)
+        | REC_TRANSPARENT_BIT
+        | REC_TWO_SIDED_BIT
+        | REC_ZWRITE_OFF_BIT
+        | REC_BLEND_ADDITIVE
+}
+
+/// Flags of a restyled body record in OUTLINE ONLY (Universe's OUTLINE:
+/// the body drawn with colour writes off, then the ink hull): additive
+/// group (its PS outputs rgb 0 — adds nothing) with z-WRITE forced on, so
+/// the hull drawn after it shows only where it is not behind the body. The
+/// culling / z-test / alpha-test bits stay as built. `trans` = the TRANS-type
+/// collectors take it (the record's bit 0): in gameplay the body's node
+/// mask is LOWPRIO_TRANS, which runs after OPACITY and before TRANS
+/// (World `FUN_1801f2c30`: 0x66 / 0x67 / 0x68).
+pub fn invisible_depth_record_flags(flags: u32, trans: bool) -> u32 {
+    let f = (flags & !(REC_BLEND_GROUP_MASK | REC_ZWRITE_OFF_BIT | REC_TRANSPARENT_BIT))
+        | REC_BLEND_ADDITIVE;
+    if trans {
+        f | REC_TRANSPARENT_BIT
+    } else {
+        f
+    }
+}
+
+/// A HULL record moved to the TRANS pass (drawn after OUTLINE ONLY's body).
+pub fn trans_record_flags(flags: u32) -> u32 {
+    flags | REC_TRANSPARENT_BIT
+}
+
 // ── GPU resource pieces the builder reads ────────────────────────────
 
 /// GPU draw record stride (`res+0x68` array).
@@ -146,6 +194,30 @@ pub const MAT_SHADER_OBJ: usize = 0x20;
 pub const SHADER_NAME_HASH: usize = 0x00;
 pub const SHADER_PROGRAM_COUNT: usize = 0x04;
 pub const SHADER_PROGRAMS: usize = 0x08;
+
+// ── Material shader parameters (RE §3.7 / §4.3; `FUN_180274070` writes them,
+// the material bind `FUN_18026cce0` uploads them as VS c24.. / PS c3..) ────
+
+/// `u16` number of `float4` parameters the material uploads (2 or 3).
+pub const MAT_PARAM_COUNT: usize = 0x18;
+/// The `parameters` block: `float4 × MAT_PARAM_COUNT` — `[0] m_vTexAnime
+/// (scaleU, scaleV, offU, offV)`, `[1] vConstatntColor`, `[2] vOffsetColor`.
+/// A `.sanm` float index `i` (0..31) addresses `MAT_PARAMS + 4·i` of an
+/// item's PRIVATE copy; only `i < 4 · param_count` reaches a shader.
+pub const MAT_PARAMS: usize = 0x28;
+/// Floats the record has room for (`0x28 + 32·4 = 0xA8 ≤ MATERIAL_SIZE`).
+pub const MAT_PARAM_FLOATS: usize = 32;
+
+/// Byte offset of `.sanm` float `index` inside a material record, or `None`
+/// when the float is beyond the material's uploaded `param_count` (writing it
+/// would be a silent no-op) or the block.
+pub fn material_param_offset(param_count: u16, index: u8) -> Option<usize> {
+    let i = index as usize;
+    if i >= MAT_PARAM_FLOATS || i >= 4 * param_count as usize {
+        return None;
+    }
+    Some(MAT_PARAMS + 4 * i)
+}
 
 /// Per-material eligibility for the whole-scene restyle: a material copy is
 /// re-pointed only when EVERY draw record using it is opaque / alpha-tested
@@ -182,6 +254,21 @@ pub const fn mat_tex_index(slot: usize) -> usize {
 pub const fn mat_tex_ptr(slot: usize) -> usize {
     0xA8 + slot * 0x18
 }
+/// The two `f32` pairs after a slot's pointer the converter initialises
+/// (`+8/+0xC = 1.0`, `+0x10/+0x14 = 0`, RE §2.1).
+pub const fn mat_tex_scale(slot: usize) -> usize {
+    mat_tex_ptr(slot) + 8
+}
+pub const fn mat_tex_offset(slot: usize) -> usize {
+    mat_tex_ptr(slot) + 0x10
+}
+/// Table index the DLL writes into a slot it binds itself (a DDR Universe
+/// style texture): out of range for every resource table, so the texture
+/// re-resolve and `materials_sampling` skip the slot.
+pub const MAT_TEX_INDEX_NONE: u16 = 0xFFFF;
+/// The material slot (and PS sampler) a DDR Universe style texture uses —
+/// `mdl_universe.hlsl` `StyleTexture : register(s1)`.
+pub const STYLE_TEXTURE_SLOT: usize = 1;
 
 // ── Resource texture table (RE §2.1) ─────────────────────────────────
 
@@ -403,6 +490,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn material_param_offsets_stay_inside_the_uploaded_block() {
+        assert_eq!(material_param_offset(3, 0), Some(0x28));
+        assert_eq!(material_param_offset(3, 2), Some(0x30));
+        assert_eq!(material_param_offset(3, 6), Some(0x40));
+        assert_eq!(material_param_offset(3, 11), Some(0x54));
+        assert_eq!(material_param_offset(3, 12), None); // vOffsetColor is the last float4
+        assert_eq!(material_param_offset(2, 4), Some(0x38));
+        assert_eq!(material_param_offset(2, 8), None);
+        assert_eq!(material_param_offset(8, 31), Some(0x28 + 31 * 4));
+        assert_eq!(material_param_offset(8, 32), None);
+        assert!(MAT_PARAMS + 4 * MAT_PARAM_FLOATS <= MATERIAL_SIZE);
+    }
+
+    #[test]
     fn footpanel_layout() {
         let c = Counts {
             draw_records: 1,
@@ -522,6 +623,51 @@ mod tests {
         assert_eq!(mat_tex_ptr(0), 0xA8);
         assert_eq!(mat_tex_ptr(7), 0xA8 + 7 * 0x18);
         assert_eq!(mat_tex_index(3), 6);
+        // The converter's slot-0 writes (`mat+0xB0/+0xB8`, RE §2.1).
+        assert_eq!(mat_tex_scale(0), 0xB0);
+        assert_eq!(mat_tex_offset(0), 0xB8);
+        assert_eq!(mat_tex_scale(1), 0xC8);
+        // Slot 7's offset pair ends inside the material record.
+        assert!(mat_tex_offset(MAT_TEX_SLOTS - 1) + 8 <= MATERIAL_SIZE);
+        assert!(STYLE_TEXTURE_SLOT < MAT_TEX_SLOTS);
+    }
+
+    #[test]
+    fn additive_flags_keep_everything_but_the_blend_group() {
+        // Opaque culled record → transparent, two-sided, z-write off, additive.
+        assert_eq!(additive_record_flags(0x0000_0000), 0x4B);
+        // An alpha-blended record's group is REPLACED, not or-ed (0x20|0x40
+        // would be the subtractive group 0x60).
+        assert_eq!(
+            additive_record_flags(0x0000_0020) & REC_BLEND_GROUP_MASK,
+            0x40
+        );
+        // Hidden / hull / z-test-off / alpha-test-off / the top nibble survive.
+        let keep = REC_HIDDEN_BIT | REC_HULL_BIT | 0x04 | 0x10 | 0x1000_0000;
+        assert_eq!(additive_record_flags(keep) & keep, keep);
+        // Idempotent.
+        let once = additive_record_flags(0x0000_0013);
+        assert_eq!(additive_record_flags(once), once);
+        // Every rewritten record is no longer restyle-eligible: the restyle
+        // must run BEFORE the rewrite.
+        assert_ne!(once & REC_BLEND_GROUP_MASK, 0);
+    }
+
+    #[test]
+    fn invisible_depth_writes_depth_and_adds_nothing() {
+        // z-write OFF / transparent / alpha group cleared, additive set.
+        let built = REC_ZWRITE_OFF_BIT | REC_TRANSPARENT_BIT | 0x20 | REC_TWO_SIDED_BIT;
+        let f = invisible_depth_record_flags(built, false);
+        assert_eq!(f & REC_ZWRITE_OFF_BIT, 0);
+        assert_eq!(f & REC_TRANSPARENT_BIT, 0);
+        assert_eq!(f & REC_BLEND_GROUP_MASK, REC_BLEND_ADDITIVE);
+        assert_ne!(f & REC_TWO_SIDED_BIT, 0, "culling as built");
+        assert_eq!(invisible_depth_record_flags(0, true), 0x41);
+        // Hidden / hull bits survive.
+        let keep = REC_HIDDEN_BIT | REC_HULL_BIT | 0x04 | 0x10;
+        assert_eq!(invisible_depth_record_flags(keep, true) & keep, keep);
+        assert_eq!(trans_record_flags(REC_HULL_BIT), REC_HULL_BIT | 1);
+        assert_eq!(trans_record_flags(trans_record_flags(4)), 5);
     }
 
     #[test]

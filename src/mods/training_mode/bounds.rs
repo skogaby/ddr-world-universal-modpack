@@ -16,8 +16,8 @@
 //! clamp, then the chart-end formula with [`section_math::MIN_SECTION_MS`],
 //! block-quantized). The resolved row-derived values seed the live bounds
 //! and remain the press-5 RESTORE target; the session-active latch
-//! ([`training_session_active`]) records row- or gesture-driven sessions
-//! for the driver arm and Step 5's taint.
+//! ([`training_session_active`]) records loop-, row- or marker-driven
+//! sessions for Step 5's taint (scrubs taint without latching it).
 //!
 //! Gestures (R3, as amended 2026-08-13 — all marker gestures live on the
 //! pinpad's MIDDLE row 4-5-6), active only at GAMEPLAY with the mod
@@ -97,9 +97,11 @@ static CHART_END_MS: AtomicI32 = AtomicI32::new(0);
 /// the scene-change instant), retried per frame by the Step-3 driver until
 /// the actor tree resolves.
 static RESOLUTION_PENDING: AtomicBool = AtomicBool::new(false);
-/// The training-session-active latch (design §4.1): rows > 0 at gameplay
-/// entry, or a gesture set a marker mid-song. Consumed by the driver arm
-/// and Step 5's taint. Cleared with the markers at song boundaries.
+/// The training-session-active latch (design §4.1): loop or rows engaged
+/// at gameplay entry, or a gesture set a marker mid-song. FF/RW scrubs do
+/// NOT set it (they taint directly). Consumed by Step 5's taint, where it
+/// keeps a restart to 0 tainted. Cleared with the markers at song
+/// boundaries.
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Per-side SONG START TIME row values (seconds — the option row's raw
@@ -184,14 +186,17 @@ static DEATH_GATE_STASH_VALID: [AtomicBool; 2] = [AtomicBool::new(false), Atomic
 static DEATH_GATE_STASH: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 /// Arm the loop's death bypass (called at the loop latch, where the live
-/// actor tree is proven): stash each live side's stock `+0x2B7` gate and
-/// set the gate on every actor. With the gate up, a gauge death latches
-/// `m_isDead` but can neither advance the actor to STEP_GAME_OVER nor
-/// finish the DPS (both engine paths are conditioned on the gate —
-/// 20260721 decompile), so the loop driver can detect the death at its
-/// leisure and fire the loop back to A; the reset's own completion block
-/// clears the death flags and restores the gauge. In versus EITHER side's
-/// death revives BOTH into the next pass (one shared grind). Fail-open:
+/// actor tree is proven): stash each live side's stock `+0x2B7` gate, set
+/// the gate on every actor, and hold every gauge out of the death state
+/// ([`song_reset::hold_gauges`], re-run per frame by the driver). This is
+/// the engine's own matching-battle "can't fail" shape: the actor gate
+/// blocks STEP_GAME_OVER and the DPS finish-poll, and the gauge floor
+/// clamps at 1 instead of sending the `0x103A` death, so `m_isDead` never
+/// latches and judging/scoring stay live. The gauge must not be allowed
+/// to die: the gate-up + `m_isDead`-latched combination never occurs in
+/// stock play (matching gauges are floored at ctor), and holding it for
+/// seconds hard-crashed the game on 20260915 (2026-10-20 cabinet test).
+/// The next loop pass or scrub restores the gauge as before. Fail-open:
 /// an unreadable/unwritable gate leaves stock death behavior (the grind
 /// just still fails out on a miss cascade).
 pub(super) fn arm_death_bypass() {
@@ -215,25 +220,29 @@ pub(super) fn arm_death_bypass() {
         return;
     }
     DEATH_GATE_ARMED.store(true, Ordering::Release);
+    let hold = song_reset::hold_gauges();
     log_info!(
-        "TrainingMode: loop death bypass armed (stock gates p1={:?} p2={:?})",
+        "TrainingMode: loop death bypass armed (stock gates p1={:?} p2={:?}; {} gauge(s) floored)",
         DEATH_GATE_STASH_VALID[0]
             .load(Ordering::Acquire)
             .then(|| DEATH_GATE_STASH[0].load(Ordering::Acquire)),
         DEATH_GATE_STASH_VALID[1]
             .load(Ordering::Acquire)
             .then(|| DEATH_GATE_STASH[1].load(Ordering::Acquire)),
+        hold.floored,
     );
 }
 
-/// Restore each stashed side's death gate (loop disarm / session end).
-/// Refusals at song boundaries are harmless — the gate is per-actor state
-/// and dies with the actor tree; fresh actors are stock.
+/// Restore each stashed side's death gate (loop disarm / session end) and
+/// release the gauge hold ([`song_reset::release_gauges`] — a disarmed
+/// loop must be able to fail out again). Refusals at song boundaries are
+/// harmless — the gate is per-actor state and dies with the actor tree;
+/// fresh actors are stock.
 pub(super) fn disarm_death_bypass() {
     if !DEATH_GATE_ARMED.swap(false, Ordering::AcqRel) {
         return;
     }
-    let mut restored = false;
+    let mut restored = song_reset::release_gauges();
     for side in 0..2usize {
         if DEATH_GATE_STASH_VALID[side].load(Ordering::Acquire)
             && song_reset::set_death_gate_for_side(
@@ -245,8 +254,14 @@ pub(super) fn disarm_death_bypass() {
         }
     }
     if restored {
-        log_info!("TrainingMode: loop death bypass disarmed (stock gates restored)");
+        log_info!("TrainingMode: loop death bypass disarmed (stock gates + gauges restored)");
     }
+}
+
+/// Whether the loop's death bypass is armed for this song (the driver's
+/// per-frame gauge-hold gate).
+pub(super) fn death_bypass_armed() -> bool {
+    DEATH_GATE_ARMED.load(Ordering::Acquire)
 }
 
 /// Row change callback target: store one side's LOOP SONG state.
@@ -470,12 +485,13 @@ fn scrub(side: usize, delta_ms: i32) {
     match song_reset::request_reset(t_q, 0, AccumulatorPolicy::Zero, None) {
         ResetOutcome::Started => {
             SCRUB_COOLING.store(true, Ordering::Release);
-            // The scrub alters the played song (AC 7): session latch +
-            // taint, the set_marker gesture pattern. The Step-5
-            // on_song_reset(t>0) subscriber re-taints t > 0 seeks anyway
-            // (idempotent); setting SESSION_ACTIVE here is what carries
-            // the t = 0 rewind-to-start restart into its predicate.
-            SESSION_ACTIVE.store(true, Ordering::Release);
+            // The scrub alters the played song (AC 7): taint here, which
+            // covers t > 0 seeks and the t = 0 rewind-to-start alike.
+            // Deliberately NOT the session latch: a scrub leaves nothing
+            // behind that the in-place reset does not rebuild, so a
+            // press-1 restart to 0 (which wipes the taint at its trigger)
+            // is an honest full run and must submit. Only a latched loop,
+            // section bound or marker keeps a song tainted across restarts.
             super::taint_entered_sides();
             super::scrub_indicator::show(delta_ms >= 0);
             log_info!(
@@ -574,9 +590,10 @@ pub(super) fn clear_session_state(reason: &str) {
 }
 
 /// Whether a training session is active for the current song (design
-/// §4.1's predicate): row-derived bounds engaged at entry, or a gesture
-/// set a marker mid-song. The Step-3 driver's arm gate and Step 5's taint
-/// source. Latched per song; cleared with [`clear_session_state`].
+/// §4.1's predicate): loop or row-derived bounds engaged at entry, or a
+/// gesture set a marker mid-song — never a scrub alone. Step 5's taint
+/// source for restarts landing at 0. Latched per song; cleared with
+/// [`clear_session_state`].
 pub fn training_session_active() -> bool {
     SESSION_ACTIVE.load(Ordering::Acquire)
 }
@@ -628,10 +645,9 @@ pub fn try_resolve_row_bounds() -> bool {
         // both digest paths (the latch precedes the coherence gate): even
         // when stale bound rows resolve as defaults, the loop still fires.
         super::taint_entered_sides();
-        // Step-7 amendment (2026-08-15): a loop session bypasses death —
-        // gate the actors' instant-death byte so a gauge empty can never
-        // end the run; the driver detects the latched m_isDead and loops
-        // back to A (the reset revives).
+        // Step-7 amendment (2026-08-15, revised 2026-10-20): a loop
+        // session disables failure — gate the actors' instant-death byte
+        // and floor the gauges so a gauge empty can never end the run.
         arm_death_bypass();
         log_info!("TrainingMode: LOOP SONG latched for this song (side {side})");
     } else {

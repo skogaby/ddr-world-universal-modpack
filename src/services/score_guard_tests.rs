@@ -341,6 +341,7 @@ fn reset_taints_clean() {
         score_guard::set_autoplay_taint(side, false);
         score_guard::set_assist_tick_taint(side, false);
     }
+    score_guard::set_injected_song_taint(false);
 }
 
 /// Autoplay ALONE must suppress the stage save. This test is the release
@@ -459,6 +460,32 @@ fn new_sources_compose_with_existing_ones() {
     assert!(score_guard::is_stage_suppressed(P2));
     score_guard::set_assist_tick_taint(P2, false);
     assert!(!score_guard::is_stage_suppressed(P2));
+    reset_taints_clean();
+}
+
+#[test]
+fn injected_song_taint_is_global_level_driven_and_survives_song_reset() {
+    use super::score_guard;
+    let _guard = locked_clean_taints();
+    assert!(!score_guard::is_injected_song_tainted());
+    score_guard::set_injected_song_taint(true);
+    assert!(score_guard::is_injected_song_tainted());
+    // Global: both sides' stage saves are suppressed.
+    assert!(score_guard::is_stage_suppressed(P1));
+    assert!(score_guard::is_stage_suppressed(P2));
+    // The per-song reset (scene-28 entry / in-place quick restart) must NOT
+    // launder it — only the next bank request or a new session may.
+    score_guard::reset_song_taint();
+    assert!(score_guard::is_stage_suppressed(P1));
+    // Level semantics: a stock bank request clears it.
+    score_guard::set_injected_song_taint(false);
+    assert!(!score_guard::is_stage_suppressed(P1));
+    assert!(!score_guard::is_stage_suppressed(P2));
+    // Card-in clears it too.
+    score_guard::set_injected_song_taint(true);
+    score_guard::reset_session();
+    assert!(!score_guard::is_injected_song_tainted());
+    assert!(!score_guard::is_stage_suppressed(P1));
     reset_taints_clean();
 }
 

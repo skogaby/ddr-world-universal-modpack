@@ -12,7 +12,8 @@
 //! chunk: u32 tag = 0xFF010002 + type, u16 h4, u16 h6
 //!   type 0: u32 rel_offsets[] @+8 (relative to the CHUNK start), 0-terminated → bone tracks
 //!   type 4: six u32 rel offsets @+8..+0x1C (0 = absent)        → camera slots
-//!   anything else: ignored (type 1 = exporter-side hierarchy validation data)
+//!   anything else: ignored here (type 1 = exporter-side hierarchy validation
+//!   data; types 14 / 15 = the `.sanm` material shape, `sanm.rs`)
 //! track (16 B): u16 kind, u16 tag, u16 key_count, u8 target, u8 sub,
 //!               u32 rel → u16 times[key_count] (0 = uniform), u32 rel → values
 //!               (both relative to the TRACK start)
@@ -44,8 +45,11 @@ pub enum Channel {
 pub struct Track {
     pub kind: u16,
     pub channel: Channel,
-    /// Bone index (type 0) or camera slot (type 4).
+    /// Bone index (type 0), camera slot (type 4) or material slot (type 14).
     pub target: u8,
+    /// Byte `+7`: the float index into the material parameters block for
+    /// `.sanm` tracks (type 14); 0 on bone / camera tracks.
+    pub sub: u8,
     pub key_count: u16,
     /// Explicit key times in frames, or `None` for uniform keys (key `k` at
     /// frame `k`).
@@ -119,11 +123,12 @@ pub fn kind_info(kind: u16) -> Option<(Channel, usize)> {
     })
 }
 
-fn parse_track(r: &Le<'_>, o: usize) -> Result<Track, AnmError> {
+pub(super) fn parse_track(r: &Le<'_>, o: usize) -> Result<Track, AnmError> {
     let kind = r.u16(o).ok_or(AnmError::Truncated)?;
     let (channel, stride) = kind_info(kind).ok_or(AnmError::UnknownKind(kind))?;
     let key_count = r.u16(o + 4).ok_or(AnmError::Truncated)?;
     let target = r.u8(o + 6).ok_or(AnmError::Truncated)?;
+    let sub = r.u8(o + 7).ok_or(AnmError::Truncated)?;
     let times_rel = r.u32(o + 8).ok_or(AnmError::Truncated)? as usize;
     let values_rel = r.u32(o + 0xC).ok_or(AnmError::Truncated)? as usize;
     let n = key_count as usize;
@@ -157,6 +162,7 @@ fn parse_track(r: &Le<'_>, o: usize) -> Result<Track, AnmError> {
         kind,
         channel,
         target,
+        sub,
         key_count,
         times,
         values: values_start..values_end,

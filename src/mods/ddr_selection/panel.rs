@@ -1441,6 +1441,11 @@ fn seed_dwell() {
     if off == 0 {
         return;
     }
+    // A READY hold is announced for this song (Background Dancers' flight
+    // take-off plays before the song): the legacy panel waits with it.
+    if crate::services::ready_hold::hold_wanted() {
+        return;
+    }
     let (Some(step), Some(dps)) = (song_reset::dps_step(), song_reset::live_dps()) else {
         return;
     };
