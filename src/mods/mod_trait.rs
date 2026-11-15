@@ -61,8 +61,36 @@ pub const DEFAULT_OFF_MODS: &[&str] = &["smx-hardware", "hide-bottom-text", "bac
 /// clock's XACT seams land in the pre-Initialize factory window) can honour
 /// the mod toggle.
 pub fn mod_enabled_in_config(config: &HashMap<String, bool>, id: &str) -> bool {
+    toggle_in_config(config, id) || forced_on_by(config, id).is_some()
+}
+
+/// `(owner, dependency)`: while `owner` is enabled, `dependency` is enabled
+/// whatever its own toggle says, because the owner cannot work without it
+/// (StepMania Packs' only wheel entry point is its STEPMANIA folder, which
+/// `folder-expansion` builds — with that mod off the folder never exists and,
+/// the exclusion hooks being its too, the songs spill into ALL MUSIC; its
+/// songs carry the STEPMANIA series value, which only `series-expansion`
+/// teaches the game about).
+const FORCED_DEPENDENCIES: &[(&str, &str)] = &[
+    ("stepmania-packs", "folder-expansion"),
+    ("stepmania-packs", "series-expansion"),
+];
+
+/// The mod's own toggle (or its default when the key is absent).
+fn toggle_in_config(config: &HashMap<String, bool>, id: &str) -> bool {
     let default_on = !DEFAULT_OFF_MODS.contains(&id);
     config.get(id).copied().unwrap_or(default_on)
+}
+
+/// The enabled mod that overrides `id`'s own OFF toggle, if any.
+fn forced_on_by(config: &HashMap<String, bool>, id: &str) -> Option<&'static str> {
+    if toggle_in_config(config, id) {
+        return None;
+    }
+    FORCED_DEPENDENCIES
+        .iter()
+        .find(|(owner, dep)| *dep == id && toggle_in_config(config, owner))
+        .map(|(owner, _)| *owner)
 }
 
 /// Context passed to mods during initialization. Provides read-only access
@@ -282,6 +310,13 @@ impl ModRegistry {
                 continue;
             }
             if mod_enabled_in_config(config, &id) {
+                if let Some(owner) = forced_on_by(config, &id) {
+                    log_info!(
+                        "Mod '{}' is off in config but required by '{}' -- enabling it",
+                        id,
+                        owner
+                    );
+                }
                 self.enable(&id);
             }
         }

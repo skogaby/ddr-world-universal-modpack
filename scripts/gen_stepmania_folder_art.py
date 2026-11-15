@@ -23,8 +23,8 @@ data_mods/stepmania_packs/, laid out like the operator mod folders
   series_labels/
       sefi_version_stepmania_{1..5}col.png           enhanced-layout labels
 
-Sizes, colour modes and text placement follow the reference `dogs` set in
-data_mods/custom_folders/ (itself cut to the stock `firststep` textures): the
+Sizes, colour modes and text placement follow the stock `firststep` folder
+textures: the
 title sits in the lower band of its canvas, the subtitle is centred, the info
 banner keeps the stock transparent 17-px top strip over a dark diagonal hatch
 with a white title and yellow description at x=20, and the header strip is a
@@ -174,7 +174,7 @@ def paste_strip(canvas: Image.Image, strip: Image.Image, baseline: int, x: Optio
 
 
 def to_palette(img: Image.Image) -> Image.Image:
-    """Quantise to a 256-colour palette, the mode the reference `dogs`
+    """Quantise to a 256-colour palette, the mode the stock
     title/subtitle/back-off textures use: an adaptive palette for opaque
     images, else an RGBA-palette octree quantisation (PNG gets a tRNS)."""
     if img.mode == "RGB":
@@ -184,7 +184,7 @@ def to_palette(img: Image.Image) -> Image.Image:
 
 # ── Folder textures ────────────────────────────────────────────────────
 def render_title(on: bool) -> Image.Image:
-    """240x126 title: the wordmark in the lower band (like `dogs`), white with
+    """240x126 title: the wordmark in the lower band (like the stock titles), white with
     the stock dark outline and an orange shadow when on, grey tones when off."""
     img = Image.new("RGBA", TITLE_SIZE, (0, 0, 0, 0))
     if on:
@@ -277,7 +277,7 @@ def render_info() -> Image.Image:
 
 def render_card() -> Image.Image:
     """220x60 header strip ("Change folder" card): two-line italic wordmark,
-    cream fill, dark outline, orange shadow (the stock/`dogs` composition)."""
+    cream fill, dark outline, orange shadow (the stock composition)."""
     img = Image.new("RGBA", CARD_SIZE, (0, 0, 0, 0))
     strip, base = text_strip(TITLE, 25, CARD_FILL, OUTLINE, 2.0, CARD_SHADOW, (3, 3), shear=0.18)
     paste_strip(img, strip, base, None, 31)

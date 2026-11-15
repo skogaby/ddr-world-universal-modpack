@@ -27,6 +27,8 @@
 //! (`sefi_version_<texture>_<N>col.png`); in legacy mode the label PNG is
 //! found like any other, in `data_mods/custom_series/`, then in any LayeredFS
 //! mod folder (`select_music_option_v3_ifs/tex/`), then in that directory.
+//! The registry enables this mod whenever `stepmania-packs` is enabled,
+//! overriding an OFF toggle (`mod_trait::FORCED_DEPENDENCIES`).
 //!
 //! ## Byte patches (saved and restored on disable)
 //!

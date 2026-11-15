@@ -1755,6 +1755,22 @@ const SIGNATURES: &[SignatureDefinition] = &[
         pattern: "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 80 B9 ? ? 00 00 00 41 0F B6 F0 48 63 FA 48 8B D9 75 ? 8B D7 C6 81 ? ? 00 00 01 E8",
         description: "SelectMusicModel source-list getter (model, side, any_filter_active) -> vector<shared_ptr<ChartMetadata>>*. Hook target (ALL MUSIC exclusion).",
     },
+    // The song-select view's per-side input-handler registration
+    // (`FUN_18010efa0` on 20260915, a virtual) registers the "open filter
+    // modal" handler (button 0xF → event 0x15) only inside ALL MUSIC:
+    //   +0   48 8B 05 d32      MOV RAX,[rip+game_work_global]
+    //   +7   48 8B 08          MOV RCX,[RAX]
+    //   +10  83 79 1C 07       CMP dword [RCX+0x1C],7     ; current folder type
+    //   +14  75 34             JNZ skip
+    // The sort-cycle handler's twin test 0x44 bytes later ends `75 41`, so the
+    // rel8 keeps this unique (one match on all six builds 20250805…20261027).
+    // derive_selectmusic_input_setup walks back to the function entry and
+    // RIP-decodes the global; the 0x1C field offset is pinned by the pattern.
+    SignatureDefinition {
+        name: "selectmusic_filter_gate",
+        pattern: "48 8B 05 ? ? ? ? 48 8B 08 83 79 1C 07 75 34",
+        description: "Song-select input registration: `GameWork+0x1C == 7` (ALL MUSIC) test guarding the filter-modal button handler. Anchor for derive_selectmusic_input_setup (folder-expansion filter menu in custom folders).",
+    },
     // ── Gameplay object allocation ───────────────────────────────────
     // The gameplay sequence object has a fixed-size shared_ptr array (one slot per
     // non-ALL_MUSIC folder). Custom folders overflow this. We find the allocation
@@ -3766,6 +3782,7 @@ impl SignatureStore {
         self.find_dance_play_sequence_vtable();
         self.find_movie_backdrop_vtables();
         self.derive_folder_functor_ctors();
+        self.derive_selectmusic_input_setup();
         self.derive_gameplay_obj_addresses();
         self.derive_app_heap_handle();
         self.derive_file_manager_singleton();
@@ -10942,6 +10959,69 @@ impl SignatureStore {
     }
 
     // ── Derived address resolution ──────────────────────────────────
+
+    /// From `selectmusic_filter_gate` (the ALL MUSIC test guarding the
+    /// filter-modal button handler):
+    /// * `selectmusic_input_setup` — entry of the function the test sits in
+    ///   (the song-select view's per-side input-handler registration). The
+    ///   test is ~0x3B0 bytes in, past `find_function_entry`'s window, so the
+    ///   nearest preceding `CC`-padded `PUSH RBP,RBX,RSI,RDI,R12..R15`
+    ///   prologue within 0x800 bytes is taken (0x3AC back on 20260721+, 0x3D7
+    ///   on 20250805 / 20260224).
+    /// * `selectmusic_folder_type_global` — RIP-decoded at match+3: the
+    ///   GameWork pointer-to-pointer global whose `+0x1C` field (pinned by the
+    ///   pattern) is the applied folder's type id.
+    ///
+    /// Either both publish or neither. Soft consumer: folder-expansion's
+    /// filter menu in custom folders.
+    fn derive_selectmusic_input_setup(&mut self) {
+        let Some(site) = self.get_address("selectmusic_filter_gate") else {
+            log_warn!("  [-] selectmusic_input_setup -- selectmusic_filter_gate unresolved");
+            return;
+        };
+        const PROLOGUE: [u8; 13] = [
+            0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+        ];
+        const MAX_BACK: usize = 0x800;
+        unsafe {
+            let site_off = site.offset_from(self.base) as usize;
+            if site_off + 7 > self.size {
+                log_warn!("  [-] selectmusic_input_setup -- gate outside module");
+                return;
+            }
+            let image = std::slice::from_raw_parts(self.base, site_off);
+            let lo = site_off.saturating_sub(MAX_BACK).max(1);
+            let entry_off = (lo..site_off.saturating_sub(PROLOGUE.len()))
+                .rev()
+                .find(|&i| image[i - 1] == 0xCC && image[i..].starts_with(&PROLOGUE));
+            let Some(entry_off) = entry_off else {
+                log_warn!(
+                    "  [-] selectmusic_input_setup -- no prologue within 0x{:X} bytes before the gate",
+                    MAX_BACK
+                );
+                return;
+            };
+            let global = decode_rip_relative(site.add(3));
+            let global_off = (global as usize).wrapping_sub(self.base as usize);
+            if global_off >= self.size {
+                log_warn!("  [-] selectmusic_input_setup -- GameWork global outside module");
+                return;
+            }
+            self.resolved
+                .insert("selectmusic_input_setup".into(), self.base.add(entry_off));
+            self.resolved
+                .insert("selectmusic_folder_type_global".into(), global);
+            log_info!(
+                "  [+] selectmusic_input_setup (derived) @ +0x{:X} (gate at +0x{:X})",
+                entry_off,
+                site_off - entry_off
+            );
+            log_info!(
+                "  [+] selectmusic_folder_type_global (derived) @ +0x{:X}",
+                global_off
+            );
+        }
+    }
 
     fn derive_folder_functor_ctors(&mut self) {
         let folder_register = match self.get_address("folder_register") {

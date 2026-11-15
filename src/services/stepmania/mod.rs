@@ -620,6 +620,9 @@ pub fn ensure_registration() -> Option<Registration> {
             key: FOLDER_KEY.to_string(),
             voice_key: String::new(),
             exclude_from_all_music: exclude,
+            // Packs run to thousands of charts: the Filter menu and the sort
+            // button work inside the STEPMANIA folder.
+            filter_menu: true,
         }) {
             Ok(()) => Some(bit),
             Err(e) => {

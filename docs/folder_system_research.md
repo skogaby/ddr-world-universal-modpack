@@ -621,6 +621,83 @@ through the same getter, so ALL MUSIC's displayed count drops accordingly.
 
 ---
 
+## Filter Modal Outside ALL MUSIC (20260915)
+
+Implemented as folder-expansion's per-folder `filter_menu` (the STEPMANIA folder sets
+it); mechanism in the module doc of `src/mods/folder_expansion.rs`. The analysis below
+is static, from `gamemdx_20260915.dll`. The gate signature and both derived names
+resolve on all six builds (20250805…20261027). Cabinet run 2026-11-14 (maintainer): the
+Filter menu works inside the STEPMANIA folder; see "Cabinet result" below.
+
+**Why the modal is ALL MUSIC only — two independent gates.**
+
+1. *Input gate.* `FUN_18010efa0` (vtable `0x18036efc8`, the song-select view's
+   per-side input-handler registration) registers two handlers only while
+   `GameWork+0x1c == 7` (`GameWork+0x1c` is the current folder's `type_id`, written by
+   `FUN_1800fdf00` from `folder_apply_to_model`):
+
+   | Site | Button | Handler | Effect |
+   |---|---|---|---|
+   | `0x18010f356` `CMP [RCX+0x1c],7 / JNZ` | `0xf` | lambda40 `FUN_1801120e0` → event `0x15` | `FUN_1801113b0`: event `0x14` (open, `FUN_18010e060`, panel at `view+0x460`) or `0x11` (close) — the **filter modal** |
+   | `0x18010f39a` `CMP [RCX+0x1c],7 / JNZ` | `0xc` | lambda41 `FUN_1801121d0` → event `0x19` | `FUN_180111500` → event `0x18` (`FUN_18010e1a0`): cycles the user sort id at `FilterManager+0x3f8` |
+
+   These are the only two `== 7` tests on `GameWork+0x1c` besides the Random-card gate
+   (`0x180199723`). A custom folder's type id is `0x10 + i`, so neither handler exists.
+
+2. *Data gate.* `FUN_180100ad0` (active filters) returns only the folder's override
+   filter while `FilterManager+0x2c8 != 0`, and the player's selections otherwise (see
+   "Consuming it" above). So even with the modal open, selections would change nothing
+   inside a folder.
+
+**Design (as built), using the hooks folder-expansion already owned plus one new one.**
+
+- *Data:* build a filterable custom folder with an **empty** filter function and mode
+  flag 0, exactly like ALL MUSIC (skip the `folder_filter_functor_ctor` write into the
+  filter slot). `FilterManager+0x3d0` (the folder's mode flag) is only a forced sorter
+  id — non-zero makes `FUN_180100c00` skip the user sort — so 0 gives the sort button
+  its meaning back. The game then stores no override, so the Filter-menu selections
+  apply. Restrict the list to
+  the folder's songs in the existing `selectmusic_source_list` detour — the inverse of
+  the ALL MUSIC exclusion, with the same `lambda20` functor: keep members while the
+  applied folder (already recorded by the `folder_apply_to_model` detour) is that folder.
+  Counts, the "N Songs" chip and the recount all read through that getter.
+- *Input:* detour `FUN_18010efa0` (signature `selectmusic_filter_gate` → derived
+  `selectmusic_input_setup` + `selectmusic_folder_type_global`) and present
+  `GameWork+0x1c` as 7 for the duration of the call when it holds a filterable custom
+  folder's type id, restoring it afterwards. Both handlers (filter modal, sort cycle)
+  register.
+  (Writing 7 permanently is unsafe: the value also selects the results scene and is
+  looked up in the folder list by `FUN_18010c770`. NOP-ing the `JNZ` would open the modal
+  in stock genre folders too, where the override still wins.)
+
+Pushing the override into the active-filter list alongside the selections was rejected:
+`FilterCard` (`FUN_18011b090`) prints the literal `error` for a `Filter` with no summary
+function, which the folder override lacks.
+
+Every path that makes a folder current (`FUN_18010c4d0`, `FUN_18010ec60`) calls
+`FUN_1800fdf00` and then the folder's apply functor (`FolderProperty+0x40` →
+`FUN_180145c80` → `folder_apply_to_model`), so the detour's record of the applied folder
+is never stale.
+
+**Cabinet result (2026-11-14)**
+
+The maintainer ran the build on a cabinet and reported the feature working as designed.
+That settles the one inference the design rested on: `FUN_18010efa0` does re-run when a
+folder is entered, so the filter-modal handler is registered inside a `filter_menu`
+folder. The run was reported as a whole; the game build used and these individual
+observations were not recorded, so they remain unverified in writing:
+
+- whether the filter chip and the button prompts are drawn outside ALL MUSIC (they could
+  be hidden by the folder's `+0x1fc` flag cluster or by the AFP while the modal works);
+- the sort button's behaviour and the default order inside the folder;
+- behaviour on the builds other than the one the cabinet runs.
+
+Log lines that mark the two halves working: `filter menu enabled in folder type 0x..`
+(input gate) and `filter-menu folder list — N of M chart entries are members` (list
+restriction).
+
+---
+
 ## Open Questions
 
 1. **~~Are the count arrays sized for more than 6?~~** YES — confirmed 10 slots each, matching property bits 0-9.

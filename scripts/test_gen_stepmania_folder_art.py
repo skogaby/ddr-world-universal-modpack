@@ -27,16 +27,20 @@ class TextureTests(unittest.TestCase):
             self.assertEqual(img.size, size, name)
             self.assertEqual(img.mode, mode, name)
 
-    def test_the_seven_dogs_texture_names_map_one_to_one(self):
-        dogs = sorted(
-            p.name.replace("_dogs", "_stepmania")
-            for p in (art.REPO_ROOT / "data_mods" / "custom_folders").rglob("*_dogs*.png")
+    def test_the_eight_folder_textures_cover_every_stock_slot(self):
+        self.assertEqual(
+            sorted(art.TEXTURES),
+            [
+                "muca_txt_folder_name_stepmania",
+                "mufo_folder_back_stepmania_off",
+                "mufo_folder_back_stepmania_on",
+                "mufo_txt_folder_info_stepmania",
+                "mufo_txt_folder_subtitle_stepmania_off",
+                "mufo_txt_folder_subtitle_stepmania_on",
+                "mufo_txt_folder_title_stepmania_off",
+                "mufo_txt_folder_title_stepmania_on",
+            ],
         )
-        self.assertEqual(len(dogs), 8)
-        self.assertEqual(dogs, sorted(f"{name}.png" for name in art.TEXTURES))
-        for name, (ifs_dir, _, _) in art.TEXTURES.items():
-            ref = art.REPO_ROOT / "data_mods" / "custom_folders" / ifs_dir / "tex" / f"{name.replace('_stepmania', '_dogs')}.png"
-            self.assertTrue(ref.is_file(), ref)
 
     def test_palette_textures_keep_transparency(self):
         for name in (
@@ -55,7 +59,7 @@ class TextureTests(unittest.TestCase):
             self.assertEqual(reloaded.mode, "P", name)
             self.assertIn("transparency", reloaded.info, name)
 
-    def test_title_sits_in_the_lower_band_like_dogs(self):
+    def test_title_sits_in_the_lower_band_like_stock(self):
         for state in ("on", "off"):
             bbox = ink_bbox(art.render_texture(f"mufo_txt_folder_title_stepmania_{state}"))
             self.assertIsNotNone(bbox)

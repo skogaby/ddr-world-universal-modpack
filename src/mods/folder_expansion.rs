@@ -5,13 +5,16 @@
 //! ## Config
 //!
 //! `mod-config.json` `folder_expansion` (operator-edited; the DLL never writes
-//! it): `custom_folders: [{bit_index, key, voice_key, exclude_from_all_music}]`
+//! it): `custom_folders: [{bit_index, key, voice_key, exclude_from_all_music,
+//! filter_menu}]`
 //! and `hide_difficulty_pane` (bool, default false). A song joins a folder when
 //! its musicdb `<property>` bitmask has bit `bit_index` set. `key` names the
 //! folder's assets, `voice_key` its select voice (may be empty).
 //! `exclude_from_all_music` (bool, default false) hides that folder's songs
 //! from the ALL MUSIC folder — they stay selectable in the custom folder (and
-//! in any other folder they belong to). Validation at init: `key`/`voice_key`
+//! in any other folder they belong to). `filter_menu` (bool, default false)
+//! makes the Filter menu and the sort button work inside that folder, as they
+//! do in ALL MUSIC. Validation at init: `key`/`voice_key`
 //! ≤ 15 bytes (they are written as SSO strings), `bit_index` ≤ 31 and unique.
 //! A missing section or a failed validation makes `init` return false, so the
 //! mod is not registered.
@@ -26,7 +29,9 @@
 //! folders' art is looked up like any folder's, first under
 //! `data_mods/custom_folders/`, then in any LayeredFS mod folder
 //! (`<ifs>_ifs/tex/<name>.png`) — the StepMania set ships in
-//! `data_mods/stepmania_packs/`.
+//! `data_mods/stepmania_packs/`. Because that folder is the loader's only
+//! entry point, the registry enables this mod whenever `stepmania-packs` is
+//! enabled, overriding an OFF toggle (`mod_trait::FORCED_DEPENDENCIES`).
 //!
 //! ## Hooks and patches (all owned here)
 //!
@@ -64,6 +69,25 @@
 //!   (incl. the `property`/`property_old` fallback and the bit-8 quirk) with
 //!   no `music::Info` offset hardcoded. Side effect: ALL MUSIC's displayed
 //!   song count excludes the hidden songs too.
+//! - **Filter menu in custom folders** (`filter_menu`; the two detours above
+//!   plus one on `selectmusic_input_setup`) — stock, the Filter menu exists
+//!   only in ALL MUSIC for two reasons: the song-select view registers the
+//!   filter-modal and sort-cycle button handlers only while
+//!   `GameWork+0x1C` (the applied folder's type id) is 7, and a folder's own
+//!   filter function becomes a model override that replaces the player's
+//!   Filter-menu selections. A `filter_menu` folder is therefore built like
+//!   ALL MUSIC — no filter function, mode flag 0 (the user's sort instead of
+//!   the fixed folder sort) — and its membership is applied by the
+//!   source-list detour instead (the inverse of the exclusion: keep only the
+//!   holders its `lambda20` functor accepts while that folder is applied), so
+//!   counts, the header chip and the sort all behave as in ALL MUSIC. The
+//!   input-registration detour presents the folder type as 7 for the
+//!   duration of the original call only, then restores it (the value also
+//!   selects the results scene and is looked up in the folder list). A folder
+//!   is built this way only when all three detours are installed; otherwise
+//!   it keeps its ordinary fixed list. Disabling the mod mid-session removes
+//!   the detours, so an already-built `filter_menu` folder lists every song
+//!   until the folders are rebuilt.
 //! - **Gameplay-object alloc size + ctor** (`gameplay_obj_alloc_size` /
 //!   `gameplay_obj_ctor`, only with ≥1 custom folder) — the gameplay sequence
 //!   object holds one shared_ptr slot per non-ALL-MUSIC folder. The
@@ -275,6 +299,13 @@ pub struct CustomFolderEntry {
     /// in this folder and in any other folder they belong to.
     #[serde(default)]
     pub exclude_from_all_music: bool,
+    /// Let the player use the Filter menu (and the sort button) inside this
+    /// folder, as in ALL MUSIC: the folder is built without its own override
+    /// filter and its membership is applied to the model's source list
+    /// instead. Falls back to the plain fixed list when the hooks it needs
+    /// are unavailable.
+    #[serde(default)]
+    pub filter_menu: bool,
 }
 
 pub fn get_config() -> Option<&'static FolderConfig> {
@@ -586,11 +617,13 @@ unsafe extern "C" fn folder_register_hook(context: *mut u8, folder_property: *mu
                 let functor_buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
                 let functor_ret = functor_ctor(functor_buf, entry.bit_index);
 
-                // 2. Create filter functor
-                let filter_buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
-                let filter_ret = filter_functor_ctor(filter_buf, entry.bit_index);
+                // A filter-menu folder is built like ALL MUSIC: no filter
+                // function (so the model gets no override and the player's
+                // Filter-menu selections apply) and mode flag 0 (the user's
+                // sort). Its membership is applied by the source-list detour.
+                let filter_menu = filter_menu_functor(custom_type_id).is_some();
 
-                // 3. Allocate FolderProperty using the GAME'S allocator.
+                // 2. Allocate FolderProperty using the GAME'S allocator.
                 // folder_register creates a shared_ptr whose control block destructor
                 // calls the game's free() on this pointer. Using VirtualAlloc here
                 // causes a heap mismatch crash in RtlFreeHeap.
@@ -602,21 +635,26 @@ unsafe extern "C" fn folder_register_hook(context: *mut u8, folder_property: *mu
                 std::ptr::write_bytes(folder, 0, layout.struct_size);
                 property_ctor(folder);
 
-                // 4. Set fields (max_difficulty left at constructor default of 4)
+                // 3. Set fields (max_difficulty left at constructor default of 4)
                 *(folder as *mut u32) = custom_type_id;
                 write_sso_string(folder.add(layout.key_offset), &entry.key);
                 write_sso_string(folder.add(layout.voice_key_offset), &entry.voice_key);
 
-                // 5. Wire filter functor via shared_ptr move
-                shared_ptr_move(folder.add(layout.filter_functor_slot), filter_ret);
+                // 4. Create the filter functor and wire it via shared_ptr move
+                if !filter_menu {
+                    let filter_buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
+                    let filter_ret = filter_functor_ctor(filter_buf, entry.bit_index);
+                    shared_ptr_move(folder.add(layout.filter_functor_slot), filter_ret);
+                }
 
-                // 6. Set mode_flag = 3 (genre folder)
-                *(folder.add(layout.mode_flag_offset) as *mut u32) = 3;
+                // 5. Set mode_flag: 3 = genre folder (fixed sort), 0 = as ALL MUSIC
+                *(folder.add(layout.mode_flag_offset) as *mut u32) =
+                    if filter_menu { 0 } else { 3 };
 
-                // 7. Wire property functor via shared_ptr move
+                // 6. Wire property functor via shared_ptr move
                 shared_ptr_move(folder.add(layout.functor_slot), functor_ret);
 
-                // 8. Create folder data shared_ptr and store it
+                // 7. Create folder data shared_ptr and store it
                 let shared_ptr_buf = memory::alloc_zeroed(16);
                 if !layout.create_folder_data.is_null() {
                     let create_fn: CreateFolderDataFn =
@@ -625,12 +663,16 @@ unsafe extern "C" fn folder_register_hook(context: *mut u8, folder_property: *mu
                 }
                 let result = store_ptr(folder, shared_ptr_buf);
 
-                // 9. Register the custom folder
+                // 8. Register the custom folder
                 if let Some(ref hook) = REGISTER_HOOK {
                     hook.call(context, result);
                 }
 
-                log_info!("FolderExpansion: registered folder '{}'", entry.key);
+                log_info!(
+                    "FolderExpansion: registered folder '{}'{}",
+                    entry.key,
+                    if filter_menu { " (filter menu)" } else { "" }
+                );
             }
         }
     }
@@ -728,6 +770,99 @@ static CURRENT_FOLDER_TYPE: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 /// folder); each tests "chart's song has property bit `bit_index`".
 static mut EXCLUDE_FUNCTORS: Vec<*mut u8> = Vec::new();
 
+// ── Filter menu inside custom folders ────────────────────────────────
+//
+// See the module doc ("Filter menu in custom folders").
+
+/// The song-select view's per-side input-handler registration (a virtual):
+/// __fastcall(RCX=view, RDX=component, R8, R9). Registers the filter-modal
+/// and sort-cycle button handlers only while `GameWork+0x1C == 7`.
+type InputSetupFn = unsafe extern "C" fn(*mut u8, *mut u8, usize, usize);
+
+static mut INPUT_SETUP_HOOK: Option<GenericDetour<InputSetupFn>> = None;
+
+/// `selectmusic_folder_type_global`: holds a pointer to the GameWork pointer.
+static mut FOLDER_TYPE_GLOBAL: *const u8 = std::ptr::null();
+/// Applied folder's type id inside GameWork. Not build-derived by a
+/// derivation of its own: the `selectmusic_filter_gate` AOB matches the
+/// `CMP dword [RCX+0x1C],7` bytes, so a build that moved the field does not
+/// resolve the signature at all.
+const GAMEWORK_FOLDER_TYPE_OFFSET: usize = 0x1C;
+
+/// `(custom type id, lambda20 membership functor)` per `filter_menu` folder.
+/// Filled only when every hook the feature needs is installed; the
+/// `folder_register` detour builds a folder without its override filter
+/// exactly when its type id is listed here.
+static mut FILTER_MENU_FOLDERS: Vec<(u32, *mut u8)> = Vec::new();
+
+/// One-shot log guards for the first modal-gate spoof / membership pass.
+static FILTER_MENU_GATE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static FILTER_MENU_LIST_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Membership functor of the `filter_menu` folder with this type id.
+unsafe fn filter_menu_functor(type_id: u32) -> Option<*mut u8> {
+    (*std::ptr::addr_of!(FILTER_MENU_FOLDERS))
+        .iter()
+        .find(|(id, _)| *id == type_id)
+        .map(|(_, functor)| *functor)
+}
+
+/// `&GameWork.folder_type`, or `None` while GameWork is not up.
+unsafe fn folder_type_slot() -> Option<*mut u32> {
+    let global = FOLDER_TYPE_GLOBAL;
+    if global.is_null() {
+        return None;
+    }
+    let holder = memory::read_ptr(global);
+    if holder.is_null() || !memory::is_readable(holder, 8) {
+        return None;
+    }
+    let game_work = memory::read_ptr(holder);
+    if game_work.is_null() || !memory::is_readable(game_work.add(GAMEWORK_FOLDER_TYPE_OFFSET), 4) {
+        return None;
+    }
+    Some(game_work.add(GAMEWORK_FOLDER_TYPE_OFFSET) as *mut u32)
+}
+
+/// Hook callback for the input-handler registration: while a `filter_menu`
+/// folder is applied, present the folder type as ALL MUSIC for the duration
+/// of the original so it registers the filter-modal and sort handlers, then
+/// put the real type back (it also selects the results scene and is looked
+/// up in the folder list elsewhere).
+unsafe extern "C" fn input_setup_hook(view: *mut u8, component: *mut u8, a3: usize, a4: usize) {
+    let Some(ref hook) = *std::ptr::addr_of!(INPUT_SETUP_HOOK) else {
+        return;
+    };
+    let slot = match folder_type_slot() {
+        Some(slot) if filter_menu_functor(*slot).is_some() => slot,
+        _ => {
+            hook.call(view, component, a3, a4);
+            return;
+        }
+    };
+    let real = *slot;
+    *slot = ALL_MUSIC_TYPE_ID;
+    hook.call(view, component, a3, a4);
+    *slot = real;
+    if !FILTER_MENU_GATE_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log_info!(
+            "FolderExpansion: filter menu enabled in folder type 0x{:X}",
+            real
+        );
+    }
+}
+
+/// What the source-list detour keeps of the model's base list.
+#[derive(Clone, Copy)]
+enum ListView {
+    /// ALL MUSIC: everything except the excluded folders' songs.
+    AllMusic,
+    /// A `filter_menu` folder: only that folder's songs.
+    Folder(*mut u8),
+}
+
 /// Our shallow copy of the model's base list: the `{begin, end, cap}` header
 /// the detour returns, and the backing storage it points into. Non-owning —
 /// see the module doc. Only ever touched on the game's select-music thread.
@@ -788,10 +923,10 @@ unsafe fn functor_matches(functor: *mut u8, holder: &[usize; 2]) -> bool {
     do_call(functor, copy.as_mut_ptr() as *mut u8) != 0
 }
 
-/// Build the ALL MUSIC view of `orig` (a `vector<shared_ptr<ChartMetadata>>`)
-/// into `FILTERED_LIST_*`. Returns the header pointer, or `None` when the
-/// input is not readable (caller falls back to `orig`).
-unsafe fn build_filtered_source_list(orig: *mut u8) -> Option<*mut u8> {
+/// Build the `view` of `orig` (a `vector<shared_ptr<ChartMetadata>>`) into
+/// `FILTERED_LIST_*`. Returns the header pointer, or `None` when the input
+/// is not readable (caller falls back to `orig`).
+unsafe fn build_filtered_source_list(orig: *mut u8, view: ListView) -> Option<*mut u8> {
     if !memory::is_readable(orig, 24) {
         return None;
     }
@@ -809,20 +944,37 @@ unsafe fn build_filtered_source_list(orig: *mut u8) -> Option<*mut u8> {
     buf.clear();
     buf.reserve(count);
     let src = std::slice::from_raw_parts(begin as *const [usize; 2], count);
-    let mut excluded = 0usize;
+    let mut dropped = 0usize;
     for holder in src {
-        if functors.iter().any(|&f| functor_matches(f, holder)) {
-            excluded += 1;
-        } else {
+        let keep = match view {
+            ListView::AllMusic => !functors.iter().any(|&f| functor_matches(f, holder)),
+            ListView::Folder(functor) => functor_matches(functor, holder),
+        };
+        if keep {
             buf.push(*holder);
+        } else {
+            dropped += 1;
         }
     }
-    if !EXCLUSION_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        log_info!(
-            "FolderExpansion: ALL MUSIC exclusion active — hid {} of {} chart entries",
-            excluded,
-            count
-        );
+    match view {
+        ListView::AllMusic => {
+            if !EXCLUSION_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                log_info!(
+                    "FolderExpansion: ALL MUSIC exclusion active — hid {} of {} chart entries",
+                    dropped,
+                    count
+                );
+            }
+        }
+        ListView::Folder(_) => {
+            if !FILTER_MENU_LIST_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                log_info!(
+                    "FolderExpansion: filter-menu folder list — {} of {} chart entries are members",
+                    count - dropped,
+                    count
+                );
+            }
+        }
     }
     let base = buf.as_ptr() as usize;
     let header = &mut *std::ptr::addr_of_mut!(FILTERED_LIST_HEADER);
@@ -833,7 +985,8 @@ unsafe fn build_filtered_source_list(orig: *mut u8) -> Option<*mut u8> {
 }
 
 /// Hook callback for `selectmusic_source_list`. Pass-through unless the model
-/// is currently showing ALL MUSIC and at least one folder is excluded.
+/// is showing ALL MUSIC with at least one folder excluded, or a `filter_menu`
+/// folder (whose membership is applied here instead of by an override filter).
 unsafe extern "C" fn selectmusic_source_list_hook(
     model: *mut u8,
     side: i32,
@@ -843,19 +996,28 @@ unsafe extern "C" fn selectmusic_source_list_hook(
         Some(ref hook) => hook.call(model, side, any_filter_active),
         None => return std::ptr::null_mut(),
     };
-    if orig.is_null()
-        || CURRENT_FOLDER_TYPE.load(std::sync::atomic::Ordering::Acquire) != ALL_MUSIC_TYPE_ID
-        || (*std::ptr::addr_of!(EXCLUDE_FUNCTORS)).is_empty()
-    {
+    if orig.is_null() {
         return orig;
     }
+    let current = CURRENT_FOLDER_TYPE.load(std::sync::atomic::Ordering::Acquire);
+    let view = if current == ALL_MUSIC_TYPE_ID {
+        if (*std::ptr::addr_of!(EXCLUDE_FUNCTORS)).is_empty() {
+            return orig;
+        }
+        ListView::AllMusic
+    } else {
+        match filter_menu_functor(current) {
+            Some(functor) => ListView::Folder(functor),
+            None => return orig,
+        }
+    };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_filtered_source_list(orig)
+        build_filtered_source_list(orig, view)
     })) {
         Ok(Some(filtered)) => filtered,
         Ok(None) => orig,
         Err(_) => {
-            log_error!("FolderExpansion: panic in ALL MUSIC exclusion — passing through");
+            log_error!("FolderExpansion: panic filtering the source list — passing through");
             orig
         }
     }
@@ -1221,6 +1383,9 @@ pub struct FolderExpansionMod {
     // ALL MUSIC exclusion hook targets (optional signatures; null = feature unavailable)
     apply_folder_fn: *const u8,
     source_list_fn: *const u8,
+    // Filter menu in custom folders (optional signatures; null = feature unavailable)
+    input_setup_fn: *const u8,
+    folder_type_global: *const u8,
     // Gameplay object patch addresses (for expanding the fixed-size shared_ptr array)
     gameplay_obj_alloc_size: *const u8, // points to the imm32 in MOV ECX,<size>
     gameplay_obj_ctor: *const u8,       // constructor function address
@@ -1242,6 +1407,8 @@ impl FolderExpansionMod {
             game_malloc: std::ptr::null(),
             apply_folder_fn: std::ptr::null(),
             source_list_fn: std::ptr::null(),
+            input_setup_fn: std::ptr::null(),
+            folder_type_global: std::ptr::null(),
             gameplay_obj_alloc_size: std::ptr::null(),
             gameplay_obj_ctor: std::ptr::null(),
         }
@@ -1295,49 +1462,87 @@ impl FolderExpansionMod {
         None
     }
 
-    /// Build one game `lambda20` filter functor per excluded folder and install
-    /// the `folder_apply_to_model` + `selectmusic_source_list` detours. Any
-    /// missing prerequisite logs a WARN and leaves ALL MUSIC untouched.
-    fn install_all_music_exclusion(&self, excluded: &[&CustomFolderEntry]) {
-        if self.apply_folder_fn.is_null() || self.source_list_fn.is_null() {
-            log_warn!("FolderExpansion: exclusion hook targets unresolved — ALL MUSIC unchanged");
+    /// Build one game `lambda20` membership functor for `entry`, or `None`
+    /// (with a WARN) when the game's ctor yields nothing usable.
+    unsafe fn build_membership_functor(&self, entry: &CustomFolderEntry) -> Option<*mut u8> {
+        let filter_functor_ctor: FolderFunctorCtorFn =
+            std::mem::transmute(self.filter_functor_ctor);
+        let buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
+        if buf.is_null() {
+            log_warn!("FolderExpansion: functor alloc failed for '{}'", entry.key);
+            return None;
+        }
+        let ret = filter_functor_ctor(buf, entry.bit_index);
+        if ret.is_null() || memory::read_ptr(ret).is_null() {
+            log_warn!(
+                "FolderExpansion: filter functor ctor returned no vtable for '{}'",
+                entry.key
+            );
+            return None;
+        }
+        Some(ret)
+    }
+
+    /// Set up the two song-list features: ALL MUSIC exclusion (`excluded`)
+    /// and the filter menu inside custom folders (`filter_menu`, each with
+    /// its custom type id). Both ride the `folder_apply_to_model` +
+    /// `selectmusic_source_list` detours; the filter menu also needs the
+    /// input-registration detour. Any missing prerequisite logs a WARN and
+    /// leaves the affected feature off: ALL MUSIC unchanged, or the folder
+    /// built with its ordinary fixed list.
+    fn install_list_hooks(
+        &self,
+        excluded: &[&CustomFolderEntry],
+        filter_menu: &[(u32, &CustomFolderEntry)],
+    ) {
+        if self.apply_folder_fn.is_null()
+            || self.source_list_fn.is_null()
+            || self.filter_functor_ctor.is_null()
+        {
+            log_warn!(
+                "FolderExpansion: song-list hook targets unresolved — no ALL MUSIC exclusion, no filter menu in custom folders"
+            );
             return;
         }
-        if self.filter_functor_ctor.is_null() {
-            log_warn!("FolderExpansion: folder_filter_functor_ctor missing — ALL MUSIC unchanged");
-            return;
+        let gate_ready = !self.input_setup_fn.is_null() && !self.folder_type_global.is_null();
+        if !filter_menu.is_empty() && !gate_ready {
+            log_warn!(
+                "FolderExpansion: selectmusic_input_setup unresolved — no filter menu in custom folders"
+            );
         }
         unsafe {
-            let filter_functor_ctor: FolderFunctorCtorFn =
-                std::mem::transmute(self.filter_functor_ctor);
             let functors = &mut *std::ptr::addr_of_mut!(EXCLUDE_FUNCTORS);
             functors.clear();
             for entry in excluded {
-                let buf = memory::alloc_zeroed(FUNCTOR_BUF_SIZE);
-                if buf.is_null() {
-                    log_warn!("FolderExpansion: functor alloc failed for '{}'", entry.key);
-                    continue;
-                }
-                let ret = filter_functor_ctor(buf, entry.bit_index);
-                if ret.is_null() || memory::read_ptr(ret).is_null() {
-                    log_warn!(
-                        "FolderExpansion: filter functor ctor returned no vtable for '{}'",
-                        entry.key
+                if let Some(functor) = self.build_membership_functor(entry) {
+                    functors.push(functor);
+                    log_info!(
+                        "FolderExpansion: '{}' (bit_index={}) excluded from ALL MUSIC",
+                        entry.key,
+                        entry.bit_index
                     );
-                    continue;
                 }
-                functors.push(ret);
-                log_info!(
-                    "FolderExpansion: '{}' (bit_index={}) excluded from ALL MUSIC",
-                    entry.key,
-                    entry.bit_index
-                );
             }
-            if functors.is_empty() {
+            // Built locally and published only once every hook is in: the
+            // `folder_register` detour drops a folder's own filter exactly
+            // when its type id is in `FILTER_MENU_FOLDERS`.
+            let menu_folders = &mut *std::ptr::addr_of_mut!(FILTER_MENU_FOLDERS);
+            menu_folders.clear();
+            let mut pending: Vec<(u32, *mut u8)> = Vec::new();
+            if gate_ready {
+                for (type_id, entry) in filter_menu {
+                    if let Some(functor) = self.build_membership_functor(entry) {
+                        pending.push((*type_id, functor));
+                    }
+                }
+            }
+            if functors.is_empty() && pending.is_empty() {
                 return;
             }
             CURRENT_FOLDER_TYPE.store(0, std::sync::atomic::Ordering::Release);
             EXCLUSION_LOGGED.store(false, std::sync::atomic::Ordering::Release);
+            FILTER_MENU_GATE_LOGGED.store(false, std::sync::atomic::Ordering::Release);
+            FILTER_MENU_LIST_LOGGED.store(false, std::sync::atomic::Ordering::Release);
 
             let apply_target: FolderApplyFn = std::mem::transmute(self.apply_folder_fn);
             if let Err(e) = crate::core::hooks::install_enabled(
@@ -1367,9 +1572,36 @@ impl FolderExpansionMod {
                 return;
             }
             log_info!(
-                "FolderExpansion: ALL MUSIC exclusion hooks installed ({} folder(s))",
+                "FolderExpansion: song-list hooks installed ({} folder(s) excluded from ALL MUSIC)",
                 functors.len()
             );
+
+            if pending.is_empty() {
+                return;
+            }
+            FOLDER_TYPE_GLOBAL = self.folder_type_global;
+            let setup_target: InputSetupFn = std::mem::transmute(self.input_setup_fn);
+            if let Err(e) = crate::core::hooks::install_enabled(
+                std::ptr::addr_of_mut!(INPUT_SETUP_HOOK),
+                setup_target,
+                input_setup_hook,
+            ) {
+                log_error!(
+                    "FolderExpansion: failed to hook selectmusic_input_setup: {} — no filter menu in custom folders",
+                    e
+                );
+                return;
+            }
+            for (type_id, entry) in filter_menu {
+                if pending.iter().any(|(id, _)| id == type_id) {
+                    log_info!(
+                        "FolderExpansion: '{}' (type_id=0x{:X}) gets the filter menu",
+                        entry.key,
+                        type_id
+                    );
+                }
+            }
+            *menu_folders = pending;
         }
     }
 
@@ -1835,13 +2067,23 @@ impl Mod for FolderExpansionMod {
         if config
             .custom_folders
             .iter()
-            .any(|f| f.exclude_from_all_music)
+            .any(|f| f.exclude_from_all_music || f.filter_menu)
             && (self.apply_folder_fn.is_null() || self.source_list_fn.is_null())
         {
             log_warn!(
-                "FolderExpansion: folder_apply_to_model / selectmusic_source_list unresolved — exclude_from_all_music unavailable"
+                "FolderExpansion: folder_apply_to_model / selectmusic_source_list unresolved — exclude_from_all_music / filter_menu unavailable"
             );
         }
+
+        // Optional: filter menu in custom folders
+        self.input_setup_fn = ctx
+            .signatures
+            .get_address("selectmusic_input_setup")
+            .unwrap_or(std::ptr::null());
+        self.folder_type_global = ctx
+            .signatures
+            .get_address("selectmusic_folder_type_global")
+            .unwrap_or(std::ptr::null());
 
         // Estimate folder_init size for scanning
         self.folder_init_size = estimate_function_size(self.folder_init_addr, 0x3000);
@@ -1875,6 +2117,24 @@ impl Mod for FolderExpansionMod {
             Some(c) => c,
             None => return,
         };
+
+        // Song-list features first: the folder_register detour below builds a
+        // `filter_menu` folder differently once these hooks are in.
+        let excluded: Vec<&CustomFolderEntry> = config
+            .custom_folders
+            .iter()
+            .filter(|f| f.exclude_from_all_music)
+            .collect();
+        let filter_menu: Vec<(u32, &CustomFolderEntry)> = config
+            .custom_folders
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.filter_menu)
+            .map(|(i, f)| (CUSTOM_TYPE_ID_BASE + i as u32, f))
+            .collect();
+        if !excluded.is_empty() || !filter_menu.is_empty() {
+            self.install_list_hooks(&excluded, &filter_menu);
+        }
 
         // Install folder_register hook (for custom folders and difficulty unlock)
         unsafe {
@@ -1941,16 +2201,6 @@ impl Mod for FolderExpansionMod {
                     }
                 }
             }
-        }
-
-        // Install ALL MUSIC exclusion hooks
-        let excluded: Vec<&CustomFolderEntry> = config
-            .custom_folders
-            .iter()
-            .filter(|f| f.exclude_from_all_music)
-            .collect();
-        if !excluded.is_empty() {
-            self.install_all_music_exclusion(&excluded);
         }
 
         // Generate custom geo + AFP files for LayeredFS serving
@@ -2044,6 +2294,8 @@ impl Mod for FolderExpansionMod {
             HAS_SONGS_HOOK = None;
             APPLY_FOLDER_HOOK = None;
             SOURCE_LIST_HOOK = None;
+            INPUT_SETUP_HOOK = None;
+            (*std::ptr::addr_of_mut!(FILTER_MENU_FOLDERS)).clear();
             CUSTOM_FOLDERS_CREATED = false;
             CURRENT_FOLDER_TYPE.store(0, std::sync::atomic::Ordering::Release);
             // The functor buffers are intentionally leaked (alloc_zeroed, never
@@ -2083,6 +2335,7 @@ mod tests {
             key: key.to_string(),
             voice_key: String::new(),
             exclude_from_all_music: false,
+            filter_menu: false,
         }
     }
 

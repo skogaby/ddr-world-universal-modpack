@@ -7,6 +7,10 @@
 //! merged element-wise by [`super::option_menu`]. The user's key order is
 //! preserved (`serde_json` `preserve_order`) and new keys land at the end of
 //! their parent object.
+//!
+//! One deliberate non-additive carve-out: the retired example folder the
+//! release config used to ship (`folder_expansion.custom_folders`'s `dogs`
+//! entry, see [`retire_example_folder`]) is removed from the user's file.
 
 use serde_json::{Map, Value};
 
@@ -20,19 +24,63 @@ pub struct MergeReport {
     pub added: Vec<String>,
     /// Ids of `option_menu_settings` rows inserted.
     pub menu_rows_added: Vec<String>,
+    /// Retired shipped entries removed from the user's file (dotted paths).
+    pub removed: Vec<String>,
 }
 
 impl MergeReport {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.menu_rows_added.is_empty()
+        self.added.is_empty() && self.menu_rows_added.is_empty() && self.removed.is_empty()
     }
 }
 
 /// Merge `release` into `user`, returning the merged document and a report.
 pub fn merge_config(user: &Value, release: &Value) -> (Value, MergeReport) {
     let mut report = MergeReport::default();
-    let merged = merge_value(user, release, "", &mut report);
+    let mut merged = merge_value(user, release, "", &mut report);
+    retire_example_folder(&mut merged, &mut report);
     (merged, report)
+}
+
+/// Drop the `dogs` example folder older releases shipped in
+/// `folder_expansion.custom_folders`. Its art no longer ships and Folder
+/// Expansion is now on for most installs, so a leftover entry would show an
+/// empty, art-less folder on the wheel. Only the entry exactly as shipped
+/// (`bit_index` 11, `key` "dogs", no voice, not excluded from ALL MUSIC) is
+/// removed; anything an operator changed is theirs and stays.
+fn retire_example_folder(doc: &mut Value, report: &mut MergeReport) {
+    let Some(folders) = doc
+        .get_mut("folder_expansion")
+        .and_then(|s| s.get_mut("custom_folders"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let before = folders.len();
+    folders.retain(|entry| !is_shipped_example_folder(entry));
+    if folders.len() != before {
+        report
+            .removed
+            .push("folder_expansion.custom_folders[dogs]".to_string());
+    }
+}
+
+fn is_shipped_example_folder(entry: &Value) -> bool {
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    obj.get("key").and_then(Value::as_str) == Some("dogs")
+        && obj.get("bit_index").and_then(Value::as_u64) == Some(11)
+        && obj.get("voice_key").is_none_or(|v| v.as_str() == Some(""))
+        && obj
+            .get("exclude_from_all_music")
+            .is_none_or(|v| v.as_bool() == Some(false))
+        && obj.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                "key" | "bit_index" | "voice_key" | "exclude_from_all_music"
+            )
+        })
 }
 
 fn merge_value(user: &Value, release: &Value, path: &str, report: &mut MergeReport) -> Value {
@@ -203,6 +251,47 @@ mod tests {
         let text = to_pretty_json(&once);
         assert!(text.ends_with("}\n"));
         assert!(text.contains("\n  \"a\": {\n    \"b\": 1,"));
+    }
+
+    #[test]
+    fn shipped_dogs_example_folder_is_removed_and_reported() {
+        let user = json!({"mods": {"folder-expansion": false}, "folder_expansion": {
+            "custom_folders": [
+                {"bit_index": 11, "key": "dogs", "voice_key": ""},
+                {"bit_index": 12, "key": "omni", "voice_key": ""}
+            ],
+            "hide_difficulty_pane": true
+        }});
+        let release = json!({"mods": {"folder-expansion": true}, "folder_expansion": {"custom_folders": [], "hide_difficulty_pane": true}});
+        let (out, report) = merged(user, release.clone());
+        assert_eq!(
+            out["folder_expansion"]["custom_folders"],
+            json!([{"bit_index": 12, "key": "omni", "voice_key": ""}])
+        );
+        assert_eq!(out["mods"]["folder-expansion"], false, "toggle untouched");
+        assert_eq!(
+            report.removed,
+            vec!["folder_expansion.custom_folders[dogs]"]
+        );
+        assert!(!report.is_empty());
+        let (again, report) = merged(out.clone(), release);
+        assert_eq!(again, out);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn operator_edited_dogs_folder_is_kept() {
+        for entry in [
+            json!({"bit_index": 12, "key": "dogs", "voice_key": ""}),
+            json!({"bit_index": 11, "key": "dogs", "voice_key": "vo_dogs"}),
+            json!({"bit_index": 11, "key": "dogs", "exclude_from_all_music": true}),
+            json!({"bit_index": 11, "key": "cats"}),
+        ] {
+            let user = json!({"folder_expansion": {"custom_folders": [entry]}});
+            let (out, report) = merged(user.clone(), json!({}));
+            assert_eq!(out, user);
+            assert!(report.is_empty());
+        }
     }
 
     #[test]

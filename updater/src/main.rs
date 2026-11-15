@@ -705,6 +705,9 @@ fn merge_config_bytes(user: &[u8], release: &[u8]) -> MergeOutcome {
             report.menu_rows_added.join(", ")
         ));
     }
+    if !report.removed.is_empty() {
+        parts.push("retired example folder 'dogs' removed".to_string());
+    }
     MergeOutcome::Changed(
         merge::json::to_pretty_json(&merged).into_bytes(),
         parts.join(", "),

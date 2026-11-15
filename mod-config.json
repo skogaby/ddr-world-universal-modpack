@@ -3,7 +3,7 @@
     "fast-bootup": true,
     "series-expansion": false,
     "improved-song-title-sorting": true,
-    "folder-expansion": false,
+    "folder-expansion": true,
     "skip-intros": true,
     "song-limit-expansion": true,
     "song-playback-speed": true,
@@ -72,13 +72,7 @@
     ]
   },
   "folder_expansion": {
-    "custom_folders": [
-      {
-        "bit_index": 11,
-        "key": "dogs",
-        "voice_key": ""
-      }
-    ],
+    "custom_folders": [],
     "hide_difficulty_pane": true
   },
   "custom_options": {
